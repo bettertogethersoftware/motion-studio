@@ -1,0 +1,37 @@
+{
+  "name": "motion-studio-engine",
+  "version": "0.5.0",
+  "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, and MCP server.",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'",
+    "studio": "node src/studio/server.js",
+    "doctor": "node src/cli/render.js --doctor",
+    "mcp": "node src/mcp/server.js"
+  },
+  "keywords": [
+    "video",
+    "renderer",
+    "motion-graphics",
+    "puppeteer",
+    "ffmpeg",
+    "mcp",
+    "deterministic",
+    "alpha"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "puppeteer": "^23.11.1",
+    "zod": "^3.25.76"
+  },
+  "bin": {
+    "motion-studio": "src/studio/server.js",
+    "motion-studio-render": "src/cli/render.js",
+    "motion-studio-mcp": "src/mcp/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

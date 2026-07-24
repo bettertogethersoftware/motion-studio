@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Studio</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
+</head>
+<body>
+<div id="prereq-banner" class="banner hidden"></div>
+
+<div class="frame">
+  <aside class="rail">
+    <header class="brand">
+      <span class="brand-mark">▶</span>
+      <div>
+        <h1>MOTION<br>STUDIO</h1>
+        <span class="version">v0.5 · deterministic renderer</span>
+      </div>
+    </header>
+
+    <div class="rail-section">
+      <div class="rail-head">
+        <span>projects</span>
+        <button id="btn-new" class="ghost" title="New project">+ new</button>
+      </div>
+      <ul id="project-list" class="project-list"></ul>
+    </div>
+
+    <footer class="rail-foot">
+      <span id="engine-status">engine —</span>
+    </footer>
+  </aside>
+
+  <main class="stage">
+    <div id="empty-state" class="empty">
+      <p>◤ no project selected</p>
+      <p class="dim">Pick a project on the left or create one.<br>
+      Compositions are pure functions of the frame number —<br>
+      what you scrub here is exactly what renders.</p>
+    </div>
+
+    <div id="workbench" class="workbench hidden">
+      <section class="viewport-wrap">
+        <div class="viewport-head">
+          <span id="project-title" class="mono"></span>
+          <span id="viewport-meta" class="dim mono"></span>
+          <span id="hot-reload-dot" title="hot reload connected">●</span>
+        </div>
+        <div class="viewport" id="viewport">
+          <div class="checker" id="checker"></div>
+          <iframe id="preview" title="composition preview" sandbox="allow-scripts allow-same-origin"></iframe>
+        </div>
+
+        <div class="transport">
+          <button id="btn-play" class="transport-btn" title="play/pause (space)">▶</button>
+          <button id="btn-step-back" class="transport-btn" title="step back">‹</button>
+          <button id="btn-step-fwd" class="transport-btn" title="step forward">›</button>
+          <input type="range" id="scrubber" min="0" max="0" value="0" step="1">
+          <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
+          <span class="mono dim" id="timecode">00:00.00</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <nav class="tabs">
+          <button data-tab="render" class="tab active">render</button>
+          <button data-tab="config" class="tab">config</button>
+          <button data-tab="outputs" class="tab">outputs</button>
+        </nav>
+
+        <div id="tab-render" class="tab-body">
+          <div class="fieldrow">
+            <label>workers
+              <select id="rd-workers">
+                <option value="1">1 (serial)</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+            </label>
+            <label>range
+              <input id="rd-range" class="mono" placeholder="full (e.g. 0-89)" size="10">
+            </label>
+            <button id="btn-render" class="primary">render →</button>
+            <button id="btn-still" class="ghost" title="export current frame as PNG">still ⤓</button>
+          </div>
+
+          <div id="job-card" class="job-card hidden">
+            <div class="job-line">
+              <span id="job-state" class="pill">—</span>
+              <span id="job-phase" class="mono dim"></span>
+              <span id="job-eta" class="mono dim"></span>
+              <button id="btn-cancel" class="ghost danger">cancel</button>
+            </div>
+            <div class="bar"><div id="job-bar" class="bar-fill"></div></div>
+            <div class="job-line dim mono">
+              <span id="job-frames"></span>
+              <span id="job-fps"></span>
+            </div>
+            <pre id="job-logs" class="logs"></pre>
+            <a id="job-download" class="download hidden" href="#">⤓ download output</a>
+          </div>
+        </div>
+
+        <div id="tab-config" class="tab-body hidden">
+          <form id="config-form" class="config-grid" autocomplete="off">
+            <label>name <input name="name"></label>
+            <label>fps <input name="fps" type="number" min="1" max="240"></label>
+            <label>width <input name="width" type="number" step="2"></label>
+            <label>height <input name="height" type="number" step="2"></label>
+            <label>frames <input name="durationInFrames" type="number" min="1"></label>
+            <label>format
+              <select name="format">
+                <option value="mp4">mp4 · H.264</option>
+                <option value="webm">webm · VP9</option>
+                <option value="gif">gif</option>
+                <option value="prores">prores · .mov</option>
+                <option value="png-sequence">png sequence</option>
+              </select>
+            </label>
+            <label>crf <input name="crf" type="number" min="0" max="63"></label>
+            <label class="check"><input name="transparent" type="checkbox"> transparent (alpha)</label>
+            <div class="config-actions">
+              <button type="submit" class="primary">apply</button>
+              <span id="config-msg" class="dim"></span>
+            </div>
+          </form>
+        </div>
+
+        <div id="tab-outputs" class="tab-body hidden">
+          <ul id="output-list" class="output-list"></ul>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog id="new-dialog">
+  <form id="new-form" method="dialog">
+    <h2>new project</h2>
+    <label>name <input name="name" required placeholder="Intro Title"></label>
+    <div class="fieldrow">
+      <label>width <input name="width" type="number" value="1920" step="2"></label>
+      <label>height <input name="height" type="number" value="1080" step="2"></label>
+    </div>
+    <div class="fieldrow">
+      <label>fps <input name="fps" type="number" value="30"></label>
+      <label>frames <input name="durationInFrames" type="number" value="150"></label>
+    </div>
+    <div class="fieldrow right">
+      <button type="button" id="btn-new-cancel" class="ghost">cancel</button>
+      <button type="submit" class="primary">create</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

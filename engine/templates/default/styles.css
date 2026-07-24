@@ -1,0 +1,51 @@
+/* __PROJECT_NAME__ — Motion Studio composition styles
+ *
+ * Rules of the road:
+ *  - The stage is exactly the render resolution; body margin must be 0.
+ *  - No CSS `transition` or `animation` with real-time durations: they
+ *    animate over wall-clock time, which breaks frame determinism. All
+ *    motion is set per-frame from composition.js via interpolate().
+ */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+#stage {
+  position: relative;
+  width: __WIDTH__px;
+  height: __HEIGHT__px;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.layer {
+  position: absolute;
+  left: 50%;
+  will-change: transform, opacity;
+}
+
+#title {
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 96px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  text-shadow: 0 4px 32px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+#subtitle {
+  top: 62%;
+  transform: translate(-50%, 0);
+  font-size: 32px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.78);
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}

@@ -1,0 +1,254 @@
+# Motion Studio — Architecture (v0.5)
+
+## 1. System overview
+
+Motion Studio is three thin entry points around one shared render engine.
+
+```
+ Human path                                 Agent path
+ ──────────                                 ──────────
+ Browser → Studio web UI                    MCP client (Claude Desktop / Code)
+   http://127.0.0.1:7345                            │  MCP over stdio
+        │ HTTP/SSE (localhost only)                 ▼
+        ▼                                   MCP server (engine/src/mcp/server.js)
+ Studio server (engine/src/studio/)           15 tools, path sandbox
+   projects / preview / render API                  │
+   hot-reload SSE, output download                  │
+        │            in-process calls               │
+        └──────────────┬────────────────────────────┘
+                       │            ┌── CLI (engine/src/cli/render.js)
+                       ▼            ▼      scripts, CI, parallel workers
+        Render Engine Core (engine/src/core/)
+          renderer.js  — capture loop, parallel split, stills
+          browser.js   — Puppeteer lifecycle (injectable)
+          encoder.js   — FFmpeg pipe / sequence / concat / transcode / audio
+          formats.js   — output-format registry (mp4 webm gif prores png-seq)
+          jobs.js      — job queue, status, logs, cancellation
+          progress.js  — JSON-line protocol (+ etaMs)
+                       ▼
+        headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
+```
+
+The engine core is the *only* implementation of "launch Chromium / capture a
+frame / run FFmpeg". The CLI translates process arguments and signals into
+engine calls and streams the protocol to stdout; the MCP server translates
+tool calls into the same engine calls and folds the same protocol into
+pollable job state; the Studio server exposes the same calls over local HTTP
+for the UI. Because all paths share the fragile parts (Puppeteer lifecycle,
+process trees, encoding), they cannot drift apart.
+
+v0.2 shipped a Windows-only C# WinForms app on the human path; v0.5 replaces
+it with the Studio web UI — see [CHANGELOG.md](CHANGELOG.md) for the full
+rationale (cross-platform, one toolchain, and strictly better preview
+fidelity since the browser preview drives the project's real entry HTML).
+
+## 2. The frame model
+
+A composition is a folder with `project.json` (fps, dimensions, duration,
+output and audio settings), an HTML entry point, and JS that registers a
+per-frame function through the copied-in `frame-api.js` runtime. The engine
+loads the entry in headless Chromium, then for each frame: sets
+`window.frameReady = false`, invokes `window.setFrame(n)`, waits for
+`frameReady === true` (or `window.__frameError`), screenshots, and streams
+the PNG onward. Because every frame is a pure function of `n`, frames can be
+captured in any order and split across worker processes; the full contract,
+including the `registerComposition` harness that makes async readiness
+correct by default, is in [frame-api.md](frame-api.md).
+
+Determinism supports beyond the contract itself: Chromium is launched with
+`--force-color-profile=srgb`, `--disable-lcd-text`, and
+`--font-render-hinting=none` so pixel output does not vary with the host
+display, and the runtime provides `MotionStudio.random(seed)` (and, in v1.1,
+closed-form `spring()`) so compositions never need `Math.random()` or
+stateful simulation.
+
+## 3. Output formats
+
+`core/formats.js` is the single registry of deliverable formats. Each entry
+declares its container extension, FFmpeg encode arguments, whether alpha
+survives (`supportsAlpha`), and whether the parallel path may merge segments
+with `-c copy` (`copyConcat`). The rest of the engine never spells out codec
+flags.
+
+| format | container | codec | alpha | parallel merge |
+|---|---|---|---|---|
+| `mp4` (default) | .mp4 | libx264, yuv420p, faststart | — | copy-concat |
+| `webm` | .webm | libvpx-vp9 (CRF, row-mt) | yuva420p, alt-ref off | copy-concat (opaque) |
+| `gif` | .gif | palettegen/paletteuse (split) | — | FFV1 intermediate |
+| `prores` | .mov | prores_ks 422 HQ / 4444 | 4444 + yuva444p10le | copy-concat (opaque) |
+| `png-sequence` | folder | none (frame PNGs) | RGBA | frames renumbered |
+
+`output.transparent: true` threads through the whole pipeline: Chromium
+captures with `omitBackground` (unpainted pixels are alpha 0), and encoding
+uses the format's alpha pixel format. Validation rejects `transparent` on
+formats that cannot carry it, and requires even dimensions only for
+chroma-subsampled formats. Switching `output.format` automatically renames
+the configured output file's extension so a `.mp4` never silently contains
+VP9.
+
+## 4. IPC: the JSON-line progress protocol
+
+Everything the engine reports crosses one contract,
+`engine/src/core/progress.js` — one JSON object per stdout line:
+
+| type | fields | meaning |
+|---|---|---|
+| `start` | `jobId, totalFrames, fps, width, height` | render accepted, dimensions locked |
+| `progress` | `frame, totalFrames, framesDone, elapsedMs, renderFps, etaMs` | one per captured frame (aggregated across workers; `etaMs` null until ≥3 frames of signal) |
+| `phase` | `phase` | `capturing` → (`concat`) → `encoding` → (`audio`) |
+| `log` | `level, message` | diagnostics worth showing |
+| `done` | `outputPath, frames, elapsedMs` | terminal success |
+| `error` | `code, message, detail?` | terminal failure — exactly one is emitted, at whichever layer caught it first |
+
+The MCP `JobManager` and the Studio server tap the same emitter in-process to
+maintain the snapshot returned by `get_render_status` / `GET /api/jobs/:id`;
+any external orchestrator can parse the CLI's stdout stream directly.
+Non-JSON stdout lines (e.g. a dependency printing) are wrapped as `log`
+messages so no consumer can be crashed by stray output. CLI exit codes: `0`
+ok, `2` bad arguments/config, `3` prerequisites missing, `4` cancelled, `1`
+render error.
+
+## 5. Jobs and the render queue
+
+`core/jobs.js` owns job lifecycle for both the MCP and Studio paths:
+`queued → running → done | error | cancelled`. One render runs at a time by
+default; further submissions queue FIFO and start automatically, replacing
+v0.2's fail-fast `render_already_in_progress` (which forced agents into
+poll-then-submit races). The queue is bounded (10) — a full queue fails with
+`queue_full` — so an unattended agent loop still cannot fan out unbounded
+work, and `MOTION_STUDIO_MAX_RENDERS` optionally caps total renders per MCP
+session. Cancelling a queued job dequeues it without ever starting it. Job
+status includes `percent`, `renderFps`, `etaMs`, and `queuePosition` while
+queued.
+
+## 6. Error model
+
+All cross-boundary failures are `EngineError`s with a stable
+machine-readable `code` (`engine/src/core/errors.js`): `prereqs_missing`,
+`project_not_found`, `project_already_exists`, `invalid_config`,
+`path_outside_project`, `file_not_found`, `syntax_error`, `job_not_found`,
+`browser_launch_failed`, `composition_error`, `frame_timeout`,
+`ffmpeg_failed`, `cancelled`, `disk_error`, `internal_error`, and — new in
+v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`
+(`render_already_in_progress` is retired from the render path but the code
+remains reserved). MCP tools return them as `isError` results with the JSON
+body; the CLI emits them as protocol `error` lines; the Studio server maps
+them to HTTP statuses (403 sandbox, 404 not-found, 400 invalid, 413
+asset-too-large, 429 queue-full, 503 prereqs). `write_composition_file`
+compile-checks `.js` content (`vm.Script`) and rejects with `syntax_error`
+*before touching disk*; writes are atomic (temp file + rename) so a rejected
+write never corrupts the previous version.
+
+## 7. Process lifetime and cancellation
+
+No orphaned Chromium/FFmpeg processes, from any path. Cancellation is an
+`AbortSignal`: the capture loop checks it between frames, aborting kills the
+FFmpeg sink and closes the browser, and `renderParallel` SIGKILLs its worker
+processes on abort. As a second layer, every spawned pid (Chromium, FFmpeg,
+workers) is reported upward via `onChildPid`; `cancel_render` hard-kills any
+of them still alive two seconds after the abort. This engine-level guarantee
+is what the v0.2 WinForms Job Object provided on Windows, now owned by the
+shared `JobManager` on every OS. Inside the engine, the FFmpeg sink handles
+stdin backpressure (`drain`) so a fast capture loop cannot balloon memory,
+and a killed sink swallows its own exit rejection so teardown never surfaces
+spurious errors.
+
+## 8. Parallel rendering
+
+`renderParallel` splits the frame range into contiguous chunks (remainder
+spread across the first chunks), spawns one CLI worker per chunk with
+`--frame-range a b --segment`, and aggregates their per-worker `progress`
+streams into a single monotonically increasing count. The merge is
+format-aware:
+
+- **Copy-concat formats, opaque** (mp4, webm, prores): workers encode the
+  target codec directly; segments are concatenated with FFmpeg's concat
+  demuxer and `-c copy` — no re-encode, identical codec parameters by
+  construction.
+- **GIF, or any transparent render**: per-segment GIF palettes cannot be
+  concatenated, and alpha must survive the merge — so workers encode a
+  lossless FFV1/RGBA intermediate (`--intermediate`), the intermediates are
+  copy-concatenated, and a single final encode pass produces the target
+  file. FFV1 is lossless, so the parallel result is bit-equivalent to a
+  serial render.
+- **png-sequence**: workers write frames into per-worker folders; the merge
+  renames them into the output folder with globally consistent zero-padded
+  numbering.
+
+The audio pass runs once, on the merged file. Workers default to
+`min(CPU cores, 4)`; beyond ~4 concurrent Chromium instances, memory
+pressure typically erases the speedup on desktop hardware.
+
+## 9. Audio
+
+`project.json` may declare `audio: [{ src, startInFrames?, gainDb? }]`.
+After the silent video exists, a single FFmpeg pass builds a
+`-filter_complex` graph — per-track `adelay` (frame offset → ms) and
+`volume`, then `amix` with `normalize=0` so adding a quiet voiceover doesn't
+duck the music bed — and muxes with the video stream copied. The audio codec
+comes from the format registry (AAC for mp4, Opus for webm, PCM for ProRes);
+GIF and png-sequence cannot carry audio, so configured tracks are skipped
+with a `log` warning rather than failing the render. The mixed audio is
+`apad`-ded and `atrim`-med to exactly the video duration: a 5-second music
+bed under a 0.8-second clip yields a 0.8-second file, which `-shortest`
+would not guarantee in the general case.
+
+## 10. Security and sandboxing
+
+The agent-facing write surface is exactly composition source files and
+`assets/` content inside the target project. `resolveInProject` (used by
+every file-touching tool and every Studio file route) rejects absolute and
+drive-letter paths, `..` escapes, null bytes, and symlink escapes (the
+deepest existing ancestor is `realpath`-ed and re-checked). Text writes are
+restricted to an extension allow-list (`.html .css .js .mjs .json .svg .txt
+.md`); binary asset writes (`write_asset_file`) are additionally confined to
+the `assets/` folder, allow-listed to image/audio/font types, and capped at
+25 MB decoded. `project.json` is deny-listed from raw writes so config
+invariants can only change through the validated `update_project_config`
+tool. `remove_project` deletes files only inside the managed projects root.
+There is no shell tool and no arbitrary-path tool. The MCP server is
+stdio-only; the Studio server binds to `127.0.0.1` and has no authentication
+because it is never reachable off-machine — do not reverse-proxy it.
+
+One caveat worth stating plainly: composition JS executes with Chromium's
+normal capabilities inside the render browser (it can, for example, `fetch`
+remote resources). The sandbox governs what an agent can do to the *user's
+disk and processes* through the tool surface, not what the page can do
+inside Chromium. Treat composition code from untrusted sources like any
+other code you run.
+
+## 11. Shared project registry
+
+All paths read and write `~/.motion-studio/projects.json` (override with
+`MOTION_STUDIO_HOME`), and project folders are identical regardless of which
+side created them. Scaffolding is implemented once, in the engine's
+`ProjectStore`; the Studio UI and MCP `create_project` both call it. Config
+files written by v0.2 (schema v1) are migrated to schema v2 on read,
+non-destructively. Registry writes are atomic (temp file + rename).
+Human/agent concurrent edits remain last-write-wins on disk, surfaced to the
+human through the Studio's hot-reload watcher.
+
+## 12. Preview fidelity
+
+The Studio preview iframe loads the project's *actual entry HTML* from the
+sandboxed `/preview/:id/` route and is driven through the same
+`window.setFrame(n)` contract the headless renderer uses — the preview and
+the render differ only in Chromium being headless. The agent preview,
+`capture_preview_frame`, goes further and reuses the render path itself
+(real Puppeteer capture), so what the agent sees is byte-what-renders. The
+render is always the source of truth.
+
+## 13. Testability
+
+The renderer takes an injectable `browserFactory`; tests substitute a fake
+browser that emits real, self-encoded PNGs (RGB and RGBA), so the entire
+pipeline downstream of the screenshot — backpressure, every encode format,
+concat, the FFV1 intermediate path, audio, cancellation, protocol, queue,
+HTTP API — runs against real FFmpeg with probe-verified outputs. The same
+substitution works across process boundaries via the
+`MOTION_STUDIO_BROWSER_MODULE` environment hook, enabling true multi-process
+parallel-render tests, full MCP client↔server integration tests (official
+SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
+`real-chromium.test.js` suite covers the one seam fakes cannot — Puppeteer
+launch, screenshot determinism, and genuine `omitBackground` alpha — and
+skips honestly where no browser is resolvable. 102 tests; see `engine/test/`.

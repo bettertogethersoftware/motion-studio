@@ -1,0 +1,17 @@
+/* Intro Title example — no CSS transitions/animations anywhere:
+   all motion is computed per frame in composition.js. */
+html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+#stage { position: relative; width: 1920px; height: 1080px; overflow: hidden;
+         font-family: "Segoe UI", system-ui, sans-serif; }
+#particles { position: absolute; inset: 0; }
+.layer { position: absolute; left: 50%; will-change: transform, opacity; }
+#bar { top: 41.5%; height: 6px; width: 0; background: #7c9cff;
+       transform: translate(-50%, 0); border-radius: 3px;
+       box-shadow: 0 0 24px rgba(124, 156, 255, 0.8); }
+#title { top: 50%; transform: translate(-50%, -50%); font-size: 118px; font-weight: 800;
+         color: #fff; white-space: nowrap; text-shadow: 0 6px 42px rgba(0,0,0,.5); }
+#subtitle { top: 60%; transform: translate(-50%, 0); font-size: 30px; font-weight: 400;
+            color: rgba(255,255,255,.75); letter-spacing: .28em; white-space: nowrap;
+            text-transform: uppercase; }
+#outro { top: 50%; transform: translate(-50%, -50%); font-size: 44px; font-weight: 300;
+         color: rgba(255,255,255,.9); letter-spacing: .08em; white-space: nowrap; }

@@ -1,0 +1,64 @@
+/* Lower Third — transparent overlay: NO page background. Anything unpainted
+   stays alpha 0 in the rendered WebM. */
+
+html, body {
+  margin: 0;
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  background: transparent;
+}
+
+#stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+.layer { position: absolute; will-change: transform, opacity; }
+
+#plate {
+  left: 72px;
+  bottom: 96px;
+  padding: 20px 34px 22px 30px;
+  background: linear-gradient(105deg, rgba(10, 12, 18, 0.92) 0%, rgba(16, 20, 30, 0.86) 100%);
+  border-left: 6px solid #ffb454;
+  color: #f2f4f8;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+#live-dot {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff5c4d;
+}
+
+.line { overflow: hidden; white-space: nowrap; }
+
+#name {
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+#role {
+  margin-top: 6px;
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  color: #ffb454;
+  text-transform: uppercase;
+}
+
+#rule {
+  left: 72px;
+  bottom: 84px;
+  height: 3px;
+  background: #ffb454;
+  transform-origin: left center;
+}

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "name": "Lower Third",
+  "fps": 30,
+  "width": 1280,
+  "height": 720,
+  "durationInFrames": 120,
+  "entry": "composition.html",
+  "output": {
+    "dir": "out",
+    "filename": "lower-third.webm",
+    "format": "webm",
+    "transparent": true,
+    "crf": 30,
+    "preset": "medium",
+    "pixFmt": "yuv420p"
+  }
+}

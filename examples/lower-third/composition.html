@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lower Third — Motion Studio example (transparent WebM)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- No background anywhere: with output.transparent=true the renderer
+       captures with omitBackground, so everything not painted is alpha 0. -->
+  <div id="stage">
+    <div id="plate" class="layer">
+      <span id="live-dot"></span>
+      <div id="name" class="line">AVA NAKAMURA</div>
+      <div id="role" class="line">Chief Render Officer · Motion Studio</div>
+    </div>
+    <div id="rule" class="layer"></div>
+  </div>
+  <script src="frame-api.js"></script>
+  <script src="composition.js"></script>
+</body>
+</html>
