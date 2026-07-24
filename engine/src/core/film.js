@@ -70,8 +70,13 @@ export function validateScenes(scenes, { hasMasterAudio = false } = {}) {
   const unrendered = scenes.filter((s) => !fs.existsSync(sceneOutputPath(s.path, s.config)));
   if (unrendered.length) {
     throw new EngineError(ErrorCodes.SCENE_NOT_RENDERED,
-      `render these scenes before assembling the film: ${unrendered.map((s) => s.projectId).join(', ')}`,
-      { unrendered: unrendered.map((s) => s.projectId) });
+      'render these scenes before assembling the film — nothing found at the expected output path ' +
+        '(if you rendered with a custom outputFilename, re-render with the default): ' +
+        unrendered.map((s) => `${s.projectId} → ${path.relative(s.path, sceneOutputPath(s.path, s.config))}`).join(', '),
+      {
+        unrendered: unrendered.map((s) => s.projectId),
+        expected: Object.fromEntries(unrendered.map((s) => [s.projectId, sceneOutputPath(s.path, s.config)])),
+      });
   }
 
   // Concatenating a mix of with-audio and silent scenes with `-c copy` fails.

@@ -136,6 +136,18 @@ speech executable pointed to by `MOTION_STUDIO_TTS_EXE`; the rest of Motion
 Studio stays cross-platform, and the synthesized WAV mixes through the exact
 audio path described above.
 
+## Long-form films (multiple scenes)
+
+One composition is the right size for a shot or a scene, not for minutes of
+video. To build something longer, make **each scene its own project** (same
+width/height/fps/format), render each, and stitch the results with the
+`build_film` MCP tool — it concatenates the rendered scenes **losslessly**
+(`-c copy`, no re-encode) into one continuous film, optionally laying a single
+master audio track over the whole thing. Each scene stays a short, independent,
+resumable render, so you can fix one scene and re-stitch in seconds. See
+[film-setup.md](film-setup.md) for the pattern, the quality pipeline, and how it
+scales to arbitrary length.
+
 ## The CLI
 
 Everything the Studio does is scriptable:

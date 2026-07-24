@@ -107,6 +107,53 @@ build_film {
 → out/my-film.mp4  (900 frames, 30s, one continuous film)
 ```
 
+## The pattern that scales: one engine, scenes as data
+
+For a film of more than a couple of scenes, don't write a bespoke composition per
+scene. Write **one** `composition.js` that reads a per-scene config object, and give
+each scene project its own tiny config file:
+
+```html
+<script src="frame-api.js"></script>
+<script src="scene.js"></script>        <!-- window.SCENE = { … } — differs per scene -->
+<script src="composition.js"></script>  <!-- the shared engine — identical everywhere -->
+```
+
+The engine turns `window.SCENE` (background, sprites with positions/entrances, a
+library of named effects, camera keyframes, dialogue timing, titles) into per-frame
+draws. Every scene project ships the **same** `composition.js`; only `scene.js`
+changes. This keeps `build_film`'s "one project per scene" model cheap to author — a
+new scene is a data file, not new code — and it's how a 7-scene, five-minute cutscene
+was built.
+
+**Iterate one scene at a time.** Because scenes are independent projects, fix a single
+scene's config, re-render *only that project*, and call `build_film` again — the other
+scenes' rendered outputs are reused untouched and the whole film re-stitches in
+seconds. That render-one / reassemble loop is what makes a long film tractable.
+
+## Using external image assets
+
+Backgrounds, sprites, and other images live under the project's `assets/` and are
+referenced as `assets/<name>`. Put them there **directly on disk** for anything large
+or numerous (`write_asset_file` is base64, capped at 25 MB). A few determinism rules
+learned the hard way:
+
+- **Load images before you register.** Preload every image (`new Image()` +
+  `Promise.all`) and only then call `registerComposition`, so `setFrame` isn't defined
+  until the assets are ready — the renderer waits for that handshake, guaranteeing each
+  captured frame has its images. Drawing local images onto a `<canvas>` is fine: the
+  render screenshots the *page*, not the canvas buffer, so cross-origin tainting never
+  matters.
+- **GIFs animate on the wall clock — don't use them live.** An animated `<img>` GIF
+  advances by real time, which breaks frame determinism. Convert to a **still**
+  (`ffmpeg -i bg.gif -frames:v 1 bg.png`) and drive any motion yourself from `frame`.
+- **Pixel art:** set `image-rendering: pixelated` on the canvas/element and
+  `ctx.imageSmoothingEnabled = false`, then scale up — crisp big pixels instead of blur.
+- **Transparency:** PNGs with alpha composite directly. For a sprite on a solid colour
+  (e.g. a ripped sheet), key it out first — and add `format=rgba`, or ffmpeg may drop
+  palette/keyed alpha when cropping:
+  `ffmpeg -i sheet.png -vf "crop=W:H:X:Y,colorkey=0xRRGGBB:0.2:0.05,format=rgba" sprite.png`
+
 ## Scaling to an hour (and why this is the way)
 
 - **Render time scales linearly**, but each scene is a **short, independent,
