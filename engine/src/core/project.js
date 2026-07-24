@@ -30,9 +30,11 @@ import { randomUUID } from 'node:crypto';
 import { EngineError, ErrorCodes } from './errors.js';
 import { resolveInProject, ASSET_EXTENSIONS } from './sandbox.js';
 import { FORMATS, getFormat, normalizeOutputFilename } from './formats.js';
+import { getLibrary, libsVendorDir, LIBRARY_IDS } from './libraries.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_DIR = path.resolve(__dirname, '../../templates/default');
+const TEMPLATES_ROOT = path.resolve(__dirname, '../../templates');
 const RUNTIME_FRAME_API = path.resolve(__dirname, '../runtime/frame-api.js');
 
 export const CONFIG_SCHEMA_VERSION = 2;
@@ -76,6 +78,10 @@ export function validateConfig(cfg) {
           problems.push(`audio[${i}].startInFrames: non-negative integer`);
         if (t.gainDb !== undefined && typeof t.gainDb !== 'number') problems.push(`audio[${i}].gainDb: number`);
       });
+    }
+    if (cfg.libraries !== undefined) {
+      if (!Array.isArray(cfg.libraries) || cfg.libraries.some((l) => typeof l !== 'string'))
+        problems.push('libraries: must be an array of strings');
     }
   }
   if (problems.length) {
@@ -179,7 +185,7 @@ export class ProjectStore {
   async updateConfig(projectId, patch) {
     const entry = await this.getProjectEntry(projectId);
     const cfg = await this.readConfig(projectId);
-    const ALLOWED = new Set(['fps', 'width', 'height', 'durationInFrames', 'audio', 'output', 'name']);
+    const ALLOWED = new Set(['fps', 'width', 'height', 'durationInFrames', 'audio', 'output', 'name', 'libraries']);
     for (const k of Object.keys(patch)) {
       if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_CONFIG, `Config field "${k}" cannot be updated`, { field: k });
     }
@@ -322,6 +328,79 @@ export class ProjectStore {
     await fsp.writeFile(tmp, buf);
     await fsp.rename(tmp, abs);
     return { path: normalized, bytes: buf.length };
+  }
+
+  /**
+   * Attach an optional 3D library (v0.7). Copies the vendored library build
+   * into the project (kept local so renders stay hermetic) and, unless
+   * scaffold===false, replaces composition.html/js/css with the library's
+   * frame-driven starter. Records the library id in config.libraries.
+   * @returns {{library, name, version, global, copied, scaffolded, notes, config}}
+   */
+  async addLibrary(projectId, { library, scaffold = true, addons = [] } = {}) {
+    const spec = getLibrary(library);
+    if (!spec) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, `Unknown library "${library}"; available: ${LIBRARY_IDS.join(', ')}`, { library });
+    }
+    // Resolve requested addons against the library's registry.
+    const addonSpecs = [];
+    for (const a of addons || []) {
+      const av = spec.addons && spec.addons[a];
+      if (!av) {
+        throw new EngineError(ErrorCodes.INVALID_CONFIG, `Library "${spec.id}" has no addon "${a}"; available: ${Object.keys(spec.addons || {}).join(', ') || '(none)'}`, { library: spec.id, addon: a });
+      }
+      addonSpecs.push({ id: a, ...av });
+    }
+
+    const entry = await this.getProjectEntry(projectId);
+    const cfg = await this.readConfig(projectId);
+    const vendorDir = libsVendorDir();
+
+    // 1) copy the vendored library + addon build(s) into the project
+    const copied = [];
+    for (const f of [...spec.files, ...addonSpecs]) {
+      const srcAbs = path.join(vendorDir, f.vendor);
+      if (!fs.existsSync(srcAbs)) {
+        throw new EngineError(
+          ErrorCodes.LIBRARY_UNAVAILABLE,
+          `Library build not found: ${f.vendor}. Run "node scripts/fetch-libs.mjs ${spec.id}" in the engine folder (git-ignored, ~${spec.approxKB} KB).`,
+          { library: spec.id, file: f.vendor },
+        );
+      }
+      const abs = resolveInProject(entry.path, f.dest, { forWrite: true });
+      await fsp.mkdir(path.dirname(abs), { recursive: true });
+      await fsp.copyFile(srcAbs, abs);
+      copied.push({ path: f.dest, bytes: (await fsp.stat(abs)).size });
+    }
+
+    // Addon <script> tags injected into the scaffolded HTML (after the core lib).
+    const addonScripts = addonSpecs.map((a) => `<script src="${a.dest}"></script>`).join('\n  ');
+
+    // 2) scaffold the starter composition (placeholder substitution) unless opted out
+    const scaffolded = [];
+    if (scaffold) {
+      const tdir = path.join(TEMPLATES_ROOT, spec.template);
+      for (const file of await fsp.readdir(tdir)) {
+        const content = (await fsp.readFile(path.join(tdir, file), 'utf8'))
+          .replaceAll('<!--__ADDONS__-->', addonScripts)
+          .replaceAll('__PROJECT_NAME__', cfg.name)
+          .replaceAll('__FPS__', String(cfg.fps))
+          .replaceAll('__DURATION__', String(cfg.durationInFrames))
+          .replaceAll('__WIDTH__', String(cfg.width))
+          .replaceAll('__HEIGHT__', String(cfg.height));
+        const abs = resolveInProject(entry.path, file, { forWrite: true });
+        const tmp = abs + '.tmp-' + process.pid;
+        await fsp.writeFile(tmp, content, 'utf8');
+        await fsp.rename(tmp, abs);
+        scaffolded.push(file);
+      }
+    }
+
+    // 3) record the library in config
+    const libs = Array.from(new Set([...(cfg.libraries || []), spec.id]));
+    const config = await this.updateConfig(projectId, { libraries: libs });
+
+    return { library: spec.id, name: spec.name, version: spec.version, global: spec.global, addons: addonSpecs.map((a) => a.id), copied, scaffolded, notes: spec.notes, config };
   }
 
   /**

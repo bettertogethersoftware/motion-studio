@@ -1,0 +1,181 @@
+# Motion Studio — 3D Libraries (Three.js / Babylon.js) and glTF/GLB models
+
+Motion Studio compositions are self-contained HTML/CSS/JS driven by a frame
+number. That model extends cleanly to real 3D: WebGL renders in the headless
+render path (confirmed — SwiftShader/GPU), so a composition can pull in a
+rendering library and draw a scene as a pure function of `frame`.
+
+This document covers the **`add_library`** feature (shipped, v0.7), the
+**optional local-asset-fetch flag**, and an **honest investigation writeup** of
+loading glTF/GLB *models* via the Babylon loaders addon — which is **not yet
+working** and is documented here so the next person doesn't start from zero.
+
+---
+
+## 1. `add_library` (shipped)
+
+Attach a pinned 3D library to a project. The build is vendored **locally** into
+the project (never a CDN at render time, so renders stay hermetic) and a
+frame-driven starter composition is scaffolded.
+
+```
+add_library { projectId, library: "three" | "babylon", scaffold?: true }
+```
+
+- **`three`** — Three.js (~600 KB, lightweight). Good default for logos,
+  product shots, simple 3D.
+- **`babylon`** — Babylon.js (~8 MB, batteries-included: `GlowLayer`,
+  `DefaultRenderingPipeline` bloom/vignette/grain, `FresnelParameters`). Good
+  when you want a cinematic look without assembling postprocessing yourself.
+- `scaffold` (default true) replaces `composition.html/js/css` with the library
+  starter; the library id is recorded in the new optional `config.libraries`.
+
+Registry: [`engine/src/core/libraries.js`](../engine/src/core/libraries.js).
+Builds are git-ignored under `engine/vendor/libs/` and fetched with
+`node scripts/fetch-libs.mjs`. Starters live in `engine/templates/lib-*`.
+
+### Determinism contract (returned as `notes`, baked into the starters)
+
+The frame-driven render calls your `setFrame` once per frame, in any order,
+across parallel workers. So:
+
+- **Drive every animation from the injected `frame`.** No `requestAnimationFrame`,
+  no `THREE.Clock`/`getDelta()`, no Babylon `engine.runRenderLoop()`, no particle
+  systems / `scene.beginAnimation()` (all wall-clock based).
+- The renderer must use **`preserveDrawingBuffer: true`** and each `setFrame`
+  should end with a GL **`finish()`** so the headless screenshot captures the
+  frame.
+- Babylon `DefaultRenderingPipeline`: set **`grain.animated = false`** (animated
+  grain is time-based).
+
+Both the Three.js moon and the Babylon spaceship-intro demos render this way and
+were produced end to end (Chromium capture → FFmpeg).
+
+---
+
+## 2. Loading external assets over `file://` (opt-in flag)
+
+Compositions load from a `file://` URL. Chrome allows `<img>`, `<audio>`, CSS
+url(), and canvas 2D image draws from sibling files, **but blocks `fetch`/`XHR`**
+to `file://` (CORS — "Cross origin requests are only supported for protocol
+schemes: … data, http, https …"). glTF/GLB loaders and JSON `fetch()` therefore
+fail with `net::ERR_FAILED`.
+
+Opt-in flag (added v0.7, [`engine/src/core/browser.js`](../engine/src/core/browser.js)):
+
+```
+MOTION_STUDIO_ALLOW_LOCAL_FETCH=1   # adds Chromium --allow-file-access-from-files
+```
+
+Off by default (no behavior change). With it set, a composition can `fetch` its
+own project assets. **Security note:** with the flag on, composition JS can
+`fetch('file:///…')` any local file and draw it to the canvas (exfiltrate via the
+output image). Acceptable for a local single-user tool running your own
+compositions; do not enable it for untrusted composition code. A longer-term
+alternative is to serve the project over `http://127.0.0.1` during render instead
+of `file://` (see §4).
+
+Verified: with the flag, a 13.5 MB GLB **fetches and imports** successfully.
+
+---
+
+## 3. glTF/GLB models via the Babylon loaders addon — RESOLVED
+
+Goal: load a real model (`super_starfury.glb`, 13.5 MB) via
+`babylonjs.loaders.min.js` + `BABYLON.SceneLoader.ImportMeshAsync` and render it
+frame-driven. **This works** — verified end to end as a cinematic video. The
+root cause of the earlier "blank frame" wall and the fix are below; the working
+recipe is §3.4.
+
+### 3.1 What works
+- With `MOTION_STUDIO_ALLOW_LOCAL_FETCH=1`, the GLB fetches and imports:
+  `SceneLoader.ImportMeshAsync('', 'assets/', 'super_starfury.glb', scene)`
+  resolves with **18 geometry meshes**, valid world bounds
+  (`scene.getWorldExtends()` → min ≈ (−711, −478, −910), max ≈ (712, 555, 566);
+  centre ≈ (0, 38, −172); bounding-sphere radius ≈ 1148). Meshes report
+  `isVisible=true`, `isEnabled()=true`, `scaling.z=1`, and only the composition's
+  own camera/light exist (the GLB brought neither).
+
+### 3.2 Gotchas found along the way (all real, worth keeping)
+1. **file:// CORS** — fixed with the flag (§2).
+2. **PBR renders black without IBL** — glTF uses metallic-roughness PBR; with no
+   `scene.environmentTexture` the metal is unlit/near-black. A procedural equirect
+   env (built on a `<canvas>` → data URL → `EquiRectangularCubeTexture`) helps but
+   was not sufficient on its own.
+3. **Model is large & offset** — frame from the bounding sphere:
+   `distance = sphereRadius / sin(fov/2)`, `camera.maxZ` beyond that; don't assume
+   the model sits at the origin or is ~1 unit.
+4. **Heavy model + per-frame `await`** — awaiting the 13.5 MB `ImportMeshAsync`
+   *inside* `setFrame` trips Puppeteer `Protocol error … Promise was collected`.
+   Fix: **load once, then `registerComposition`** so every `setFrame` is
+   synchronous.
+5. **CDN/build pitfalls** — `cdn.jsdelivr.net/npm/babylonjs@<v>/babylon.js` (the
+   6.8 MB build) rendered **nothing** (blank) in this setup; the working core is
+   `https://cdn.babylonjs.com/babylon.js` (8.2 MB). Loaders are at
+   `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the
+   `/babylonjs.loaders.min.js` root path 404s). Core and loaders must be the
+   **same version**.
+6. **Byte-size is a misleading proxy** — a blank/uniform frame and a
+   mostly-flat-color frame are both ~8 KB PNGs. Always inspect actual pixels, not
+   the file size.
+
+### 3.3 The wall — root cause & fix (RESOLVED)
+Reduced to a minimal box in a known-good project, `gl.readPixels` at screen
+centre read the **clearColor, not the box** — even though the box was an active,
+in-frustum mesh (`scene.meshes=1`, `getActiveMeshes()=1`, correct active camera).
+The tell was **`mesh.isReady()=false` and `material.isReady()=false`**:
+
+> **Babylon (and Three) compile material shaders lazily. The *first*
+> `scene.render()` / `renderer.render()` SKIPS any mesh whose effect hasn't
+> compiled yet.** The frame-driven path renders once and screenshots, so a
+> single-frame capture (`render_still`, `capture_preview_frame`, or frame 0)
+> shows only the clear. Video renders "worked" only because the page persists
+> across frames — frame 0 warmed the shader and frames 1+ drew.
+
+Both earlier symptoms ("loaders script → black", "meshes don't draw") were this
+one cause surfacing at different times. Nothing about the loaders UMD, MSAA, or
+`preserveDrawingBuffer` was actually broken.
+
+**Fix (now baked into both starters):** compile shaders before the first frame.
+- Babylon: `await Promise.all(scene.meshes.filter(m=>m.material).map(m => m.material.forceCompilationAsync(m)))` before `registerComposition`.
+- Three: `renderer.compile(scene, camera)` before `registerComposition`.
+
+Debugging tip that cracked it: read the true framebuffer with `gl.readPixels`
+inside the composition (surface the value via a thrown error) — far more reliable
+than inferring from PNG byte size, which conflates blank and uniform-color frames.
+`mesh.isReady()` / `material.isReady()` tell you whether shaders are compiled.
+
+### 3.4 Loading a glTF/GLB model (working recipe)
+1. `add_library { library: "babylon", addons: ["loaders"] }` — vendors
+   `babylonjs.loaders.min.js` and injects its `<script>` after the core.
+2. Put the model under `assets/` (`write_asset_file`) and render with
+   **`MOTION_STUDIO_ALLOW_LOCAL_FETCH=1`** (glTF fetches over file://, §2).
+3. In the composition:
+   - `const r = await BABYLON.SceneLoader.ImportMeshAsync('', 'assets/', 'model.glb', scene)`.
+   - `scene.animationGroups.forEach(g => g.stop())` — glTF animations are
+     wall-clock; drive motion from `frame`.
+   - Light the PBR materials: set `scene.environmentTexture` (a procedural
+     equirect built on a `<canvas>` → data URL is hermetic).
+   - **Frame from the bounds** (models aren't ~1 unit and rarely sit at the
+     origin): world-AABB the geometry meshes, `distance = sphereRadius /
+     sin(fov/2)`, set `camera.maxZ` beyond that.
+   - **Warm up**: `forceCompilationAsync` on the imported meshes before
+     `registerComposition`.
+   - **Load once, then register** — never `await` the multi-MB import inside
+     `setFrame` (it trips Puppeteer's `Promise was collected`).
+
+Verified: `super_starfury.glb` (13.5 MB, 18 meshes, metallic PBR) renders as a
+cinematic frame-driven video.
+
+### 3.5 Build/CDN notes
+- Core: `https://cdn.babylonjs.com/babylon.js`. Loaders:
+  `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the root
+  `/babylonjs.loaders.min.js` 404s). Core and loaders must be the **same
+  version**. The jsdelivr `babylonjs@<v>/babylon.js` build rendered nothing here —
+  prefer the `cdn.babylonjs.com` build.
+
+### 3.6 Status
+Shipped and tested: `add_library` (three + babylon) with the babylon **`loaders`
+addon**, the local-fetch flag, and the shader warm-up baked into both starters
+(so single-frame captures render). Tests cover addon vendoring + `<script>`
+injection and the unknown-addon errors.

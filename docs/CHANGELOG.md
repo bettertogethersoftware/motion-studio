@@ -1,5 +1,150 @@
 # Motion Studio — Changelog
 
+## v0.9 (2026-07-25)
+
+### Long-form films — assemble scenes with `build_film`
+
+**Build videos longer than a single composition** by authoring each scene as its
+own project and stitching the rendered scenes together with the new `build_film`
+MCP tool (`engine/src/core/film.js`, `engine/src/mcp/server.js`). This is the
+answer to "can it do an hour?": not as one monolithic 108k-frame composition, but
+as many short, independent, resumable scene renders concatenated losslessly.
+
+- **Lossless assembly.** Scene outputs are concatenated with `ffmpeg -c copy`
+  (no re-encode) — reusing the very `encoder.concatSegments` the parallel renderer
+  already uses to merge frame-range segments, now applied across projects. Assembly
+  is near-instant regardless of film length.
+- **Consistency invariant.** Scenes must share resolution/fps/format/pixel-format
+  (mp4/webm/prores only — gif/png-sequence can't be stream-copied). A mismatch
+  fails with the new `inconsistent_scenes`; an unrendered scene with
+  `scene_not_rendered` (the tool assembles, it never renders — rendering stays with
+  the existing async `render` tool).
+- **Audio, two ways.** With no `audio`, each scene's own audio is preserved (all
+  scenes must be consistently audio or silent). Pass an `audio` master timeline
+  (`{ src, startInFrames?, gainDb? }`, like `config.audio`) to lay one score +
+  narration over the *whole* film via `encoder.muxAudio` — the clean path for
+  long-form.
+- **Quality.** The concat is lossless, so quality is set by scene render settings
+  (`output.crf`/`preset`, or ProRes/PNG intermediates) and one final delivery
+  encode of the master. See [film-setup.md](film-setup.md).
+- New error codes: `inconsistent_scenes`, `scene_not_rendered`, `film_failed`.
+  Additive only — no existing tool or workflow changes; short single-composition
+  videos work exactly as before. Tool count 19 → 20.
+
+## v0.8 (2026-07-25)
+
+### Music generation (MIDI → FluidSynth)
+
+**Compose a music bed from a note spec** with the new `synthesize_music` MCP
+tool (`engine/src/core/music.js`, `engine/src/mcp/server.js`). The agent authors
+a small JSON spec (bpm + tracks of notes); the engine renders it to a Standard
+MIDI File, then to audio, and — like `synthesize_speech` — attaches it as a
+normal `config.audio` track so the next render mixes it in. This closes the
+last "can play but can't generate" gap: v0.6 generated *speech*, v0.8 generates
+*music*, and both flow through the audio mux the engine already had.
+
+- **Two-stage, spawn-based pipeline** mirroring the TTS design (no new npm deps,
+  no synthesis in Node):
+  `note spec → MotionStudioMidi.exe (DryWetMIDI) → song.mid → FluidSynth + a
+  General MIDI SoundFont → WAV → config.audio track`.
+  The MIDI-authoring half is a self-contained C# console exe
+  (`music/MotionStudioMidi`, DryWetMIDI 7.2.0) built the same way as the TTS exe;
+  FluidSynth is the provided `fluidsynth.exe`; the SoundFont is any `.sf2`/`.sf3`.
+- **Spec** (all authored by the agent): `bpm`, plus `tracks`, each with a General
+  MIDI `program` (0..127; 0 piano, 32 acoustic bass, 40 violin, 48 strings, 56
+  trumpet, 73 flute…) or `drums:true` (routes to GM percussion, channel 10), and
+  `notes` of `{ pitch 0..127 (60 = middle C), start, duration (both in beats),
+  velocity? }`.
+- **Windows-only, optional.** Three external pieces, each resolvable by env var
+  with a git-ignored vendored default under `engine/vendor/`:
+  `MOTION_STUDIO_MIDI_EXE`, `MOTION_STUDIO_FLUIDSYNTH`, `MOTION_STUDIO_SOUNDFONT`.
+  Any missing piece → the new `music_unavailable` code (named in the error), and
+  the rest of the engine is unaffected. New codes: `music_unavailable`,
+  `music_failed`, `invalid_music_spec`. See [music-setup.md](music-setup.md).
+- **Durations.** Returns `musicalDurationSeconds` (the note content) *and*
+  `durationSeconds`/`durationInFrames` — the latter re-derived from the WAV
+  header (via `tts.js`'s `wavDurationSeconds`), which is longer because FluidSynth
+  adds a reverb/release tail; the WAV is what FFmpeg actually muxes. Use
+  `durationInFrames` to size the video, and `startInFrames`/`gainDb` to place and
+  balance the bed under narration (e.g. `gainDb: -8`).
+- `mode:"attach"` (default) writes `assets/music-<n>.wav` and appends the track;
+  `mode:"asset-only"` writes + reports only. Tool count 18 → 19.
+
+## v0.7 (2026-07-25)
+
+### Optional 3D libraries (Three.js / Babylon.js)
+
+**Attach a 3D rendering library to a project** with the new `add_library` MCP
+tool (`store.addLibrary`, `engine/src/core/libraries.js`). It copies a pinned
+library build **locally** into the project — never a CDN at render time, so
+renders stay hermetic and reproducible — and scaffolds a frame-driven starter
+composition (`engine/templates/lib-three`, `engine/templates/lib-babylon`).
+
+- `library: "three"` — Three.js (~600 KB, lightweight) or `"babylon"` —
+  Babylon.js (~8 MB, built-in glow/bloom/postprocessing). `scaffold` (default
+  true) swaps in the starter; the attached library is recorded in the new
+  optional `config.libraries` array.
+- The big builds are **git-ignored** under `engine/vendor/libs/` and fetched with
+  `node scripts/fetch-libs.mjs` (URLs live in the registry). A missing build
+  returns the new `library_unavailable` error code; `MOTION_STUDIO_LIBS_DIR`
+  overrides the vendor location (used by tests).
+- **Determinism contract** (returned to the agent as `notes`, and baked into the
+  starters): drive all animation from the injected `frame` — no
+  `requestAnimationFrame`, no `THREE.Clock` / Babylon `runRenderLoop` / particle
+  systems (all wall-clock based); starters set `preserveDrawingBuffer` and call a
+  GL `finish()` each frame so the headless screenshot captures it. Confirmed
+  WebGL renders in the headless path (SwiftShader/GPU); both starters render end
+  to end through Chromium + FFmpeg.
+- Neither library is in the base scaffold — 2D projects carry nothing extra.
+- **glTF/GLB models**: the babylon `loaders` addon (`add_library { library:
+  "babylon", addons: ["loaders"] }`) vendors `babylonjs.loaders.min.js` and
+  injects it, for `SceneLoader.ImportMeshAsync`. Loading a model over `file://`
+  needs the opt-in **`MOTION_STUDIO_ALLOW_LOCAL_FETCH`** env (adds Chromium
+  `--allow-file-access-from-files`; off by default — `fetch`/XHR to `file://` is
+  otherwise CORS-blocked). Verified end to end on a 13.5 MB model. See
+  [3d-libraries.md](3d-libraries.md).
+- **Shader warm-up in the starters**: Babylon/Three compile materials lazily and
+  skip not-ready meshes on the *first* render, so a single-frame capture
+  (render_still / capture_preview_frame / frame 0) came back blank. The starters
+  now compile up front (`material.forceCompilationAsync` / `renderer.compile`)
+  before registering the composition.
+
+## v0.6 (2026-07-24)
+
+### Text-to-speech narration
+
+**Generate a voiceover from text** via two new MCP tools, `synthesize_speech`
+and `list_voices` (`engine/src/core/tts.js`, `engine/src/mcp/server.js`).
+Narration is synthesized by an external, self-contained Windows console
+executable that the engine spawns the same way it spawns FFmpeg; its path is
+supplied through the new `MOTION_STUDIO_TTS_EXE` environment variable. See
+[tts-setup.md](tts-setup.md) for the CLI contract and build steps.
+
+*Rationale / scope.* Motion Studio already muxed pre-supplied audio tracks
+(`config.audio`, `core/encoder.js`); the only missing piece was *generating*
+speech. The renderer and the audio mux are untouched — `synthesize_speech`
+writes a WAV into `assets/` and, in the default `attach` mode, appends a normal
+`{ src, startInFrames?, gainDb? }` track, so a synthesized voiceover flows
+through the exact path a hand-supplied one already did. The tool also returns
+the clip length as `durationInFrames`, letting an agent size a `Sequence()` to
+the narration; `mode: "asset-only"` synthesizes and reports the duration
+without modifying `config.audio`.
+
+- Duration is derived authoritatively from the WAV RIFF header on the Node side
+  (exactly what FFmpeg later muxes), not from the exe's self-report.
+- New stable error codes (`core/errors.js`): `tts_unavailable` (engine not
+  configured — the feature is Windows-only and optional), `unsupported_voice`,
+  and `tts_failed`. The TTS tools do **not** gate on the render prerequisites,
+  so a machine with no speech engine still renders everything else normally.
+- The reference exe (`tts/MotionStudioTts/`) ships two backends: **WinRT**
+  (`Windows.Media.SpeechSynthesis`, default — the OneCore "mobile" voices,
+  more voices including male) with automatic fallback to **SAPI5** COM
+  automation (`--engine sapi`). Either way it emits the same CLI-contract WAV +
+  JSON that `list_voices`/`synthesize_speech` consume.
+- This deliberately reintroduces an optional, Windows-only native dependency —
+  narrowly, only for speech synthesis — without disturbing the cross-platform
+  engine established in v0.5.
+
 ## v0.5 (2026-07-08)
 
 v0.5 evolves the v0.2 implementation into a commercial-ready, cross-platform

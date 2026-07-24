@@ -29,6 +29,20 @@ export const ErrorCodes = Object.freeze({
   UNSUPPORTED_FORMAT: 'unsupported_format',
   ASSET_TOO_LARGE: 'asset_too_large',
   QUEUE_FULL: 'queue_full',
+  // added in v0.6 (text-to-speech / narration) — see docs/CHANGELOG.md
+  TTS_UNAVAILABLE: 'tts_unavailable',
+  TTS_FAILED: 'tts_failed',
+  UNSUPPORTED_VOICE: 'unsupported_voice',
+  // added in v0.7 (optional 3D libraries) — see docs/CHANGELOG.md
+  LIBRARY_UNAVAILABLE: 'library_unavailable',
+  // added in v0.8 (music generation) — see docs/CHANGELOG.md
+  MUSIC_UNAVAILABLE: 'music_unavailable',
+  MUSIC_FAILED: 'music_failed',
+  INVALID_MUSIC_SPEC: 'invalid_music_spec',
+  // added in v0.9 (film assembly / build_film) — see docs/CHANGELOG.md
+  INCONSISTENT_SCENES: 'inconsistent_scenes',
+  SCENE_NOT_RENDERED: 'scene_not_rendered',
+  FILM_FAILED: 'film_failed',
 });
 
 export class EngineError extends Error {

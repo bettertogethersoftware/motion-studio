@@ -10,8 +10,10 @@ two kinds of users through one shared render engine:
   live preview that drives your *actual* composition, scrub/play transport,
   hot reload, render queue with progress + ETA, output downloads.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (15 tools): author compositions, ingest assets, preview
-  frames as images, render, poll, cancel. No shell, no arbitrary file access.
+  tool surface (20 tools): author compositions, ingest assets, synthesize
+  narration and generate music beds (Windows), attach 3D libraries
+  (Three.js/Babylon.js), preview frames as images, render, poll, cancel, and
+  assemble multi-scene films. No shell, no arbitrary file access.
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -78,25 +80,33 @@ motion-studio/
 │   │   ├── sandbox.js             path sandbox for all file-touching surfaces
 │   │   ├── progress.js            JSON-line stdout protocol (emitter + parser)
 │   │   ├── prereqs.js             Node/FFmpeg detection, version floors
+│   │   ├── tts.js                 text-to-speech: spawn Windows exe, WAV duration (v0.6)
+│   │   ├── libraries.js           optional 3D library registry (three/babylon) (v0.7)
+│   │   ├── music.js               music: note spec → MIDI exe → FluidSynth → WAV (v0.8)
+│   │   ├── film.js                film: stitch rendered scene projects into one film (v0.9)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (15 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents (20 tools)
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: projects/preview/render/jobs/SSE
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.1 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      102 tests across 8 suites (see below)
+│   └── test/                      149 tests across 12 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4) — REAL rendered output in out/
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
 │                                  — real alpha render + proof composite in out/
 └── docs/
-    ├── CHANGELOG.md               v0.2 → v0.5 decision log (read this first)
+    ├── CHANGELOG.md               v0.2 → v0.9 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
     ├── user-guide.md              Studio UI, formats, transparency, audio, CLI
     ├── frame-api.md               the authoring contract (v1.1)
     ├── mcp-setup.md               agent setup + full tool reference
+    ├── tts-setup.md               text-to-speech: exe contract + build (v0.6)
+    ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
+    ├── music-setup.md             music: MIDI exe + FluidSynth + SoundFont (v0.8)
+    ├── film-setup.md              long-form: build_film scene assembly (v0.9)
     ├── SKILL.md                   drop-in agent skill
     └── spec-changes.md            historical v0.2-era decision log
 ```
@@ -126,13 +136,16 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-102 tests across 8 suites: core units, pipeline integration (real FFmpeg,
+149 tests across 12 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
-stdio), frame-api runtime (vm-hosted), v0.5 features, Studio HTTP server
-(ephemeral port, sandbox 403s, SSE hot reload), and a gated real-Chromium
-suite (capture determinism, genuine `omitBackground` alpha) that runs
-wherever a browser is resolvable:
+stdio), text-to-speech (WAV parsing + stubbed exe contract), music generation
+(two-stage MIDI→FluidSynth pipeline against stubs), film assembly (scene
+validation + real concat/master-audio mux), 3D libraries (add_library vendoring
++ scaffold), frame-api runtime (vm-hosted), v0.5 features, Studio HTTP server
+(ephemeral port, sandbox 403s, SSE hot reload), and a gated real-Chromium suite
+(capture determinism, genuine `omitBackground` alpha) that runs wherever a
+browser is resolvable:
 
 ```bash
 PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm test

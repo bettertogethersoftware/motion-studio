@@ -59,10 +59,38 @@ Every composition you write must read animation state from an injected frame num
    - `prereqs_missing`: tell the user Node.js/FFmpeg aren't detected on their system rather than retrying — this isn't fixable from inside the MCP session.
    - `composition_error` / `frame_timeout` from a render or capture: your composition threw at a specific frame, or never signalled ready — for timeouts the near-universal cause is unawaited async work; use an async `registerComposition` function.
    - `path_outside_project`: you attempted a path outside the project folder; use project-relative paths only.
+   - `tts_unavailable` from `synthesize_speech`/`list_voices`: the speech engine isn't configured on this machine (a Windows-only feature) — tell the user to install/configure it rather than retrying.
+   - `music_unavailable` from `synthesize_music`: the music toolchain (MIDI exe + FluidSynth + SoundFont) isn't configured (Windows-only) — the user sets it up, don't retry. `invalid_music_spec` means the note spec was empty/malformed — fix the spec.
    - If `get_render_status` reports `error`, call `get_logs` for the job and read the actual output before guessing at a fix — Chromium launch failures and FFmpeg encoding errors look different and need different fixes.
 
 6. **Report back concretely.**
    Tell the user the output file path (returned by `render` and confirmed in the `done` status) and roughly what the render contains, rather than just "done." If you rendered a short preview range first, say so and offer to render the full length.
+
+## Adding narration (text-to-speech)
+
+If the video needs a spoken voiceover, synthesize it with `synthesize_speech` rather than asking the user for an audio file. This needs Motion Studio's speech engine, which is **Windows-only**; if it isn't configured the tool returns `tts_unavailable` (the user installs/configures it — don't retry blindly).
+
+- Call `list_voices` first to see the installed voices, then pass one as `voice` (omit for the system default).
+- `synthesize_speech { projectId, text, voice }` writes a WAV into `assets/` and returns the clip length as both `durationSeconds` and `durationInFrames`. **Use `durationInFrames` to size the `Sequence()` the narration plays under — and often the project's own `durationInFrames` — so the on-screen animation lasts exactly as long as the voiceover.** Synthesizing before you finalize timing is the whole point: it's how you sync visuals to speech.
+- `mode` (default `attach`) also appends the clip to the project's audio tracks, so the next `render` mixes it in automatically; pass `startInFrames` to offset it and `gainDb` to balance it against a music bed. Use `mode: "asset-only"` to inspect the duration first and wire the track yourself later via `update_project_config`.
+- Audio is muxed at the final render only — `capture_preview_frame` is silent. mp4/webm/prores carry audio; gif and png-sequence do not.
+
+## Adding a music bed (generated music)
+
+If the video wants music, compose a short piece with `synthesize_music` instead of asking for an audio file — **you author the notes**. Like speech it's **Windows-only**; an unconfigured toolchain returns `music_unavailable` (the user sets it up — don't retry blindly).
+
+- Author a `spec`: `{ bpm, tracks: [ { program, notes: [ { pitch, start, duration, velocity? } ] } ] }`. `program` is a General MIDI instrument `0..127` (0 piano, 32 acoustic bass, 40 violin, 48 strings, 56 trumpet, 73 flute…); `drums:true` routes a track to percussion. `pitch` is a MIDI note (60 = middle C); `start`/`duration` are in **beats** (quarter notes). Keep it simple and diatonic — a melody track plus a bass/chord track reads as "music" far more than one dense track.
+- `synthesize_music { projectId, spec, mode, gainDb }` writes a WAV into `assets/` and returns `durationInFrames` — but note it reflects the **rendered** length including a reverb tail, which is longer than the notes (`musicalDurationSeconds`). Loop or extend the spec to fill the video rather than expecting the bed to land on an exact beat.
+- As a **background bed under narration**, attach it at a low `gainDb` (e.g. `-8` to `-14`) so speech stays intelligible, and use `startInFrames` to place it. `mode` works exactly as for speech (`attach` vs `asset-only`).
+
+## Long-form: multi-scene films
+
+A composition is one `frame → state` function — right for a shot or a scene, not for minutes of video. To build anything longer than a single composition, author **each scene as its own project** and stitch the rendered scenes with `build_film`. Don't try to cram a whole film into one giant timeline.
+
+- Give every scene project the **same** `width`, `height`, `fps`, and `output.format` (mp4/webm/prores) — `build_film` concatenates losslessly (`-c copy`) and rejects mismatches with `inconsistent_scenes`.
+- **Render each scene first** (`render` → poll to `done`). `build_film` assembles only; an unrendered scene fails with `scene_not_rendered`.
+- `build_film { scenes: [{projectId}, …] }` in play order → one continuous film. For a score/narration that spans the whole film, pass a master `audio: [{ src, startInFrames?, gainDb? }]` (in the output project's `assets/`); it replaces per-scene audio. Otherwise keep per-scene audio consistent (all scenes audio, or all silent).
+- Quality: render scenes at low `output.crf` or as ProRes, assemble, then do one final encode — see [film-setup.md](film-setup.md). Because compositions are pure functions of frame, preview scenes at a low resolution and final-render at full res with no code change.
 
 ## Iterating on an existing project
 

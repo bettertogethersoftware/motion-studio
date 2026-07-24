@@ -7,9 +7,10 @@
  *   FFmpeg  >= 5.0     — concat demuxer + libx264 flags used here are stable
  *                        from 5.x; 4.x mostly works but is not tested.
  *
- * The WinForms PrereqChecker (C#) performs the same checks with the same
- * version floors; keep MIN_NODE / MIN_FFMPEG in sync with
- * app/MotionStudio/Services/PrereqChecker.cs.
+ * (The v0.2 C# WinForms PrereqChecker that used to mirror these floors was
+ * removed in v0.5 when the desktop shell was replaced by the Studio web UI —
+ * see docs/CHANGELOG.md. The optional text-to-speech exe (v0.6) does not
+ * participate in these checks; it has its own probe in core/tts.js.)
  */
 
 import { execFile } from 'node:child_process';

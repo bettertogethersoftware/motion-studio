@@ -361,3 +361,9 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Motion Studio — published text-to-speech exe (build artifact; see docs/tts-setup.md).
+# The self-contained MotionStudioTts.exe is ~70 MB; build it locally, don't commit it.
+engine/vendor/
+# FluidSynth binary distribution (runtime dependency; build/place locally, see docs/music-setup.md).
+fluidsynth-v2.5.6-win10-x64-glib/

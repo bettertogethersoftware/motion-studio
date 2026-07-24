@@ -48,6 +48,11 @@ export async function createPuppeteerBrowser({
         '--disable-lcd-text',              // subpixel AA varies per display; grayscale AA is stable
         '--hide-scrollbars',
         '--font-render-hinting=none',
+        // Opt-in (v0.7): let a composition fetch its own project assets over
+        // file:// — e.g. glTF/GLB models via a loader, or JSON data. Off by
+        // default (file:// XHR is CORS-blocked); enable per render with
+        // MOTION_STUDIO_ALLOW_LOCAL_FETCH=1. <img>/<audio>/CSS assets never need it.
+        ...(process.env.MOTION_STUDIO_ALLOW_LOCAL_FETCH ? ['--allow-file-access-from-files'] : []),
       ],
     });
   } catch (e) {

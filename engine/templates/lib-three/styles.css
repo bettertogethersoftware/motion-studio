@@ -1,0 +1,3 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: __WIDTH__px; height: __HEIGHT__px; overflow: hidden; background: #05060f; }
+#gl { position: absolute; inset: 0; display: block; }

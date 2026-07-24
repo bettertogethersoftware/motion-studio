@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MotionStudioTts</AssemblyName>
+    <RootNamespace>MotionStudioTts</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Single-file self-contained publish needs native libs extracted at first run. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!--
+    No package references. Two synthesis backends, both from the Windows runtime:
+      * WinRT (default): Windows.Media.SpeechSynthesis, the OneCore "mobile"
+        voices (more voices including male; projections come free with the
+        net10.0-windows10.0.x TFM, no NuGet).
+      * SAPI5 (fallback, engine=sapi): SAPI.SpVoice / SAPI.SpFileStream via
+        late-bound dynamic. (The managed System.Speech wrapper was dropped; it
+        NREs instantiating voices under .NET Core on some machines.)
+  -->
+
+</Project>

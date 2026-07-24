@@ -14,5 +14,11 @@
     "crf": 18,
     "preset": "medium",
     "pixFmt": "yuv420p"
-  }
+  },
+  "audio": [
+    {
+      "src": "assets/narration.wav",
+      "startInFrames": 24
+    }
+  ]
 }

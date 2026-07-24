@@ -23,6 +23,10 @@ const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.resolve(__dirname, '../src/mcp/server.js');
 const FAKE_BROWSER = path.resolve(__dirname, 'helpers/fake-browser-module.js');
+const FAKE_TTS = path.resolve(__dirname, 'helpers/fake-tts.mjs');
+const FAKE_MIDI = path.resolve(__dirname, 'helpers/fake-music.mjs');
+const FAKE_FLUIDSYNTH = path.resolve(__dirname, 'helpers/fake-fluidsynth.mjs');
+const FAKE_SOUNDFONT = path.resolve(__dirname, 'fixtures/fake.sf2');
 
 let haveFfmpeg = false;
 let tmp, client, transport;
@@ -37,6 +41,10 @@ before(async () => {
       ...process.env,
       MOTION_STUDIO_HOME: path.join(tmp, 'home'),
       MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
+      MOTION_STUDIO_TTS_EXE: FAKE_TTS,
+      MOTION_STUDIO_MIDI_EXE: FAKE_MIDI,
+      MOTION_STUDIO_FLUIDSYNTH: FAKE_FLUIDSYNTH,
+      MOTION_STUDIO_SOUNDFONT: FAKE_SOUNDFONT,
     },
     stderr: 'pipe',
   });
@@ -65,6 +73,14 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'update_project_config',
     // new in v0.5
     'render_still', 'write_asset_file', 'remove_project',
+    // new in v0.6 (text-to-speech)
+    'synthesize_speech', 'list_voices',
+    // new in v0.7 (3D libraries)
+    'add_library',
+    // new in v0.8 (music generation)
+    'synthesize_music',
+    // new in v0.9 (film assembly)
+    'build_film',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -256,4 +272,213 @@ test('mcp: update_project_config switches format and fixes the filename extensio
   assert.equal(bad.data.code, 'invalid_config');
   // restore mp4 for any later tests
   await callJson('update_project_config', { projectId, patch: { output: { format: 'mp4', transparent: false } } });
+});
+
+/* --------------------------- v0.6 text-to-speech --------------------------- */
+
+test('mcp: synthesize_speech attach mode adds an audio track and reports frames', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('synthesize_speech', {
+    projectId, text: 'Welcome to Motion Studio.', voice: 'Microsoft David Desktop', mode: 'attach',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, true);
+  assert.equal(res.data.mode, 'attach');
+  assert.equal(res.data.assetPath, 'assets/narration-1.wav');
+  // Stub clip is 1.0s; project fps is 30 → ceil(1.0 * 30) = 30 frames.
+  assert.equal(res.data.durationInFrames, 30);
+  assert.equal(res.data.fps, 30);
+
+  const proj = await callJson('get_project', { projectId });
+  assert.ok(fs.existsSync(path.join(proj.data.path, 'assets', 'narration-1.wav')));
+  assert.ok(
+    (proj.data.config.audio ?? []).some((tk) => tk.src === 'assets/narration-1.wav'),
+    JSON.stringify(proj.data.config.audio),
+  );
+});
+
+test('mcp: synthesize_speech asset-only mode writes a WAV but leaves config.audio unchanged', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const before = await callJson('get_project', { projectId });
+  const beforeCount = (before.data.config.audio ?? []).length;
+
+  const res = await callJson('synthesize_speech', {
+    projectId, text: 'Second clip, not attached.', voice: 'Microsoft Zira Desktop', mode: 'asset-only',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, false);
+  assert.match(res.data.hint, /update_project_config/);
+  assert.ok(Number.isInteger(res.data.durationInFrames));
+
+  const proj = await callJson('get_project', { projectId });
+  assert.ok(fs.existsSync(path.join(proj.data.path, ...res.data.assetPath.split('/'))));
+  assert.equal((proj.data.config.audio ?? []).length, beforeCount);
+});
+
+test('mcp: synthesize_speech rejects an assetPath outside assets/', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('synthesize_speech', {
+    projectId, text: 'x', voice: 'Microsoft David Desktop', assetPath: '../evil.wav',
+  });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'path_outside_project');
+});
+
+test('mcp: list_voices / synthesize_speech return tts_unavailable when the exe is missing', async () => {
+  // A second server pointed at a nonexistent exe — no ffmpeg needed (TTS tools do not gate on prereqs).
+  const badTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER],
+    env: {
+      ...process.env,
+      MOTION_STUDIO_HOME: path.join(tmp, 'home-no-tts'),
+      MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
+      MOTION_STUDIO_TTS_EXE: path.join(tmp, 'no-such-tts.exe'),
+    },
+    stderr: 'pipe',
+  });
+  const badClient = new Client({ name: 'ms-test-client-no-tts', version: '0.0.1' });
+  await badClient.connect(badTransport);
+  try {
+    const res = await badClient.callTool({ name: 'list_voices', arguments: {} });
+    const text = res.content.find((c) => c.type === 'text')?.text ?? '{}';
+    assert.equal(!!res.isError, true);
+    assert.equal(JSON.parse(text).code, 'tts_unavailable');
+  } finally {
+    await badClient.close().catch(() => {});
+  }
+});
+
+/* ---------------------------- v0.8 music generation ---------------------------- */
+// The music toolchain (MIDI exe + fluidsynth + soundfont) is stubbed via env in the
+// shared server. These need no ffmpeg — synthesize_music does not gate on prereqs.
+
+const MUSIC_SPEC = {
+  bpm: 96,
+  tracks: [
+    { program: 0, notes: [{ pitch: 72, start: 0, duration: 1 }, { pitch: 76, start: 1, duration: 1 }] },
+    { program: 32, notes: [{ pitch: 48, start: 0, duration: 2 }] },
+  ],
+};
+
+let musicProjectId;
+
+test('mcp: synthesize_music attach mode writes a WAV and adds an audio track', async () => {
+  const proj = await callJson('create_project', { name: 'Music MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+  musicProjectId = proj.data.id;
+
+  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, mode: 'attach', gainDb: -8 });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, true);
+  assert.equal(res.data.mode, 'attach');
+  assert.equal(res.data.assetPath, 'assets/music-1.wav');
+  assert.equal(res.data.bpm, 96);
+  assert.equal(res.data.tracks, 2);
+  assert.equal(res.data.notes, 3);
+  assert.ok(res.data.bytes > 0);
+  // Stub fluidsynth emits 0.25s; fps 30 → ceil(0.25 * 30) = 8 frames.
+  assert.equal(res.data.durationInFrames, 8);
+  assert.equal(res.data.fps, 30);
+
+  const after = await callJson('get_project', { projectId: musicProjectId });
+  assert.ok(fs.existsSync(path.join(after.data.path, 'assets', 'music-1.wav')));
+  const track = (after.data.config.audio ?? []).find((tk) => tk.src === 'assets/music-1.wav');
+  assert.ok(track, JSON.stringify(after.data.config.audio));
+  assert.equal(track.gainDb, -8);
+});
+
+test('mcp: synthesize_music asset-only mode writes a WAV but leaves config.audio unchanged', async () => {
+  const before = await callJson('get_project', { projectId: musicProjectId });
+  const beforeCount = (before.data.config.audio ?? []).length;
+
+  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, mode: 'asset-only' });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, false);
+  assert.match(res.data.hint, /update_project_config/);
+  assert.equal(res.data.assetPath, 'assets/music-2.wav');
+
+  const after = await callJson('get_project', { projectId: musicProjectId });
+  assert.ok(fs.existsSync(path.join(after.data.path, ...res.data.assetPath.split('/'))));
+  assert.equal((after.data.config.audio ?? []).length, beforeCount);
+});
+
+test('mcp: synthesize_music rejects an assetPath outside assets/', async () => {
+  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, assetPath: '../evil.wav' });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'path_outside_project');
+});
+
+test('mcp: synthesize_music returns music_unavailable when the toolchain is missing', async () => {
+  const badTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER],
+    env: {
+      ...process.env,
+      MOTION_STUDIO_HOME: path.join(tmp, 'home-no-music'),
+      MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
+      MOTION_STUDIO_TTS_EXE: FAKE_TTS,
+      MOTION_STUDIO_MIDI_EXE: path.join(tmp, 'no-such-midi.exe'),
+      MOTION_STUDIO_FLUIDSYNTH: path.join(tmp, 'no-such-fs.exe'),
+      MOTION_STUDIO_SOUNDFONT: path.join(tmp, 'no-such.sf2'),
+    },
+    stderr: 'pipe',
+  });
+  const badClient = new Client({ name: 'ms-test-client-no-music', version: '0.0.1' });
+  await badClient.connect(badTransport);
+  try {
+    const proj = await badClient.callTool({ name: 'create_project', arguments: { name: 'No Music', fps: 30 } });
+    const projId = JSON.parse(proj.content.find((c) => c.type === 'text').text).id;
+    const res = await badClient.callTool({ name: 'synthesize_music', arguments: { projectId: projId, spec: MUSIC_SPEC } });
+    const text = res.content.find((c) => c.type === 'text')?.text ?? '{}';
+    assert.equal(!!res.isError, true);
+    assert.equal(JSON.parse(text).code, 'music_unavailable');
+  } finally {
+    await badClient.close().catch(() => {});
+  }
+});
+
+/* ------------------------------- v0.9 film assembly ------------------------------- */
+
+const renderToDone = async (projectId) => {
+  const start = await callJson('render', { projectId });
+  let status; const deadline = Date.now() + 30_000;
+  do { await new Promise((r) => setTimeout(r, 100)); status = (await callJson('get_render_status', { jobId: start.data.jobId })).data; }
+  while (status.state === 'running' && Date.now() < deadline);
+  assert.equal(status.state, 'done', JSON.stringify(status));
+};
+
+test('mcp: build_film concatenates rendered scenes into one film', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const sceneIds = [];
+  for (const name of ['Scene A', 'Scene B']) {
+    const p = await callJson('create_project', { name, fps: 30, width: 320, height: 240, durationInFrames: 6 });
+    sceneIds.push(p.data.id);
+    await renderToDone(p.data.id);
+  }
+  const res = await callJson('build_film', { scenes: sceneIds.map((id) => ({ projectId: id })) });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.scenes, 2);
+  assert.equal(res.data.totalFrames, 12);
+  assert.ok(fs.existsSync(res.data.outputPath));
+  const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', res.data.outputPath]);
+  assert.ok(Math.abs(parseFloat(stdout) - 0.4) < 0.2, `film ~0.4s, got ${stdout.trim()}`);
+});
+
+test('mcp: build_film reports scene_not_rendered when a scene has no output', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const p = await callJson('create_project', { name: 'Unrendered Scene', fps: 30, width: 320, height: 240, durationInFrames: 6 });
+  const res = await callJson('build_film', { scenes: [{ projectId: p.data.id }] });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'scene_not_rendered');
+});
+
+test('mcp: build_film rejects scenes with mismatched dimensions', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const a = await callJson('create_project', { name: 'Wide', fps: 30, width: 320, height: 240, durationInFrames: 6 });
+  const b = await callJson('create_project', { name: 'Tall', fps: 30, width: 640, height: 480, durationInFrames: 6 });
+  await renderToDone(a.data.id);
+  await renderToDone(b.data.id);
+  const res = await callJson('build_film', { scenes: [{ projectId: a.data.id }, { projectId: b.data.id }] });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'inconsistent_scenes');
 });

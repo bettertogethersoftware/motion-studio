@@ -125,6 +125,17 @@ Drop the files in `assets/` and re-render. mp4 muxes AAC, webm muxes Opus,
 prores muxes PCM; gif and png-sequence cannot carry audio (tracks are
 skipped with a warning in the logs).
 
+### Generated narration (text-to-speech)
+
+On Windows you can synthesize a voiceover instead of supplying an audio file.
+An agent calls the `synthesize_speech` MCP tool (see [tts-setup.md](tts-setup.md)):
+it speaks your text to `assets/narration-<n>.wav`, reports the clip's length in
+frames, and — in the default `attach` mode — adds it to the `audio` list above
+for you. This is an optional, Windows-only feature that requires the external
+speech executable pointed to by `MOTION_STUDIO_TTS_EXE`; the rest of Motion
+Studio stays cross-platform, and the synthesized WAV mixes through the exact
+audio path described above.
+
 ## The CLI
 
 Everything the Studio does is scriptable:

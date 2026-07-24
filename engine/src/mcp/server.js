@@ -14,6 +14,11 @@
  * Environment:
  *   MOTION_STUDIO_HOME          override data dir (default ~/.motion-studio)
  *   MOTION_STUDIO_MAX_RENDERS   per-session render cap (default unlimited; spec §10)
+ *   MOTION_STUDIO_TTS_EXE       path to the Windows text-to-speech exe (optional;
+ *                               enables synthesize_speech / list_voices — v0.6)
+ *   MOTION_STUDIO_MIDI_EXE      MotionStudioMidi.exe (music, v0.8)
+ *   MOTION_STUDIO_FLUIDSYNTH    fluidsynth.exe (music, v0.8)
+ *   MOTION_STUDIO_SOUNDFONT     .sf2/.sf3 SoundFont (music, v0.8)
  */
 
 import path from 'node:path';
@@ -29,6 +34,10 @@ import { captureSingleFrame, renderComposition, renderParallel, renderStill } fr
 import { checkPrerequisites } from '../core/prereqs.js';
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
+import { resolveInProject } from '../core/sandbox.js';
+import { synthesizeSpeech, wavDurationSeconds, framesForDuration, checkTts, resolveTtsExe } from '../core/tts.js';
+import { synthesizeMusic, checkMusic } from '../core/music.js';
+import { validateScenes, assembleFilm } from '../core/film.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -77,6 +86,28 @@ const wrap = (fn) => async (args) => {
     return fail(err);
   }
 };
+
+/** Smallest-free assets/narration-<n>.wav (mirrors render_still's still-<frame> defaulting). */
+async function nextNarrationPath(assetsDir) {
+  let existing;
+  try {
+    existing = new Set(await fsp.readdir(assetsDir));
+  } catch {
+    existing = new Set();
+  }
+  let n = 1;
+  while (existing.has(`narration-${n}.wav`)) n++;
+  return `assets/narration-${n}.wav`;
+}
+
+/** Smallest-free assets/music-<n>.wav. */
+async function nextMusicPath(assetsDir) {
+  let existing;
+  try { existing = new Set(await fsp.readdir(assetsDir)); } catch { existing = new Set(); }
+  let n = 1;
+  while (existing.has(`music-${n}.wav`)) n++;
+  return `assets/music-${n}.wav`;
+}
 
 /* ------------------------------------------------------------------ */
 /* Server + tools                                                      */
@@ -395,6 +426,255 @@ server.registerTool(
 );
 
 server.registerTool(
+  'synthesize_speech',
+  {
+    title: 'Synthesize narration (text-to-speech)',
+    description:
+      'Turn narration text into a spoken WAV in the project\'s assets/ folder using the system speech engine ' +
+      '(Windows-only; requires MOTION_STUDIO_TTS_EXE — otherwise fails with tts_unavailable). ' +
+      'Returns the clip length as durationSeconds AND durationInFrames — use durationInFrames to size the ' +
+      'Sequence() block the narration plays under. mode="attach" (default) also appends the clip to the ' +
+      'project\'s audio tracks so the next render mixes it in automatically; mode="asset-only" just writes the ' +
+      'WAV and reports its duration, leaving you to wire it later with update_project_config. ' +
+      'List available voices first with list_voices. Text is sent to the engine via a UTF-8 file, so quotes / ' +
+      'newlines / unicode in the narration are safe.',
+    inputSchema: {
+      projectId: z.string(),
+      text: z.string().min(1).describe('Narration text (UTF-8)'),
+      voice: z.string().optional().describe('Voice name from list_voices; omit for the system default'),
+      rate: z.number().int().min(-10).max(10).optional().describe('Speaking rate (engine scale, e.g. -10..10)'),
+      volume: z.number().int().min(0).max(100).optional().describe('Volume 0..100'),
+      mode: z.enum(['attach', 'asset-only']).default('attach')
+        .describe('attach = also add an audio track; asset-only = just synthesize + report'),
+      assetPath: z.string().optional()
+        .describe('Project-relative .wav under assets/ (default assets/narration-<n>.wav)'),
+      startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
+      gainDb: z.number().optional().describe('attach mode: track gain in dB'),
+    },
+  },
+  wrap(async ({ projectId, text, voice, rate, volume, mode, assetPath, startInFrames, gainDb }) => {
+    const ttsExe = resolveTtsExe();
+    const probe = await checkTts({ ttsExe });
+    if (!probe.available) {
+      throw new EngineError(
+        ErrorCodes.TTS_UNAVAILABLE,
+        `Speech engine not available: ${probe.error}. Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE ` +
+          'to its path (Windows only), then retry — do not retry blindly.',
+        { error: probe.error },
+      );
+    }
+
+    const entry = await store.getProjectEntry(projectId);
+    const config = await store.readConfig(projectId);
+    const assetsDir = path.join(entry.path, 'assets');
+    await fsp.mkdir(assetsDir, { recursive: true });
+
+    const relPath = assetPath ?? (await nextNarrationPath(assetsDir));
+    const normalized = relPath.replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/')) {
+      throw new EngineError(
+        ErrorCodes.PATH_OUTSIDE_PROJECT,
+        `Narration must be written under assets/ (got "${relPath}")`,
+        { path: relPath },
+      );
+    }
+    // Reuse the sandbox's write guards (allow-list incl. .wav, traversal/symlink checks).
+    const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
+
+    const result = await synthesizeSpeech({ text, outPath: abs, voice, rate, volume, ttsExe });
+
+    const stat = await fsp.stat(abs).catch(() => null);
+    if (!stat || stat.size === 0) {
+      throw new EngineError(
+        ErrorCodes.TTS_FAILED,
+        `Speech engine reported success but no audio was written to ${normalized}`,
+        { path: normalized },
+      );
+    }
+
+    const durationSeconds = await wavDurationSeconds(abs);
+    const durationInFrames = framesForDuration(durationSeconds, config.fps);
+
+    let attached = false;
+    let audio;
+    let audioTrackIndex;
+    if (mode === 'attach') {
+      const track = { src: normalized };
+      if (startInFrames !== undefined) track.startInFrames = startInFrames;
+      if (gainDb !== undefined) track.gainDb = gainDb;
+      audioTrackIndex = config.audio?.length ?? 0;
+      const updated = await store.updateConfig(projectId, { audio: [...(config.audio ?? []), track] });
+      audio = updated.audio;
+      attached = true;
+    }
+
+    return ok({
+      mode,
+      assetPath: normalized,
+      voice: result.voice ?? voice ?? null,
+      durationSeconds,
+      durationInFrames,
+      fps: config.fps,
+      sampleRate: result.sampleRate,
+      channels: result.channels,
+      bytes: stat.size,
+      reportedDurationSeconds: result.durationSeconds,
+      attached,
+      ...(attached
+        ? { audioTrackIndex, audio }
+        : { hint: `Wire this in later with update_project_config { audio: [{ src: "${normalized}" }] }` }),
+    });
+  }),
+);
+
+server.registerTool(
+  'list_voices',
+  {
+    title: 'List installed TTS voices',
+    description:
+      'List the speech voices installed on this machine, for use as the "voice" argument to synthesize_speech. ' +
+      'Windows-only; requires MOTION_STUDIO_TTS_EXE (otherwise fails with tts_unavailable).',
+    inputSchema: {},
+  },
+  wrap(async () => {
+    const ttsExe = resolveTtsExe();
+    const probe = await checkTts({ ttsExe });
+    if (!probe.available) {
+      throw new EngineError(
+        ErrorCodes.TTS_UNAVAILABLE,
+        `Speech engine not available: ${probe.error}. Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE ` +
+          '(Windows only).',
+        { error: probe.error },
+      );
+    }
+    return ok({ voices: probe.voices });
+  }),
+);
+
+server.registerTool(
+  'synthesize_music',
+  {
+    title: 'Generate music (MIDI → FluidSynth)',
+    description:
+      'Compose a short piece of music from a note spec YOU author, and add it as an audio track. ' +
+      'The spec is rendered to MIDI (DryWetMIDI) then to audio (FluidSynth + a General MIDI SoundFont). ' +
+      'Windows-only; requires the music toolchain (MotionStudioMidi.exe + fluidsynth + a soundfont) — otherwise ' +
+      'fails with music_unavailable (see docs/music-setup.md). ' +
+      'mode="attach" (default) writes assets/music-<n>.wav AND appends the audio track so the next render mixes it; ' +
+      'mode="asset-only" writes + reports only. Returns durationSeconds/durationInFrames (the WAV, which includes a ' +
+      'reverb tail) and musicalDurationSeconds (the note content). Use durationInFrames to size the video, and ' +
+      'startInFrames/gainDb to place and balance the bed against narration. ' +
+      'Spec: bpm, plus tracks of notes. program = General MIDI instrument 0..127 (0 piano, 24 nylon guitar, 32 acoustic ' +
+      'bass, 40 violin, 48 strings, 56 trumpet, 73 flute…). drums:true routes the track to GM percussion. ' +
+      'Each note: pitch 0..127 (60 = middle C), start & duration in beats (quarter notes), velocity 1..127.',
+    inputSchema: {
+      projectId: z.string(),
+      spec: z.object({
+        bpm: z.number().min(20).max(400).default(120),
+        tracks: z.array(z.object({
+          program: z.number().int().min(0).max(127).default(0).describe('General MIDI instrument (ignored if drums)'),
+          drums: z.boolean().optional().describe('Route to GM percussion (channel 10)'),
+          notes: z.array(z.object({
+            pitch: z.number().int().min(0).max(127).describe('MIDI note; 60 = middle C'),
+            start: z.number().min(0).describe('Start time in beats (quarter notes)'),
+            duration: z.number().min(0).describe('Length in beats'),
+            velocity: z.number().int().min(1).max(127).optional(),
+          })).min(1),
+        })).min(1),
+      }).describe('The piece to compose'),
+      mode: z.enum(['attach', 'asset-only']).default('attach'),
+      assetPath: z.string().optional().describe('Project-relative .wav under assets/ (default assets/music-<n>.wav)'),
+      startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
+      gainDb: z.number().optional().describe('attach mode: track gain in dB (e.g. -8 for a background bed)'),
+    },
+  },
+  wrap(async ({ projectId, spec, mode, assetPath, startInFrames, gainDb }) => {
+    const probe = await checkMusic();
+    if (!probe.available) {
+      throw new EngineError(
+        ErrorCodes.MUSIC_UNAVAILABLE,
+        `Music toolchain not available: ${probe.error}. Build MotionStudioMidi.exe, place fluidsynth + a SoundFont, ` +
+          'or set MOTION_STUDIO_MIDI_EXE / MOTION_STUDIO_FLUIDSYNTH / MOTION_STUDIO_SOUNDFONT (Windows only). See docs/music-setup.md.',
+        { error: probe.error },
+      );
+    }
+    const entry = await store.getProjectEntry(projectId);
+    const config = await store.readConfig(projectId);
+    const assetsDir = path.join(entry.path, 'assets');
+    await fsp.mkdir(assetsDir, { recursive: true });
+
+    const relPath = assetPath ?? (await nextMusicPath(assetsDir));
+    const normalized = relPath.replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/')) {
+      throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Music must be written under assets/ (got "${relPath}")`, { path: relPath });
+    }
+    const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
+
+    const result = await synthesizeMusic({ spec, outPath: abs });
+
+    const stat = await fsp.stat(abs).catch(() => null);
+    if (!stat || stat.size === 0) {
+      throw new EngineError(ErrorCodes.MUSIC_FAILED, `Rendered no audio to ${normalized}`, { path: normalized });
+    }
+    const durationSeconds = await wavDurationSeconds(abs);
+    const durationInFrames = framesForDuration(durationSeconds, config.fps);
+
+    let attached = false, audio, audioTrackIndex;
+    if (mode === 'attach') {
+      const track = { src: normalized };
+      if (startInFrames !== undefined) track.startInFrames = startInFrames;
+      if (gainDb !== undefined) track.gainDb = gainDb;
+      audioTrackIndex = config.audio?.length ?? 0;
+      const updated = await store.updateConfig(projectId, { audio: [...(config.audio ?? []), track] });
+      audio = updated.audio;
+      attached = true;
+    }
+
+    return ok({
+      mode,
+      assetPath: normalized,
+      bpm: result.bpm,
+      tracks: result.tracks,
+      notes: result.notes,
+      musicalDurationSeconds: result.musicalDurationSeconds,
+      durationSeconds,
+      durationInFrames,
+      fps: config.fps,
+      bytes: stat.size,
+      attached,
+      ...(attached
+        ? { audioTrackIndex, audio }
+        : { hint: `Wire this in later with update_project_config { audio: [{ src: "${normalized}" }] }` }),
+    });
+  }),
+);
+
+server.registerTool(
+  'add_library',
+  {
+    title: 'Add a 3D library (Three.js / Babylon.js)',
+    description:
+      'Vendor an optional 3D rendering library into the project — copied locally so renders stay hermetic ' +
+      '(no CDN at render time) — and scaffold a frame-driven starter composition. ' +
+      'library="three" (Three.js, ~600 KB, lightweight) or "babylon" (Babylon.js, ~8 MB, built-in ' +
+      'glow/bloom/postprocessing). scaffold=true (default) replaces composition.html/js/css with the library ' +
+      'starter; set false to only vendor the library and keep your composition. ' +
+      'The result includes determinism notes you MUST follow: drive all animation from the injected frame — ' +
+      'no requestAnimationFrame, no THREE.Clock / Babylon render loop / particle systems (all wall-clock based) — ' +
+      'and compile shaders before the first frame (the starters warm up materials, else single-frame captures render blank). ' +
+      'addons: babylon supports "loaders" (glTF/GLB import via SceneLoader); loading a model also needs env MOTION_STUDIO_ALLOW_LOCAL_FETCH=1. ' +
+      'Requires the vendored build (run scripts/fetch-libs.mjs once); otherwise fails with library_unavailable.',
+    inputSchema: {
+      projectId: z.string(),
+      library: z.enum(['three', 'babylon']),
+      scaffold: z.boolean().default(true).describe('Replace composition.html/js/css with the library starter'),
+      addons: z.array(z.enum(['loaders'])).optional().describe('Optional addons — babylon "loaders" for glTF/GLB'),
+    },
+  },
+  wrap(async ({ projectId, library, scaffold, addons }) => ok(await store.addLibrary(projectId, { library, scaffold, addons }))),
+);
+
+server.registerTool(
   'remove_project',
   {
     title: 'Remove a project',
@@ -408,6 +688,77 @@ server.registerTool(
     },
   },
   wrap(async ({ projectId, deleteFiles }) => ok(await store.removeProject(projectId, { deleteFiles }))),
+);
+
+server.registerTool(
+  'build_film',
+  {
+    title: 'Assemble scenes into a film',
+    description:
+      'Stitch several already-rendered scene projects into one continuous film — the way to build videos longer than a single ' +
+      'composition. Author each scene as its own project (create_project → write_composition_file → render), then list them here ' +
+      'in play order. Scenes are concatenated LOSSLESSLY (ffmpeg -c copy, no re-encode), so they must share resolution, fps, format ' +
+      'and pixel format — use mp4, webm, or prores (gif / png-sequence cannot be concatenated). This tool renders nothing: every ' +
+      'scene must already be rendered, or it fails with scene_not_rendered listing which. Mismatched scenes fail with ' +
+      'inconsistent_scenes. Audio: with no `audio`, each scene\'s own audio is preserved (all scenes must be consistently audio ' +
+      'or all silent); pass `audio` to lay ONE master timeline (music bed + narration, startInFrames/gainDb like config.audio) over ' +
+      'the whole film, which replaces per-scene audio. Tip for quality: render scenes as prores (or low crf), assemble, then do a ' +
+      'single final encode. See docs/film-setup.md.',
+    inputSchema: {
+      scenes: z.array(z.object({ projectId: z.string() })).min(1)
+        .describe('Scene projects in play order; each must already be rendered'),
+      outputProjectId: z.string().optional()
+        .describe('Project that receives out/<film> and holds master-audio assets (default: the first scene)'),
+      outputFilename: z.string().optional()
+        .describe('Bare filename for the film; extension is forced to the scenes\' format (default film.<ext>)'),
+      audio: z.array(z.object({
+        src: z.string().describe('Project-relative audio under assets/ of the output project'),
+        startInFrames: z.number().int().min(0).optional().describe('Track start offset in frames'),
+        gainDb: z.number().optional().describe('Track gain in dB (e.g. -8 for a background bed)'),
+      })).optional().describe('Optional master audio laid over the entire film (replaces per-scene audio)'),
+    },
+  },
+  wrap(async ({ scenes, outputProjectId, outputFilename, audio }) => {
+    await requirePrereqs();
+    const sceneData = [];
+    for (const s of scenes) {
+      const entry = await store.getProjectEntry(s.projectId);
+      const config = await store.readConfig(s.projectId);
+      sceneData.push({ projectId: s.projectId, path: entry.path, config });
+    }
+    const info = validateScenes(sceneData, { hasMasterAudio: !!(audio && audio.length) });
+
+    const outId = outputProjectId ?? scenes[0].projectId;
+    const outEntry = await store.getProjectEntry(outId);
+    const outCfg = await store.readConfig(outId);
+
+    const ext = path.extname(sceneData[0].config.output?.filename ?? 'output.mp4') || '.mp4';
+    const base = (outputFilename ?? 'film').replace(/\.[a-z0-9]+$/i, '');
+    if (base.includes('/') || base.includes('\\') || base.includes('..') || base === '') {
+      throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare filename');
+    }
+    const outDir = path.join(outEntry.path, outCfg.output?.dir ?? 'out');
+    await fsp.mkdir(outDir, { recursive: true });
+    const outputPath = path.join(outDir, base + ext);
+
+    let audioTracks;
+    if (audio && audio.length) {
+      audioTracks = [];
+      for (const t of audio) {
+        const normalized = t.src.replace(/\\/g, '/');
+        if (!normalized.startsWith('assets/')) {
+          throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `master audio must be under assets/ (got "${t.src}")`, { path: t.src });
+        }
+        const abs = resolveInProject(outEntry.path, normalized, { asAsset: true });
+        const stat = await fsp.stat(abs).catch(() => null);
+        if (!stat) throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `master audio not found: ${normalized} in project ${outId}`, { path: normalized });
+        audioTracks.push({ src: abs, startInFrames: t.startInFrames, gainDb: t.gainDb });
+      }
+    }
+
+    const result = await assembleFilm({ scenes: sceneData, format: info.format, outputPath, audioTracks, projectRoot: outEntry.path });
+    return ok({ outputProjectId: outId, sceneOrder: scenes.map((s) => s.projectId), ...result });
+  }),
 );
 
 /* ------------------------------------------------------------------ */
