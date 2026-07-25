@@ -1,5 +1,5 @@
 /*!
- * Motion Studio Frame API runtime — v1.1
+ * Motion Studio Frame API runtime — v1.2
  *
  * Loaded as a classic <script> before composition code. Provides the four
  * primitives of the frame-driven contract (docs/frame-api.md):
@@ -14,6 +14,10 @@
  *   MotionStudio.spring(frame, options?)           // physical spring 0→1, closed form
  *   MotionStudio.interpolateColors(frame, inputRange, colors)
  *   MotionStudio.Loop(durationInFrames, fn)        // repeat a sub-animation
+ *
+ * v1.2: argument errors now name the offending values. A bad interpolate()
+ * range often throws only at the frame that first reaches the call, so the
+ * message has to carry enough context to identify the call site on its own.
  *
  * Also exported as bare globals (interpolate, Sequence, ...) for terse
  * composition code. Runs in both the render Chromium (Puppeteer) and the
@@ -70,11 +74,19 @@
       throw new TypeError('interpolate: inputRange and outputRange must be arrays');
     }
     if (inputRange.length < 2 || inputRange.length !== outputRange.length) {
-      throw new RangeError('interpolate: ranges must have equal length >= 2');
+      throw new RangeError(
+        'interpolate: ranges must have equal length >= 2 (inputRange has ' + inputRange.length +
+        ', outputRange has ' + outputRange.length + ')');
     }
     for (let i = 1; i < inputRange.length; i++) {
       if (!(inputRange[i] > inputRange[i - 1])) {
-        throw new RangeError('interpolate: inputRange must be strictly increasing');
+        // Naming the offending pair matters: the usual cause is a descending
+        // range built from a negative quantity, and it can sit unnoticed until
+        // the one frame that reaches this call.
+        throw new RangeError(
+          'interpolate: inputRange must be strictly increasing, but index ' + i + ' (' + inputRange[i] +
+          ') is not greater than index ' + (i - 1) + ' (' + inputRange[i - 1] + '). inputRange=[' +
+          inputRange.join(', ') + ']');
       }
     }
     const easing =
@@ -212,7 +224,10 @@
    */
   function interpolateColors(frame, inputRange, colors) {
     if (!Array.isArray(colors) || colors.length !== inputRange.length) {
-      throw new RangeError('interpolateColors: colors must match inputRange length');
+      throw new RangeError(
+        'interpolateColors: colors must match inputRange length (inputRange has ' +
+        (Array.isArray(inputRange) ? inputRange.length : typeof inputRange) + ', colors has ' +
+        (Array.isArray(colors) ? colors.length : typeof colors) + ')');
     }
     var parsed = colors.map(parseColor);
     var channel = function (i) {
@@ -282,7 +297,7 @@
 
   const api = {
     interpolate, Sequence, Loop, spring, interpolateColors, random, easings,
-    registerComposition, version: 1.1,
+    registerComposition, version: 1.2,
   };
   global.MotionStudio = api;
   // Bare-name conveniences for terse composition code.

@@ -21,7 +21,13 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { EngineError, ErrorCodes } from './errors.js';
 import { getFormat } from './formats.js';
-import { concatSegments, muxAudio } from './encoder.js';
+import { concatSegments, muxAudio, measureAudioLevels } from './encoder.js';
+
+/** Peak (dBFS) at or above which the mix is reported as clipping. */
+const CLIPPING_DBFS = -0.1;
+
+/** How close to `audioTargetPeakDb` counts as "already there" — one pass only. */
+const TARGET_TOLERANCE_DB = 0.2;
 
 /**
  * A one-line fingerprint of everything that must match for a lossless `-c copy`
@@ -102,22 +108,64 @@ export function validateScenes(scenes, { hasMasterAudio = false } = {}) {
  * @param {string}  opts.outputPath     absolute destination
  * @param {Array}   [opts.audioTracks]  master audio: [{ src(abs), startInFrames?, gainDb? }]
  * @param {string}  [opts.projectRoot]  root the audio srcs resolve against
- * @returns {{ scenes, totalFrames, durationSeconds, fps, format, hasAudio, outputPath }}
+ * @param {boolean} [opts.audioLimiter=true]  brick-wall the mix at -1 dBFS
+ * @param {number}  [opts.audioTargetPeakDb]  measure the mix and re-mux once so it
+ *   peaks here (e.g. -2). Preserves the relative balance between tracks — every
+ *   gain moves by the same offset.
+ * @returns {{ scenes, totalFrames, durationSeconds, fps, format, hasAudio, outputPath, audio? }}
  */
-export async function assembleFilm({ scenes, format, outputPath, audioTracks, projectRoot, ffmpegPath = 'ffmpeg', onSpawn }) {
+export async function assembleFilm({
+  scenes, format, outputPath, audioTracks, projectRoot,
+  audioLimiter = true, audioTargetPeakDb,
+  ffmpegPath = 'ffmpeg', onSpawn,
+}) {
   const fps = scenes[0].config.fps;
   const segmentPaths = scenes.map((s) => sceneOutputPath(s.path, s.config));
   const totalFrames = scenes.reduce((sum, s) => sum + s.config.durationInFrames, 0);
   const videoDurationSec = totalFrames / fps;
-  const output = { format };
+  const output = { format, audioLimiter };
+  let audio;
 
   if (audioTracks && audioTracks.length) {
-    // Concat the video, then lay the master audio over the full length.
+    if (audioTargetPeakDb != null && !(audioTargetPeakDb >= -60 && audioTargetPeakDb <= 0)) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG,
+        `audioTargetPeakDb must be between -60 and 0 (got ${audioTargetPeakDb})`, { audioTargetPeakDb });
+    }
+
+    // Concat the video, then lay the master audio over the full length. The
+    // silent concat is kept until we are done: a target-peak correction re-muxes
+    // from it, which costs seconds, where redoing the concat would not.
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-film-'));
     const silent = path.join(tmp, `video${getFormat(format).ext}`);
     try {
       await concatSegments({ segmentPaths, outputPath: silent, ffmpegPath, onSpawn });
-      await muxAudio({ videoPath: silent, audioTracks, outputPath, fps, projectRoot, output, ffmpegPath, onSpawn, videoDurationSec });
+      const mux = (tracks) => muxAudio({
+        videoPath: silent, audioTracks: tracks, outputPath, fps, projectRoot,
+        output, ffmpegPath, onSpawn, videoDurationSec,
+      });
+
+      await mux(audioTracks);
+      let levels = await measureAudioLevels({ filePath: outputPath, ffmpegPath, onSpawn }).catch(() => null);
+
+      // One correction pass. Shifting every track by the same offset keeps the
+      // balance the caller chose; re-measuring proves the result rather than
+      // assuming the shift landed (the limiter may still be in the way).
+      let appliedOffsetDb;
+      if (audioTargetPeakDb != null && levels?.peakDb != null
+          && Math.abs(audioTargetPeakDb - levels.peakDb) > TARGET_TOLERANCE_DB) {
+        appliedOffsetDb = Number((audioTargetPeakDb - levels.peakDb).toFixed(2));
+        await mux(audioTracks.map((t) => ({ ...t, gainDb: (t.gainDb ?? 0) + appliedOffsetDb })));
+        levels = await measureAudioLevels({ filePath: outputPath, ffmpegPath, onSpawn }).catch(() => null);
+      }
+
+      audio = {
+        tracks: audioTracks.length,
+        limiter: audioLimiter,
+        ...(levels ?? {}),
+        ...(levels?.peakDb != null ? { clipping: levels.peakDb >= CLIPPING_DBFS } : {}),
+        ...(appliedOffsetDb != null ? { appliedOffsetDb } : {}),
+        ...(audioTargetPeakDb != null ? { targetPeakDb: audioTargetPeakDb } : {}),
+      };
     } finally {
       await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
     }
@@ -133,5 +181,6 @@ export async function assembleFilm({ scenes, format, outputPath, audioTracks, pr
     format,
     hasAudio: !!(audioTracks && audioTracks.length) || sceneHasAudio(scenes[0].config),
     outputPath,
+    ...(audio ? { audio } : {}),
   };
 }

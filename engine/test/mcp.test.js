@@ -81,6 +81,10 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'synthesize_music',
     // new in v0.9 (film assembly)
     'build_film',
+    // new in v0.11 (shared-file sync)
+    'sync_shared_files',
+    // new in v0.12 (sound effects)
+    'synthesize_sfx',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -435,6 +439,85 @@ test('mcp: synthesize_music returns music_unavailable when the toolchain is miss
   } finally {
     await badClient.close().catch(() => {});
   }
+});
+
+/* ---------------------------- v0.12 sound effects ----------------------------- */
+// No stub env at all: core/sfx.js is pure JS, which is the point — there is no
+// toolchain to be missing and therefore no *_unavailable path to test.
+
+const SFX_SPEC = {
+  cues: [
+    { atFrame: 0, type: 'chime', pitch: 82, gain: 0.4, decay: 0.5 },
+    { atFrame: 15, type: 'whoosh', rise: 0.2, fall: 0.2, gain: 0.5 },
+  ],
+};
+
+let sfxProjectId;
+
+test('mcp: synthesize_sfx attach mode writes a WAV and adds an audio track', async () => {
+  const proj = await callJson('create_project', { name: 'Sfx MCP', fps: 30, width: 320, height: 240, durationInFrames: 60 });
+  sfxProjectId = proj.data.id;
+
+  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, mode: 'attach', gainDb: -12 });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, true);
+  assert.equal(res.data.assetPath, 'assets/sfx-1.wav');
+  assert.equal(res.data.cues, 2);
+  assert.equal(res.data.channels, 1);
+  assert.equal(res.data.sampleRate, 44100);
+  assert.equal(res.data.normalize, 'ceiling');
+  // fps AND the bed length are inherited from the project, so the bed spans the
+  // composition without the caller restating either.
+  assert.equal(res.data.fps, 30);
+  assert.equal(res.data.durationInFrames, 60);
+  assert.equal(res.data.durationSeconds, 2);
+  assert.ok(res.data.bytes > 0);
+
+  const after = await callJson('get_project', { projectId: sfxProjectId });
+  assert.ok(fs.existsSync(path.join(after.data.path, 'assets', 'sfx-1.wav')));
+  const track = (after.data.config.audio ?? []).find((tk) => tk.src === 'assets/sfx-1.wav');
+  assert.ok(track, JSON.stringify(after.data.config.audio));
+  assert.equal(track.gainDb, -12);
+});
+
+test('mcp: synthesize_sfx asset-only mode writes a WAV but leaves config.audio unchanged', async () => {
+  const before = await callJson('get_project', { projectId: sfxProjectId });
+  const beforeCount = (before.data.config.audio ?? []).length;
+
+  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, mode: 'asset-only' });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.attached, false);
+  assert.match(res.data.hint, /update_project_config/);
+  assert.equal(res.data.assetPath, 'assets/sfx-2.wav');
+
+  const after = await callJson('get_project', { projectId: sfxProjectId });
+  assert.equal((after.data.config.audio ?? []).length, beforeCount);
+});
+
+test('mcp: synthesize_sfx reports the real level and leaves a quiet bed quiet', async () => {
+  const res = await callJson('synthesize_sfx', {
+    projectId: sfxProjectId, mode: 'asset-only',
+    spec: { cues: [{ atFrame: 0, type: 'chime', gain: 0.25, decay: 0.4 }] },
+  });
+  assert.equal(res.data.appliedGainDb, 0, 'a quiet bed must not be normalized up');
+  assert.equal(res.data.peakDb, res.data.rawPeakDb, 'the reported peak must be the real one');
+  assert.ok(res.data.peakDb < -10, `expected a quiet bed, got ${res.data.peakDb} dBFS`);
+});
+
+test('mcp: synthesize_sfx surfaces a bad spec as invalid_sfx_spec', async () => {
+  const res = await callJson('synthesize_sfx', {
+    projectId: sfxProjectId, mode: 'asset-only',
+    // Placement outside the bed is a bug, not something to clamp silently.
+    spec: { durationInFrames: 30, cues: [{ atFrame: 900, type: 'chime' }] },
+  });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'invalid_sfx_spec');
+});
+
+test('mcp: synthesize_sfx rejects an assetPath outside assets/', async () => {
+  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, assetPath: '../evil.wav' });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'path_outside_project');
 });
 
 /* ------------------------------- v0.9 film assembly ------------------------------- */

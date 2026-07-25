@@ -61,7 +61,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn }) {
+  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn, preflight }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -96,7 +96,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { projectPath, config, outputPath, frameRange, workers, renderFn },
+      _run: { projectPath, config, outputPath, frameRange, workers, renderFn, preflight },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -144,10 +144,11 @@ export class JobManager {
       }
     });
 
-    const { projectPath, config, outputPath, frameRange, workers, renderFn } = job._run;
+    const { projectPath, config, outputPath, frameRange, workers, renderFn, preflight } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
       projectPath, config, outputPath, frameRange, workers,
+      ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
       progress,
       jobId: job.jobId,
@@ -198,6 +199,8 @@ export class JobManager {
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
       error: job.error,
+      // Measured level of the muxed mix (v0.10) — the caller cannot hear it.
+      ...(job.result?.audio ? { audio: job.result.audio } : {}),
       ...(queuePosition ? { queuePosition } : {}),
     };
   }
@@ -206,6 +209,27 @@ export class JobManager {
     return [...this.jobs.values()]
       .sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1))
       .map((j) => this.getStatus(j.jobId));
+  }
+
+  /**
+   * Wait until every listed job reaches a terminal state (done | error |
+   * cancelled), or the timeout elapses (v0.14). Backs `wait_for_render`: one
+   * blocking call instead of a get_render_status round trip per poll. Unknown
+   * ids fail up front with job_not_found, not halfway through the wait. A
+   * timeout is NOT an error — the caller gets the current snapshots plus
+   * `timedOut: true` and decides what to do; the jobs keep running.
+   */
+  async waitFor(jobIds, { timeoutMs = 300_000, pollMs = 250 } = {}) {
+    for (const id of jobIds) this._get(id);
+    const terminal = new Set([JobState.DONE, JobState.ERROR, JobState.CANCELLED]);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const statuses = jobIds.map((id) => this.getStatus(id));
+      if (statuses.every((s) => terminal.has(s.state))) return { timedOut: false, jobs: statuses };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { timedOut: true, jobs: statuses };
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
+    }
   }
 
   getLogs(jobId, { tail = 100 } = {}) {

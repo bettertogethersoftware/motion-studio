@@ -188,7 +188,21 @@ export async function concatSegments({ segmentPaths, outputPath, ffmpegPath = 'f
  *
  * Track: { src, startInFrames = 0, gainDb = 0 }
  */
-export function buildAudioFilter(tracks, fps) {
+/**
+ * Brick-wall limiter appended to the mix (v0.10). limit=0.891 is -1 dBFS;
+ * level=0 disables alimiter's auto-levelling, which would otherwise make the
+ * filter *boost* quiet audio instead of only catching peaks. Below -1 dBFS this
+ * is a no-op, so it costs nothing on a mix that was already safe.
+ */
+export const LIMITER_FILTER = 'alimiter=limit=0.891:level=0';
+
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.limiter=true] append LIMITER_FILTER to the mix.
+ *   amix runs with normalize=0 so gains sum directly — three tracks at 0 dB can
+ *   sum well past full scale. Set false to pass the mix through untouched.
+ */
+export function buildAudioFilter(tracks, fps, { limiter = true } = {}) {
   const chains = [];
   const mixInputs = [];
   tracks.forEach((t, i) => {
@@ -199,11 +213,103 @@ export function buildAudioFilter(tracks, fps) {
     chains.push(`[${i + 1}:a]adelay=${delayMs}|${delayMs},volume=${gain}dB[${label}]`);
     mixInputs.push(`[${label}]`);
   });
+  const mixOut = limiter ? '[amix]' : '[aout]';
   const mix =
     tracks.length === 1
-      ? `${mixInputs[0]}anull[aout]`
-      : `${mixInputs.join('')}amix=inputs=${tracks.length}:normalize=0[aout]`;
-  return [...chains, mix].join(';');
+      ? `${mixInputs[0]}anull${mixOut}`
+      : `${mixInputs.join('')}amix=inputs=${tracks.length}:normalize=0${mixOut}`;
+  const graph = [...chains, mix];
+  if (limiter) graph.push(`[amix]${LIMITER_FILTER}[aout]`);
+  return graph.join(';');
+}
+
+/**
+ * Decode a rendered file and report its integrated/peak audio level in dBFS
+ * (v0.10). Used to tell the caller whether the mix clipped — the one audio
+ * failure an agent has no way to notice on its own.
+ *
+ * Returns null if the file has no audio or ffmpeg's output cannot be parsed;
+ * callers treat that as "unknown", never as a render failure.
+ */
+export async function measureAudioLevels({ filePath, ffmpegPath = 'ffmpeg', onSpawn, signal }) {
+  // Check first: an 'abort' listener registered after the fact never fires for a
+  // signal that is already aborted, so without this the process would spawn and
+  // run to completion on a cancelled job.
+  if (signal?.aborted) return null;
+
+  const args = ['-hide_banner', '-nostats', '-i', filePath, '-af', 'volumedetect', '-f', 'null', '-'];
+  const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  // This pass decodes the whole file, so on a long film it owns the process for
+  // a meaningful window. Report the pid and honour cancellation like every other
+  // spawn here — otherwise a cancel mid-measurement orphans an ffmpeg.
+  if (onSpawn && proc.pid) onSpawn(proc.pid);
+  const onAbort = () => { try { proc.kill('SIGKILL'); } catch { /* already gone */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  let stderr = '';
+  proc.stderr.on('data', (d) => { stderr += d.toString(); });
+  const code = await new Promise((resolve) => {
+    proc.on('error', () => resolve(-1));
+    proc.on('close', (c) => resolve(c));
+  }).finally(() => signal?.removeEventListener('abort', onAbort));
+
+  if (code !== 0) return null;
+  const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+  const peak = /max_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+  if (!mean && !peak) return null;
+  return {
+    meanDb: mean ? Number(mean[1]) : null,
+    peakDb: peak ? Number(peak[1]) : null,
+  };
+}
+
+/**
+ * Count the video frames actually present in an encoded file (v0.11).
+ *
+ * Returns null when the count cannot be established (no ffprobe on PATH, an
+ * unreadable file, a container that reports nothing) — callers treat that as
+ * "unverified", never as a failure, because ffprobe is not a declared
+ * prerequisite (see core/prereqs.js: only ffmpeg is).
+ *
+ * Tries the container's own `nb_frames` first: muxers write it from the frames
+ * actually written, so a truncated file reports the truncated number and the
+ * check costs one metadata read. Only if that is missing/unusable do we fall
+ * back to `-count_frames`, which decodes the whole file.
+ */
+export async function probeFrameCount({ filePath, ffprobePath = 'ffprobe', onSpawn, signal }) {
+  if (signal?.aborted) return null;
+
+  const run = async (args) => {
+    let proc;
+    try {
+      proc = spawn(ffprobePath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return null;                                  // ffprobe missing entirely
+    }
+    if (onSpawn && proc.pid) onSpawn(proc.pid);
+    const onAbort = () => { try { proc.kill('SIGKILL'); } catch { /* already gone */ } };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      let stdout = '';
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      return await new Promise((resolve) => {
+        proc.on('error', () => resolve(null));
+        proc.on('close', (code) => resolve(code === 0 ? stdout.trim() : null));
+      });
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+  };
+
+  const base = ['-v', 'error', '-select_streams', 'v:0', '-of', 'default=nk=1:nw=1'];
+
+  const fast = await run([...base, '-show_entries', 'stream=nb_frames', filePath]);
+  const n = Number(fast);
+  if (Number.isInteger(n) && n > 0) return n;
+
+  const slow = await run([...base, '-count_frames', '-show_entries', 'stream=nb_read_frames', filePath]);
+  const m = Number(slow);
+  return Number.isInteger(m) && m > 0 ? m : null;
 }
 
 /**
@@ -223,7 +329,7 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projec
   for (const t of audioTracks) args.push('-i', path.resolve(projectRoot, t.src));
 
   const filter =
-    buildAudioFilter(audioTracks, fps) +
+    buildAudioFilter(audioTracks, fps, { limiter: output.audioLimiter !== false }) +
     `;[aout]apad,atrim=0:${videoDurationSec.toFixed(3)}[afinal]`;
 
   args.push(

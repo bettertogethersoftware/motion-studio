@@ -1,5 +1,388 @@
 # Motion Studio — Changelog
 
+## v0.14 (2026-07-25)
+
+Hardening from the first full dogfood run (an 8-scene, five-minute narrated
+film): every item below is a defect or friction that run surfaced.
+
+### Capture crashes self-heal in-job (`browser_crashed`)
+
+Headless Chromium dies intermittently mid-screenshot on long renders
+(`Protocol error (Page.captureScreenshot): Target closed`) — flaky, not
+load-dependent (docs/knowledge-base.md §4.3). Previously one flake failed the
+whole job: an 86%-done scene lost all its captured frames and re-rendered from
+zero, and the error surfaced as `internal_error` (or worse, `composition_error`
+when the crash landed inside `page.evaluate`, blaming the user's composition
+for a browser fault).
+
+- **`browser_crashed`** — new error code. `core/browser.js` classifies every
+  crash-shaped rejection (`Target closed` / `Target crashed` / `Session
+  closed` / `Connection closed` / detached frame / generic `Protocol error`)
+  at all four capture touchpoints (`evaluate`, `waitForFunction`, the
+  `__frameError` read, `screenshot`), and exports `isBrowserCrash()`.
+- **In-job recovery** — the serial capture loop (which is also what every
+  parallel worker runs) relaunches the browser and retries the *same frame*,
+  up to `CRASH_RELAUNCH_LIMIT` (3) relaunches per render with 500 ms·n
+  backoff. Frames already piped to the FFmpeg sink are kept, so a flake now
+  costs ~a second instead of the scene. Each relaunch is logged (`get_logs`)
+  and reported via `onChildPid` for process-tree cleanup.
+- A render that spends the whole budget fails with `browser_crashed` and
+  `detail.relaunches` — the code now genuinely means "this machine keeps
+  crashing", which is an actionable signal instead of noise. Aborts inside a
+  crash window keep their `cancelled` semantics.
+
+### `wait_for_render` — block instead of poll
+
+Agents watched the render queue with per-job `get_render_status` polling loops
+(or, worse, file watchers that are structurally blind to failed jobs — silence
+looks identical to "still rendering"). New tool:
+
+- `wait_for_render { jobIds: [1..16], timeoutMs?: 1s..10min (default 5min) }`
+  blocks until **every** listed job is `done`/`error`/`cancelled`, or the
+  timeout elapses. Returns `{ timedOut, jobs }`, each entry in the
+  `get_render_status` shape (structured `error`, measured `audio` block).
+- A timeout is **not** an error: the jobs keep running and the caller gets
+  current snapshots with `timedOut: true`. Unknown ids fail up front with
+  `job_not_found`. Backed by `JobManager.waitFor()` (250 ms internal poll).
+
+### SFX: clamped cues are named
+
+`synthesize_sfx` reported `clamped: 1` — *something* was truncated, no way to
+tell what, or whether it mattered. `renderCues` now also returns
+**`clampedCues: [{ cue, type, atSeconds, lostSeconds }]`** (index into
+`spec.cues`, and how much tail ran past the end of the bed); the MCP response
+includes it whenever `clamped > 0`. A finale chime losing 2 s of decay is
+taste; a whoosh losing its fall is a timing bug — now distinguishable without
+listening.
+
+### Docs
+
+- **film-setup.md**: two techniques the dogfood film proved out — *tiling a
+  short music loop* as repeated master-timeline entries stepped by
+  `musicalDurationSeconds × fps` (the reverb tail becomes a free crossfade at
+  each seam), and *multi-clip / multi-voice narration offsets* chained from
+  measured clip durations with a 15–20-frame breath gap. Long-batch guidance
+  updated for in-job recovery, `wait_for_render`, and skipping redundant
+  pre-flights after `capture_preview_frames`.
+- **SKILL.md / mcp-setup.md**: wait-don't-poll flow, `browser_crashed`
+  handling, sharper `preflight: false` guidance.
+- **knowledge-base.md §4.3** marked FIXED IN ENGINE; **architecture.md** error
+  model updated.
+
+## v0.13 (2026-07-25)
+
+### Vendored 3D builds are pinned and content-locked
+
+`libraries.js` declared Babylon as `version: 'stable'` against
+`https://cdn.babylonjs.com/babylon.js`, and `engine/vendor/` is git-ignored. Two
+independent problems hid in that: **acquisition** (two machines fetching at
+different times vendor different builds) and **provenance** (a project could not
+say what it rendered against, even on one machine).
+
+A version pin alone fixes only the first — and, measurably, not even that.
+`/babylon.js` and `/v9.18.0/babylon.js` both self-report `Version="9.18.0"` and
+are **different code**: 8,180,880 vs 8,180,848 bytes, diverging around byte
+2,317,477 where the floating build carries an extra `var t;`. A version string is
+a claim; a hash is a fact. So the fix is content-addressed.
+
+- **`engine/vendor.lock.json`** — committed, unlike the artifacts it describes.
+  Records `{ version, sha256, bytes, url }` per vendored build, keys sorted for a
+  stable diff. Deliberately *not* inside `engine/vendor/`, which is ignored
+  wholesale — the same split npm and cargo use.
+- **`core/vendor-lock.js`** — hashing, self-reported version detection, and
+  verification. `detectVersion` reads what the **bytes** say rather than trusting
+  the URL, and returns `null` rather than guessing: three's `REVISION` minifies to
+  `const e="134"` (and `134` also appears in colour constants) and the Babylon
+  loaders bundle has no banner at all. The hash is the identity; the version is a
+  courtesy label.
+- **`fetch-libs.mjs`** hashes every download and **refuses to overwrite on
+  mismatch**, so a failed run cannot half-upgrade the vendor dir. `--update` is
+  the only way to change the lock; `--verify` checks disk against it and exits 1
+  on drift, printing both hashes.
+- **Both libraries pinned to versioned URLs.** Babylon → `/v9.18.0/babylon.js`
+  and `/v9.18.0/loaders/babylonjs.loaders.min.js` (versioned paths need the `v`
+  prefix — `/9.18.0/…` 404s). Three was already pinned; Babylon was the outlier.
+- **`config.libraryBuilds`** — `add_library` now stamps `{ version, sha256,
+  bytes }` per copied file into the project, and each `copied` entry carries its
+  `sha256`. This is the half a URL pin cannot give: a finished render is traceable
+  to exact bytes despite the vendor dir being ignored.
+
+Because the pinned build is *not* the one that produced the 15-second space-jump
+video, the swap was verified by re-rendering a frame of the ship — identical, so
+the `var t;` difference is immaterial here. Only checking established that.
+
+### `engine/vendor/libs` is now committed
+
+Decided after the above, and it changes what the lock is *for*. Of the 215 MB in
+`engine/vendor/`, only `libs/` is a sane thing to track: ~9 MB of immutable
+third-party JS (three.js MIT, Babylon Apache-2.0), no build step. Everything else
+stays ignored — the 94 MB and 65 MB exes are build artifacts of tracked C# source,
+git keeps every version of a binary forever, and no LFS is configured here (at
+94 MB the TTS exe is close to GitHub's 100 MB hard limit).
+
+So `add_library` now works on a **fresh clone with no setup and no network**, and
+`scripts/fetch-libs.mjs` is an upgrade/repair tool rather than a prerequisite.
+
+With the builds committed, **git is the integrity mechanism** and
+`vendor.lock.json` keeps only the jobs git cannot do:
+
+- **origin** — git records content, never where it came from. The lock pairs each
+  committed file with the exact upstream URL, version and hash.
+- **drift** — `fetch-libs.mjs` can overwrite committed files, so hash-checking on
+  download turns an accidental dependency bump into a refusal rather than an
+  unreviewed diff in someone's next commit.
+
+`config.libraryBuilds` is likewise **not** redundant: git says what the repo holds
+*now*, `libraryBuilds` says what a project copied *then*, and those diverge the
+moment the libraries are upgraded — the second is what a finished render was made
+from.
+
+`.gitignore` gotcha, verified in a scratch repo: the rule had to become
+`engine/vendor/*` + `!engine/vendor/libs/`. With `engine/vendor/` (trailing slash)
+git never descends into the directory and the negation silently does nothing.
+
+Docs: `3d-libraries.md` §3.5 rewritten with the pinning/locking workflow, and its
+old "jsdelivr renders nothing" warning narrowed — that described a 6.8 MB
+artifact, whereas at 9.18.0 jsdelivr and the versioned `cdn.babylonjs.com` path
+serve the same 8,180,848 bytes. Its intro no longer claims glTF loading is "not yet
+working" (§3 has said RESOLVED since v0.12). `knowledge-base.md` §8.3 upgraded from
+"deliberately not fixed" to the measurement that drove the design, plus the
+commit-the-libraries decision that superseded half of it.
+
+Tests: +10 (`vendor-lock.test.js`), including a check that the **real** committed
+lock is internally consistent and version-pinned, so a hand-edit fails here rather
+than at someone else's clone. 241 total.
+
+## v0.12.1 (2026-07-25)
+
+Two bugs found by reviewing v0.12 against a real 3D render, plus the knowledge
+base that round produced.
+
+- **`validateSfxSpec` was incomplete.** Per-type parameter checks (pitch/hz
+  exclusivity, `wave`, shimmer `pitches`, negative `decay`/`dur`) lived inside the
+  generators' `render` functions, so the exported validator returned happily on a
+  spec that `renderCues` then threw on — defeating the point of validating up
+  front. Each generator is now split into `resolve(cue,i) → params` (validates,
+  applies defaults, reports `lengthSeconds`) and `render(out,n,params,…)` which
+  trusts them; validation completes before a single sample is allocated. `seed` is
+  validated too. A new test asserts the *property* rather than cases: every spec
+  `renderCues` rejects, `validateSfxSpec` must also reject.
+- **`addLibrary` dropped addon notes.** The registry has always carried them — the
+  `loaders` addon's note documents that loading a model needs
+  `MOTION_STUDIO_ALLOW_LOCAL_FETCH=1`, the single most common way a glTF render
+  fails — but only `spec.notes` was returned, so a core-level caller never saw it.
+  Addon notes are now appended to `notes`, attributed as `[loaders] …`, with a test
+  asserting the string survives. `addons` deliberately stays a plain id array: an
+  existing test caught that changing its shape would break the public result.
+
+Docs: new **[knowledge-base.md](knowledge-base.md)** — every problem hit while
+making four videos in one run, as symptom → root cause → fix → lesson.
+`3d-libraries.md` §3.2 gains the normalization-scale trap (never animate the node
+carrying a fixed transform) and **corrects** its own "PBR renders black without
+IBL" note: the 15-second space-jump render lit the same 11-material,
+metallic-≈0.68 GLB to a clean grey with no `environmentTexture` at all, so IBL buys
+reflections rather than visibility.
+
+## v0.12 (2026-07-25)
+
+### `synthesize_sfx` — sound effects, with nothing to install
+
+The gap this closes: `synthesize_speech` makes a voice, `synthesize_music` makes
+pitched notes, and neither can make a **noise**. Three films needed whooshes on
+cuts, chimes between scenes, a thud on an impact and a shimmer under a reveal, and
+each one hand-rolled ~100 lines of DSP plus a raw RIFF writer to get them —
+outside the engine, outside its tests, reinvented every time. `synthesize_music`
+was never the answer: a filtered-noise riser has no MIDI note number, and
+requiring FluidSynth and a SoundFont to produce a 400 ms whoosh is the wrong
+dependency shape.
+
+- **`core/sfx.js` — pure JS, no toolchain.** Unlike speech (Windows TTS exe) and
+  music (MIDI exe + FluidSynth + SoundFont), this has no external dependency at
+  all, so there is deliberately **no `sfx_unavailable`** twin to
+  `music_unavailable` — it can always run, on every OS. Split into a pure
+  `renderCues(spec) → Float32Array` and a thin `synthesizeSfx({spec, outPath})`,
+  so nearly every test inspects samples directly with no ffmpeg and no subprocess.
+- **Five generators**, each lifted from code already validated on screen rather
+  than invented fresh: `chime` (inharmonic bell partials 1/2/2.76/4.16/5.43, upper
+  ones decaying faster, 4 ms attack), `whoosh` (seeded noise through a sweeping
+  one-pole LP + HP, quartic rise landing exactly on the cue), `shimmer`
+  (micro-detuned sine stack, per-voice tremolo, filtered air beneath), `thud`
+  (descending sine + octave, 90 ms attack so it settles rather than clicks), and
+  `tone` (oscillator + AR envelope) as the escape hatch. Descending-pitch cues
+  accumulate phase instead of evaluating `sin(2π·f(t)·t)`, which sweeps about
+  twice as fast as its own frequency curve claims — a bug shipped by hand twice
+  before it got written down.
+- **Time is in frames.** `atFrame` is primary because every other audio placement
+  in the engine speaks frames (`config.audio.startInFrames`, `build_film`'s
+  timeline, a scene's `filmOffset`), which turns "a chime on every scene cut" into
+  a map over scene offsets instead of a hand-computed division that hides
+  off-by-ones. `at` in seconds is accepted; exactly one of the two, since silently
+  preferring one would let a typo look like it worked.
+- **`gain` is a peak amplitude, not dB.** Each cue is scaled so its peak equals
+  its `gain`, which is what makes `0.4` mean the same thing for a bell, a noise
+  sweep and a sub thud — instead of `gain` being a per-generator fudge factor.
+  Passing a dB value is rejected.
+- **It leaves a quiet bed quiet.** `normalize` defaults to `'ceiling'`:
+  attenuate *only if* the mix exceeds `ceilingDb` (−1 dBFS), reporting
+  `rawPeakDb`, `peakDb` and `appliedGainDb`. `'peak'` and `'none'` are available.
+  The earlier design sketch called for always normalizing to −1; that was wrong
+  and contradicted v0.11 — a bed normalized to the ceiling reports a peak that
+  tells the caller nothing and then has to be undone with a large negative
+  `gainDb` at mix time (both hand-rolled beds sat near −20 purely to cancel their
+  own normalization). Same principle as `audioTargetPeakDb`: a reported number
+  should be measured truth, not an artifact of an automatic correction.
+- **Bounded determinism, stated rather than implied.** Noise comes from a seeded
+  PRNG (per-cue seeds, so two identical cues are not copies), and a spec
+  re-renders byte-identically on a given Node build — asserted in the tests. It is
+  **not** guaranteed across Node/V8 versions, because ECMAScript does not pin
+  `Math.sin`/`Math.exp`. Pinning that would mean fixed-point transcendental
+  tables, which is not worth it for a sound-effects bed. Frame-render determinism
+  is untouched: that is a property of the composition, and audio is generated once
+  and thereafter read as a file.
+- **Budgets and honest edges.** 512 cues, 30 s per cue, `sampleRate` ∈
+  22050/44100/48000. A cue *overhanging* the end is clamped and counted in
+  `clamped`; a cue starting *past* the end is an error — overhang is a taste
+  decision, placement outside the piece is a bug. Bad specs fail with the new
+  **`invalid_sfx_spec`**, carrying the offending cue index in `detail`.
+- **MCP tool `synthesize_sfx`** mirrors `synthesize_music` field for field
+  (`projectId`, `spec`, `mode: attach | asset-only`, `assetPath?`,
+  `startInFrames?`, `gainDb?`), and inherits `fps` **and** the default bed length
+  from the project so a bed spans the composition by default. It writes
+  server-side, which matters: a 10-minute 44.1 kHz mono bed is ~53 MB, over
+  `write_asset_file`'s 25 MB cap. `sampleRate: 22050` halves it.
+
+Verified against the real thing: regenerating the 9.8-minute Bible film's bed (18
+cues) through the engine took 891 ms and matched the hand-rolled version's mean
+level exactly (−28.8 dBFS both). The peak differs by design — −3.6 instead of
+−0.9 — because the engine leaves the quiet bed at its natural level instead of
+normalizing it, which is the point.
+
+Docs: new [sfx-setup.md](sfx-setup.md); `architecture.md` §9.1 compares the three
+generated-audio sources by dependency; rows/sections added to `mcp-setup.md`,
+`SKILL.md` and `film-setup.md` §Levels. `sfx-plan.md` is retained as the design
+record, now marked implemented with its deviations noted.
+
+## v0.11 (2026-07-25)
+
+### Long-form integrity: film levels, short-render detection, a render lock, shared-file sync
+
+Four changes, all found building two ten-minute multi-scene films (a tutorial and
+a children's Bible film) end to end. The theme is that v0.10 made a single
+*render* hard to get silently wrong, and these extend the same guarantee to a
+whole *film*.
+
+- **`build_film` now measures the film's audio — and can hit a target level.**
+  `render` has reported the mixed level since v0.10, but the one artifact that
+  actually ships did not: `assembleFilm` muxed the master timeline and returned
+  without ever looking at it. It now returns
+  `audio: { tracks, limiter, peakDb, meanDb, clipping, … }` whenever a master
+  timeline was supplied. New **`audioTargetPeakDb`** (−60..0) measures the mix,
+  applies a single offset to *every* track — so the caller's relative balance is
+  preserved exactly — re-muxes once, and re-measures rather than assuming the
+  shift landed. Motivating case: the same master gain that was correct for an
+  en-US narration film would have put zh-TW narration at **+1.4 dBFS**, forcing
+  the limiter onto every consonant. That failure is inaudible-as-broken and
+  unreported — it just sounds muddy — which is precisely why it needs measuring
+  rather than taste. `build_film` also now honours the output project's
+  `output.audioLimiter` instead of always defaulting it on.
+- **Short renders are detected instead of shipped.** Nothing verified that the
+  encoded file contained the frames that were rendered, so a worker killed
+  mid-encode left a valid-but-truncated video that `build_film` happily
+  concatenated into a film with a scene that just stops. Both render paths now
+  probe the real frame count and fail with the new **`short_render`** code
+  (`detail.expected` / `detail.actual`); results carry `framesVerified`. New
+  `encoder.probeFrameCount` reads the container's `nb_frames` first (muxers write
+  it from frames actually written, so truncation shows up for one metadata read)
+  and only falls back to a full `-count_frames` decode when that is missing.
+  ffprobe is not a declared prerequisite, so an unmeasurable file reports
+  `framesVerified: false` — never a failed render. This makes "output exists and
+  is the right length" a trustworthy resume condition for a long batch.
+- **A cross-process render lock.** Job queueing serialises renders within one
+  process and said nothing about a second one; two renders on a project is silent
+  corruption, not a loud failure — both write the same frames, both run FFmpeg on
+  the same output, and any torn frame in between is invisible. Observed for real
+  when an orphaned background render raced a foreground one through the same
+  scene. `core/lock.js` adds a `.render.lock` dotfile holding the owning pid;
+  **liveness, not age, decides staleness** (a render may legitimately run for
+  hours), creation is an atomic `open(…,'wx')`, same-pid acquisition is
+  re-entrant, and release only fires if we still own it — so an unreleased lock
+  self-heals via the next acquirer. Parallel *workers* deliberately skip it
+  (`lock: false` from the CLI's `--segment`): they target the same project by
+  design and the parent's lock covers them. This finally *raises*
+  **`render_already_in_progress`**, a code reserved but unused since v0.5 — now
+  meaning a foreign process, not in-process concurrency, which still queues.
+- **`sync_shared_files` — the maintenance half of the scene-as-data pattern.**
+  `docs/film-setup.md` recommends every scene project ship the same
+  `composition.js` and differ only in a small `scene.js`, but each project holds
+  its own *copy*, so editing the original reached nothing already scaffolded —
+  making a one-line art fix a sixteen-project chore on a sixteen-scene film. The
+  new tool (and `ProjectStore.syncSharedFiles`) copies named files from a source
+  project into many targets, with the same syntax check and determinism lint per
+  target. Every source file is read before anything is written, so a bad path
+  fails before it half-updates a film; the source is skipped if listed among the
+  targets; `project.json` stays deny-listed. It does **not** invalidate rendered
+  output — re-render the affected scenes.
+
+Docs: `film-setup.md` gains a **Levels** section (measure, never inherit a master
+gain) and a **narration-first timing** section (let TTS length set
+`durationInFrames`, so picture cannot drift from voice); `architecture.md` gains
+§7.1 (render lock) and §7.2 (frame-count verification). `docs/sfx-plan.md` is a
+new **design/TODO document, not an implementation**, for a future
+`synthesize_sfx`: both films had to hand-roll ~100 lines of DSP and a raw WAV
+writer for chimes, whooshes and thuds, because `synthesize_music` is a MIDI
+pipeline needing FluidSynth and a SoundFont and has no vocabulary for unpitched
+noise.
+
+## v0.10 (2026-07-25)
+
+### Authoring-loop fixes: batch preview, render pre-flight, determinism lint, audio safety
+
+Five changes aimed at the agent authoring loop, all found while building a
+10-second 3D driving demo end to end.
+
+- **`capture_preview_frames` — N frames, one page load.** Every
+  `capture_preview_frame` call launched Chromium, loaded the page, and re-ran the
+  composition's one-time setup (canvas textures, geometry merging) to produce a
+  single screenshot; checking five frames paid that five times. The new tool takes
+  explicit `frames` or just a `count` of evenly-spaced frames (first and last
+  always included) and returns them all as images, capped at 24 per call.
+  `captureSingleFrame` now delegates to the same `captureFrames` core.
+- **Render pre-flight.** A composition that throws only at frame 90 used to take
+  the render down after ~90 frames of work — and, in parallel mode, after spawning
+  every worker. Both paths now probe evenly-spaced frames (including both
+  endpoints) before committing, and fail with the real `composition_error` /
+  `frame_timeout`, plus `detail.phase = "preflight"`. The serial path reuses the
+  page it already opened, so it costs a handful of frame renders; the parallel path
+  pays one browser launch to avoid wasting N. Skipped under 30 frames; disable with
+  `render { preflight: false }` or the CLI's `--no-preflight`. No new error codes —
+  the point is to surface the *existing* failure sooner.
+- **Determinism lint on write.** `write_composition_file` already rejected bad
+  syntax before touching disk; it now also scans JS/CSS for frame-driven contract
+  violations (`Date.now`, `performance.now`, `setTimeout`/`setInterval`,
+  `requestAnimationFrame`, `Math.random`, `THREE.Clock`/`getDelta`,
+  `runRenderLoop`, `beginAnimation`, real-time CSS `transition`/`animation`) and
+  returns them as a `warnings` array. **Advisory only — the file is still
+  written**, since a loader outside the frame function may legitimately use a
+  timer. Comments and string literals are blanked before scanning, without which
+  the lint would fire on the scaffold's own header comment. Regex-based on purpose:
+  the engine keeps its dependency list short and `vm.Script` yields no AST.
+- **Audio can no longer clip silently.** `amix` runs with `normalize=0`, so track
+  gains sum straight through and nothing stood between a three-track mix and
+  distortion. `output.audioLimiter` (**new, defaults to `true`**) appends
+  `alimiter=limit=0.891:level=0` — a brick wall at −1 dBFS, a no-op below it, with
+  alimiter's auto-levelling pinned off so it never *boosts* a quiet mix. Set it
+  `false` to pass the summed mix through untouched. **This changes the default
+  audio path**; renders whose mix already peaked under −1 dBFS are unaffected.
+- **Measured levels reported.** Renders that carry audio now decode the result and
+  report `audio: { tracks, limiter, peakDb, meanDb, clipping }` in the render
+  result and in `get_render_status` — the one audio failure an agent has no way to
+  notice on its own. Measurement failure is never fatal.
+- **Better `interpolate` errors** (Frame API v1.2). A bad range now names the
+  offending pair and prints the whole array, because a descending range typically
+  throws only at the one frame that first reaches the call. **Existing projects keep
+  their copy of `frame-api.js`** — it is copied in at scaffold time, so only new
+  projects pick this up automatically; overwrite the file to upgrade in place.
+
 ## v0.9 (2026-07-25)
 
 ### Long-form films — assemble scenes with `build_film`

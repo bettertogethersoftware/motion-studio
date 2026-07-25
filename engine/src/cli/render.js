@@ -37,6 +37,7 @@ function parseArgs(argv) {
       case '--segment': out.segment = true; break;
       case '--intermediate': out.intermediate = true; break;
       case '--doctor': out.doctor = true; break;
+      case '--no-preflight': out.preflight = false; break;
       case '--capture-frame': out.captureFrame = Number(argv[++i]); break;
       case '--capture-out': out.captureOut = argv[++i]; break;
       case '--help': case '-h': out.help = true; break;
@@ -56,6 +57,7 @@ Options:
   --frames-dir <dir>            write PNG sequence to dir, encode second-pass
   --segment                     internal: render a segment, skip audio pass
   --intermediate                internal: encode segment as lossless FFV1
+  --no-preflight                skip the pre-render frame probe (default: probe 5 frames)
   --doctor                      print prerequisite check results as JSON and exit
 `;
 
@@ -140,6 +142,13 @@ async function main() {
       asIntermediate: !!args.intermediate,
       signal: controller.signal,
       progress,
+      // Workers render a slice each and are spawned by an already-pre-flighted
+      // parent; probing again in every worker would just repeat the same check.
+      preflight: args.preflight !== false && !args.segment,
+      // Likewise the render lock: every worker targets the same project on
+      // purpose, and the parent holds one lock covering all of them. A worker
+      // taking its own would deadlock the fan-out against itself.
+      lock: !args.segment,
       ...(browserFactory ? { browserFactory } : {}),
     };
     if (args.workers && args.workers > 1) {

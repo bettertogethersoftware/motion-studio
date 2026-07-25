@@ -6,9 +6,9 @@ render path (confirmed — SwiftShader/GPU), so a composition can pull in a
 rendering library and draw a scene as a pure function of `frame`.
 
 This document covers the **`add_library`** feature (shipped, v0.7), the
-**optional local-asset-fetch flag**, and an **honest investigation writeup** of
-loading glTF/GLB *models* via the Babylon loaders addon — which is **not yet
-working** and is documented here so the next person doesn't start from zero.
+**optional local-asset-fetch flag**, and loading glTF/GLB *models* via the Babylon
+loaders addon — which **works** (§3), kept as a full investigation writeup because
+the root cause was non-obvious and the gotchas are all still live.
 
 ---
 
@@ -31,8 +31,10 @@ add_library { projectId, library: "three" | "babylon", scaffold?: true }
   starter; the library id is recorded in the new optional `config.libraries`.
 
 Registry: [`engine/src/core/libraries.js`](../engine/src/core/libraries.js).
-Builds are git-ignored under `engine/vendor/libs/` and fetched with
-`node scripts/fetch-libs.mjs`. Starters live in `engine/templates/lib-*`.
+Builds are **committed** under `engine/vendor/libs/` (~9 MB, MIT / Apache-2.0), so
+`add_library` works on a fresh clone with no setup. `node scripts/fetch-libs.mjs`
+is an upgrade/repair tool, not a prerequisite. Starters live in
+`engine/templates/lib-*`.
 
 ### Determinism contract (returned as `notes`, baked into the starters)
 
@@ -49,7 +51,40 @@ across parallel workers. So:
   grain is time-based).
 
 Both the Three.js moon and the Babylon spaceship-intro demos render this way and
-were produced end to end (Chromium capture → FFmpeg).
+were produced end to end (Chromium capture → FFmpeg). A third production — the
+City Runner third-person game demo (rigged character, procedural city, chase
+cam, game HUD) — added the patterns below.
+
+### The vendored API surface is the contract, not the online docs
+
+The three.js build is **r134** (2021). Classes the current docs treat as
+standard may not exist — `CapsuleGeometry` (r142+) throws
+`is not a constructor`, surfacing as the generic "never defined
+window.setFrame" failure with the real error in its `Page errors:` tail.
+Check the vendored revision before reaching for a modern class; compose from
+primitives when in doubt (knowledge-base.md §6.3).
+
+### Game HUD / 2D overlay: a second canvas, drawn in the same frame call
+
+For HUD chrome over a 3D scene (minimap, health bars, timecode, prompts,
+vignette/grain), skip render-target postprocessing entirely: stack a plain 2D
+`<canvas>` absolutely positioned over the WebGL canvas, and in the frame
+function draw the 3D scene first (`renderer.render` + `gl.finish()`), then the
+HUD. The capture screenshots the *page*, so the browser composites the layers
+for free. This keeps HUD text crisp (no WebGL text rasterization), lets the HUD
+read composition state directly (e.g. a distance counter derived from the same
+`characterZ(frame)` that places the character), and costs nothing at r134 where
+postprocessing add-ons aren't bundled.
+
+Two smaller tricks from the same production:
+
+- **Blob shadow over shadow maps.** A radial-gradient canvas texture on a
+  ground-hugging plane, moved with the character and scaled/faded with jump
+  height. For a long tracking shot it beats a shadow-mapped light whose frustum
+  would have to span the whole run (or be repositioned every frame).
+- **Drive gait phase from distance, not frames** — and sanity-check the
+  cadence arithmetic (cycles/sec) before rendering; a wrong rate is invisible
+  in still previews (knowledge-base.md §5.6).
 
 ---
 
@@ -98,23 +133,46 @@ recipe is §3.4.
 
 ### 3.2 Gotchas found along the way (all real, worth keeping)
 1. **file:// CORS** — fixed with the flag (§2).
-2. **PBR renders black without IBL** — glTF uses metallic-roughness PBR; with no
-   `scene.environmentTexture` the metal is unlit/near-black. A procedural equirect
-   env (built on a `<canvas>` → data URL → `EquiRectangularCubeTexture`) helps but
-   was not sufficient on its own.
-3. **Model is large & offset** — frame from the bounding sphere:
-   `distance = sphereRadius / sin(fov/2)`, `camera.maxZ` beyond that; don't assume
-   the model sits at the origin or is ~1 unit.
+2. **PBR needs *enough* light — but not necessarily IBL.** glTF uses
+   metallic-roughness PBR, and with only a weak hemispheric light the metal reads
+   as near-black, which is where the original "PBR is black without IBL" note came
+   from. **Superseded by evidence:** the 15-second *Space Jump* render lit the
+   same `super_starfury.glb` (all 11 materials `pbrMetallicRoughness`, metallic
+   ≈0.68) to a clean, legible grey using **no `environmentTexture` at all** — just
+   a hemispheric fill (0.45) plus two directional lights (key 2.6, rim 1.3). So:
+   IBL buys you *reflections* and is worth adding for a hero beauty shot, but it
+   is **not** required to get a lit result. If your metal is black, try a
+   directional light at intensity ≳2 before building a procedural equirect.
+3. **Model is large & offset** — never assume it sits at the origin or is ~1
+   unit. Two ways to deal with it, and the second has a trap:
+   - **Move the camera to the model** — frame from the bounding sphere:
+     `distance = sphereRadius / sin(fov/2)`, `camera.maxZ` beyond that. Best when
+     the model is the whole shot and stays put.
+   - **Scale the model to the camera** — normalize it into known units
+     (`scale = targetSize / max(size.x, size.y, size.z)`), which is easier when
+     the model has to be *animated* against a fixed camera and hand-authored
+     lights. `node.getHierarchyBoundingVectors(true)` gives you `{min,max}` over
+     the whole subtree in one call — much less error-prone than a hand-rolled
+     world-AABB loop over `loaded.meshes`, especially on a 45-node export.
+
+   **The trap, if you normalize: keep the normalization scale on a node your
+   frame function never touches.** Put it on the same node you animate and the
+   first `setFrame` that assigns `scaling` silently wipes it, and the model jumps
+   to native size — a Sketchfab export measured in centimetres then fills the
+   frame ~250×. Use three nested nodes: an outer one you animate freely
+   (position/rotation/scaling for a stretch effect), a middle one holding the
+   fixed normalization scale, and an inner one holding the centring offset.
+   The symptom is distinctive: a *correct-looking* model that is wildly too big
+   and off-centre, rather than a missing or black one.
 4. **Heavy model + per-frame `await`** — awaiting the 13.5 MB `ImportMeshAsync`
    *inside* `setFrame` trips Puppeteer `Protocol error … Promise was collected`.
    Fix: **load once, then `registerComposition`** so every `setFrame` is
    synchronous.
-5. **CDN/build pitfalls** — `cdn.jsdelivr.net/npm/babylonjs@<v>/babylon.js` (the
-   6.8 MB build) rendered **nothing** (blank) in this setup; the working core is
-   `https://cdn.babylonjs.com/babylon.js` (8.2 MB). Loaders are at
-   `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the
-   `/babylonjs.loaders.min.js` root path 404s). Core and loaders must be the
-   **same version**.
+5. **CDN/build pitfalls** — an old `cdn.jsdelivr.net/npm/babylonjs@<v>/babylon.js`
+   build (6.8 MB) rendered **nothing** (blank) here; the working core is
+   `cdn.babylonjs.com` (8.2 MB). Core and loaders must be the **same version**.
+   Both are now pinned and hash-locked — see §3.5, which also narrows this jsdelivr
+   warning to the specific old build it described.
 6. **Byte-size is a misleading proxy** — a blank/uniform frame and a
    mostly-flat-color frame are both ~8 KB PNGs. Always inspect actual pixels, not
    the file size.
@@ -167,12 +225,49 @@ than inferring from PNG byte size, which conflates blank and uniform-color frame
 Verified: `super_starfury.glb` (13.5 MB, 18 meshes, metallic PBR) renders as a
 cinematic frame-driven video.
 
-### 3.5 Build/CDN notes
-- Core: `https://cdn.babylonjs.com/babylon.js`. Loaders:
-  `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the root
-  `/babylonjs.loaders.min.js` 404s). Core and loaders must be the **same
-  version**. The jsdelivr `babylonjs@<v>/babylon.js` build rendered nothing here —
-  prefer the `cdn.babylonjs.com` build.
+### 3.5 Build/CDN notes — pinned and hash-locked (v0.13)
+
+Both libraries are now **version-pinned and content-locked**. The registry points
+at versioned URLs and `engine/vendor.lock.json` (committed, unlike the artifacts
+it describes) records the sha256 of every vendored build:
+
+- Core: `https://cdn.babylonjs.com/v9.18.0/babylon.js`
+- Loaders: `https://cdn.babylonjs.com/v9.18.0/loaders/babylonjs.loaders.min.js`
+- Versioned paths need the **`v` prefix** — `/9.18.0/…` 404s, `/v9.18.0/…` works.
+  The root `/babylonjs.loaders.min.js` also works but is unversioned.
+- Core and loaders must be the **same version**.
+
+**A version pin alone is not enough, and this is measurable.**
+`cdn.babylonjs.com/babylon.js` and `cdn.babylonjs.com/v9.18.0/babylon.js` both
+self-report `Version="9.18.0"` and are **different code** — 8,180,880 vs
+8,180,848 bytes, diverging around byte 2,317,477 where the floating build carries
+an extra `var t;`. A version string is a claim; a hash is a fact. (Both render the
+ship identically, so the difference is immaterial *here* — but only checking told
+us that.)
+
+Verify what you have, and never let a silent swap through:
+
+```bash
+node scripts/fetch-libs.mjs --verify   # check disk against the lock, exit 1 on drift
+node scripts/fetch-libs.mjs            # fetch; refuses to overwrite on hash mismatch
+node scripts/fetch-libs.mjs --update   # accept a new build and rewrite the lock
+```
+
+`add_library` additionally stamps `config.libraryBuilds` into the project
+(`{ version, sha256, bytes }` per copied file). That is not redundant with git
+tracking the builds: git says what the repo holds *now*, `libraryBuilds` says what
+the project copied *then* — and they diverge the moment the libraries are upgraded.
+
+Note the version is recorded as `null` when a build does not state one: three's
+`REVISION` is minified to `const e="134"` and the Babylon loaders bundle has no
+banner at all. **The hash is the identity; the version is a courtesy label** — the
+detector refuses to guess, because a wrong version is worse than no version.
+
+The old warning that the jsdelivr `babylonjs@<v>/babylon.js` build "rendered
+nothing" appears to be **version-specific**, not a property of jsdelivr: it
+described a 6.8 MB artifact, whereas at 9.18.0 jsdelivr and the versioned
+`cdn.babylonjs.com` path serve the same 8,180,848 bytes. Prefer
+`cdn.babylonjs.com` anyway — it is the channel with known-good history here.
 
 ### 3.6 Status
 Shipped and tested: `add_library` (three + babylon) with the babylon **`loaders`

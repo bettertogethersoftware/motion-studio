@@ -37,6 +37,12 @@ test('addLibrary babylon with the loaders addon vendors it and injects the scrip
     const res = await store.addLibrary(proj.id, { library: 'babylon', addons: ['loaders'] });
     assert.deepEqual(res.addons, ['loaders']);
     assert.ok(res.copied.some((c) => c.path === 'babylonjs.loaders.min.js'));
+    // The addon's own note must reach the caller. It documents that loading a
+    // model needs MOTION_STUDIO_ALLOW_LOCAL_FETCH=1 — the single most common way
+    // a glTF render fails — and it used to be dropped from the return value.
+    assert.ok(res.notes.some((n) => /MOTION_STUDIO_ALLOW_LOCAL_FETCH/.test(n)),
+      `addon note missing from notes: ${JSON.stringify(res.notes)}`);
+    assert.ok(res.notes.some((n) => /^\[loaders\]/.test(n)), 'addon notes should be attributed');
     assert.ok(fs.existsSync(path.join(proj.path, 'babylonjs.loaders.min.js')));
     const html = await fsp.readFile(path.join(proj.path, 'composition.html'), 'utf8');
     assert.match(html, /src="babylonjs\.loaders\.min\.js"/); // injected

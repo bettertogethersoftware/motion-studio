@@ -55,8 +55,9 @@ export class ProgressEmitter {
     this.emit({ type: 'log', level, message });
   }
 
-  done({ outputPath, frames, elapsedMs }) {
-    this.emit({ type: 'done', outputPath, frames, elapsedMs });
+  /** `audio` (v0.10) carries the measured mix level when the render had audio. */
+  done({ outputPath, frames, elapsedMs, audio = undefined }) {
+    this.emit({ type: 'done', outputPath, frames, elapsedMs, ...(audio ? { audio } : {}) });
   }
 
   error(engineError) {
