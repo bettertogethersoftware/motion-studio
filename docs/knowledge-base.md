@@ -228,6 +228,13 @@ different scene. It is flaky, not exhaustion and not a bad scene.
 the loop, and resume-by-frame-count so a restart skips completed scenes. Lowering
 the fan-out only changes the odds; retrying is what recovers.
 
+**FIXED IN ENGINE (v0.14).** The capture loop now classifies crash-shaped
+failures as `browser_crashed` and self-heals: relaunch Chromium (up to 3 per
+render, backoff), retry the *same frame*, keep every frame already piped to the
+sink. A flake costs ~a second instead of the scene; a job that exhausts the
+budget fails with `browser_crashed` — which now genuinely means "this machine
+keeps crashing", not "one flake". Batch-level retry remains the backstop.
+
 **Lesson.** A plausible cause that fits the first data point is not a diagnosis.
 The second occurrence is what tells you whether you were right — and here it said
 "no".
@@ -278,6 +285,30 @@ Scenes sharing a `composition.js` share its bugs. Previewing one frame per
 distinct scene type caught all three Bible-film art bugs in seconds, against a
 32-minute render.
 
+### 5.6 Rate errors are invisible in stills — every sampled pose looks fine
+
+**Symptom.** None, in 20 preview frames of a third-person running character
+(City Runner). Every sampled frame showed a plausible mid-stride pose.
+
+**Root cause.** The gait cycle length was 2.6 world units; at cruise speed that
+is a full two-footstrike cycle every ~5 frames — **~11.5 footstrikes per
+second**, which at 30 fps playback reads as leg *vibration*, not running. A
+still preview cannot catch this even in principle: a rate error produces no bad
+frame, only a bad *sequence*. (The same failure class as the sweep in §7.1 —
+there the time-derivative was wrong, here the spatial frequency.)
+
+**Fix.** Compute the real-world rate before rendering: `cadence =
+speed / cycleLength × fps-independent`, compare against reality (a sprint is
+~3–4 footstrikes/sec), then pick the constant from that. 8.5 units/cycle gave
+~3.5/sec. One arithmetic line replaces a wasted render.
+
+**Lesson.** For any cyclic motion — gait, wheel spin, blink, flicker, siren —
+the reviewable artifact is a *number* (cycles per second), not a frame. Do the
+division in a comment next to the constant. Stills validate poses; only
+arithmetic (or an actual video) validates rates. Corollary: drive cycle phase
+from **distance travelled**, not frame count, so the cadence follows the
+character through accelerations instead of needing per-phase retuning.
+
 ---
 
 ## 6. 3D models
@@ -312,6 +343,27 @@ with **no IBL at all** — hemispheric 0.45 plus two directional lights (2.6 / 1
 **Lesson.** IBL buys reflections, not visibility. If metal looks black, raise a
 directional light before building a procedural equirect. And when a doc states a
 hard limit, an actual render is allowed to overrule it.
+
+### 6.3 The vendored Three.js is r134 — modern API docs will lie to you
+
+**Symptom.** `TypeError: THREE.CapsuleGeometry is not a constructor`, surfacing
+as the generic "Composition never defined window.setFrame" failure (the real
+error is in its `Page errors:` tail — read that tail first).
+
+**Root cause.** The vendored build is **r134** (2021; the same build whose
+minified `REVISION` foiled version detection in §8.3). `CapsuleGeometry` landed
+in r142; anything the current three.js docs describe as recent may simply not
+exist here. The API surface is defined by the vendored bytes, not by
+threejs.org.
+
+**Fix.** Compose from primitives that r134 has (a cylinder body reads fine as a
+background pedestrian). For a modern-API dependency, check the vendored
+revision *first* rather than debugging a "constructor" error after.
+
+**Lesson.** A hash-locked library (§8.3) is traceable but also *frozen* —
+provenance and staleness are the same property seen from two sides. When a
+well-known class "is not a constructor", suspect the build's age before your
+code.
 
 ---
 
@@ -447,6 +499,32 @@ Corollary found along the way: `detectVersion` returns **null** for three
 (`REVISION` minifies to `const e="134"`, and `134` also appears in colour
 constants) and for the Babylon loaders bundle (no banner). Refusing to guess is
 correct — a wrong version is worse than no version.
+
+### 8.4 An output-file watcher that confirmed the *previous* render
+
+**Symptom.** A shell watcher ("`out/output.mp4` exists and its size is stable →
+DONE") reported completion seconds into a **re-render** — while the job was
+still in its capture phase. The watcher had matched the *previous* render's
+leftover file (9,969,574 bytes); the real artifact landed later at 9,974,318.
+
+**Root cause.** Two stacked flaws. (1) **Stale artifact**: a re-render's output
+path already holds a perfectly stable file from last time, so
+existence+stability is satisfied at t=0. (2) Even on a clean directory the
+condition is unsound for audio renders: the pipeline encodes video to the final
+path, renames it to `.video-only`, then muxes audio back to the final path — so
+the output file can exist and hold a stable size *mid-job*.
+
+**Fix.** Job state is the source of truth for an in-flight render, not the
+filesystem: `wait_for_render` (v0.14) or `get_render_status` to a terminal
+state, then verify the artifact (§1.2's frame count). If an external
+file-watcher is genuinely needed, delete or rename the prior artifact *before*
+submitting, and treat file-stability only as a hint.
+
+**Lesson.** "Measure the artifact" (§9) has a precondition this failure
+exposed: first prove the artifact you are measuring is the one this run
+produced. Freshness before measurement — a stale file passes every check you
+aim at it. This is also §1.4 again in new clothes: the watcher, like the
+zero-test `npm test`, reported success about the wrong thing.
 
 ---
 

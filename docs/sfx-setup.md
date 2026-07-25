@@ -132,9 +132,14 @@ inaudible on thuds and whooshes and only slightly dulls the top bell partials.
 
 - **512 cues** per bed — enough for a cue on every cut of a long film.
 - **30 s per cue.** Anything longer is a music bed or an ambience loop, not a cue.
-- A cue **overhanging** the end is clamped and reported in `clamped`. A cue
-  starting **past** the end is an error: overhang is a taste decision, placement
-  outside the piece is a bug.
+- A cue **overhanging** the end is clamped and reported in `clamped` (a count),
+  and — since v0.14 — named in **`clampedCues`**: one
+  `{ cue, type, atSeconds, lostSeconds }` entry per victim, where `cue` is the
+  index into `spec.cues` and `lostSeconds` is how much of the tail ran past the
+  end of the bed. A final chime losing 2 s of its decay is a taste decision;
+  a whoosh losing its whole fall is a timing bug — the detail is what lets you
+  tell the two apart without listening. A cue starting **past** the end is an
+  error: overhang is a taste decision, placement outside the piece is a bug.
 
 Bad specs fail with `invalid_sfx_spec`, with the offending cue index in `detail`.
 

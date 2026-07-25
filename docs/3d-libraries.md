@@ -51,7 +51,40 @@ across parallel workers. So:
   grain is time-based).
 
 Both the Three.js moon and the Babylon spaceship-intro demos render this way and
-were produced end to end (Chromium capture → FFmpeg).
+were produced end to end (Chromium capture → FFmpeg). A third production — the
+City Runner third-person game demo (rigged character, procedural city, chase
+cam, game HUD) — added the patterns below.
+
+### The vendored API surface is the contract, not the online docs
+
+The three.js build is **r134** (2021). Classes the current docs treat as
+standard may not exist — `CapsuleGeometry` (r142+) throws
+`is not a constructor`, surfacing as the generic "never defined
+window.setFrame" failure with the real error in its `Page errors:` tail.
+Check the vendored revision before reaching for a modern class; compose from
+primitives when in doubt (knowledge-base.md §6.3).
+
+### Game HUD / 2D overlay: a second canvas, drawn in the same frame call
+
+For HUD chrome over a 3D scene (minimap, health bars, timecode, prompts,
+vignette/grain), skip render-target postprocessing entirely: stack a plain 2D
+`<canvas>` absolutely positioned over the WebGL canvas, and in the frame
+function draw the 3D scene first (`renderer.render` + `gl.finish()`), then the
+HUD. The capture screenshots the *page*, so the browser composites the layers
+for free. This keeps HUD text crisp (no WebGL text rasterization), lets the HUD
+read composition state directly (e.g. a distance counter derived from the same
+`characterZ(frame)` that places the character), and costs nothing at r134 where
+postprocessing add-ons aren't bundled.
+
+Two smaller tricks from the same production:
+
+- **Blob shadow over shadow maps.** A radial-gradient canvas texture on a
+  ground-hugging plane, moved with the character and scaled/faded with jump
+  height. For a long tracking shot it beats a shadow-mapped light whose frustum
+  would have to span the whole run (or be repositioned every frame).
+- **Drive gait phase from distance, not frames** — and sanity-check the
+  cadence arithmetic (cycles/sec) before rendering; a wrong rate is invisible
+  in still previews (knowledge-base.md §5.6).
 
 ---
 

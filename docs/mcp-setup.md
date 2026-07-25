@@ -128,7 +128,8 @@ encode) and scaling to long-form, see [film-setup.md](film-setup.md).
 | tool | arguments | returns / notes |
 |---|---|---|
 | `render` | `projectId`, `frameRange?` = `[start, end]` inclusive, `workers?` = 1, `outputFilename?`, `preflight?` = true **(v0.10)** | Starts an async job for the configured output format; returns `{ jobId, state, queuePosition?, outputPath, totalFrames }` immediately. One render runs at a time; further submissions **queue FIFO (v0.5)** and start automatically. A full queue (10) fails with `queue_full`. `workers` > 1 splits capture across parallel Chromium processes. **Pre-flight (v0.10):** evenly-spaced frames (both endpoints included) are probed before the render commits, so a composition that only breaks at frame 90 fails in seconds instead of after 90 frames and N spawned workers. Failures keep their real code (`composition_error` / `frame_timeout`) with `detail.phase = "preflight"`. Skipped under 30 frames; pass `preflight: false` to disable. **Frame-count verification (v0.11):** when the encode finishes, the file's actual frame count is checked against what was rendered; a mismatch fails with `short_render` rather than returning a truncated file, and the result carries `framesVerified` (false only when ffprobe is unavailable). **Render lock (v0.11):** the project is locked for the duration, so a *second process* rendering the same project fails fast with `render_already_in_progress` instead of silently interleaving frame writes. In-process submissions still queue as before. |
-| `get_render_status` | `jobId` | `{ state: queued\|running\|done\|error\|cancelled, framesDone, totalFrames, percent, renderFps, etaMs, queuePosition?, outputPath?, error? }`. Poll until terminal. When the render carried audio, adds `audio: { tracks, limiter, peakDb, meanDb, clipping }` **(v0.10)** — the measured level of the final mix. Error: `job_not_found`. |
+| `get_render_status` | `jobId` | `{ state: queued\|running\|done\|error\|cancelled, framesDone, totalFrames, percent, renderFps, etaMs, queuePosition?, outputPath?, error? }`. Poll until terminal — or use `wait_for_render` instead of a polling loop. When the render carried audio, adds `audio: { tracks, limiter, peakDb, meanDb, clipping }` **(v0.10)** — the measured level of the final mix. Error: `job_not_found`. |
+| `wait_for_render` **(v0.14)** | `jobIds` = `[…]` (1–16), `timeoutMs?` = 300000 (1s–10min) | Blocks until **every** listed job is terminal, or the timeout elapses. Returns `{ timedOut, jobs }` — each `jobs[]` entry has the `get_render_status` shape, including the structured `error` for failed jobs and the measured `audio` block for finished ones. Check states individually: one failed scene does not stop the others. Waiting on queued jobs is fine (FIFO). A timeout is **not** an error — the jobs keep running; wait again to keep watching. Error: `job_not_found` if any id is unknown. |
 | `cancel_render` | `jobId` | Aborts a running job and kills every child process (Chromium workers, FFmpeg); dequeues a queued job without starting it. Idempotent on finished jobs. |
 | `list_render_jobs` | — | All jobs this session, newest first, with status snapshots. |
 | `get_logs` | `jobId`, `tail?` = 200 | The job's log lines (engine phases, warnings, FFmpeg stderr on failure) — read this before diagnosing a failed render. |
@@ -143,9 +144,9 @@ write_composition_file { path: "composition.js", content: … }   → syntax_err
                                                 → then: warnings? fix determinism hits
 capture_preview_frames { count: 5 }             → inspect 5 images from ONE page load
 render { frameRange: [0, 59] }                  → confirm pacing on 2s
-get_render_status …                             → done
-render { workers: 4 }                           → pre-flight probes, then full render
-get_render_status … (poll)                      → etaMs while running → done, outputPath,
+wait_for_render { jobIds: [job1] }              → done
+render { workers: 4, preflight: false }         → already previewed; skip the probe
+wait_for_render { jobIds: [job2] }              → blocks → done, outputPath,
                                                    audio: { peakDb, clipping }
 render_still { frame: 150 }                     → poster frame for the thumbnail
 ```

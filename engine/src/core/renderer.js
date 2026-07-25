@@ -40,7 +40,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { EngineError, ErrorCodes, asEngineError } from './errors.js';
 import { ProgressEmitter, ProgressStreamParser } from './progress.js';
-import { createPuppeteerBrowser } from './browser.js';
+import { createPuppeteerBrowser, isBrowserCrash } from './browser.js';
 import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount } from './encoder.js';
 import { getFormat, INTERMEDIATE } from './formats.js';
 import { acquireRenderLock } from './lock.js';
@@ -68,6 +68,15 @@ export const MAX_PREVIEW_FRAMES = 24;
 
 /** Below this many frames a render is short enough that pre-flight is pure overhead. */
 export const MIN_FRAMES_FOR_PREFLIGHT = 30;
+
+/**
+ * Browser relaunches a single render will attempt when Chromium crashes
+ * mid-capture (v0.14). Three is deliberate: the observed crash is a one-off
+ * flake, so one relaunch almost always heals it — a render that eats the whole
+ * budget is telling you something else is wrong (OOM, GPU driver), and should
+ * fail loudly rather than crash-loop.
+ */
+export const CRASH_RELAUNCH_LIMIT = 3;
 
 function assertFrameInRange(frame, config) {
   if (!Number.isInteger(frame) || frame < 0 || frame >= config.durationInFrames) {
@@ -253,13 +262,54 @@ export async function renderComposition(opts) {
 
   try {
     throwIfAborted(signal);
-    const page = await browser.openPage({ url: entryUrl, width: config.width, height: config.height, transparent });
+    const openPage = () =>
+      browser.openPage({ url: entryUrl, width: config.width, height: config.height, transparent });
+    let page = await openPage();
 
     // Free here: the page is already warm, so probing costs a few frame renders
     // instead of the tail of a doomed render.
     if (preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
       await runPreflight(page, preflightFrameList(startFrame, endFrame, preflightCount), signal, progress);
     }
+
+    // Chromium dies intermittently mid-capture ("Target closed") on long runs —
+    // a transient flake, not a bad scene (docs/knowledge-base.md). Every frame
+    // already written to the sink is good, so instead of failing the job and
+    // re-rendering from zero, relaunch the browser and retry the SAME frame.
+    // The budget is per render, not per frame: a machine that keeps crashing
+    // should fail, not loop.
+    let crashRelaunches = 0;
+    const captureWithRecovery = async (frame) => {
+      for (;;) {
+        try {
+          return await page.captureFrame(frame);
+        } catch (err) {
+          // Aborted renders keep their cancellation semantics even mid-crash.
+          if (!isBrowserCrash(err) || signal?.aborted) throw err;
+          if (crashRelaunches >= CRASH_RELAUNCH_LIMIT) {
+            // Re-code here: a raw Puppeteer rejection matched by message would
+            // otherwise leave the renderer as internal_error and lose the
+            // "this was a crash, after N relaunches" story.
+            throw new EngineError(
+              ErrorCodes.BROWSER_CRASHED,
+              `${err.message} (relaunch budget of ${CRASH_RELAUNCH_LIMIT} spent — this machine keeps crashing, not flaking)`,
+              { frame, relaunches: crashRelaunches },
+            );
+          }
+          crashRelaunches++;
+          progress.log(
+            'warn',
+            `Chromium crashed at frame ${frame}; relaunching (${crashRelaunches}/${CRASH_RELAUNCH_LIMIT}): ${err.message}`,
+          );
+          await browser.close().catch(() => {});
+          await new Promise((r) => setTimeout(r, 500 * crashRelaunches));
+          throwIfAborted(signal);
+          browser = await browserFactory({});
+          if (browser.pid) onChildPid(browser.pid);
+          page = await openPage();
+        }
+      }
+    };
 
     progress.phase('capturing');
     const sequenceDir = isPngSequence ? outputPath : framesDir;
@@ -272,7 +322,7 @@ export async function renderComposition(opts) {
     let framesDone = 0;
     for (let frame = startFrame; frame <= endFrame; frame++) {
       throwIfAborted(signal);
-      const png = await page.captureFrame(frame);
+      const png = await captureWithRecovery(frame);
       if (sequenceDir) {
         // zero-padded, range-relative index so a sequence encode is contiguous
         const name = `frame-${String(frame - startFrame).padStart(6, '0')}.png`;

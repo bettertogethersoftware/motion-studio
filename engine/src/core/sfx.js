@@ -397,6 +397,7 @@ export function renderCues(spec) {
   const scratch = new Float32Array(scratchLen);
 
   let clamped = 0;
+  const clampedCues = [];
   for (const r of s.cues) {
     const start = Math.round(r.atSeconds * s.sampleRate);
     const natural = Math.max(1, Math.round(r.lengthSeconds * s.sampleRate));
@@ -416,7 +417,18 @@ export function renderCues(spec) {
 
     const room = total - start;
     const write = Math.min(n, room);
-    if (write < natural) clamped++;
+    if (write < natural) {
+      clamped++;
+      // Name the victim (v0.14): a bare count told the caller *something* was
+      // cut but not what to fix. `cue` is the index into spec.cues; lostSeconds
+      // is how much of the cue's tail ran past the end of the bed.
+      clampedCues.push({
+        cue: r.index,
+        type: r.type,
+        atSeconds: Number(r.atSeconds.toFixed(3)),
+        lostSeconds: Number(((natural - write) / s.sampleRate).toFixed(3)),
+      });
+    }
     for (let k = 0; k < write; k++) mix[start + k] += scratch[k] * scale;
   }
 
@@ -440,6 +452,7 @@ export function renderCues(spec) {
     durationSeconds: Number(s.durationSeconds.toFixed(3)),
     cues: s.cues.length,
     clamped,
+    clampedCues,
     normalize: s.normalize,
     rawPeakDb: rawPeak > 0 ? Number(gainToDb(rawPeak).toFixed(2)) : null,
     peakDb: peak > 0 ? Number(gainToDb(peak).toFixed(2)) : null,

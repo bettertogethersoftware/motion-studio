@@ -51,6 +51,11 @@ export const ErrorCodes = Object.freeze({
   // No `sfx_unavailable` twin to MUSIC_UNAVAILABLE: core/sfx.js is pure JS with
   // no external toolchain, so it can never be missing.
   INVALID_SFX_SPEC: 'invalid_sfx_spec',
+  // added in v0.14 (in-job capture recovery) — see docs/CHANGELOG.md.
+  // A crash-shaped Chromium failure ("Target closed" et al.): transient, not a
+  // bad composition. The capture loop relaunches and retries on this code; it
+  // only surfaces to callers after the relaunch budget is spent.
+  BROWSER_CRASHED: 'browser_crashed',
 });
 
 export class EngineError extends Error {

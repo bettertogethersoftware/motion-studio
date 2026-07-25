@@ -24,6 +24,33 @@ import { EngineError, ErrorCodes } from './errors.js';
 export const DEFAULT_FRAME_TIMEOUT_MS = 15_000;
 export const COMPOSITION_READY_TIMEOUT_MS = 30_000;
 
+/**
+ * Crash-shaped Chromium failures (v0.14). Headless Chromium dies intermittently
+ * mid-capture on long runs; when it does, the CDP connection drops and every
+ * in-flight Puppeteer call rejects with one of these message shapes — that
+ * string is the only signal we get. Without classification these leaked out as
+ * composition_error (evaluate), frame_timeout (waitForFunction), or
+ * internal_error (screenshot), all of which read as "your composition is
+ * broken" when the truth is "the browser fell over; retry".
+ */
+const CRASH_PATTERNS =
+  /target closed|target crashed|session closed|connection closed|browser has disconnected|navigating frame was detached|protocol error/i;
+
+/** True for errors that mean "Chromium died", regardless of where they surfaced. */
+export function isBrowserCrash(err) {
+  if (!err) return false;
+  if (err.code === ErrorCodes.BROWSER_CRASHED) return true;
+  return CRASH_PATTERNS.test(String(err?.message ?? err));
+}
+
+function asCrash(err, frame) {
+  return new EngineError(
+    ErrorCodes.BROWSER_CRASHED,
+    `Chromium crashed while capturing frame ${frame}: ${err.message}`,
+    { frame },
+  );
+}
+
 export async function createPuppeteerBrowser({
   headless = true,
   executablePath = undefined,
@@ -105,6 +132,7 @@ export async function createPuppeteerBrowser({
               return window.setFrame(frame);
             }, n);
           } catch (e) {
+            if (isBrowserCrash(e)) throw asCrash(e, n);
             throw new EngineError(ErrorCodes.COMPOSITION_ERROR, `setFrame(${n}) threw: ${e.message}`, {
               frame: n,
               pageErrors,
@@ -116,7 +144,8 @@ export async function createPuppeteerBrowser({
               timeout: frameTimeoutMs,
               polling: 16,
             });
-          } catch {
+          } catch (e) {
+            if (isBrowserCrash(e)) throw asCrash(e, n);
             throw new EngineError(
               ErrorCodes.FRAME_TIMEOUT,
               `Frame ${n} never became ready within ${frameTimeoutMs}ms. ` +
@@ -125,14 +154,25 @@ export async function createPuppeteerBrowser({
             );
           }
 
-          const frameError = await page.evaluate('window.__frameError');
+          let frameError;
+          try {
+            frameError = await page.evaluate('window.__frameError');
+          } catch (e) {
+            if (isBrowserCrash(e)) throw asCrash(e, n);
+            throw e;
+          }
           if (frameError) {
             throw new EngineError(ErrorCodes.COMPOSITION_ERROR, `Composition error at frame ${n}: ${frameError}`, {
               frame: n,
             });
           }
 
-          return Buffer.from(await page.screenshot({ type: 'png', omitBackground: transparent }));
+          try {
+            return Buffer.from(await page.screenshot({ type: 'png', omitBackground: transparent }));
+          } catch (e) {
+            if (isBrowserCrash(e)) throw asCrash(e, n);
+            throw e;
+          }
         },
 
         async close() {

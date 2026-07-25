@@ -378,8 +378,9 @@ server.registerTool(
     title: 'Start a render job',
     description:
       'Start rendering the composition to the configured output format (mp4/webm/gif/prores/png-sequence — ' +
-      'set via update_project_config). Returns a jobId immediately; poll get_render_status until state is ' +
-      'done/error/cancelled. Optional frameRange renders a cheap partial segment first. If another job is ' +
+      'set via update_project_config). Returns a jobId immediately; block on it with wait_for_render (or poll ' +
+      'get_render_status) until state is done/error/cancelled. Optional frameRange renders a cheap partial ' +
+      'segment first. If another job is ' +
       'running, the new job is QUEUED (FIFO, one render at a time) and starts automatically — the response ' +
       'then has state "queued" and a queuePosition. A full queue fails with queue_full.',
     inputSchema: {
@@ -426,10 +427,37 @@ server.registerTool(
       'Get progress/state for a jobId: state (queued|running|done|error|cancelled), phase, framesDone/totalFrames, ' +
       'percent, renderFps, etaMs (null until measurable), queuePosition while queued, and the structured error ' +
       'if it failed. Wait for a terminal state before reporting completion. When the render carried audio, the ' +
-      'done status also has `audio` with the measured peakDb/meanDb of the final mix and a `clipping` flag.',
+      'done status also has `audio` with the measured peakDb/meanDb of the final mix and a `clipping` flag. ' +
+      'To wait for one or more jobs without a polling loop, use wait_for_render instead.',
     inputSchema: { jobId: z.string() },
   },
   wrap(async ({ jobId }) => ok(jobs.getStatus(jobId))),
+);
+
+server.registerTool(
+  'wait_for_render',
+  {
+    title: 'Wait for render job(s) to reach a terminal state',
+    description:
+      'Block until every listed job is done/error/cancelled, or until timeoutMs elapses — one call instead of a ' +
+      'get_render_status polling loop (new in v0.14). Returns { timedOut, jobs } where each jobs[] entry has the ' +
+      'same shape as get_render_status, including the structured error for failed jobs and the measured `audio` ' +
+      'block for finished ones — check states individually, since one failed scene does not stop the others. ' +
+      'Waiting on queued jobs is fine; they complete in FIFO order. A timeout is NOT an error: the jobs keep ' +
+      'running and you get the current snapshots with timedOut: true (wait again to keep watching). ' +
+      'Errors: job_not_found if any id is unknown.',
+    inputSchema: {
+      jobIds: z.array(z.string()).min(1).max(16).describe('Job ids from render; every id must exist'),
+      timeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(600_000)
+        .default(300_000)
+        .describe('Stop waiting after this long; the jobs themselves are unaffected'),
+    },
+  },
+  wrap(async ({ jobIds, timeoutMs }) => ok(await jobs.waitFor(jobIds, { timeoutMs }))),
 );
 
 server.registerTool(
@@ -837,6 +865,7 @@ server.registerTool(
       assetPath: normalized,
       cues: result.cues,
       clamped: result.clamped,
+      ...(result.clamped ? { clampedCues: result.clampedCues } : {}),
       normalize: result.normalize,
       rawPeakDb: result.rawPeakDb,
       peakDb: result.peakDb,

@@ -130,7 +130,12 @@ machine-readable `code` (`engine/src/core/errors.js`): `prereqs_missing`,
 `browser_launch_failed`, `composition_error`, `frame_timeout`,
 `ffmpeg_failed`, `cancelled`, `disk_error`, `internal_error`, and — new in
 v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`. New in v0.11:
-`short_render` (the encoded file has fewer frames than were rendered).
+`short_render` (the encoded file has fewer frames than were rendered). New in
+v0.14: `browser_crashed` — a crash-shaped Chromium failure ("Target closed" et
+al.), classified so it stops masquerading as `composition_error`/
+`frame_timeout`/`internal_error`; the capture loop relaunches and retries on it
+in place, and it only surfaces after the per-render relaunch budget (3) is
+spent.
 `render_already_in_progress` was retired from the render path in v0.5 and held
 reserved; **v0.11 raises it again for a different condition** — not
 in-process concurrency, which still queues, but a *second OS process* holding

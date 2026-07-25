@@ -67,15 +67,28 @@ function crc32(buf) {
  * @param {(frame:number)=>void} [hooks.onCapture]
  * @param {number} [hooks.failAtFrame]     throw a composition error at this frame
  * @param {number} [hooks.captureDelayMs]  simulate slow frames (cancellation tests)
+ * @param {number[]} [hooks.crashOnceAtFrames]  throw a crash-shaped raw error
+ *   ("Protocol error … Target closed") the FIRST time each listed frame is
+ *   captured — retries of the same frame then succeed, mimicking the transient
+ *   Chromium flake the capture-recovery path (v0.14) exists for. The pending
+ *   set lives OUTSIDE the factory on purpose: recovery relaunches the browser
+ *   through the same factory, and the crash must not repeat after relaunch.
+ * @param {()=>void} [hooks.onLaunch]      called per factory invocation (count relaunches)
  */
 export function makeFakeBrowserFactory(hooks = {}) {
+  const pendingCrashes = new Set(hooks.crashOnceAtFrames ?? []);
   return async function fakeBrowserFactory() {
+    hooks.onLaunch?.();
     return {
       pid: null,
       async openPage({ width, height, transparent = false }) {
         return {
           async captureFrame(n) {
             if (hooks.captureDelayMs) await new Promise((r) => setTimeout(r, hooks.captureDelayMs));
+            if (pendingCrashes.has(n)) {
+              pendingCrashes.delete(n);
+              throw new Error('Protocol error (Page.captureScreenshot): Target closed');
+            }
             if (hooks.failAtFrame === n) {
               const { EngineError, ErrorCodes } = await import('../../src/core/errors.js');
               throw new EngineError(ErrorCodes.COMPOSITION_ERROR, `synthetic failure at frame ${n}`);

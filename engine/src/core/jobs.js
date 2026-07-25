@@ -211,6 +211,27 @@ export class JobManager {
       .map((j) => this.getStatus(j.jobId));
   }
 
+  /**
+   * Wait until every listed job reaches a terminal state (done | error |
+   * cancelled), or the timeout elapses (v0.14). Backs `wait_for_render`: one
+   * blocking call instead of a get_render_status round trip per poll. Unknown
+   * ids fail up front with job_not_found, not halfway through the wait. A
+   * timeout is NOT an error — the caller gets the current snapshots plus
+   * `timedOut: true` and decides what to do; the jobs keep running.
+   */
+  async waitFor(jobIds, { timeoutMs = 300_000, pollMs = 250 } = {}) {
+    for (const id of jobIds) this._get(id);
+    const terminal = new Set([JobState.DONE, JobState.ERROR, JobState.CANCELLED]);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const statuses = jobIds.map((id) => this.getStatus(id));
+      if (statuses.every((s) => terminal.has(s.state))) return { timedOut: false, jobs: statuses };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { timedOut: true, jobs: statuses };
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
+    }
+  }
+
   getLogs(jobId, { tail = 100 } = {}) {
     const job = this._get(jobId);
     return job.logs.slice(-tail);

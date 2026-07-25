@@ -52,6 +52,50 @@ between scenes — they affect encoding, not stream compatibility.)
   **replaces** per-scene audio and is the clean choice for long-form — a score that
   spans scene cuts, VO placed by absolute frame across the whole film.
 
+### Tiling a music loop across the film
+
+The score does not need to be as long as the film. Compose one short piece
+(32–64 beats is plenty), then list the **same `src` several times** at stepped
+`startInFrames`:
+
+```
+audio: [
+  { src: "assets/theme.wav", startInFrames: 0,    gainDb: -13 },
+  { src: "assets/theme.wav", startInFrames: 1440, gainDb: -13 },
+  { src: "assets/theme.wav", startInFrames: 2880, gainDb: -13 },
+  …
+]
+```
+
+Step by the piece's **`musicalDurationSeconds` × fps**, not by its WAV length:
+`synthesize_music` reports both, and the WAV is longer because it carries the
+reverb tail. Stepped on the musical grid, each repeat starts in time while the
+previous tail decays underneath it — a free crossfade at every seam. (A 48 s
+theme at 30 fps tiles every 1440 frames; seven placements cover a five-minute
+film.)
+
+### Placing multi-clip narration (and a second voice)
+
+A scene that chains clips — narrator, a quotation in a second voice, narrator
+again — derives every offset from the **measured** clip lengths, never from the
+text. For a scene starting at `filmOffset`:
+
+```
+a = filmOffset + LEAD                  # narr-a starts after the scene lead-in
+q = a + narrA.durationInFrames + GAP   # the quote voice
+b = q + quote.durationInFrames + GAP   # narr-a's voice resumes
+
+audio: [ { src: "assets/narr-a.wav", startInFrames: a },
+         { src: "assets/quote.wav",  startInFrames: q },
+         { src: "assets/narr-b.wav", startInFrames: b }, … ]
+```
+
+`GAP` of 15–20 frames reads as a natural breath. Scene-local visuals (subtitle
+cues, beat-synced effects) use the same numbers minus `filmOffset`, so
+re-synthesizing any clip means re-measuring once and updating both places — and
+the "size the scene to the voice" assertion below generalizes to the chain:
+the *last* clip must still end inside the scene.
+
 ## Levels: measure, never inherit
 
 When you pass a master `audio` timeline, the result carries an `audio` block with
@@ -254,12 +298,24 @@ learned the hard way:
   mid-screenshot (`Protocol error (Page.captureScreenshot): Target closed`) on
   long runs — observed at both 4 and 6 workers, on different scenes each time,
   with plenty of RAM free. It is flaky, not a bad scene and not memory pressure,
-  so lowering the fan-out only changes the odds; **retrying the scene** is what
-  recovers. Make the batch resumable on the same signal: skip a scene whose
-  output already has exactly `durationInFrames` frames. Since v0.11 the renderer
-  verifies that count itself and fails with `short_render` rather than returning
-  a truncated file, so "the output exists and is the right length" is now a
-  trustworthy resume condition.
+  so lowering the fan-out only changes the odds. **Since v0.14 the capture loop
+  self-heals**: a crash-shaped failure relaunches Chromium (up to 3 per render,
+  with backoff) and retries the *same frame* in place, so the frames already
+  encoded are kept and a flake costs about a second instead of a scene. A job
+  that spends the whole budget fails with `browser_crashed` — at that point the
+  machine is crashing, not flaking. Scene-level retry remains the backstop, and
+  the resume condition is unchanged: skip a scene whose output already has
+  exactly `durationInFrames` frames. Since v0.11 the renderer verifies that
+  count itself and fails with `short_render` rather than returning a truncated
+  file, so "the output exists and is the right length" is a trustworthy resume
+  condition.
+- **Wait, don't poll.** For a queued batch, `wait_for_render` (v0.14) with the
+  whole list of jobIds replaces a `get_render_status` polling loop; it returns
+  when every scene is terminal (or on timeout, with the current snapshots).
+  Check each returned state — one failed scene does not stop the others.
+- **Skip redundant pre-flights.** If you have just verified every scene with
+  `capture_preview_frames`, pass `preflight: false` to `render` — the probe
+  would re-check what you just looked at, at one Chromium launch per scene.
 
 ## Current limits (v0.9)
 

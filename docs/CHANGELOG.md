@@ -1,5 +1,74 @@
 # Motion Studio — Changelog
 
+## v0.14 (2026-07-25)
+
+Hardening from the first full dogfood run (an 8-scene, five-minute narrated
+film): every item below is a defect or friction that run surfaced.
+
+### Capture crashes self-heal in-job (`browser_crashed`)
+
+Headless Chromium dies intermittently mid-screenshot on long renders
+(`Protocol error (Page.captureScreenshot): Target closed`) — flaky, not
+load-dependent (docs/knowledge-base.md §4.3). Previously one flake failed the
+whole job: an 86%-done scene lost all its captured frames and re-rendered from
+zero, and the error surfaced as `internal_error` (or worse, `composition_error`
+when the crash landed inside `page.evaluate`, blaming the user's composition
+for a browser fault).
+
+- **`browser_crashed`** — new error code. `core/browser.js` classifies every
+  crash-shaped rejection (`Target closed` / `Target crashed` / `Session
+  closed` / `Connection closed` / detached frame / generic `Protocol error`)
+  at all four capture touchpoints (`evaluate`, `waitForFunction`, the
+  `__frameError` read, `screenshot`), and exports `isBrowserCrash()`.
+- **In-job recovery** — the serial capture loop (which is also what every
+  parallel worker runs) relaunches the browser and retries the *same frame*,
+  up to `CRASH_RELAUNCH_LIMIT` (3) relaunches per render with 500 ms·n
+  backoff. Frames already piped to the FFmpeg sink are kept, so a flake now
+  costs ~a second instead of the scene. Each relaunch is logged (`get_logs`)
+  and reported via `onChildPid` for process-tree cleanup.
+- A render that spends the whole budget fails with `browser_crashed` and
+  `detail.relaunches` — the code now genuinely means "this machine keeps
+  crashing", which is an actionable signal instead of noise. Aborts inside a
+  crash window keep their `cancelled` semantics.
+
+### `wait_for_render` — block instead of poll
+
+Agents watched the render queue with per-job `get_render_status` polling loops
+(or, worse, file watchers that are structurally blind to failed jobs — silence
+looks identical to "still rendering"). New tool:
+
+- `wait_for_render { jobIds: [1..16], timeoutMs?: 1s..10min (default 5min) }`
+  blocks until **every** listed job is `done`/`error`/`cancelled`, or the
+  timeout elapses. Returns `{ timedOut, jobs }`, each entry in the
+  `get_render_status` shape (structured `error`, measured `audio` block).
+- A timeout is **not** an error: the jobs keep running and the caller gets
+  current snapshots with `timedOut: true`. Unknown ids fail up front with
+  `job_not_found`. Backed by `JobManager.waitFor()` (250 ms internal poll).
+
+### SFX: clamped cues are named
+
+`synthesize_sfx` reported `clamped: 1` — *something* was truncated, no way to
+tell what, or whether it mattered. `renderCues` now also returns
+**`clampedCues: [{ cue, type, atSeconds, lostSeconds }]`** (index into
+`spec.cues`, and how much tail ran past the end of the bed); the MCP response
+includes it whenever `clamped > 0`. A finale chime losing 2 s of decay is
+taste; a whoosh losing its fall is a timing bug — now distinguishable without
+listening.
+
+### Docs
+
+- **film-setup.md**: two techniques the dogfood film proved out — *tiling a
+  short music loop* as repeated master-timeline entries stepped by
+  `musicalDurationSeconds × fps` (the reverb tail becomes a free crossfade at
+  each seam), and *multi-clip / multi-voice narration offsets* chained from
+  measured clip durations with a 15–20-frame breath gap. Long-batch guidance
+  updated for in-job recovery, `wait_for_render`, and skipping redundant
+  pre-flights after `capture_preview_frames`.
+- **SKILL.md / mcp-setup.md**: wait-don't-poll flow, `browser_crashed`
+  handling, sharper `preflight: false` guidance.
+- **knowledge-base.md §4.3** marked FIXED IN ENGINE; **architecture.md** error
+  model updated.
+
 ## v0.13 (2026-07-25)
 
 ### Vendored 3D builds are pinned and content-locked
