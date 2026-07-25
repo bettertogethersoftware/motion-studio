@@ -176,4 +176,4 @@ headless Chromium + FFmpeg through the parallel path.
 
 ## License
 
-MIT — see [LICENSE.txt](LICENSE.txt).
+Unlicense — see [LICENSE.txt](LICENSE.txt).
