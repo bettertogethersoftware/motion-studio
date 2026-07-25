@@ -85,6 +85,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'sync_shared_files',
     // new in v0.12 (sound effects)
     'synthesize_sfx',
+    // new in v0.15 (asset management)
+    'list_assets', 'delete_asset', 'rename_asset',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -244,6 +246,82 @@ test('mcp: write_asset_file round-trips base64 and enforces the sandbox', async 
   });
   assert.equal(outside.isError, true);
   assert.equal(outside.data.code, 'path_outside_project');
+});
+
+test('mcp: list_assets reports kind and audio reference counts (v0.15)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const wav = Buffer.alloc(1024, 3).toString('base64');
+  await callJson('write_asset_file', { projectId, path: 'assets/bed.wav', contentBase64: wav });
+  await callJson('write_asset_file', { projectId, path: 'assets/spare.wav', contentBase64: wav });
+  await callJson('update_project_config', {
+    projectId,
+    patch: { audio: [{ src: 'assets/bed.wav', startInFrames: 0, gainDb: -4 }] },
+  });
+
+  const list = await callJson('list_assets', { projectId });
+  assert.equal(list.isError, false, JSON.stringify(list.data));
+  const bed = list.data.files.find((f) => f.path === 'assets/bed.wav');
+  const spare = list.data.files.find((f) => f.path === 'assets/spare.wav');
+  assert.equal(bed.kind, 'audio');
+  assert.equal(bed.audioRefs, 1, 'referenced file reports its usage');
+  assert.equal(spare.audioRefs, 0, 'orphaned file is distinguishable');
+  assert.equal(bed.bytes, 1024);
+});
+
+test('mcp: rename_asset repoints audio tracks and refuses to clobber (v0.15)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const renamed = await callJson('rename_asset', {
+    projectId, from: 'assets/bed.wav', to: 'assets/audio/bed.wav', updateAudio: true,
+  });
+  assert.equal(renamed.isError, false, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.audioRefs, 1);
+  assert.equal(renamed.data.audioTracksUpdated, 1);
+  assert.equal(renamed.data.config.audio[0].src, 'assets/audio/bed.wav');
+  assert.equal(renamed.data.config.audio[0].gainDb, -4, 'track settings survive the move');
+
+  const clobber = await callJson('rename_asset', {
+    projectId, from: 'assets/spare.wav', to: 'assets/audio/bed.wav',
+  });
+  assert.equal(clobber.isError, true);
+  assert.equal(clobber.data.code, 'invalid_config');
+
+  const escape = await callJson('rename_asset', {
+    projectId, from: 'assets/spare.wav', to: '../escaped.wav',
+  });
+  assert.equal(escape.isError, true);
+  assert.equal(escape.data.code, 'path_outside_project');
+});
+
+test('mcp: delete_asset reports references and only strips tracks when asked (v0.15)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // Without the flag the track survives — but the agent is told it now dangles.
+  const kept = await callJson('delete_asset', { projectId, path: 'assets/audio/bed.wav' });
+  assert.equal(kept.isError, false, JSON.stringify(kept.data));
+  assert.equal(kept.data.deleted, true);
+  assert.equal(kept.data.audioRefs, 1);
+  assert.equal(kept.data.audioTracksRemoved, 0);
+  const still = await callJson('get_project', { projectId });
+  assert.equal(still.data.config.audio.length, 1, 'reference deliberately left in place');
+
+  // Restore it and delete again, this time cleaning the timeline.
+  await callJson('write_asset_file', {
+    projectId, path: 'assets/audio/bed.wav', contentBase64: Buffer.alloc(512, 9).toString('base64'),
+  });
+  const cleaned = await callJson('delete_asset', {
+    projectId, path: 'assets/audio/bed.wav', updateAudio: true,
+  });
+  assert.equal(cleaned.data.audioTracksRemoved, 1);
+  assert.deepEqual(cleaned.data.config.audio, []);
+
+  const missing = await callJson('delete_asset', { projectId, path: 'assets/audio/bed.wav' });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.data.code, 'file_not_found');
+
+  const outside = await callJson('delete_asset', { projectId, path: 'composition.js' });
+  assert.equal(outside.isError, true);
+  assert.equal(outside.data.code, 'path_outside_project');
+  const proj = await callJson('get_project', { projectId });
+  assert.ok(fs.existsSync(path.join(proj.data.path, 'composition.js')), 'sandbox kept the source file');
 });
 
 test('mcp: remove_project unregisters (files kept by default)', async (t) => {

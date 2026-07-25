@@ -131,7 +131,7 @@ const renderCompositionInjected = (o) => renderComposition({ ...o, browserFactor
 // the factory handed to it explicitly.
 const renderParallelInjected = (o) => renderParallel({ ...o, browserFactory: injectedBrowserFactory });
 
-const server = new McpServer({ name: 'motion-studio', version: '0.5.0' });
+const server = new McpServer({ name: 'motion-studio', version: '0.15.0' });
 
 server.registerTool(
   'list_projects',
@@ -543,6 +543,68 @@ server.registerTool(
   wrap(async ({ projectId, path: relPath, contentBase64 }) => {
     const res = await store.writeAssetFile(projectId, relPath, contentBase64);
     return ok({ written: res });
+  }),
+);
+
+server.registerTool(
+  'list_assets',
+  {
+    title: 'List a project\'s assets',
+    description:
+      'Enumerate every file under the project\'s assets/ folder (new in v0.15): path, bytes, mtime, a coarse ' +
+      'kind (image/audio/font/data), and audioRefs — how many config.audio tracks reference the file. ' +
+      'get_project also lists files, but undifferentiated and without reference counts; use this to answer ' +
+      '"which assets does the audio timeline actually use, and which are orphaned?" before cleaning up.',
+    inputSchema: {
+      projectId: z.string(),
+    },
+  },
+  wrap(async ({ projectId }) => {
+    return ok({ files: await store.listAssets(projectId) });
+  }),
+);
+
+server.registerTool(
+  'delete_asset',
+  {
+    title: 'Delete an asset',
+    description:
+      'Delete one file under the project\'s assets/ folder (new in v0.15). Always reports audioRefs — the number ' +
+      'of config.audio tracks that referenced the file — so a dangling reference is never created silently. ' +
+      'Pass updateAudio: true to also drop those tracks in the same call; leaving it false keeps them, which ' +
+      'means the next render fails at the ffmpeg mux step with a missing input. Irreversible: the file is ' +
+      'removed from disk. Folders are not deleted (manage those on disk).',
+    inputSchema: {
+      projectId: z.string(),
+      path: z.string().describe('Project-relative path under assets/, e.g. assets/narration-3.wav'),
+      updateAudio: z.boolean().default(false)
+        .describe('Also remove any config.audio tracks whose src is this file'),
+    },
+  },
+  wrap(async ({ projectId, path: relPath, updateAudio }) => {
+    return ok(await store.deleteAsset(projectId, relPath, { updateAudio }));
+  }),
+);
+
+server.registerTool(
+  'rename_asset',
+  {
+    title: 'Rename or move an asset',
+    description:
+      'Rename/move a file within the project\'s assets/ folder (new in v0.15). Both paths must stay under ' +
+      'assets/, and an existing destination is refused rather than overwritten. Reports audioRefs; pass ' +
+      'updateAudio: true to repoint those config.audio tracks at the new path (each track\'s startInFrames ' +
+      'and gainDb are preserved). Without it the tracks keep pointing at the old, now-missing file.',
+    inputSchema: {
+      projectId: z.string(),
+      from: z.string().describe('Existing project-relative path under assets/'),
+      to: z.string().describe('New project-relative path under assets/'),
+      updateAudio: z.boolean().default(false)
+        .describe('Also repoint any config.audio tracks that reference the old path'),
+    },
+  },
+  wrap(async ({ projectId, from, to, updateAudio }) => {
+    return ok(await store.renameAsset(projectId, from, to, { updateAudio }));
   }),
 );
 

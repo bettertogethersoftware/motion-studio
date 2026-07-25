@@ -11,7 +11,7 @@ Motion Studio is three thin entry points around one shared render engine.
    http://127.0.0.1:7345                            │  MCP over stdio
         │ HTTP/SSE (localhost only)                 ▼
         ▼                                   MCP server (engine/src/mcp/server.js)
- Studio server (engine/src/studio/)           24 tools, path sandbox
+ Studio server (engine/src/studio/)           27 tools, path sandbox
    projects / assets / settings                     │
    preview / render API                             │
    hot-reload SSE, output download                  │
@@ -368,7 +368,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-261 tests across 17 suites; see `engine/test/`. A clean run has **zero
+264 tests across 17 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

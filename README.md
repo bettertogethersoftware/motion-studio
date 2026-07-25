@@ -13,7 +13,7 @@ two kinds of users through one shared render engine:
   rename, delete), edit the audio timeline, and set global preferences
   including an FFmpeg binary override.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (24 tools): author compositions, ingest assets, synthesize
+  tool surface (27 tools): author compositions, manage assets, synthesize
   narration, music beds and sound effects, attach 3D libraries
   (Three.js/Babylon.js), preview frames as images, render, poll, cancel, and
   assemble multi-scene films. No shell, no arbitrary file access.
@@ -97,13 +97,13 @@ motion-studio/
 │   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (24 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents (27 tools)
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: projects/assets/settings/render/jobs/SSE
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.1 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      261 tests across 17 suites (see below)
+│   └── test/                      264 tests across 17 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4) — REAL rendered output in out/
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
@@ -149,7 +149,7 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-261 tests across 17 suites: core units, pipeline integration (real FFmpeg,
+264 tests across 17 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), text-to-speech (WAV parsing + stubbed exe contract), music generation

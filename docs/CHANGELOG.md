@@ -135,6 +135,27 @@ layered another copy on top. Both now call a single `toggleAudition`:
   projects stops playback — previously the clip kept playing while its stop
   button was removed from the DOM with the old project's rows.
 
+### Asset management reaches the agent surface (3 new MCP tools)
+
+The v0.15 asset work initially landed in the core and the Studio only, leaving
+agents able to *write* an asset but never list, rename, or remove one — so a
+project accumulated every failed narration take with no way to clean up. Tool
+count 24 → 27:
+
+- **`list_assets { projectId }`** — everything under `assets/` with `path`,
+  `bytes`, `mtime`, `kind`, and `audioRefs`. `get_project` lists files too,
+  but undifferentiated and without reference counts; this is what separates a
+  load-bearing asset from an orphan.
+- **`delete_asset { projectId, path, updateAudio? }`** and
+  **`rename_asset { projectId, from, to, updateAudio? }`** — thin wrappers over
+  the same `ProjectStore` methods the Studio uses, so there is one
+  implementation of the sandbox, the clobber refusal, and the track rewrite.
+
+`audioRefs` is reported unconditionally on all three. The flag matters more
+for agents than for humans: a person gets a dialog listing the affected
+tracks, whereas an agent that deletes a referenced file would otherwise learn
+about it as an ffmpeg mux failure minutes into the next render.
+
 ### Deleting an asset no longer silently breaks the audio timeline
 
 Removing (or renaming) a file that `config.audio` references used to succeed
