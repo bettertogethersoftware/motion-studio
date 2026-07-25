@@ -4,9 +4,12 @@
  * Motion Studio compositions are self-contained HTML/CSS/JS. A project can opt
  * in to a heavier rendering library (Three.js / Babylon.js) that gets vendored
  * *locally* into the project — never a CDN at render time, so renders stay
- * hermetic and reproducible. The big library builds live under the engine's
- * vendor dir (git-ignored, populated by scripts/fetch-libs.mjs); only the small
- * starter templates (engine/templates/lib-*) are committed source.
+ * hermetic and reproducible. The builds live in engine/vendor/libs, which IS
+ * committed (~9 MB, MIT / Apache-2.0), so add_library works on a fresh clone with
+ * no setup step; engine/vendor.lock.json records which upstream build each file
+ * came from, and scripts/fetch-libs.mjs is an upgrade/repair tool rather than a
+ * prerequisite. The rest of engine/vendor (the two exes, FluidSynth, SoundFonts)
+ * stays out of git — see .gitignore for why each one.
  *
  * This registry is the single source of truth for both `add_library` (the MCP
  * tool / ProjectStore.addLibrary) and scripts/fetch-libs.mjs.

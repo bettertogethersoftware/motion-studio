@@ -362,8 +362,26 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Motion Studio — published text-to-speech exe (build artifact; see docs/tts-setup.md).
-# The self-contained MotionStudioTts.exe is ~70 MB; build it locally, don't commit it.
-engine/vendor/
+# Motion Studio — engine/vendor holds four unrelated things, and only one is
+# committed. Note the pattern ignores the *contents* (`vendor/*`), not the
+# directory: with `vendor/` git never descends into it and the !negation below
+# would silently do nothing.
+#
+#   vendor/tts/         MotionStudioTts.exe   ~94 MB  build artifact — source is in tts/
+#   vendor/music/       MotionStudioMidi.exe  ~65 MB  build artifact — source is in music/
+#   vendor/soundfonts/                        ~39 MB  third-party, licence varies
+#   vendor/fluidsynth/                         ~8 MB  third-party LGPL binaries
+#   vendor/libs/        three.js + Babylon     ~9 MB  COMMITTED (see below)
+#
+# The three exes/binaries stay out: two are rebuildable from tracked source
+# (docs/tts-setup.md, docs/music-setup.md), git keeps every version of a binary
+# forever, and at 94 MB the TTS exe is close to GitHub's 100 MB hard limit with
+# no LFS configured here.
+engine/vendor/*
+# vendor/libs IS committed: ~9 MB of immutable third-party JS (three.js MIT,
+# Babylon.js Apache-2.0) with no build step, so a fresh clone can render 3D with
+# no setup and no network. engine/vendor.lock.json records which upstream build
+# each file came from — git guarantees the bytes, the lock explains their origin.
+!engine/vendor/libs/
 # FluidSynth binary distribution (runtime dependency; build/place locally, see docs/music-setup.md).
 fluidsynth-v2.5.6-win10-x64-glib/

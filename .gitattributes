@@ -61,3 +61,13 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+###############################################################################
+# Vendored 3D library builds (engine/vendor/libs) are committed and byte-exact:
+# their sha256 is recorded in engine/vendor.lock.json and stamped into each
+# project as config.libraryBuilds. The "* text=auto" rule above would normalize
+# LF on commit and re-expand to CRLF on checkout under core.autocrlf, changing
+# the bytes and breaking every one of those hashes on a fresh Windows clone.
+# Treat them as binary so what is checked out is exactly what was locked.
+###############################################################################
+engine/vendor/libs/** -text

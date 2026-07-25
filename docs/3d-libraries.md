@@ -6,9 +6,9 @@ render path (confirmed — SwiftShader/GPU), so a composition can pull in a
 rendering library and draw a scene as a pure function of `frame`.
 
 This document covers the **`add_library`** feature (shipped, v0.7), the
-**optional local-asset-fetch flag**, and an **honest investigation writeup** of
-loading glTF/GLB *models* via the Babylon loaders addon — which is **not yet
-working** and is documented here so the next person doesn't start from zero.
+**optional local-asset-fetch flag**, and loading glTF/GLB *models* via the Babylon
+loaders addon — which **works** (§3), kept as a full investigation writeup because
+the root cause was non-obvious and the gotchas are all still live.
 
 ---
 
@@ -31,8 +31,10 @@ add_library { projectId, library: "three" | "babylon", scaffold?: true }
   starter; the library id is recorded in the new optional `config.libraries`.
 
 Registry: [`engine/src/core/libraries.js`](../engine/src/core/libraries.js).
-Builds are git-ignored under `engine/vendor/libs/` and fetched with
-`node scripts/fetch-libs.mjs`. Starters live in `engine/templates/lib-*`.
+Builds are **committed** under `engine/vendor/libs/` (~9 MB, MIT / Apache-2.0), so
+`add_library` works on a fresh clone with no setup. `node scripts/fetch-libs.mjs`
+is an upgrade/repair tool, not a prerequisite. Starters live in
+`engine/templates/lib-*`.
 
 ### Determinism contract (returned as `notes`, baked into the starters)
 
@@ -133,12 +135,11 @@ recipe is §3.4.
    *inside* `setFrame` trips Puppeteer `Protocol error … Promise was collected`.
    Fix: **load once, then `registerComposition`** so every `setFrame` is
    synchronous.
-5. **CDN/build pitfalls** — `cdn.jsdelivr.net/npm/babylonjs@<v>/babylon.js` (the
-   6.8 MB build) rendered **nothing** (blank) in this setup; the working core is
-   `https://cdn.babylonjs.com/babylon.js` (8.2 MB). Loaders are at
-   `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the
-   `/babylonjs.loaders.min.js` root path 404s). Core and loaders must be the
-   **same version**.
+5. **CDN/build pitfalls** — an old `cdn.jsdelivr.net/npm/babylonjs@<v>/babylon.js`
+   build (6.8 MB) rendered **nothing** (blank) here; the working core is
+   `cdn.babylonjs.com` (8.2 MB). Core and loaders must be the **same version**.
+   Both are now pinned and hash-locked — see §3.5, which also narrows this jsdelivr
+   warning to the specific old build it described.
 6. **Byte-size is a misleading proxy** — a blank/uniform frame and a
    mostly-flat-color frame are both ~8 KB PNGs. Always inspect actual pixels, not
    the file size.
@@ -220,8 +221,9 @@ node scripts/fetch-libs.mjs --update   # accept a new build and rewrite the lock
 ```
 
 `add_library` additionally stamps `config.libraryBuilds` into the project
-(`{ version, sha256, bytes }` per copied file), so a finished render can be traced
-to exact bytes even though `engine/vendor/` is git-ignored.
+(`{ version, sha256, bytes }` per copied file). That is not redundant with git
+tracking the builds: git says what the repo holds *now*, `libraryBuilds` says what
+the project copied *then* — and they diverge the moment the libraries are upgraded.
 
 Note the version is recorded as `null` when a build does not state one: three's
 `REVISION` is minified to `const e="134"` and the Babylon loaders bundle has no

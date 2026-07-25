@@ -1,24 +1,31 @@
 /**
- * Vendor lockfile for the optional 3D library builds (v0.13).
+ * Vendor provenance for the 3D library builds (v0.13).
  *
- * The builds live in engine/vendor/libs, which is **git-ignored**, so nothing in
- * the repo recorded which bytes a render was made against. Two independent
- * problems came out of that:
+ * **engine/vendor/libs is committed** (the only part of engine/vendor that is —
+ * ~9 MB of immutable third-party JS, three.js MIT and Babylon Apache-2.0). So git
+ * already guarantees every clone has identical bytes, and this module is NOT the
+ * integrity mechanism for them. It answers the two questions git cannot:
  *
- *   acquisition — two machines running fetch-libs.mjs at different times can
- *                 vendor different builds.
- *   provenance  — a project could not say what it rendered against, even on one
- *                 machine.
+ *   origin  — which upstream build produced the committed bytes? Git records
+ *             content, never where it came from. vendor.lock.json pairs each file
+ *             with the exact URL + version + hash it was fetched from.
+ *   drift   — fetch-libs.mjs can overwrite committed files. Hash-checking on
+ *             download turns an accidental dependency bump into a refusal
+ *             instead of an unreviewed diff in someone's next commit.
  *
- * A version pin alone fixes only the first, and demonstrably not even that:
- * `cdn.babylonjs.com/babylon.js` and `cdn.babylonjs.com/v9.18.0/babylon.js` BOTH
- * self-report Version="9.18.0" and are different code — they diverge around byte
- * 2,317,477, where the floating build carries an extra `var t;`. A version string
- * is a claim; a hash is a fact. So the lock is content-addressed.
+ * Content-addressed rather than version-pinned, because a version string does not
+ * identify a build: `cdn.babylonjs.com/babylon.js` and
+ * `cdn.babylonjs.com/v9.18.0/babylon.js` BOTH self-report Version="9.18.0" and are
+ * different code — they diverge around byte 2,317,477, where the floating build
+ * carries an extra `var t;`. A version string is a claim; a hash is a fact.
  *
- * The lockfile itself is committed (unlike the artifacts it describes) and lives
- * at engine/vendor.lock.json — deliberately NOT inside engine/vendor/, which is
- * ignored wholesale. Same split npm and cargo use: ignored artifacts, tracked lock.
+ * Also used by ProjectStore.addLibrary to stamp config.libraryBuilds: a project
+ * copies these files at a point in time, so "what does the repo hold now" (git)
+ * and "what did this project copy" (libraryBuilds) are different facts once the
+ * libraries are ever upgraded.
+ *
+ * The lockfile lives at engine/vendor.lock.json — outside engine/vendor/, whose
+ * *contents* are ignored by default with only libs/ negated back in.
  */
 
 import crypto from 'node:crypto';
@@ -30,7 +37,7 @@ import { EngineError, ErrorCodes } from './errors.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** Committed lock describing the git-ignored vendor/libs contents. */
+/** Origin record for the committed vendor/libs builds. */
 export function vendorLockPath() {
   return process.env.MOTION_STUDIO_VENDOR_LOCK || path.resolve(__dirname, '../../vendor.lock.json');
 }
@@ -70,7 +77,7 @@ export async function writeLock(files) {
   const sorted = {};
   for (const k of Object.keys(files).sort()) sorted[k] = files[k];
   const body = {
-    comment: 'Content hashes for the git-ignored engine/vendor/libs builds. Run "node scripts/fetch-libs.mjs --update" to change.',
+    comment: 'Upstream origin of the committed engine/vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run "node scripts/fetch-libs.mjs --update" to change.',
     lockfileVersion: 1,
     files: sorted,
   };

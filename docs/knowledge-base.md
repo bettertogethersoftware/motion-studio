@@ -395,10 +395,10 @@ never saw it. Addon notes are now appended to `notes`, attributed as
 that produced it.
 
 **Root cause.** `libraries.js` declared Babylon as `version: 'stable'` fetching
-`https://cdn.babylonjs.com/babylon.js`, and `engine/vendor/` is git-ignored. Two
-independent failures hid in that: **acquisition** (two machines fetching at
-different times get different builds) and **provenance** (a project cannot say
-what it rendered against, even on one machine).
+`https://cdn.babylonjs.com/babylon.js`, and all of `engine/vendor/` was
+git-ignored. Two independent failures hid in that: **acquisition** (two machines
+fetching at different times get different builds) and **provenance** (a project
+cannot say what it rendered against, even on one machine).
 
 **The measurement that settled the design.** A version pin fixes only the first —
 and here, not even that. `/babylon.js` and `/v9.18.0/babylon.js` both self-report
@@ -420,10 +420,28 @@ Because the pinned build is not the one that made the video, the swap was
 confirmed by re-rendering a frame of the ship — identical. **Verify the
 substitution, don't assume a same-version build is the same build.**
 
+**Then the cheaper fix, chosen afterwards: commit the libraries.** Of the 215 MB
+in `engine/vendor/`, only `libs/` was a sane candidate — ~9 MB of immutable
+third-party JS (three.js MIT, Babylon Apache-2.0) with no build step. The rest
+stays out: the two 94 MB / 65 MB exes are build artifacts of tracked C# source,
+git keeps every version of a binary forever, and there is no LFS configured. With
+`libs/` committed, **git became the integrity mechanism** and the lock kept only
+the jobs git cannot do: recording *where* the bytes came from, and refusing to let
+a `fetch-libs` run silently rewrite committed files.
+
+A `.gitignore` trap worth knowing, verified in a scratch repo: `engine/vendor/`
+(trailing slash) excludes the directory so git never descends into it, and a
+following `!engine/vendor/libs/` does **nothing**. You must ignore the *contents* —
+`engine/vendor/*` — for the negation to bite.
+
 **Lesson.** *A version string is a claim; a hash is a fact.* For anything
-git-ignored, record the checkable one. And when a fix has two halves, name them
-separately — pinning the URL and recording the hash solve different problems, and
-only one of them makes a finished artifact traceable.
+git-ignored, record the checkable one — and reconsider whether it needs to be
+git-ignored at all, since committing 9 MB removed a whole class of problem that no
+amount of tooling would have. When a fix has two halves, name them separately:
+pinning the URL and recording the hash solve different problems, and only one of
+them makes a finished artifact traceable. Also worth saying plainly — the later,
+simpler decision made part of my own earlier work redundant, and that is the right
+outcome to report rather than defend.
 
 Corollary found along the way: `detectVersion` returns **null** for three
 (`REVISION` minifies to `const e="134"`, and `134` also appears in colour

@@ -433,7 +433,9 @@ export class ProjectStore {
       if (!fs.existsSync(srcAbs)) {
         throw new EngineError(
           ErrorCodes.LIBRARY_UNAVAILABLE,
-          `Library build not found: ${f.vendor}. Run "node scripts/fetch-libs.mjs ${spec.id}" in the engine folder (git-ignored, ~${spec.approxKB} KB).`,
+          `Library build not found: ${f.vendor}. This file is committed to the repo, so a clean checkout should have it — `
+            + `restore it with "git checkout -- engine/vendor/libs", or re-download with `
+            + `"node scripts/fetch-libs.mjs ${spec.id}" in the engine folder (~${spec.approxKB} KB).`,
           { library: spec.id, file: f.vendor },
         );
       }
@@ -441,9 +443,11 @@ export class ProjectStore {
       await fsp.mkdir(path.dirname(abs), { recursive: true });
       await fsp.copyFile(srcAbs, abs);
       // Hash what we actually copied, so the project records the exact build it
-      // holds. The vendor dir is git-ignored and a version string does not
-      // identify a build (see core/vendor-lock.js), so this is the only durable
-      // answer to "what was this rendered against?".
+      // holds. Not redundant with git tracking engine/vendor/libs: git says what
+      // the repo holds *now*, this says what the project copied *then* — they
+      // diverge the moment the libraries are upgraded, and it is the second one a
+      // finished render was made from. (A version string would not do: see
+      // core/vendor-lock.js on two builds both reporting 9.18.0.)
       const bytes = await fsp.readFile(abs);
       builds[f.dest] = { version: detectVersion(bytes), sha256: sha256(bytes), bytes: bytes.length };
       copied.push({ path: f.dest, bytes: bytes.length, sha256: builds[f.dest].sha256 });

@@ -42,11 +42,43 @@ Because the pinned build is *not* the one that produced the 15-second space-jump
 video, the swap was verified by re-rendering a frame of the ship — identical, so
 the `var t;` difference is immaterial here. Only checking established that.
 
+### `engine/vendor/libs` is now committed
+
+Decided after the above, and it changes what the lock is *for*. Of the 215 MB in
+`engine/vendor/`, only `libs/` is a sane thing to track: ~9 MB of immutable
+third-party JS (three.js MIT, Babylon Apache-2.0), no build step. Everything else
+stays ignored — the 94 MB and 65 MB exes are build artifacts of tracked C# source,
+git keeps every version of a binary forever, and no LFS is configured here (at
+94 MB the TTS exe is close to GitHub's 100 MB hard limit).
+
+So `add_library` now works on a **fresh clone with no setup and no network**, and
+`scripts/fetch-libs.mjs` is an upgrade/repair tool rather than a prerequisite.
+
+With the builds committed, **git is the integrity mechanism** and
+`vendor.lock.json` keeps only the jobs git cannot do:
+
+- **origin** — git records content, never where it came from. The lock pairs each
+  committed file with the exact upstream URL, version and hash.
+- **drift** — `fetch-libs.mjs` can overwrite committed files, so hash-checking on
+  download turns an accidental dependency bump into a refusal rather than an
+  unreviewed diff in someone's next commit.
+
+`config.libraryBuilds` is likewise **not** redundant: git says what the repo holds
+*now*, `libraryBuilds` says what a project copied *then*, and those diverge the
+moment the libraries are upgraded — the second is what a finished render was made
+from.
+
+`.gitignore` gotcha, verified in a scratch repo: the rule had to become
+`engine/vendor/*` + `!engine/vendor/libs/`. With `engine/vendor/` (trailing slash)
+git never descends into the directory and the negation silently does nothing.
+
 Docs: `3d-libraries.md` §3.5 rewritten with the pinning/locking workflow, and its
 old "jsdelivr renders nothing" warning narrowed — that described a 6.8 MB
 artifact, whereas at 9.18.0 jsdelivr and the versioned `cdn.babylonjs.com` path
-serve the same 8,180,848 bytes. `knowledge-base.md` §8.3 upgraded from
-"deliberately not fixed" to the measurement that drove the design.
+serve the same 8,180,848 bytes. Its intro no longer claims glTF loading is "not yet
+working" (§3 has said RESOLVED since v0.12). `knowledge-base.md` §8.3 upgraded from
+"deliberately not fixed" to the measurement that drove the design, plus the
+commit-the-libraries decision that superseded half of it.
 
 Tests: +10 (`vendor-lock.test.js`), including a check that the **real** committed
 lock is internally consistent and version-pinned, so a hand-edit fails here rather

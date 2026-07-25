@@ -1,21 +1,26 @@
 #!/usr/bin/env node
 /**
- * Download the optional 3D library builds into engine/vendor/libs (git-ignored).
- * Required for the `add_library` tool; run once after cloning:
+ * Maintain the 3D library builds in engine/vendor/libs.
  *
- *   node scripts/fetch-libs.mjs              # all libraries, verified against the lock
- *   node scripts/fetch-libs.mjs three        # just one
+ * **You do not need this after cloning** — engine/vendor/libs is committed, so
+ * `add_library` works out of the box. This is an upgrade/repair tool:
+ *
  *   node scripts/fetch-libs.mjs --verify     # check what's on disk, download nothing
- *   node scripts/fetch-libs.mjs --update     # fetch AND rewrite the lock (bump a version)
+ *   node scripts/fetch-libs.mjs              # re-fetch; refuses to change locked bytes
+ *   node scripts/fetch-libs.mjs three        # just one library
+ *   node scripts/fetch-libs.mjs --update     # accept a new build and rewrite the lock
  *
  * The URLs and destinations come from src/core/libraries.js so this stays in
  * lockstep with what add_library copies into projects.
  *
- * Every download is hashed and checked against engine/vendor.lock.json, which IS
- * committed even though the artifacts it describes are not. Without that, two
- * machines could vendor different code and nothing would record which a render
- * used — and a version pin alone does not close it: the floating and versioned
- * Babylon URLs both report 9.18.0 and are different code. See core/vendor-lock.js.
+ * Because the targets are committed, a plain re-fetch that silently pulled a newer
+ * build would land an unreviewed dependency bump in someone's next commit. So every
+ * download is hashed against engine/vendor.lock.json and a mismatch is a refusal,
+ * not an overwrite — `--update` is the only way to change what is locked.
+ *
+ * Content-addressed, not version-pinned, because a version string does not identify
+ * a build: the floating and versioned Babylon URLs both report 9.18.0 and are
+ * different code. See core/vendor-lock.js.
  */
 import fsp from 'node:fs/promises';
 import path from 'node:path';
