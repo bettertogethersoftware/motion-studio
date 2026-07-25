@@ -1,4 +1,4 @@
-# Motion Studio — User Guide (v0.5)
+# Motion Studio — User Guide (v0.15)
 
 ## Installation and first run
 

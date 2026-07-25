@@ -1,6 +1,6 @@
 {
   "name": "motion-studio-engine",
-  "version": "0.5.0",
+  "version": "0.15.0",
   "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, and MCP server.",
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

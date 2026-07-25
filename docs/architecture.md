@@ -1,4 +1,4 @@
-# Motion Studio — Architecture (v0.5)
+# Motion Studio — Architecture (v0.15)
 
 ## 1. System overview
 
@@ -11,8 +11,9 @@ Motion Studio is three thin entry points around one shared render engine.
    http://127.0.0.1:7345                            │  MCP over stdio
         │ HTTP/SSE (localhost only)                 ▼
         ▼                                   MCP server (engine/src/mcp/server.js)
- Studio server (engine/src/studio/)           15 tools, path sandbox
-   projects / preview / render API                  │
+ Studio server (engine/src/studio/)           24 tools, path sandbox
+   projects / assets / settings                     │
+   preview / render API                             │
    hot-reload SSE, output download                  │
         │            in-process calls               │
         └──────────────┬────────────────────────────┘
@@ -25,6 +26,7 @@ Motion Studio is three thin entry points around one shared render engine.
           formats.js   — output-format registry (mp4 webm gif prores png-seq)
           jobs.js      — job queue, status, logs, cancellation
           progress.js  — JSON-line protocol (+ etaMs)
+          settings.js  — global user preferences (Studio only; see §11)
                        ▼
         headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
 ```
@@ -294,11 +296,16 @@ every file-touching tool and every Studio file route) rejects absolute and
 drive-letter paths, `..` escapes, null bytes, and symlink escapes (the
 deepest existing ancestor is `realpath`-ed and re-checked). Text writes are
 restricted to an extension allow-list (`.html .css .js .mjs .json .svg .txt
-.md`); binary asset writes (`write_asset_file`) are additionally confined to
-the `assets/` folder, allow-listed to image/audio/font types, and capped at
-25 MB decoded. `project.json` is deny-listed from raw writes so config
-invariants can only change through the validated `update_project_config`
-tool. `remove_project` deletes files only inside the managed projects root.
+.md`); binary asset writes are additionally confined to the `assets/` folder,
+allow-listed to image/audio/font types, and capped at 25 MB. The MCP tool
+(`write_asset_file`, base64) and the Studio's raw-body upload both funnel
+through one `ProjectStore.writeAssetBuffer`, so that confinement has a single
+enforcement point rather than two implementations to keep in step; the
+Studio's asset delete/rename routes resolve through the same sandbox.
+`project.json` is deny-listed from raw writes so config invariants can only
+change through the validated `update_project_config` tool (the Studio's
+config PATCH calls the same `updateConfig`). `remove_project` deletes files
+only inside the managed projects root.
 There is no shell tool and no arbitrary-path tool. The MCP server is
 stdio-only; the Studio server binds to `127.0.0.1` and has no authentication
 because it is never reachable off-machine — do not reverse-proxy it.
@@ -310,7 +317,7 @@ disk and processes* through the tool surface, not what the page can do
 inside Chromium. Treat composition code from untrusted sources like any
 other code you run.
 
-## 11. Shared project registry
+## 11. Shared project registry and global settings
 
 All paths read and write `~/.motion-studio/projects.json` (override with
 `MOTION_STUDIO_HOME`), and project folders are identical regardless of which
@@ -320,6 +327,21 @@ files written by v0.2 (schema v1) are migrated to schema v2 on read,
 non-destructively. Registry writes are atomic (temp file + rename).
 Human/agent concurrent edits remain last-write-wins on disk, surfaced to the
 human through the Studio's hot-reload watcher.
+
+`~/.motion-studio/settings.json` (v0.15, `core/settings.js`) sits alongside it
+and holds *user preferences*, with the same atomic write and a validated
+schema: `newProjectDefaults`, `render.defaultWorkers`, and an `ffmpeg` block
+(binary `path` override plus `defaultCrf`/`defaultPreset`). The scope line is
+deliberate and worth preserving: settings **seed** the Studio's forms and
+newly created projects, and never override an existing `project.json`. The
+MCP server does not read them at all — an agent asking for 24 fps says so
+explicitly, and a machine-level preference silently changing an agent's
+output would be a reproducibility hazard. The one setting that reaches the
+engine directly is `ffmpeg.path`, which flows into `checkPrerequisites` and
+every Studio render job; `renderParallel` forwards it to its worker processes
+(CLI `--ffmpeg`) so a parent and its workers cannot encode with different
+binaries. A corrupted settings file degrades to defaults rather than
+bricking the UI.
 
 ## 12. Preview fidelity
 
@@ -344,4 +366,15 @@ parallel-render tests, full MCP client↔server integration tests (official
 SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 `real-chromium.test.js` suite covers the one seam fakes cannot — Puppeteer
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
-skips honestly where no browser is resolvable. 102 tests; see `engine/test/`.
+skips honestly where no browser is resolvable.
+
+261 tests across 17 suites; see `engine/test/`. A clean run has **zero
+failures**. Tests skip rather than fail when the platform cannot host them:
+besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
+code 4` is POSIX-only, because Windows has no signal mechanism and
+`child.kill('SIGTERM')` falls back to `TerminateProcess()` — the process dies
+before any handler runs, so `close` reports `null` instead of the CLI's exit
+code 4. Cancellation on Windows is unaffected: it goes through
+`JobManager.cancel`'s in-process abort, covered on every platform. A
+permanently-red case teaches readers to skim past failures, which is how a
+real regression hides.

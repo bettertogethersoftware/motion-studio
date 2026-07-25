@@ -1,4 +1,4 @@
-# Motion Studio v0.5 — code-driven video renderer
+# Motion Studio v0.15 — code-driven video renderer
 
 Motion Studio renders videos from HTML/CSS/JS animations using a
 deterministic, frame-driven model. Animations are authored as **pure
@@ -8,10 +8,13 @@ two kinds of users through one shared render engine:
 
 - **Humans**, through the cross-platform **Studio web UI** (`npm run studio`):
   live preview that drives your *actual* composition, scrub/play transport,
-  hot reload, render queue with progress + ETA, output downloads.
+  hot reload, render queue with progress + ETA, and full project management —
+  create/configure/delete projects, manage `assets/` (upload, audition,
+  rename, delete), edit the audio timeline, and set global preferences
+  including an FFmpeg binary override.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (20 tools): author compositions, ingest assets, synthesize
-  narration and generate music beds (Windows), attach 3D libraries
+  tool surface (24 tools): author compositions, ingest assets, synthesize
+  narration, music beds and sound effects, attach 3D libraries
   (Three.js/Babylon.js), preview frames as images, render, poll, cancel, and
   assemble multi-scene films. No shell, no arbitrary file access.
 
@@ -19,10 +22,11 @@ Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
 (transparent WebM/ProRes overlays that drop onto any timeline).
 
-v0.5 evolves the v0.2 reference implementation into a commercial-ready,
-cross-platform product; every deliberate change is recorded with rationale
-in [docs/CHANGELOG.md](docs/CHANGELOG.md) (headline: the Windows-only
-WinForms app is replaced by the Studio web UI).
+Every deliberate change since the v0.2 reference implementation is recorded
+with its rationale in [docs/CHANGELOG.md](docs/CHANGELOG.md) — read it first.
+Headlines: the Windows-only WinForms app became the Studio web UI (v0.5),
+long-form film assembly (v0.9), vendored-build provenance (v0.13), in-job
+crash recovery (v0.14), and the full Studio management surface (v0.15).
 
 ## Quick start
 
@@ -44,7 +48,10 @@ node src/cli/render.js --project ../examples/intro-title \
 ```
 
 If Puppeteer's Chromium download is blocked, install any Chrome/Chromium and
-set `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome`.
+set `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome`. If FFmpeg is not on PATH,
+point at it with `--ffmpeg /path/to/ffmpeg` (CLI) or the **ffmpeg → binary
+path** field in the Studio's ⚙ settings dialog, which applies to every
+Studio render and the prerequisite check.
 
 ### Connect an AI agent (MCP)
 
@@ -80,32 +87,38 @@ motion-studio/
 │   │   ├── sandbox.js             path sandbox for all file-touching surfaces
 │   │   ├── progress.js            JSON-line stdout protocol (emitter + parser)
 │   │   ├── prereqs.js             Node/FFmpeg detection, version floors
+│   │   ├── settings.js            global user preferences + ffmpeg overrides (v0.15)
 │   │   ├── tts.js                 text-to-speech: spawn Windows exe, WAV duration (v0.6)
 │   │   ├── libraries.js           optional 3D library registry (three/babylon) (v0.7)
 │   │   ├── music.js               music: note spec → MIDI exe → FluidSynth → WAV (v0.8)
+│   │   ├── sfx.js                 sound effects: pure-JS cue synthesis (v0.12)
 │   │   ├── film.js                film: stitch rendered scene projects into one film (v0.9)
+│   │   ├── lock.js                cross-process render lock (v0.11)
+│   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (20 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents (24 tools)
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
-│   │   ├── server.js                localhost API: projects/preview/render/jobs/SSE
+│   │   ├── server.js                localhost API: projects/assets/settings/render/jobs/SSE
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.1 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      149 tests across 12 suites (see below)
+│   └── test/                      261 tests across 17 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4) — REAL rendered output in out/
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
 │                                  — real alpha render + proof composite in out/
 └── docs/
-    ├── CHANGELOG.md               v0.2 → v0.9 decision log (read this first)
+    ├── CHANGELOG.md               v0.2 → v0.15 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
-    ├── user-guide.md              Studio UI, formats, transparency, audio, CLI
+    ├── user-guide.md              Studio UI, projects, assets, audio, settings, CLI
     ├── frame-api.md               the authoring contract (v1.1)
     ├── mcp-setup.md               agent setup + full tool reference
+    ├── knowledge-base.md          field notes: failure modes seen in real productions
     ├── tts-setup.md               text-to-speech: exe contract + build (v0.6)
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music: MIDI exe + FluidSynth + SoundFont (v0.8)
+    ├── sfx-setup.md               sound effects: cue spec + synthesis (v0.12)
     ├── film-setup.md              long-form: build_film scene assembly (v0.9)
     ├── SKILL.md                   drop-in agent skill
     └── spec-changes.md            historical v0.2-era decision log
@@ -136,24 +149,31 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-149 tests across 12 suites: core units, pipeline integration (real FFmpeg,
+261 tests across 17 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), text-to-speech (WAV parsing + stubbed exe contract), music generation
-(two-stage MIDI→FluidSynth pipeline against stubs), film assembly (scene
-validation + real concat/master-audio mux), 3D libraries (add_library vendoring
-+ scaffold), frame-api runtime (vm-hosted), v0.5 features, Studio HTTP server
-(ephemeral port, sandbox 403s, SSE hot reload), and a gated real-Chromium suite
-(capture determinism, genuine `omitBackground` alpha) that runs wherever a
-browser is resolvable:
+(two-stage MIDI→FluidSynth pipeline against stubs), sound effects, film
+assembly (scene validation + real concat/master-audio mux), 3D libraries
+(add_library vendoring + scaffold), vendored-build provenance, frame-api
+runtime (vm-hosted), Studio HTTP server (ephemeral port, sandbox 403s, SSE hot
+reload, settings, asset CRUD), and a gated real-Chromium suite (capture
+determinism, genuine `omitBackground` alpha) that runs wherever a browser is
+resolvable:
 
 ```bash
 PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm test
 ```
+
+A clean run is **0 failures**. Two tests skip by design: the gated
+real-Chromium suite where no browser is resolvable, and — on Windows only —
+`cli: SIGTERM mid-render cancels with exit code 4`, because Windows has no
+signal mechanism (`TerminateProcess` kills before any handler runs).
+Cancellation itself is covered on every platform through `JobManager.cancel`.
 
 The shipped example outputs under `examples/*/out/` were rendered with real
 headless Chromium + FFmpeg through the parallel path.
 
 ## License
 
-MIT (see engine/package.json).
+MIT — see [LICENSE.txt](LICENSE.txt).
