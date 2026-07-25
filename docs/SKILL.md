@@ -41,6 +41,8 @@ Every composition you write must read animation state from an injected frame num
 1. **Find or create the project.**
    Call `list_projects`. If the user is iterating on an existing project, use `get_project` to see its current config and files. Otherwise call `create_project` with sensible fps/dimensions/duration for the request (e.g. 30fps, 1920×1080, and a duration in frames matching the requested length in seconds × fps) — state the assumption to the user rather than asking, unless the request is genuinely ambiguous about length or aspect ratio. Dimensions must be even numbers for mp4/webm/prores.
 
+   Pass whatever the video actually needs — an explicit argument always wins. Anything you leave out falls back to the user's global settings rather than a fixed 1920×1080/30fps, so **read `config` in the response instead of assuming what you got**: someone who works in 4K or 24fps has set that once and expects it to hold. Duration is the field to think hardest about, since it's the one a global default is least likely to be right about.
+
    **Pick the output format for the deliverable** via `update_project_config`: `mp4` (default) for general video, `webm` for smaller files, `gif` for short loops, `prores` for editorial hand-off, `png-sequence` for compositing. For a transparent overlay set `output: { format: "webm", transparent: true }` (or prores/png-sequence) and give the composition a transparent background — no `background` on `html`/`body`; everything unpainted becomes alpha 0. The output filename's extension follows the format automatically.
 
 2. **Author the composition.**

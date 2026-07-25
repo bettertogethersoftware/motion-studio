@@ -431,6 +431,139 @@ test('mcp: list_voices / synthesize_speech return tts_unavailable when the exe i
   }
 });
 
+/* ------------------------- ffmpeg binary resolution ------------------------- */
+// The MCP server used to probe a bare "ffmpeg" on PATH regardless of the Studio's
+// configured binary, so a machine with ffmpeg installed somewhere else worked in
+// the web UI and returned prereqs_missing for every agent call. These drive the
+// FAILURE path deliberately (a binary that cannot exist), so they need no real
+// ffmpeg and run everywhere.
+
+/** Connect a throwaway server with its own data dir + env, run `fn`, tear it down. */
+async function withServer({ home, settings, env = {} }, fn) {
+  const homeDir = path.join(tmp, home);
+  if (settings) {
+    await fsp.mkdir(homeDir, { recursive: true });
+    await fsp.writeFile(path.join(homeDir, 'settings.json'), JSON.stringify(settings, null, 2));
+  }
+  const t = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER],
+    env: { ...process.env, MOTION_STUDIO_HOME: homeDir, MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER, ...env },
+    stderr: 'pipe',
+  });
+  const c = new Client({ name: `ms-test-${home}`, version: '0.0.1' });
+  await c.connect(t);
+  try {
+    return await fn(async (name, args = {}) => {
+      const res = await c.callTool({ name, arguments: args });
+      const text = res.content.find((x) => x.type === 'text')?.text ?? '{}';
+      return { isError: !!res.isError, data: JSON.parse(text) };
+    });
+  } finally {
+    await c.close().catch(() => {});
+  }
+}
+
+const BOGUS_FFMPEG = path.join(os.tmpdir(), 'motion-studio-no-such-ffmpeg-xyz');
+
+test('mcp: prereq check honours settings.json ffmpeg.path', async () => {
+  await withServer(
+    { home: 'home-ffmpeg-settings', settings: { ffmpeg: { path: BOGUS_FFMPEG } } },
+    async (call) => {
+      const res = await call('list_projects');
+      // If settings were ignored we would probe PATH instead — which on a machine
+      // WITH ffmpeg installed would succeed and make this assertion fail.
+      assert.equal(res.isError, true);
+      assert.equal(res.data.code, 'prereqs_missing');
+      assert.equal(res.data.detail.ffmpeg.effectivePath, BOGUS_FFMPEG);
+      assert.equal(res.data.detail.ffmpeg.source, 'settings');
+      assert.equal(res.data.detail.ffmpeg.found, false);
+      assert.match(res.data.message, /could not be run/);
+    },
+  );
+});
+
+test('mcp: MOTION_STUDIO_FFMPEG overrides settings.json', async () => {
+  const envPath = BOGUS_FFMPEG + '-from-env';
+  await withServer(
+    {
+      home: 'home-ffmpeg-env',
+      settings: { ffmpeg: { path: BOGUS_FFMPEG } },
+      env: { MOTION_STUDIO_FFMPEG: envPath },
+    },
+    async (call) => {
+      const res = await call('list_projects');
+      assert.equal(res.data.code, 'prereqs_missing');
+      assert.equal(res.data.detail.ffmpeg.effectivePath, envPath);
+      assert.equal(res.data.detail.ffmpeg.source, 'env');
+    },
+  );
+});
+
+test('mcp: with no override the probe reports PATH as the source', async (t) => {
+  if (haveFfmpeg) return t.skip('needs a machine without ffmpeg on PATH');
+  await withServer({ home: 'home-ffmpeg-path' }, async (call) => {
+    const res = await call('list_projects');
+    assert.equal(res.data.code, 'prereqs_missing');
+    assert.equal(res.data.detail.ffmpeg.source, 'PATH');
+    assert.match(res.data.message, /on PATH/);
+  });
+});
+
+/* ------------------------ global settings reach the agent ------------------------ */
+// "Global Settings" in the Studio means global: a project an agent creates without
+// naming dimensions gets the user's defaults, and a render that doesn't name a
+// worker count gets theirs. An explicit argument still wins.
+
+test('mcp: create_project and render honour the user\'s global settings', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  await withServer(
+    {
+      home: 'home-globals',
+      settings: {
+        newProjectDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 },
+        render: { defaultWorkers: 2 },
+        ffmpeg: { defaultCrf: 18, defaultPreset: 'slow' },
+      },
+    },
+    async (call) => {
+      const made = await call('create_project', { name: 'globals' });
+      assert.equal(made.isError, false);
+      assert.equal(made.data.config.fps, 24);
+      assert.equal(made.data.config.width, 1280);
+      assert.equal(made.data.config.height, 720);
+      assert.equal(made.data.config.durationInFrames, 48);
+      // Encode defaults seed the scaffold too — previously Studio-only.
+      assert.equal(made.data.config.output.crf, 18);
+      assert.equal(made.data.config.output.preset, 'slow');
+
+      // An explicit argument beats the global; the rest still fill in.
+      const explicit = await call('create_project', { name: 'globals-explicit', fps: 60, width: 1920 });
+      assert.equal(explicit.data.config.fps, 60);
+      assert.equal(explicit.data.config.width, 1920);
+      assert.equal(explicit.data.config.height, 720);
+
+      // render reports the worker count it actually used.
+      const started = await call('render', { projectId: made.data.id, frameRange: [0, 1], preflight: false });
+      assert.equal(started.data.workers, 2);
+      const named = await call('render', { projectId: made.data.id, frameRange: [0, 1], workers: 1, preflight: false });
+      assert.equal(named.data.workers, 1);
+    },
+  );
+});
+
+test('mcp: with no settings file the factory defaults still apply', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  await withServer({ home: 'home-no-settings' }, async (call) => {
+    const made = await call('create_project', { name: 'factory' });
+    assert.equal(made.data.config.fps, 30);
+    assert.equal(made.data.config.width, 1920);
+    assert.equal(made.data.config.durationInFrames, 150);
+    const started = await call('render', { projectId: made.data.id, frameRange: [0, 1], preflight: false });
+    assert.equal(started.data.workers, 1);
+  });
+});
+
 /* ---------------------------- v0.8 music generation ---------------------------- */
 // The music toolchain (MIDI exe + fluidsynth + soundfont) is stubbed via env in the
 // shared server. These need no ffmpeg — synthesize_music does not gate on prereqs.

@@ -76,21 +76,28 @@ put there shows up on the next refresh.
 **⚙ settings** in the sidebar footer opens the global configuration:
 
 - **new-project defaults** — the fps/dimensions/duration the *+ new* dialog
-  is pre-filled with.
-- **default workers** — the render tab's initial workers selection.
+  is pre-filled with, and what any new project gets when its creator didn't
+  specify — including one an agent makes over MCP.
+- **default workers** — the render tab's initial workers selection, and the
+  worker count for any render that doesn't name one.
 - **ffmpeg** — a binary path override (leave empty to use `ffmpeg` on PATH;
   the dialog live-probes the effective binary and shows its version or a
   ✗ if it can't be run — the footer status updates too) and default
   crf/preset values that seed *newly created* projects' output config.
-  The path override applies to every Studio render; the same override is
-  available to the CLI as `--ffmpeg <path>`.
+  The path override applies to every render — the Studio's, the CLI's, and an
+  agent's. `MOTION_STUDIO_FFMPEG` overrides it for a single process, and the
+  CLI's `--ffmpeg <path>` overrides both (`render.js --doctor` prints which
+  binary it settled on and where that came from).
 - a read-only **environment** report: where the data dir, projects root, and
   registry live, plus the current values of the `MOTION_STUDIO_*` env hooks
   and `PUPPETEER_EXECUTABLE_PATH`.
 
-Settings persist in `~/.motion-studio/settings.json`. They only seed the
-Studio's forms and renders — they never override a project's `project.json`,
-and agents rendering over MCP are unaffected.
+Settings persist in `~/.motion-studio/settings.json` and are genuinely global:
+the Studio, the CLI, and agents working over MCP all honour them. They fill in
+what a new project or render didn't specify — an explicit choice always wins,
+so an agent told to make a 4K vertical video still gets one — and they apply
+only at creation. A project already on disk is never rewritten because you
+changed a global, so it keeps rendering the way it did.
 
 The project sidebar sorts by **a–z** or **date** (last modified, newest
 first) via the toggle next to *+ new*, and collapses to a slim strip with the

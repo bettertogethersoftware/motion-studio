@@ -331,17 +331,39 @@ human through the Studio's hot-reload watcher.
 `~/.motion-studio/settings.json` (v0.15, `core/settings.js`) sits alongside it
 and holds *user preferences*, with the same atomic write and a validated
 schema: `newProjectDefaults`, `render.defaultWorkers`, and an `ffmpeg` block
-(binary `path` override plus `defaultCrf`/`defaultPreset`). The scope line is
-deliberate and worth preserving: settings **seed** the Studio's forms and
-newly created projects, and never override an existing `project.json`. The
-MCP server does not read them at all — an agent asking for 24 fps says so
-explicitly, and a machine-level preference silently changing an agent's
-output would be a reproducibility hazard. The one setting that reaches the
-engine directly is `ffmpeg.path`, which flows into `checkPrerequisites` and
-every Studio render job; `renderParallel` forwards it to its worker processes
-(CLI `--ffmpeg`) so a parent and its workers cannot encode with different
-binaries. A corrupted settings file degrades to defaults rather than
-bricking the UI.
+(binary `path` override plus `defaultCrf`/`defaultPreset`).
+
+The scope line moved in v0.16, and the reasoning is worth recording because it
+reversed. Through v0.15 the MCP server read none of this: an agent asking for
+24 fps should say so explicitly, and a machine-level preference silently
+changing an agent's output looked like a reproducibility hazard. In practice
+the UI calls the panel **Global Settings**, and a user who sets a value there
+means it — the surface that happens to be driving is not a meaningful axis to
+vary behaviour along. Worse, `ffmpeg.path` had no MCP equivalent at all, so a
+correctly-configured machine still failed every agent call with
+`prereqs_missing`. All front ends now honour the file.
+
+Two invariants keep the reproducibility concern answered. Globals **only fill
+gaps** — an explicit argument always wins, which is why MCP's `create_project`
+takes `.optional()` fields rather than zod `.default()`s (a default is
+indistinguishable from a caller who meant it). And they apply **only at
+creation**: an existing `project.json` is never rewritten because a global
+changed, so a project renders identically tomorrow. Both front ends route
+through `withNewProjectDefaults` / `outputSeedFromSettings` in
+`core/settings.js` rather than merging locally, so they cannot drift.
+
+`ffmpeg.path` is resolved by one function, `resolveFfmpegPath()`, which all
+three entry points call: explicit override (CLI `--ffmpeg`) →
+`MOTION_STUDIO_FFMPEG` → `ffmpeg.path` → `ffmpeg` on PATH. The env var
+outranks settings because an MCP server inherits whatever PATH its client had;
+the override outranks everything because a caller naming a binary means it.
+The resolved path feeds `checkPrerequisites` *and* the render job, so a green
+check can never describe a different binary than the one that encodes.
+`renderParallel` forwards it to its workers unconditionally — including the
+literal `"ffmpeg"`, since a worker that re-resolved for itself could pick up an
+env var the parent deliberately overrode and split a fan-out across two
+binaries. A corrupted settings file degrades to defaults rather than bricking
+the UI — or, on the MCP side, rather than taking the server down.
 
 ## 12. Preview fidelity
 
