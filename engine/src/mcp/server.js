@@ -1044,7 +1044,9 @@ server.registerTool(
     description:
       'Stitch several already-rendered scene projects into one continuous film — the way to build videos longer than a single ' +
       'composition. Author each scene as its own project (create_project → write_composition_file → render), then list them here ' +
-      'in play order. Scenes are concatenated LOSSLESSLY (ffmpeg -c copy, no re-encode), so they must share resolution, fps, format ' +
+      'in play order. ALWAYS create a dedicated output project for the film first and pass it as outputProjectId — otherwise the ' +
+      'film and any master-audio assets land inside the FIRST SCENE\'s folder, mixed in with that scene\'s render. ' +
+      'Scenes are concatenated LOSSLESSLY (ffmpeg -c copy, no re-encode), so they must share resolution, fps, format ' +
       'and pixel format — use mp4, webm, or prores (gif / png-sequence cannot be concatenated). This tool renders nothing: every ' +
       'scene must already be rendered, or it fails with scene_not_rendered listing which. Mismatched scenes fail with ' +
       'inconsistent_scenes. Audio: with no `audio`, each scene\'s own audio is preserved (all scenes must be consistently audio ' +
@@ -1057,7 +1059,8 @@ server.registerTool(
       scenes: z.array(z.object({ projectId: z.string() })).min(1)
         .describe('Scene projects in play order; each must already be rendered'),
       outputProjectId: z.string().optional()
-        .describe('Project that receives out/<film> and holds master-audio assets (default: the first scene)'),
+        .describe('Project that receives out/<film> and holds master-audio assets. Strongly recommended: create a ' +
+          'dedicated film project and pass it here — omitting this dumps the film into the first scene\'s folder'),
       outputFilename: z.string().optional()
         .describe('Bare filename for the film; extension is forced to the scenes\' format (default film.<ext>)'),
       audio: z.array(z.object({

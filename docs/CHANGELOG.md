@@ -1,5 +1,14 @@
 # Motion Studio — Changelog
 
+## Unreleased
+
+- **Docs/guidance: films get a dedicated output project.** `build_film`'s
+  `outputProjectId` default (the first scene) meant agents assembling
+  multi-scene films dumped the film and its master-audio assets into scene 1's
+  folder. The tool description, `docs/SKILL.md`, and `docs/film-setup.md` now
+  instruct agents to create a dedicated film project and pass it as
+  `outputProjectId`. Code behavior is unchanged.
+
 ## v0.16 (2026-07-26)
 
 Global settings become actually global. v0.15 shipped the ⚙ settings dialog

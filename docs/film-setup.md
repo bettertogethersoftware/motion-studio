@@ -21,6 +21,12 @@ applies it at the **scene** level, across projects.
 - **One project per scene.** Author and render each scene with the normal tools
   (`create_project` → `write_composition_file` → `capture_preview_frame` →
   `render`). Nothing new to learn per scene.
+- **One dedicated project for the film.** Create an extra project (name it after
+  the film, e.g. `"My Film — Master"`) and pass it as `outputProjectId`; the
+  assembled film goes to its `out/` and master-audio assets live in its
+  `assets/`. If you omit `outputProjectId`, everything lands inside the **first
+  scene's** folder, tangled up with that scene's own render — avoid that. The
+  film project is never rendered itself; ignore its scaffolded composition.
 - **`build_film` assembles; it never renders.** Every scene must already be
   rendered, or the call fails with `scene_not_rendered` naming the culprits.
 - Because compositions are pure functions of frame, you can **preview scenes at
@@ -160,7 +166,7 @@ render cost; 60fps doubles frames. Even dimensions are required for mp4/webm/pro
 | arg | meaning |
 |---|---|
 | `scenes` (req) | ordered `[{ projectId }]` — the scenes, in play order, each already rendered |
-| `outputProjectId` | project that receives `out/<film>` and holds master-audio assets (default: the first scene) |
+| `outputProjectId` | project that receives `out/<film>` and holds master-audio assets — **create a dedicated film project and pass it here** (defaulting to the first scene dumps the film into that scene's folder) |
 | `outputFilename` | bare filename; extension is forced to the scenes' format (default `film.<ext>`) |
 | `audio` | optional master timeline `[{ src (under assets/), startInFrames?, gainDb? }]` laid over the whole film |
 | `audioTargetPeakDb` **(v0.11)** | −60..0. Measure the mixed film and re-mux **once** so it peaks here (e.g. `-2`). Shifts every track by the same offset, preserving your balance. |
@@ -174,25 +180,27 @@ Errors: `scene_not_rendered`, `inconsistent_scenes`, `path_outside_project`,
 ## Worked example
 
 ```
-# three scenes, identical video params
+# three scenes + one dedicated film project, identical video params
 create_project { name: "Scene 1 — Title",  width: 1920, height: 1080, fps: 30, durationInFrames: 150 }
 create_project { name: "Scene 2 — Body",   width: 1920, height: 1080, fps: 30, durationInFrames: 600 }
 create_project { name: "Scene 3 — Outro",  width: 1920, height: 1080, fps: 30, durationInFrames: 150 }
+create_project { name: "My Film — Master", width: 1920, height: 1080, fps: 30, durationInFrames: 1 }   # never rendered; holds the film + master audio
 
-# author + render each (render nothing here that build_film will redo)
+# author + render each scene (render nothing here that build_film will redo)
 write_composition_file … ; render { projectId: <scene1> } ; poll get_render_status → done
 … repeat for scene 2 and 3 …
 
-# a master score in scene 1's assets (or a dedicated film project)
-synthesize_music { projectId: <scene1>, mode: "asset-only" }   → assets/music-1.wav
+# a master score in the film project's assets
+synthesize_music { projectId: <film>, mode: "asset-only" }   → assets/music-1.wav
 
 # stitch, with the score over the whole 30s
 build_film {
   scenes: [{ projectId: <scene1> }, { projectId: <scene2> }, { projectId: <scene3> }],
+  outputProjectId: <film>,
   audio:  [{ src: "assets/music-1.wav", gainDb: -8 }],
   outputFilename: "my-film"
 }
-→ out/my-film.mp4  (900 frames, 30s, one continuous film)
+→ <film>/out/my-film.mp4  (900 frames, 30s, one continuous film)
 ```
 
 ## The pattern that scales: one engine, scenes as data
