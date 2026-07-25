@@ -10,7 +10,16 @@
  *   renderComposition(opts)     — serial capture+encode of a frame range
  *   renderParallel(opts)        — split range across worker processes + merge
  *   captureSingleFrame(opts)    — one frame as a PNG buffer (agent preview)
+ *   captureFrames(opts)         — N frames from ONE page load (v0.10)
  *   renderStill(opts)           — one frame written to disk as a PNG still
+ *   preflightFrameList(a, b, n) — the frames a pre-flight pass probes
+ *
+ * Pre-flight (v0.10): a composition that throws only at, say, frame 90 used to
+ * take the whole render down after ~90 frames of work (and after spawning every
+ * worker). Both render paths now probe a handful of evenly-spaced frames first
+ * and fail fast with the real composition_error. Serial renders reuse the page
+ * they already opened, so the check is nearly free; the parallel path pays one
+ * browser launch to avoid wasting N of them. Disable with `preflight: false`.
  *
  * Formats (v0.5): the target format comes from config.output.format
  * (core/formats.js). "png-sequence" writes a folder of frames and skips the
@@ -32,8 +41,9 @@ import { spawn } from 'node:child_process';
 import { EngineError, ErrorCodes, asEngineError } from './errors.js';
 import { ProgressEmitter, ProgressStreamParser } from './progress.js';
 import { createPuppeteerBrowser } from './browser.js';
-import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode } from './encoder.js';
+import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount } from './encoder.js';
 import { getFormat, INTERMEDIATE } from './formats.js';
+import { acquireRenderLock } from './lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,6 +61,113 @@ function resolveRange(config, frameRange) {
     );
   }
   return [start, end];
+}
+
+/** Upper bound on a single batch preview request (one page load, N screenshots). */
+export const MAX_PREVIEW_FRAMES = 24;
+
+/** Below this many frames a render is short enough that pre-flight is pure overhead. */
+export const MIN_FRAMES_FOR_PREFLIGHT = 30;
+
+function assertFrameInRange(frame, config) {
+  if (!Number.isInteger(frame) || frame < 0 || frame >= config.durationInFrames) {
+    throw new EngineError(
+      ErrorCodes.INVALID_CONFIG,
+      `frame ${frame} out of range (composition has frames 0..${config.durationInFrames - 1})`,
+    );
+  }
+}
+
+/**
+ * Evenly-spaced probe frames across an inclusive range, always including both
+ * endpoints. Endpoints matter: "works at frame 0" is exactly the false positive
+ * that lets a bad range or a late Sequence slip through to a full render.
+ */
+export function preflightFrameList(startFrame, endFrame, count = 5) {
+  const total = endFrame - startFrame + 1;
+  const n = Math.max(2, Math.min(count, total));
+  const frames = new Set();
+  for (let i = 0; i < n; i++) {
+    frames.add(startFrame + Math.round(((total - 1) * i) / (n - 1)));
+  }
+  return [...frames].sort((a, b) => a - b);
+}
+
+/**
+ * Drive an already-open page over the probe frames, discarding the pixels.
+ * Errors keep their original code (composition_error / frame_timeout) so the
+ * agent sees the real fix, with phase:'preflight' added for context.
+ */
+async function runPreflight(page, frames, signal, progress) {
+  progress.phase('preflight');
+  for (const frame of frames) {
+    throwIfAborted(signal);
+    try {
+      await page.captureFrame(frame);
+    } catch (err) {
+      const e = asEngineError(err);
+      e.detail = { ...(e.detail ?? {}), phase: 'preflight', probedFrames: frames };
+      e.message = `Pre-flight failed at frame ${frame} (probed ${frames.join(', ')}): ${e.message}`;
+      throw e;
+    }
+  }
+  progress.log('info', `Pre-flight passed: frames ${frames.join(', ')}`);
+}
+
+/**
+ * Measure the muxed result and report it (v0.10). amix runs with normalize=0,
+ * so track gains sum straight through — without this the only symptom of a
+ * clipped mix is that it sounds bad, which an agent cannot hear. Never fatal:
+ * a measurement failure must not fail an otherwise good render.
+ */
+async function reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal }) {
+  const levels = await measureAudioLevels({
+    filePath: outputPath, ffmpegPath, onSpawn: onChildPid, signal,
+  }).catch(() => null);
+  const limiter = output.audioLimiter !== false;
+  if (!levels) {
+    progress.log('warn', 'Could not measure output audio levels.');
+    return { tracks: config.audio.length, limiter };
+  }
+  const clipping = levels.peakDb !== null && levels.peakDb >= -0.1;
+  if (clipping) {
+    progress.log(
+      'warn',
+      `Mixed audio peaks at ${levels.peakDb} dBFS — the mix is clipping. ` +
+        (limiter
+          ? 'The limiter is enabled, so this is likely a very hot single track; lower its gainDb.'
+          : 'Lower the track gainDb values, or set output.audioLimiter to true.'),
+    );
+  }
+  return { tracks: config.audio.length, limiter, ...levels, clipping };
+}
+
+/**
+ * Verify the encoded file actually contains the frames we captured (v0.11).
+ *
+ * A worker killed mid-encode leaves a short but perfectly valid video behind,
+ * and nothing downstream notices: build_film happily concatenates it and the
+ * finished film simply has a scene that stops early. Checking the count here is
+ * what makes "the render succeeded" mean something, and what lets a resumable
+ * driver trust an existing output instead of re-rendering it.
+ *
+ * Unverifiable (no ffprobe) is not a failure — it is reported as such.
+ */
+export async function verifyFrameCount({ outputPath, expected, progress = new ProgressEmitter(null), onChildPid, signal }) {
+  const actual = await probeFrameCount({ filePath: outputPath, onSpawn: onChildPid, signal }).catch(() => null);
+  if (actual === null) {
+    progress.log('warn', 'Could not verify the output frame count (ffprobe unavailable?).');
+    return { frames: expected, verified: false };
+  }
+  if (actual !== expected) {
+    throw new EngineError(
+      ErrorCodes.SHORT_RENDER,
+      `output has ${actual} frames but ${expected} were rendered — the encode did not complete. ` +
+        'Re-render this project; do not assemble this file into a film.',
+      { outputPath, expected, actual },
+    );
+  }
+  return { frames: actual, verified: true };
 }
 
 function outputSettings(config) {
@@ -72,6 +189,9 @@ function outputSettings(config) {
  * @param {string} [opts.framesDir]     if set: write PNG sequence, encode second-pass
  * @param {boolean} [opts.skipAudio]    used for parallel segments (audio muxed once at the end)
  * @param {boolean} [opts.asIntermediate]  encode to the lossless intermediate codec (parallel workers)
+ * @param {boolean} [opts.lock=true]    take the project's cross-process render lock.
+ *   Parallel *workers* must pass false: they render the same project by design,
+ *   and their parent already holds the lock on their behalf.
  * @param {AbortSignal} [opts.signal]
  * @param {ProgressEmitter} [opts.progress]
  * @param {Function} [opts.browserFactory]  DI for tests; defaults to Puppeteer
@@ -86,6 +206,9 @@ export async function renderComposition(opts) {
     ffmpegPath = 'ffmpeg',
     onChildPid = () => {},
     jobId = null,
+    preflight = true,
+    preflightCount = 5,
+    lock = true,
   } = opts;
 
   let startFrame, endFrame, settings;
@@ -108,13 +231,35 @@ export async function renderComposition(opts) {
   progress.start({ jobId, totalFrames, fps: config.fps, width: config.width, height: config.height });
   await fsp.mkdir(isPngSequence ? outputPath : path.dirname(outputPath), { recursive: true });
 
-  const browser = await browserFactory({});
+  // Before Chromium: a lock failure should cost nothing.
+  let held = null;
+  try {
+    if (lock) held = await acquireRenderLock(projectPath, { label: 'render' });
+  } catch (err) {
+    const e = asEngineError(err);
+    progress.error(e);
+    throw e;
+  }
+
+  let browser;
+  try {
+    browser = await browserFactory({});
+  } catch (err) {
+    await held?.release();
+    throw err;
+  }
   if (browser.pid) onChildPid(browser.pid);
   let sink = null;
 
   try {
     throwIfAborted(signal);
     const page = await browser.openPage({ url: entryUrl, width: config.width, height: config.height, transparent });
+
+    // Free here: the page is already warm, so probing costs a few frame renders
+    // instead of the tail of a doomed render.
+    if (preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
+      await runPreflight(page, preflightFrameList(startFrame, endFrame, preflightCount), signal, progress);
+    }
 
     progress.phase('capturing');
     const sequenceDir = isPngSequence ? outputPath : framesDir;
@@ -155,6 +300,7 @@ export async function renderComposition(opts) {
       }
     }
 
+    let audio;
     if (!skipAudio && !isPngSequence && config.audio?.length) {
       const fmt = getFormat(output.format);
       if (!fmt.audioArgs) {
@@ -180,18 +326,81 @@ export async function renderComposition(opts) {
         } finally {
           await fsp.unlink(silent).catch(() => {});
         }
+        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal });
       }
     }
 
+    // A segment is one chunk of a bigger render; only the whole file is checked.
+    const verified = isPngSequence || skipAudio
+      ? { frames: totalFrames, verified: false }
+      : await verifyFrameCount({ outputPath, expected: totalFrames, progress, onChildPid, signal });
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath, frames: totalFrames, elapsedMs });
-    return { outputPath, frames: totalFrames, elapsedMs };
+    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio });
+    return {
+      outputPath, frames: totalFrames, elapsedMs,
+      framesVerified: verified.verified,
+      ...(audio ? { audio } : {}),
+    };
   } catch (err) {
     const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
     progress.error(engineErr);
     throw engineErr;
   } finally {
     if (sink) sink.kill();
+    await browser.close();
+    await held?.release();
+  }
+}
+
+/**
+ * Capture several frames through the *real* render path from a SINGLE page load
+ * (v0.10). Returns [{ frame, png }] in the order requested.
+ *
+ * This exists because per-frame previews are dominated by fixed costs, not by
+ * the frame itself: every call to captureSingleFrame used to launch Chromium,
+ * load the page, and re-run all of the composition's one-time setup (canvas
+ * textures, geometry merging) to produce one screenshot. Checking five frames
+ * paid that five times. The capture loop itself has always supported many
+ * frames per page — this just exposes it to the preview path.
+ */
+export async function captureFrames({
+  projectPath, config, frames,
+  browserFactory = createPuppeteerBrowser, onChildPid = () => {}, signal,
+}) {
+  if (!Array.isArray(frames) || frames.length === 0) {
+    throw new EngineError(ErrorCodes.INVALID_CONFIG, 'frames: a non-empty array of frame numbers is required');
+  }
+  if (frames.length > MAX_PREVIEW_FRAMES) {
+    throw new EngineError(
+      ErrorCodes.INVALID_CONFIG,
+      `frames: at most ${MAX_PREVIEW_FRAMES} frames per request (got ${frames.length})`,
+      { max: MAX_PREVIEW_FRAMES, requested: frames.length },
+    );
+  }
+  for (const frame of frames) assertFrameInRange(frame, config);
+
+  const transparent = !!config.output?.transparent;
+  const browser = await browserFactory({});
+  if (browser.pid) onChildPid(browser.pid);
+  try {
+    throwIfAborted(signal);
+    const page = await browser.openPage({
+      url: pathToFileURL(path.resolve(projectPath, config.entry)).href,
+      width: config.width,
+      height: config.height,
+      transparent,
+    });
+    const out = [];
+    for (const frame of frames) {
+      throwIfAborted(signal);
+      out.push({ frame, png: await page.captureFrame(frame) });
+    }
+    await page.close();
+    return out;
+  } catch (err) {
+    throw asEngineError(err);
+  } finally {
     await browser.close();
   }
 }
@@ -204,31 +413,11 @@ export async function captureSingleFrame({
   projectPath, config, frame,
   browserFactory = createPuppeteerBrowser, onChildPid = () => {}, signal,
 }) {
-  if (!Number.isInteger(frame) || frame < 0 || frame >= config.durationInFrames) {
-    throw new EngineError(
-      ErrorCodes.INVALID_CONFIG,
-      `frame ${frame} out of range (composition has frames 0..${config.durationInFrames - 1})`,
-    );
-  }
-  const transparent = !!config.output?.transparent;
-  const browser = await browserFactory({});
-  if (browser.pid) onChildPid(browser.pid);
-  try {
-    throwIfAborted(signal);
-    const page = await browser.openPage({
-      url: pathToFileURL(path.resolve(projectPath, config.entry)).href,
-      width: config.width,
-      height: config.height,
-      transparent,
-    });
-    const png = await page.captureFrame(frame);
-    await page.close();
-    return png;
-  } catch (err) {
-    throw asEngineError(err);
-  } finally {
-    await browser.close();
-  }
+  assertFrameInRange(frame, config);
+  const [only] = await captureFrames({
+    projectPath, config, frames: [frame], browserFactory, onChildPid, signal,
+  });
+  return only.png;
 }
 
 /** Render one frame to a PNG file on disk (the "still export" path). */
@@ -266,10 +455,14 @@ export async function renderParallel(opts) {
     projectPath, config, outputPath,
     frameRange, workers = Math.max(1, Math.min(os.cpus().length, 4)),
     signal, progress = new ProgressEmitter(null),
+    browserFactory = createPuppeteerBrowser,
     ffmpegPath = 'ffmpeg',
     onChildPid = () => {},
     jobId = null,
     nodeExecutable = process.execPath,
+    preflight = true,
+    preflightCount = 5,
+    lock = true,
   } = opts;
 
   let startFrame, endFrame, settings;
@@ -285,6 +478,8 @@ export async function renderParallel(opts) {
   const totalFrames = endFrame - startFrame + 1;
   const workerCount = Math.max(1, Math.min(workers, totalFrames));
 
+  // Delegating, not locking: renderComposition takes the lock itself, so taking
+  // it here first would deadlock against our own delegate.
   if (workerCount === 1) {
     return renderComposition({ ...opts, frameRange: [startFrame, endFrame] });
   }
@@ -292,8 +487,43 @@ export async function renderParallel(opts) {
   const isPngSequence = output.format === 'png-sequence';
   const useIntermediate = !isPngSequence && (!fmt.copyConcat || transparent);
 
+  // Held for the whole fan-out. Workers run with --segment (lock:false): they
+  // write this same project deliberately, and this lock covers them.
+  let held = null;
+  try {
+    if (lock) held = await acquireRenderLock(projectPath, { label: `render x${workerCount}` });
+  } catch (err) {
+    const e = asEngineError(err);
+    progress.error(e);
+    throw e;
+  }
+
   const startedAt = Date.now();
   progress.start({ jobId, totalFrames, fps: config.fps, width: config.width, height: config.height });
+
+  // One browser launch here buys the chance to fail before spawning N of them.
+  if (preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
+    const probeBrowser = await browserFactory({});
+    if (probeBrowser.pid) onChildPid(probeBrowser.pid);
+    try {
+      const probePage = await probeBrowser.openPage({
+        url: pathToFileURL(path.resolve(projectPath, config.entry)).href,
+        width: config.width,
+        height: config.height,
+        transparent,
+      });
+      await runPreflight(probePage, preflightFrameList(startFrame, endFrame, preflightCount), signal, progress);
+      await probePage.close();
+    } catch (err) {
+      const e = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
+      progress.error(e);
+      await held?.release();
+      throw e;
+    } finally {
+      await probeBrowser.close();
+    }
+  }
+
   progress.phase('capturing');
   await fsp.mkdir(isPngSequence ? outputPath : path.dirname(outputPath), { recursive: true });
 
@@ -370,6 +600,7 @@ export async function renderParallel(opts) {
   const onAbort = () => killChildren();
   signal?.addEventListener('abort', onAbort, { once: true });
 
+  let audio;
   try {
     throwIfAborted(signal);
     await Promise.all(chunks.map((_, i) => runWorker(i)));
@@ -424,14 +655,25 @@ export async function renderParallel(opts) {
         } finally {
           await fsp.unlink(silentOut).catch(() => {});
         }
+        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal });
       } else if (config.audio?.length && !fmt.audioArgs) {
         progress.log('warn', `Format "${output.format}" cannot carry audio; audio tracks skipped.`);
       }
     }
 
+    // The whole point of the parallel path: N workers each encoded a piece, and
+    // a piece that silently came up short would otherwise ship inside the merge.
+    const verified = isPngSequence
+      ? { frames: totalFrames, verified: false }
+      : await verifyFrameCount({ outputPath, expected: totalFrames, progress, onChildPid, signal });
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath, frames: totalFrames, elapsedMs });
-    return { outputPath, frames: totalFrames, elapsedMs };
+    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio });
+    return {
+      outputPath, frames: totalFrames, elapsedMs,
+      framesVerified: verified.verified,
+      ...(audio ? { audio } : {}),
+    };
   } catch (err) {
     killChildren();
     const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
@@ -440,5 +682,8 @@ export async function renderParallel(opts) {
   } finally {
     signal?.removeEventListener('abort', onAbort);
     await fsp.rm(segDir, { recursive: true, force: true }).catch(() => {});
+    // Best-effort: an unreleased lock self-heals, because the next acquirer
+    // clears any lock whose owning pid is no longer alive.
+    await held?.release();
   }
 }

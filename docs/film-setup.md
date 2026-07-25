@@ -52,6 +52,47 @@ between scenes — they affect encoding, not stream compatibility.)
   **replaces** per-scene audio and is the clean choice for long-form — a score that
   spans scene cuts, VO placed by absolute frame across the whole film.
 
+## Levels: measure, never inherit
+
+When you pass a master `audio` timeline, the result carries an `audio` block with
+the **measured** peak/mean dBFS of the finished film and a `clipping` flag. Read
+it. A bad mix is the one defect you cannot see in a preview frame, and the render
+path has reported these numbers since v0.10 — as of v0.11 `build_film` does too.
+
+**Do not copy a master gain from a previous film.** Levels are a property of the
+*voices and beds you actually used*, not of your taste. A worked example: an
+en-US narration film mixed correctly at a +4 dB master lift; the zh-TW OneCore
+voices in the next film conditioned about 5 dB hotter through the same
+`speechnorm` chain, and that same +4 would have put speech at **+1.4 dBFS** —
+forcing the limiter to act on every consonant. That is the failure mode to fear,
+because unlike clipping it is not reported and does not sound broken; it just
+sounds slightly muddy, which is fatal for a children's narration.
+
+The reliable procedure:
+
+1. Condition each narration clip (`speechnorm=e=9:r=0.0004:l=1,volume=-3dB` is a
+   good starting chain) and **measure the loudest one**.
+2. Set your *relative* balance from that — bed mean ~30 dB under the voice,
+   transition cues peaking ~20 dB under it.
+3. Let `build_film` place the absolute level: pass **`audioTargetPeakDb: -2`**.
+   It measures the assembled mix, applies one offset to *every* track (so your
+   balance is preserved exactly), re-muxes, and re-measures. The returned
+   `audio.appliedOffsetDb` tells you what it moved.
+
+Re-assembly is cheap — the concat is a stream copy, so a level correction on a
+ten-minute film costs seconds. Measure and fix; never ship a guess.
+
+`output.audioLimiter` (default true) still brick-walls the result at −1 dBFS, but
+treat it as a seatbelt, not a mixing tool: if the limiter is doing work, the mix
+is already wrong.
+
+**The SFX bed is calibrated the same way.** `synthesize_sfx` (v0.12) renders a
+whole cue list — chimes on cuts, a shimmer under a reveal, a thud on an impact —
+into one track, and by default it *leaves a quiet bed quiet* rather than
+normalizing it, so the `peakDb` it reports is a real level you can balance
+against. Attach it with a `gainDb` derived from that number, not from a previous
+film. See [sfx-setup.md](sfx-setup.md).
+
 ## Highest quality
 
 The concat itself is lossless, so quality is set by how you **render the scenes**
@@ -78,10 +119,13 @@ render cost; 60fps doubles frames. Even dimensions are required for mp4/webm/pro
 | `outputProjectId` | project that receives `out/<film>` and holds master-audio assets (default: the first scene) |
 | `outputFilename` | bare filename; extension is forced to the scenes' format (default `film.<ext>`) |
 | `audio` | optional master timeline `[{ src (under assets/), startInFrames?, gainDb? }]` laid over the whole film |
+| `audioTargetPeakDb` **(v0.11)** | −60..0. Measure the mixed film and re-mux **once** so it peaks here (e.g. `-2`). Shifts every track by the same offset, preserving your balance. |
 
-Returns `{ outputProjectId, sceneOrder, outputPath, scenes, totalFrames, durationSeconds, fps, format, hasAudio }`.
+Returns `{ outputProjectId, sceneOrder, outputPath, scenes, totalFrames, durationSeconds, fps, format, hasAudio }`,
+plus — whenever a master timeline was supplied — **`audio: { tracks, limiter, peakDb, meanDb, clipping, targetPeakDb?, appliedOffsetDb? }`** (v0.11).
 Errors: `scene_not_rendered`, `inconsistent_scenes`, `path_outside_project`,
-`file_not_found`, plus `prereqs_missing`/`ffmpeg_failed` from the encoder.
+`file_not_found`, `invalid_config` (bad `audioTargetPeakDb`), plus
+`prereqs_missing`/`ffmpeg_failed` from the encoder.
 
 ## Worked example
 
@@ -131,6 +175,46 @@ scene's config, re-render *only that project*, and call `build_film` again — t
 scenes' rendered outputs are reused untouched and the whole film re-stitches in
 seconds. That render-one / reassemble loop is what makes a long film tractable.
 
+**Fixing the shared engine: use `sync_shared_files`.** Each project owns its own
+*copy* of `composition.js`, so editing the one you authored first reaches nothing
+already scaffolded. On a 16-scene film a one-line art fix otherwise means sixteen
+`write_composition_file` calls. Instead:
+
+```
+sync_shared_files {
+  sourceProjectId: <scene 1>,
+  targetProjectIds: [<every other scene>],
+  files: ["composition.js", "styles.css"]
+}
+```
+
+Every target gets the same syntax check and determinism lint as a normal write,
+and all source files are read before anything is written, so a bad path fails
+before it half-updates the film. Note what it does **not** do: it will not touch
+`scene.js` unless you list it (that is the per-scene data, and listing it would
+overwrite every scene with scene 1's), and already-rendered output is not
+invalidated — **re-render the affected scenes yourself**.
+
+## Narration-first timing
+
+For anything voice-led, synthesize the narration **before** you size the scene,
+and let the audio decide `durationInFrames`:
+
+```
+synthesize_speech(...)            → durationInFrames for the clip
+durationInFrames = LEAD + <narration frames> + TAIL     // e.g. LEAD 24, TAIL 38
+update_project_config { durationInFrames }
+```
+
+Then the visuals cannot drift out of sync with the voice, because the picture is
+cut to the voice rather than the other way round. Sizing the scene first and
+hoping the VO fits is what produces either dead air at the end of a scene or a
+line still talking over the next cut. Two ten-minute films built this way landed
+every one of their scenes with exactly the intended tail frames and zero
+overruns; the check is worth automating — assert
+`narrationStart + narrationFrames <= sceneStart + durationInFrames` for every
+scene before you render anything.
+
 ## Using external image assets
 
 Backgrounds, sprites, and other images live under the project's `assets/` and are
@@ -166,6 +250,16 @@ learned the hard way:
   scenes** (generate many similar scene projects from a manifest) and **asset
   compositing** (images/video as the base, code for motion/text/transitions) over
   hand-building every frame.
+- **Drive a long batch by frame count, and retry.** Chromium dies intermittently
+  mid-screenshot (`Protocol error (Page.captureScreenshot): Target closed`) on
+  long runs — observed at both 4 and 6 workers, on different scenes each time,
+  with plenty of RAM free. It is flaky, not a bad scene and not memory pressure,
+  so lowering the fan-out only changes the odds; **retrying the scene** is what
+  recovers. Make the batch resumable on the same signal: skip a scene whose
+  output already has exactly `durationInFrames` frames. Since v0.11 the renderer
+  verifies that count itself and fails with `short_render` rather than returning
+  a truncated file, so "the output exists and is the right length" is now a
+  trustworthy resume condition.
 
 ## Current limits (v0.9)
 

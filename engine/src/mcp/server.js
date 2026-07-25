@@ -30,13 +30,17 @@ import fsp from 'node:fs/promises';
 
 import { ProjectStore } from '../core/project.js';
 import { JobManager } from '../core/jobs.js';
-import { captureSingleFrame, renderComposition, renderParallel, renderStill } from '../core/renderer.js';
+import {
+  captureSingleFrame, captureFrames, renderComposition, renderParallel, renderStill,
+  preflightFrameList, MAX_PREVIEW_FRAMES,
+} from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { resolveInProject } from '../core/sandbox.js';
 import { synthesizeSpeech, wavDurationSeconds, framesForDuration, checkTts, resolveTtsExe } from '../core/tts.js';
 import { synthesizeMusic, checkMusic } from '../core/music.js';
+import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm } from '../core/film.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -109,12 +113,23 @@ async function nextMusicPath(assetsDir) {
   return `assets/music-${n}.wav`;
 }
 
+/** Smallest-free assets/sfx-<n>.wav. */
+async function nextSfxPath(assetsDir) {
+  let existing;
+  try { existing = new Set(await fsp.readdir(assetsDir)); } catch { existing = new Set(); }
+  let n = 1;
+  while (existing.has(`sfx-${n}.wav`)) n++;
+  return `assets/sfx-${n}.wav`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Server + tools                                                      */
 /* ------------------------------------------------------------------ */
 
 const renderCompositionInjected = (o) => renderComposition({ ...o, browserFactory: injectedBrowserFactory });
-const renderParallelInjected = (o) => renderParallel(o); // workers inherit the env hook
+// Workers inherit the env hook, but the parent's pre-flight page (v0.10) needs
+// the factory handed to it explicitly.
+const renderParallelInjected = (o) => renderParallel({ ...o, browserFactory: injectedBrowserFactory });
 
 const server = new McpServer({ name: 'motion-studio', version: '0.5.0' });
 
@@ -180,6 +195,8 @@ server.registerTool(
       'output.format selects the deliverable: mp4 (default), webm, gif, prores (.mov), or png-sequence ' +
       '(a folder of frames). output.transparent=true keeps the alpha channel (webm/prores/png-sequence only; ' +
       'give the composition a transparent background). The output filename extension follows the format automatically. ' +
+      'output.audioLimiter (default true) brick-walls the mixed audio at -1 dBFS; set false only if you want the ' +
+      'summed mix passed through untouched, and remember track gains sum directly (amix runs with normalize=0). ' +
       'project.json cannot be written via write_composition_file; use this tool so config invariants are validated.',
     inputSchema: {
       projectId: z.string(),
@@ -244,7 +261,10 @@ server.registerTool(
       'Paths are sandboxed to the project (no absolute paths, no ".."). ' +
       '.js files are syntax-checked before writing and fail fast with the parse error. ' +
       'Author against the frame API (resource motion-studio://reference/frame-api): no wall-clock time, ' +
-      'register via MotionStudio.registerComposition(fn).',
+      'register via MotionStudio.registerComposition(fn). ' +
+      'JS/CSS is also scanned for frame-driven contract violations (Date.now, setInterval, Math.random, ' +
+      'requestAnimationFrame, THREE.Clock, real-time CSS transitions). Those come back as a "warnings" array ' +
+      'on success — the file IS written; fix them unless you are certain the usage is outside the frame function.',
     inputSchema: {
       projectId: z.string(),
       path: z.string().describe('Project-relative path, e.g. composition.js'),
@@ -258,13 +278,37 @@ server.registerTool(
 );
 
 server.registerTool(
+  'sync_shared_files',
+  {
+    title: 'Copy shared source files to many scene projects',
+    description:
+      'Copy one or more source files from a source project into many target projects, overwriting them (new in v0.11). ' +
+      'This is the maintenance half of the recommended film pattern (docs/film-setup.md): every scene project ships the ' +
+      'SAME composition.js and differs only in a small scene.js. Each project owns its own copy, so without this a ' +
+      'one-line fix to the shared engine means re-writing it once per scene. Files are syntax-checked and lint-scanned ' +
+      'per target exactly as write_composition_file does, and every source file is read before anything is written, so a ' +
+      'bad path fails before it half-updates the film. Does NOT touch scene.js unless you list it, and never project.json. ' +
+      'After syncing, re-render the affected scenes — already-rendered output is not invalidated automatically.',
+    inputSchema: {
+      sourceProjectId: z.string().describe('Project holding the canonical copies'),
+      targetProjectIds: z.array(z.string()).min(1).describe('Projects to overwrite; the source is skipped if listed'),
+      files: z.array(z.string()).min(1).describe('Project-relative paths, e.g. ["composition.js", "styles.css"]'),
+    },
+  },
+  wrap(async ({ sourceProjectId, targetProjectIds, files }) => {
+    return ok(await store.syncSharedFiles({ sourceProjectId, targetProjectIds, files }));
+  }),
+);
+
+server.registerTool(
   'capture_preview_frame',
   {
     title: 'Capture one frame as PNG',
     description:
       'Render a single frame through the REAL render path (headless Chromium, identical to the final render) ' +
       'and return the image. Use this to visually verify your composition at representative frames ' +
-      '(first, midpoints, Sequence boundaries, last) BEFORE starting a full render.',
+      '(first, midpoints, Sequence boundaries, last) BEFORE starting a full render. ' +
+      'Checking more than one frame? Use capture_preview_frames instead — it does them all in one page load.',
     inputSchema: { projectId: z.string(), frame: z.number().int().min(0) },
   },
   wrap(async ({ projectId, frame }) => {
@@ -279,6 +323,50 @@ server.registerTool(
       content: [
         { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
         { type: 'text', text: JSON.stringify({ frame, width: config.width, height: config.height }) },
+      ],
+    };
+  }),
+);
+
+server.registerTool(
+  'capture_preview_frames',
+  {
+    title: 'Capture several frames as PNGs',
+    description:
+      'Render SEVERAL frames from one page load and return them all as images (new in v0.10). ' +
+      'Prefer this over repeated capture_preview_frame: each single capture launches Chromium, loads the page, ' +
+      'and re-runs the composition\'s one-time setup, so checking five frames one at a time pays that cost five ' +
+      'times. Pass explicit `frames`, or just `count` to get evenly-spaced frames spanning the composition ' +
+      `(first and last always included). Maximum ${MAX_PREVIEW_FRAMES} frames per call.`,
+    inputSchema: {
+      projectId: z.string(),
+      frames: z.array(z.number().int().min(0)).optional().describe('Explicit frame numbers, in the order you want them back'),
+      count: z.number().int().min(2).max(MAX_PREVIEW_FRAMES).optional().describe('Evenly-spaced frames across the composition (default 5 when `frames` is omitted)'),
+    },
+  },
+  wrap(async ({ projectId, frames, count }) => {
+    await requirePrereqs();
+    const entry = await store.getProjectEntry(projectId);
+    const config = await store.readConfig(projectId);
+    const list = frames?.length
+      ? frames
+      : preflightFrameList(0, config.durationInFrames - 1, count ?? 5);
+    const shots = await captureFrames({
+      projectPath: entry.path, config, frames: list,
+      ...(injectedBrowserFactory ? { browserFactory: injectedBrowserFactory } : {}),
+    });
+    return {
+      content: [
+        ...shots.map((s) => ({ type: 'image', data: s.png.toString('base64'), mimeType: 'image/png' })),
+        {
+          type: 'text',
+          text: JSON.stringify({
+            frames: shots.map((s) => s.frame),
+            width: config.width,
+            height: config.height,
+            note: 'Images are in the same order as "frames".',
+          }),
+        },
       ],
     };
   }),
@@ -302,9 +390,13 @@ server.registerTool(
         .describe('[startFrame, endFrame] inclusive; omit for the full composition'),
       workers: z.number().int().min(1).max(16).optional().describe('Parallel capture processes (default 1)'),
       outputFilename: z.string().optional().describe('Filename inside the project "out" dir (default from config)'),
+      preflight: z
+        .boolean()
+        .optional()
+        .describe('Probe a few evenly-spaced frames before committing to the render (default true; skipped under 30 frames)'),
     },
   },
-  wrap(async ({ projectId, frameRange, workers, outputFilename }) => {
+  wrap(async ({ projectId, frameRange, workers, outputFilename, preflight }) => {
     await requirePrereqs();
     const entry = await store.getProjectEntry(projectId);
     const config = await store.readConfig(projectId);
@@ -314,7 +406,7 @@ server.registerTool(
     }
     const outputPath = path.join(entry.path, config.output.dir, name);
     const { jobId, state, queuePosition } = jobs.startRender({
-      projectId, projectPath: entry.path, config, outputPath, frameRange, workers,
+      projectId, projectPath: entry.path, config, outputPath, frameRange, workers, preflight,
       ...(injectedBrowserFactory
         ? { renderFn: (o) => (o.workers > 1 ? renderParallelInjected(o) : renderCompositionInjected(o)) }
         : {}),
@@ -333,7 +425,8 @@ server.registerTool(
     description:
       'Get progress/state for a jobId: state (queued|running|done|error|cancelled), phase, framesDone/totalFrames, ' +
       'percent, renderFps, etaMs (null until measurable), queuePosition while queued, and the structured error ' +
-      'if it failed. Wait for a terminal state before reporting completion.',
+      'if it failed. Wait for a terminal state before reporting completion. When the render carried audio, the ' +
+      'done status also has `audio` with the measured peakDb/meanDb of the final mix and a `clipping` flag.',
     inputSchema: { jobId: z.string() },
   },
   wrap(async ({ jobId }) => ok(jobs.getStatus(jobId))),
@@ -650,6 +743,119 @@ server.registerTool(
 );
 
 server.registerTool(
+  'synthesize_sfx',
+  {
+    title: 'Generate sound effects (pure JS, no toolchain)',
+    description:
+      'Render a list of sound-effect CUES into one mono WAV and add it as an audio track (new in v0.12). ' +
+      'Use this for the noises a film needs that speech and music cannot make: a whoosh on a cut, a chime between ' +
+      'scenes, a thud when something heavy lands, a slow shimmer under a reveal. Unlike synthesize_music there is ' +
+      'NOTHING to install — it is pure JS, works on every OS, and never returns an "unavailable" error. ' +
+      'One call makes the whole bed: you get a single track holding every cue at its absolute time, which is what you ' +
+      'want for build_film\'s master audio timeline (one track, not one per cue). ' +
+      'TIME IS IN FRAMES: `atFrame` matches config.audio.startInFrames and a scene\'s filmOffset, so "a chime on every ' +
+      'scene cut" is a plain map over your scene offsets. `at` (seconds) is accepted instead; set exactly one. ' +
+      '`gain` is the cue\'s PEAK AMPLITUDE 0..1 (not dB) and means the same thing for every type. ' +
+      'Levels: by default (`normalize:"ceiling"`) a quiet bed is left quiet and only a mix hotter than `ceilingDb` is ' +
+      'pulled down — so the returned `peakDb` is the real level and your `gainDb` at mix time stays meaningful. ' +
+      `Types: ${SFX_TYPES.join(', ')}. Pitched cues take pitch (MIDI, like synthesize_music) or hz, not both. ` +
+      `Limits: ${MAX_CUES} cues, ${MAX_CUE_SECONDS}s per cue. sampleRate ∈ ${ALLOWED_SAMPLE_RATES.join('/')} — ` +
+      'prefer 22050 for a long bed (a 10-minute 44.1k bed is ~53 MB). ' +
+      'mode="attach" (default) writes assets/sfx-<n>.wav AND appends the track; "asset-only" writes + reports only. ' +
+      'See docs/sfx-setup.md.',
+    inputSchema: {
+      projectId: z.string(),
+      spec: z.object({
+        durationInFrames: z.number().int().min(1).optional()
+          .describe('Bed length (default: the project duration, so it spans the composition)'),
+        sampleRate: z.number().int().optional().describe(`One of ${ALLOWED_SAMPLE_RATES.join(', ')} (default 44100)`),
+        normalize: z.enum(['ceiling', 'peak', 'none']).optional()
+          .describe('ceiling (default): attenuate only if over ceilingDb · peak: always sit exactly at it · none: leave alone'),
+        ceilingDb: z.number().min(-60).max(0).optional().describe('Ceiling in dBFS (default -1)'),
+        cues: z.array(z.object({
+          type: z.enum(['chime', 'whoosh', 'shimmer', 'thud', 'tone']),
+          atFrame: z.number().int().min(0).optional().describe('Start frame (preferred; matches startInFrames/filmOffset)'),
+          at: z.number().min(0).optional().describe('Start in seconds — use instead of atFrame, never both'),
+          gain: z.number().min(0.001).max(1).optional().describe('Peak amplitude 0..1, NOT dB (default 0.5)'),
+          pitch: z.number().int().min(0).max(127).optional().describe('MIDI note (chime/shimmer/tone); 60 = middle C'),
+          hz: z.number().min(1).max(20000).optional().describe('Frequency instead of pitch (thud/tone)'),
+          pitches: z.array(z.number().int().min(0).max(127)).optional().describe('shimmer: the chord to stack'),
+          decay: z.number().optional().describe('chime: decay time in seconds (default 2.0)'),
+          rise: z.number().optional().describe('whoosh/shimmer: time up to the hit (default 0.6 / 3.0)'),
+          fall: z.number().optional().describe('whoosh/shimmer: release (default 0.45 / 4.0)'),
+          hold: z.number().optional().describe('shimmer: time held at full before the fall (default 2.4)'),
+          dur: z.number().optional().describe('thud/tone: length in seconds (default 2.6 / 0.25)'),
+          attack: z.number().optional().describe('tone: attack in seconds (default 0.01)'),
+          release: z.number().optional().describe('tone: release in seconds (default 0.08)'),
+          wave: z.enum(['sine', 'triangle', 'square']).optional().describe('tone: waveform (default sine)'),
+          seed: z.number().int().optional().describe('Pin the noise for whoosh/shimmer (default: derived from the cue index)'),
+        })).min(1).describe('The cues, in any order'),
+      }).describe('The sound-effect bed to render'),
+      mode: z.enum(['attach', 'asset-only']).default('attach'),
+      assetPath: z.string().optional().describe('Project-relative .wav under assets/ (default assets/sfx-<n>.wav)'),
+      startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
+      gainDb: z.number().optional().describe('attach mode: track gain in dB (e.g. -12 to tuck the bed under narration)'),
+    },
+  },
+  wrap(async ({ projectId, spec, mode, assetPath, startInFrames, gainDb }) => {
+    const entry = await store.getProjectEntry(projectId);
+    const config = await store.readConfig(projectId);
+    const assetsDir = path.join(entry.path, 'assets');
+    await fsp.mkdir(assetsDir, { recursive: true });
+
+    const relPath = assetPath ?? (await nextSfxPath(assetsDir));
+    const normalized = relPath.replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/')) {
+      throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `SFX must be written under assets/ (got "${relPath}")`, { path: relPath });
+    }
+    const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
+
+    // fps and the default length come from the project, so a bed spans the
+    // composition without the caller restating what the engine already knows.
+    const result = await synthesizeSfx({
+      spec: {
+        ...spec,
+        fps: config.fps,
+        durationInFrames: spec.durationInFrames ?? config.durationInFrames,
+      },
+      outPath: abs,
+    });
+
+    let attached = false, audio, audioTrackIndex;
+    if (mode === 'attach') {
+      const track = { src: normalized };
+      if (startInFrames !== undefined) track.startInFrames = startInFrames;
+      if (gainDb !== undefined) track.gainDb = gainDb;
+      audioTrackIndex = config.audio?.length ?? 0;
+      const updated = await store.updateConfig(projectId, { audio: [...(config.audio ?? []), track] });
+      audio = updated.audio;
+      attached = true;
+    }
+
+    return ok({
+      mode,
+      assetPath: normalized,
+      cues: result.cues,
+      clamped: result.clamped,
+      normalize: result.normalize,
+      rawPeakDb: result.rawPeakDb,
+      peakDb: result.peakDb,
+      appliedGainDb: result.appliedGainDb,
+      sampleRate: result.sampleRate,
+      channels: result.channels,
+      durationSeconds: result.durationSeconds,
+      durationInFrames: result.durationInFrames,
+      fps: config.fps,
+      bytes: result.bytes,
+      attached,
+      ...(attached
+        ? { audioTrackIndex, audio }
+        : { hint: `Wire this in later with update_project_config { audio: [{ src: "${normalized}" }] }` }),
+    });
+  }),
+);
+
+server.registerTool(
   'add_library',
   {
     title: 'Add a 3D library (Three.js / Babylon.js)',
@@ -702,8 +908,10 @@ server.registerTool(
       'scene must already be rendered, or it fails with scene_not_rendered listing which. Mismatched scenes fail with ' +
       'inconsistent_scenes. Audio: with no `audio`, each scene\'s own audio is preserved (all scenes must be consistently audio ' +
       'or all silent); pass `audio` to lay ONE master timeline (music bed + narration, startInFrames/gainDb like config.audio) over ' +
-      'the whole film, which replaces per-scene audio. Tip for quality: render scenes as prores (or low crf), assemble, then do a ' +
-      'single final encode. See docs/film-setup.md.',
+      'the whole film, which replaces per-scene audio. When a master timeline is present the result includes an `audio` block with ' +
+      'the measured peak/mean dBFS and a `clipping` flag — check it, since a bad mix is the one defect you cannot see. Pass ' +
+      '`audioTargetPeakDb` (e.g. -2) to have the film measured and re-muxed once to that level instead of guessing gains. ' +
+      'Tip for quality: render scenes as prores (or low crf), assemble, then do a single final encode. See docs/film-setup.md.',
     inputSchema: {
       scenes: z.array(z.object({ projectId: z.string() })).min(1)
         .describe('Scene projects in play order; each must already be rendered'),
@@ -716,9 +924,12 @@ server.registerTool(
         startInFrames: z.number().int().min(0).optional().describe('Track start offset in frames'),
         gainDb: z.number().optional().describe('Track gain in dB (e.g. -8 for a background bed)'),
       })).optional().describe('Optional master audio laid over the entire film (replaces per-scene audio)'),
+      audioTargetPeakDb: z.number().min(-60).max(0).optional()
+        .describe('Measure the mixed film and re-mux once so it peaks here (e.g. -2). Shifts every track by the ' +
+          'same amount, so your relative balance is preserved. Use it instead of guessing a master gain.'),
     },
   },
-  wrap(async ({ scenes, outputProjectId, outputFilename, audio }) => {
+  wrap(async ({ scenes, outputProjectId, outputFilename, audio, audioTargetPeakDb }) => {
     await requirePrereqs();
     const sceneData = [];
     for (const s of scenes) {
@@ -756,7 +967,12 @@ server.registerTool(
       }
     }
 
-    const result = await assembleFilm({ scenes: sceneData, format: info.format, outputPath, audioTracks, projectRoot: outEntry.path });
+    const result = await assembleFilm({
+      scenes: sceneData, format: info.format, outputPath, audioTracks,
+      projectRoot: outEntry.path,
+      audioLimiter: outCfg.output?.audioLimiter !== false,
+      audioTargetPeakDb,
+    });
     return ok({ outputProjectId: outId, sceneOrder: scenes.map((s) => s.projectId), ...result });
   }),
 );

@@ -129,9 +129,12 @@ machine-readable `code` (`engine/src/core/errors.js`): `prereqs_missing`,
 `path_outside_project`, `file_not_found`, `syntax_error`, `job_not_found`,
 `browser_launch_failed`, `composition_error`, `frame_timeout`,
 `ffmpeg_failed`, `cancelled`, `disk_error`, `internal_error`, and — new in
-v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`
-(`render_already_in_progress` is retired from the render path but the code
-remains reserved). MCP tools return them as `isError` results with the JSON
+v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`. New in v0.11:
+`short_render` (the encoded file has fewer frames than were rendered).
+`render_already_in_progress` was retired from the render path in v0.5 and held
+reserved; **v0.11 raises it again for a different condition** — not
+in-process concurrency, which still queues, but a *second OS process* holding
+the project's render lock (§7.1). MCP tools return them as `isError` results with the JSON
 body; the CLI emits them as protocol `error` lines; the Studio server maps
 them to HTTP statuses (403 sandbox, 404 not-found, 400 invalid, 413
 asset-too-large, 429 queue-full, 503 prereqs). `write_composition_file`
@@ -152,6 +155,47 @@ shared `JobManager` on every OS. Inside the engine, the FFmpeg sink handles
 stdin backpressure (`drain`) so a fast capture loop cannot balloon memory,
 and a killed sink swallows its own exit rejection so teardown never surfaces
 spurious errors.
+
+### 7.1 The render lock (v0.11)
+
+Job queueing (§5) serialises renders *within* one process, which says nothing
+about a second process. Two renders on one project is silent corruption rather
+than a loud failure: both write the same frame files and both run FFmpeg on the
+same output path, so the survivor is whichever finished last and any torn frame
+in between is invisible. It has happened for real — an orphaned background
+render raced a foreground one through the same scene, and the only symptom was
+an unexpected process count.
+
+`core/lock.js` takes a `.render.lock` file (a dotfile, so `listFiles` already
+skips it) in the project folder holding the owning pid. **Liveness, not age,
+decides staleness:** a render may legitimately run for hours, so a timeout would
+eventually evict a healthy job, whereas a crashed owner's pid stops existing at
+once. Creation uses `open(…, 'wx')`, so two processes racing cannot both believe
+they won. Same-pid acquisition is re-entrant, and release is a no-op unless we
+still own the file, so a stale-lock takeover cannot be undone by the loser. An
+unreleased lock therefore self-heals: the next acquirer clears any lock whose
+owner is gone.
+
+`renderComposition` and `renderParallel` take it; **parallel workers must not**
+(`lock: false`, set from the CLI's `--segment`), because they render the same
+project by design and their parent already holds one lock covering all of them.
+`renderParallel` also delegates to `renderComposition` for a single worker, and
+lets the delegate do the locking rather than deadlocking against itself.
+
+### 7.2 Frame-count verification (v0.11)
+
+A worker killed mid-encode leaves a short but perfectly valid video, and nothing
+downstream noticed: `build_film` concatenated it and the finished film simply had
+a scene that stopped early. After encoding (and after any audio mux), the
+renderer probes the file's real frame count and fails with `short_render` if it
+disagrees with what was rendered. `encoder.probeFrameCount` reads the
+container's `nb_frames` first — muxers write it from the frames actually written,
+so a truncated file reports the truncated number for the cost of one metadata
+read — and only falls back to a full `-count_frames` decode when that is absent.
+ffprobe is **not** a declared prerequisite (§prereqs checks only ffmpeg), so an
+unmeasurable file is reported as `framesVerified: false`, never as a failure.
+This is what makes "the output exists and has the right length" a trustworthy
+resume condition for a long multi-scene batch.
 
 ## 8. Parallel rendering
 
@@ -192,6 +236,50 @@ with a `log` warning rather than failing the render. The mixed audio is
 `apad`-ded and `atrim`-med to exactly the video duration: a 5-second music
 bed under a 0.8-second clip yields a 0.8-second file, which `-shortest`
 would not guarantee in the general case.
+
+**Clipping protection (v0.10).** `normalize=0` is deliberate — it keeps the
+music bed at the level the author set — but it also means gains sum straight
+through, so three tracks near 0 dB produce a distorted master with nothing to
+catch it. The graph therefore ends `[amix] → alimiter(limit=0.891, level=0) →
+[aout]`: a brick wall at −1 dBFS that is a no-op below the threshold, with
+alimiter's auto-levelling pinned off so it can never *boost* a quiet mix. Set
+`output.audioLimiter: false` to pass the sum through untouched. After muxing,
+the result is decoded once with `volumedetect` and reported as
+`audio: { tracks, limiter, peakDb, meanDb, clipping }` on the render result and
+in `get_render_status` — an agent cannot listen to the output, so a measured
+number is the only way it learns the mix clipped. Measurement failure is logged
+and ignored; it never fails an otherwise good render.
+
+### 9.1 Generated audio: three sources, one mixer (v0.12)
+
+Everything above is the *mixer*; three generators feed it, and they differ mainly
+in what they depend on:
+
+| source | dependency | failure mode |
+|---|---|---|
+| `synthesize_speech` (v0.6) | Windows TTS exe | `tts_unavailable` |
+| `synthesize_music` (v0.8) | MIDI exe + FluidSynth + SoundFont | `music_unavailable` |
+| `synthesize_sfx` (v0.12) | **none** — pure JS in `core/sfx.js` | *(cannot be unavailable)* |
+
+`core/sfx.js` exists because the other two cannot make an unpitched noise, and
+because a filtered-noise riser has no MIDI note number. It is split into a pure
+`renderCues(spec) → Float32Array` and a thin `synthesizeSfx({spec, outPath})`
+that adds the WAV write, so nearly all of its tests inspect samples directly with
+no ffmpeg and no subprocess.
+
+Two design points worth stating because they differ from the rest of the audio
+path. First, **time is in frames** (`atFrame`): every other audio placement in
+the engine speaks frames, so a cue list maps directly over scene `filmOffset`s.
+Second, its default `normalize: 'ceiling'` only attenuates a mix that exceeds the
+ceiling, rather than always normalizing to it — the same principle as §7.2 and
+`audioTargetPeakDb`, that a reported number should be the measured truth rather
+than an artifact of an automatic correction.
+
+Determinism is bounded and documented: noise comes from a seeded PRNG so a spec
+re-renders byte-identically on a given Node build, but `Math.sin`/`Math.exp` are
+not pinned by ECMAScript, so cross-version identity is not claimed. This does not
+weaken frame-render determinism, which is a property of the composition — audio
+is generated once and thereafter read as a file.
 
 ## 10. Security and sandboxing
 

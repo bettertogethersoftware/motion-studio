@@ -1,4 +1,4 @@
-# Motion Studio Frame API Reference (v1.1)
+# Motion Studio Frame API Reference (v1.2)
 
 This is the animation contract every Motion Studio composition must follow. It exists so the render engine can call your composition once per frame, in any order, possibly split across parallel worker processes — nothing in your composition may depend on wall-clock time or call order.
 
@@ -41,7 +41,7 @@ const opacity = interpolate(frame, [0, 20], [0, 1]);
 const x = interpolate(frame, [0, 15, 45, 60], [0, 200, 200, 0], { easing: 'easeInOut' });
 ```
 
-- `inputRange` must be strictly increasing; `outputRange` must be the same length.
+- `inputRange` must be strictly increasing; `outputRange` must be the same length. A violation throws with the offending pair and the full array named (v1.2) — worth knowing because a descending range often survives frame 0 and only throws at the first frame that reaches the call. If you are mapping a quantity that goes *negative* (deceleration, a downward offset), negate it and keep the range ascending: `interpolate(-accel, [4, 14], [0, 1])`, not `interpolate(accel, [-4, -14], [0, 1])`.
 - Multi-segment ranges (second example) chain distinct phases — move in, hold, move out — in one call.
 - Values outside `inputRange` **clamp** to the nearest endpoint by default; pass `{ extrapolate: 'extend' }` to continue the boundary segment's line instead.
 - `options.easing` is a name from `MotionStudio.easings` — `linear` (default), `easeIn`, `easeOut`, `easeInOut`, `easeInQuad`, `easeOutQuad`, `easeOutBack` (overshoot pop-in), `easeOutElastic` (springy settle) — or your own `(t: 0..1) => number` function. Easing applies per segment.
@@ -157,4 +157,5 @@ MotionStudio.registerComposition(async (frame) => {
 - [ ] Multi-element timing uses `Sequence` rather than frame-offset arithmetic scattered through the code
 - [ ] Springy/looping motion uses `spring()` / `Loop()` (pure functions of frame) — never incremental per-frame physics or accumulated state
 - [ ] `frame-api.js` is included via `<script>` **before** `composition.js`
-- [ ] Spot-checked with `capture_preview_frame` at the start, a midpoint, the end, and every `Sequence` boundary before running a full render
+- [ ] Spot-checked with `capture_preview_frames` at the start, a midpoint, the end, and every `Sequence` boundary before running a full render (one call, not one per frame)
+- [ ] `write_composition_file` returned no determinism `warnings` — or each one is understood and deliberate

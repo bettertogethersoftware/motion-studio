@@ -69,6 +69,8 @@ export function validateConfig(cfg) {
     }
     if (cfg.output?.crf !== undefined && (!Number.isInteger(cfg.output.crf) || cfg.output.crf < 0 || cfg.output.crf > 63))
       problems.push('output.crf: integer in 0..63 required');
+    if (cfg.output?.audioLimiter !== undefined && typeof cfg.output.audioLimiter !== 'boolean')
+      problems.push('output.audioLimiter: boolean');
     if (typeof cfg.entry !== 'string' || !cfg.entry.endsWith('.html')) problems.push('entry: path to an .html file required');
     if (cfg.audio !== undefined) {
       if (!Array.isArray(cfg.audio)) problems.push('audio: must be an array of tracks');
@@ -99,7 +101,7 @@ export function makeConfig({ name, fps = 30, width = 1920, height = 1080, durati
     height,
     durationInFrames,
     entry: 'composition.html',
-    output: { dir: 'out', filename: 'output.mp4', format: 'mp4', transparent: false, crf: 18, preset: 'medium', pixFmt: 'yuv420p' },
+    output: { dir: 'out', filename: 'output.mp4', format: 'mp4', transparent: false, crf: 18, preset: 'medium', pixFmt: 'yuv420p', audioLimiter: true },
     ...(audio ? { audio } : {}),
   };
   return validateConfig(cfg);
@@ -284,12 +286,62 @@ export class ProjectStore {
       try { JSON.parse(content); }
       catch (e) { throw new EngineError(ErrorCodes.SYNTAX_ERROR, `JSON parse error in ${relPath}: ${e.message}`, { path: relPath }); }
     }
+    // Advisory only — a determinism violation still writes (v0.10).
+    const warnings = checkDeterminism(content, relPath);
 
     await fsp.mkdir(path.dirname(abs), { recursive: true });
     const tmp = abs + '.tmp-' + process.pid;
     await fsp.writeFile(tmp, content, 'utf8');
     await fsp.rename(tmp, abs);
-    return { path: relPath, bytes: Buffer.byteLength(content, 'utf8') };
+    return {
+      path: relPath,
+      bytes: Buffer.byteLength(content, 'utf8'),
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
+  /**
+   * Copy shared source files from one project to many (v0.11).
+   *
+   * docs/film-setup.md recommends that every scene project ship the *same*
+   * `composition.js` and differ only in a small `scene.js` — but each project
+   * holds its own copy, so editing the original reaches nothing already
+   * scaffolded. On a 16-scene film that made a one-line art fix a 16-project
+   * chore, which is exactly the kind of friction that discourages fixing it.
+   *
+   * Writes go through writeFile, so every target still gets the syntax check,
+   * the determinism lint, and the atomic temp-and-rename.
+   *
+   * @param {object} opts
+   * @param {string} opts.sourceProjectId  project holding the canonical copies
+   * @param {string[]} opts.targetProjectIds  projects to overwrite (source is skipped if listed)
+   * @param {string[]} opts.files  project-relative paths, e.g. ['composition.js']
+   */
+  async syncSharedFiles({ sourceProjectId, targetProjectIds, files }) {
+    if (!files?.length) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, 'syncSharedFiles needs at least one file');
+    }
+    if (!targetProjectIds?.length) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, 'syncSharedFiles needs at least one target project');
+    }
+    // Read every source file before writing anything: a typo in the file list
+    // should fail before it has half-updated the film.
+    const body = {};
+    for (const f of files) body[f] = await this.readFile(sourceProjectId, f);
+
+    const results = [];
+    for (const projectId of targetProjectIds) {
+      if (projectId === sourceProjectId) continue;
+      const written = [];
+      for (const f of files) written.push(await this.writeFile(projectId, f, body[f]));
+      results.push({ projectId, written });
+    }
+    return {
+      sourceProjectId,
+      files,
+      projectsUpdated: results.length,
+      results,
+    };
   }
 
   /**
@@ -400,7 +452,24 @@ export class ProjectStore {
     const libs = Array.from(new Set([...(cfg.libraries || []), spec.id]));
     const config = await this.updateConfig(projectId, { libraries: libs });
 
-    return { library: spec.id, name: spec.name, version: spec.version, global: spec.global, addons: addonSpecs.map((a) => a.id), copied, scaffolded, notes: spec.notes, config };
+    // Addon notes are appended to `notes` rather than dropped. The registry has
+    // always carried them (e.g. the glTF addon's note that loading a model needs
+    // MOTION_STUDIO_ALLOW_LOCAL_FETCH=1), but only spec.notes was returned, so a
+    // core-level caller never saw them. `addons` deliberately stays a plain id
+    // array — it is part of the tool's public result shape.
+    const addonNotes = addonSpecs.filter((a) => a.note).map((a) => `[${a.id}] ${a.note}`);
+
+    return {
+      library: spec.id,
+      name: spec.name,
+      version: spec.version,
+      global: spec.global,
+      addons: addonSpecs.map((a) => a.id),
+      copied,
+      scaffolded,
+      notes: [...(spec.notes ?? []), ...addonNotes],
+      config,
+    };
   }
 
   /**
@@ -433,6 +502,141 @@ export class ProjectStore {
 
 export const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 export { ASSET_EXTENSIONS };
+
+/* ------------------------------------------------------------------ */
+/* Determinism lint (v0.10)                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The frame-driven contract bans wall-clock time and unseeded randomness, but
+ * until now nothing checked it: a composition using Date.now() wrote cleanly and
+ * only misbehaved under parallel or out-of-order rendering, which is the hardest
+ * class of bug to notice from a still. These are WARNINGS, never write
+ * rejections — a loader outside the frame function may legitimately use a timer,
+ * and refusing the write would be worse than flagging it.
+ *
+ * Deliberately regex-based: the engine keeps its dependency list short (see
+ * cli/render.js on arg parsing), and vm.Script gives a compile check but no AST.
+ * Blanking comments and string literals first removes the false positives that
+ * would otherwise make this noise — the scaffold's own header comment names
+ * three of the banned APIs.
+ */
+
+/** Blank JS comments and string literals in place, preserving offsets/lines. */
+function blankJs(src) {
+  const out = src.split('');
+  const n = src.length;
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < n; k++) if (out[k] !== '\n') out[k] = ' ';
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (c === '/' && d === '/') {
+      let j = i;
+      while (j < n && src[j] !== '\n') j++;
+      blank(i, j); i = j; continue;
+    }
+    if (c === '/' && d === '*') {
+      let j = i + 2;
+      while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j++;
+      blank(i, j + 2); i = j + 2; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === c) break;
+        if (c !== '`' && src[j] === '\n') break; // unterminated literal; stop at EOL
+        j++;
+      }
+      blank(i, j + 1); i = j + 1; continue;
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+/** Blank CSS block comments only — `//` is not a CSS comment and appears in url(http://…). */
+function blankCss(src) {
+  const out = src.split('');
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    if (src[i] === '/' && src[i + 1] === '*') {
+      let j = i + 2;
+      while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j++;
+      for (let k = i; k < Math.min(n, j + 2); k++) if (out[k] !== '\n') out[k] = ' ';
+      i = j + 2; continue;
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+const JS_RULES = [
+  { rule: 'date-now', re: /\bDate\s*\.\s*now\s*\(/g,
+    message: 'Date.now() reads the wall clock. Derive the value from `frame` instead.' },
+  { rule: 'performance-now', re: /\bperformance\s*\.\s*now\s*\(/g,
+    message: 'performance.now() reads the wall clock. Derive the value from `frame` instead.' },
+  { rule: 'new-date', re: /\bnew\s+Date\s*\(\s*\)/g,
+    message: 'new Date() reads the wall clock. Derive the value from `frame` instead.' },
+  { rule: 'set-timeout', re: /\bsetTimeout\s*\(/g,
+    message: 'setTimeout does not advance with the frame number; sequence with Sequence(from, duration, fn).' },
+  { rule: 'set-interval', re: /\bsetInterval\s*\(/g,
+    message: 'setInterval does not advance with the frame number; loop with Loop(durationInFrames, fn).' },
+  { rule: 'request-animation-frame', re: /\brequestAnimationFrame\s*\(/g,
+    message: 'requestAnimationFrame is wall-clock driven. The engine calls setFrame(n) once per frame instead.' },
+  { rule: 'math-random', re: /\bMath\s*\.\s*random\s*\(/g,
+    message: 'Math.random() is not reproducible across workers. Use MotionStudio.random(seed).' },
+  { rule: 'three-clock', re: /\bTHREE\s*\.\s*Clock\b|\.\s*getDelta\s*\(/g,
+    message: 'THREE.Clock/getDelta() measure real elapsed time. Compute transforms from `frame`.' },
+  { rule: 'babylon-render-loop', re: /\.\s*runRenderLoop\s*\(/g,
+    message: 'engine.runRenderLoop() drives itself off the wall clock. Call scene.render() inside setFrame.' },
+  { rule: 'babylon-begin-animation', re: /\.\s*beginAnimation\s*\(/g,
+    message: 'scene.beginAnimation() is wall-clock based. Animate transforms from `frame`.' },
+];
+
+const CSS_RULES = [
+  { rule: 'css-transition', re: /(?:^|[;{\s])transition(?:-duration)?\s*:([^;}]*)/gi,
+    message: 'CSS transitions run on real time, not frame number. Compute the final value and set it directly.' },
+  { rule: 'css-animation', re: /(?:^|[;{\s])animation(?:-duration)?\s*:([^;}]*)/gi,
+    message: 'CSS animations run on real time, not frame number. Drive the property from `frame` instead.' },
+];
+
+/** True if a CSS value carries a non-zero time — `transition: none` is harmless. */
+function hasNonZeroTime(value = '') {
+  const re = /(\d*\.?\d+)\s*(ms|s)\b/gi;
+  let m;
+  while ((m = re.exec(value))) if (Number(m[1]) > 0) return true;
+  return false;
+}
+
+/**
+ * Scan composition source for frame-driven contract violations.
+ * @returns {{rule: string, line: number, snippet: string, message: string}[]}
+ */
+export function checkDeterminism(source, filename = 'composition.js') {
+  const ext = path.extname(filename).toLowerCase();
+  const isCss = ext === '.css';
+  if (!isCss && ext !== '.js' && ext !== '.mjs') return [];
+
+  const scanned = isCss ? blankCss(source) : blankJs(source);
+  const lines = source.split('\n');
+  const warnings = [];
+
+  for (const { rule, re, message } of isCss ? CSS_RULES : JS_RULES) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(scanned))) {
+      if (isCss && !hasNonZeroTime(m[1])) continue;
+      const line = scanned.slice(0, m.index).split('\n').length;
+      warnings.push({ rule, line, snippet: (lines[line - 1] ?? '').trim().slice(0, 120), message });
+      if (warnings.length >= 50) return warnings; // pathological input; stop scanning
+    }
+  }
+  return warnings.sort((a, b) => a.line - b.line);
+}
 
 /**
  * Compile-check JavaScript without executing it. Catches SyntaxError with

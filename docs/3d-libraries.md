@@ -98,13 +98,37 @@ recipe is §3.4.
 
 ### 3.2 Gotchas found along the way (all real, worth keeping)
 1. **file:// CORS** — fixed with the flag (§2).
-2. **PBR renders black without IBL** — glTF uses metallic-roughness PBR; with no
-   `scene.environmentTexture` the metal is unlit/near-black. A procedural equirect
-   env (built on a `<canvas>` → data URL → `EquiRectangularCubeTexture`) helps but
-   was not sufficient on its own.
-3. **Model is large & offset** — frame from the bounding sphere:
-   `distance = sphereRadius / sin(fov/2)`, `camera.maxZ` beyond that; don't assume
-   the model sits at the origin or is ~1 unit.
+2. **PBR needs *enough* light — but not necessarily IBL.** glTF uses
+   metallic-roughness PBR, and with only a weak hemispheric light the metal reads
+   as near-black, which is where the original "PBR is black without IBL" note came
+   from. **Superseded by evidence:** the 15-second *Space Jump* render lit the
+   same `super_starfury.glb` (all 11 materials `pbrMetallicRoughness`, metallic
+   ≈0.68) to a clean, legible grey using **no `environmentTexture` at all** — just
+   a hemispheric fill (0.45) plus two directional lights (key 2.6, rim 1.3). So:
+   IBL buys you *reflections* and is worth adding for a hero beauty shot, but it
+   is **not** required to get a lit result. If your metal is black, try a
+   directional light at intensity ≳2 before building a procedural equirect.
+3. **Model is large & offset** — never assume it sits at the origin or is ~1
+   unit. Two ways to deal with it, and the second has a trap:
+   - **Move the camera to the model** — frame from the bounding sphere:
+     `distance = sphereRadius / sin(fov/2)`, `camera.maxZ` beyond that. Best when
+     the model is the whole shot and stays put.
+   - **Scale the model to the camera** — normalize it into known units
+     (`scale = targetSize / max(size.x, size.y, size.z)`), which is easier when
+     the model has to be *animated* against a fixed camera and hand-authored
+     lights. `node.getHierarchyBoundingVectors(true)` gives you `{min,max}` over
+     the whole subtree in one call — much less error-prone than a hand-rolled
+     world-AABB loop over `loaded.meshes`, especially on a 45-node export.
+
+   **The trap, if you normalize: keep the normalization scale on a node your
+   frame function never touches.** Put it on the same node you animate and the
+   first `setFrame` that assigns `scaling` silently wipes it, and the model jumps
+   to native size — a Sketchfab export measured in centimetres then fills the
+   frame ~250×. Use three nested nodes: an outer one you animate freely
+   (position/rotation/scaling for a stretch effect), a middle one holding the
+   fixed normalization scale, and an inner one holding the centring offset.
+   The symptom is distinctive: a *correct-looking* model that is wildly too big
+   and off-centre, rather than a missing or black one.
 4. **Heavy model + per-frame `await`** — awaiting the 13.5 MB `ImportMeshAsync`
    *inside* `setFrame` trips Puppeteer `Protocol error … Promise was collected`.
    Fix: **load once, then `registerComposition`** so every `setFrame` is

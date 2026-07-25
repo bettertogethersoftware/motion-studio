@@ -61,7 +61,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn }) {
+  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn, preflight }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -96,7 +96,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { projectPath, config, outputPath, frameRange, workers, renderFn },
+      _run: { projectPath, config, outputPath, frameRange, workers, renderFn, preflight },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -144,10 +144,11 @@ export class JobManager {
       }
     });
 
-    const { projectPath, config, outputPath, frameRange, workers, renderFn } = job._run;
+    const { projectPath, config, outputPath, frameRange, workers, renderFn, preflight } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
       projectPath, config, outputPath, frameRange, workers,
+      ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
       progress,
       jobId: job.jobId,
@@ -198,6 +199,8 @@ export class JobManager {
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
       error: job.error,
+      // Measured level of the muxed mix (v0.10) — the caller cannot hear it.
+      ...(job.result?.audio ? { audio: job.result.audio } : {}),
       ...(queuePosition ? { queuePosition } : {}),
     };
   }

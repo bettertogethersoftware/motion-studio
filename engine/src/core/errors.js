@@ -43,6 +43,14 @@ export const ErrorCodes = Object.freeze({
   INCONSISTENT_SCENES: 'inconsistent_scenes',
   SCENE_NOT_RENDERED: 'scene_not_rendered',
   FILM_FAILED: 'film_failed',
+  // added in v0.11 (short-render detection) — see docs/CHANGELOG.md.
+  // RENDER_ALREADY_IN_PROGRESS (above) is also first *raised* in v0.11, by the
+  // cross-process render lock in core/lock.js.
+  SHORT_RENDER: 'short_render',
+  // added in v0.12 (sound-effects generator) — see docs/CHANGELOG.md.
+  // No `sfx_unavailable` twin to MUSIC_UNAVAILABLE: core/sfx.js is pure JS with
+  // no external toolchain, so it can never be missing.
+  INVALID_SFX_SPEC: 'invalid_sfx_spec',
 });
 
 export class EngineError extends Error {

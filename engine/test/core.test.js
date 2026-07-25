@@ -6,10 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { resolveInProject } from '../src/core/sandbox.js';
-import { ProjectStore, validateConfig, makeConfig, checkJsSyntax } from '../src/core/project.js';
+import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism } from '../src/core/project.js';
 import { parseProgressLine, ProgressStreamParser, ProgressEmitter } from '../src/core/progress.js';
 import { parseFfmpegVersion, parseNodeVersion } from '../src/core/prereqs.js';
-import { buildAudioFilter } from '../src/core/encoder.js';
+import { buildAudioFilter, LIMITER_FILTER } from '../src/core/encoder.js';
 import { ErrorCodes } from '../src/core/errors.js';
 
 let tmp;
@@ -172,6 +172,71 @@ test('checkJsSyntax: reports line info for broken source', () => {
   }
 });
 
+/* ------------------------ determinism lint --------------------------- */
+
+test('checkDeterminism: flags wall-clock, timers and unseeded randomness', () => {
+  const src = [
+    'const t = Date.now();',
+    'setInterval(tick, 16);',
+    'const r = Math.random();',
+    'requestAnimationFrame(draw);',
+  ].join('\n');
+  const rules = checkDeterminism(src, 'composition.js').map((w) => w.rule);
+  assert.deepEqual(rules.sort(), ['date-now', 'math-random', 'request-animation-frame', 'set-interval'].sort());
+});
+
+test('checkDeterminism: reports the offending line and snippet', () => {
+  const src = 'const a = 1;\nconst b = 2;\nconst t = Date.now();\n';
+  const [w] = checkDeterminism(src, 'composition.js');
+  assert.equal(w.line, 3);
+  assert.equal(w.snippet, 'const t = Date.now();');
+  assert.match(w.message, /wall clock/i);
+});
+
+test('checkDeterminism: ignores mentions in comments and strings', () => {
+  // The lib-three scaffold's own header comment names three banned APIs; if
+  // those matched, every scaffolded project would warn on its first write.
+  const src = [
+    '/* Do NOT use THREE.Clock/getDelta() or requestAnimationFrame. */',
+    '// Math.random() is banned; use MotionStudio.random(seed).',
+    'const label = "Date.now() is not allowed";',
+    'const ok = MotionStudio.random(frame);',
+  ].join('\n');
+  assert.deepEqual(checkDeterminism(src, 'composition.js'), []);
+});
+
+test('checkDeterminism: clean frame-driven composition produces no warnings', () => {
+  const src = [
+    'MotionStudio.registerComposition((frame) => {',
+    '  const o = interpolate(frame, [0, 30], [0, 1]);',
+    '  const rng = MotionStudio.random(frame);',
+    '  el.style.opacity = String(o * (0.9 + rng() * 0.1));',
+    '});',
+  ].join('\n');
+  assert.deepEqual(checkDeterminism(src, 'composition.js'), []);
+});
+
+test('checkDeterminism: CSS real-time transitions flagged, zero/none ignored', () => {
+  assert.equal(checkDeterminism('.a { transition: opacity 300ms ease; }', 'styles.css').length, 1);
+  assert.equal(checkDeterminism('.a { animation: spin 2s linear infinite; }', 'styles.css').length, 1);
+  assert.deepEqual(checkDeterminism('.a { transition: none; }', 'styles.css'), []);
+  assert.deepEqual(checkDeterminism('.a { transition: opacity 0s; }', 'styles.css'), []);
+});
+
+test('checkDeterminism: CSS url(http://…) is not treated as a comment', () => {
+  // blankCss must not honour `//`, or everything after a protocol-relative or
+  // absolute URL would be blanked and later declarations silently skipped.
+  const src = '.a { background: url(http://x/y.png); }\n.b { transition: left 1s; }';
+  const w = checkDeterminism(src, 'styles.css');
+  assert.equal(w.length, 1);
+  assert.equal(w[0].line, 2);
+});
+
+test('checkDeterminism: ignores file types it does not understand', () => {
+  assert.deepEqual(checkDeterminism('Date.now()', 'notes.md'), []);
+  assert.deepEqual(checkDeterminism('<p>Date.now()</p>', 'composition.html'), []);
+});
+
 /* ---------------------------- progress ------------------------------- */
 
 test('progress: parse valid lines, wrap noise as log', () => {
@@ -212,13 +277,34 @@ test('prereqs: version parsers handle real-world strings', () => {
 /* --------------------------- audio filter ---------------------------- */
 
 test('encoder: buildAudioFilter single track uses anull, honors delay/gain', () => {
-  const f = buildAudioFilter([{ src: 'a.mp3', startInFrames: 30, gainDb: -6 }], 30);
+  const f = buildAudioFilter([{ src: 'a.mp3', startInFrames: 30, gainDb: -6 }], 30, { limiter: false });
   assert.match(f, /\[1:a\]adelay=1000\|1000,volume=-6dB\[a0\]/);
   assert.match(f, /\[a0\]anull\[aout\]/);
 });
 
 test('encoder: buildAudioFilter mixes multiple tracks without normalizing', () => {
-  const f = buildAudioFilter([{ src: 'a.mp3' }, { src: 'b.wav', startInFrames: 60 }], 30);
+  const f = buildAudioFilter([{ src: 'a.mp3' }, { src: 'b.wav', startInFrames: 60 }], 30, { limiter: false });
   assert.match(f, /amix=inputs=2:normalize=0\[aout\]/);
   assert.match(f, /\[2:a\]adelay=2000\|2000/);
+});
+
+test('encoder: buildAudioFilter appends the limiter by default (amix does not normalize)', () => {
+  const f = buildAudioFilter([{ src: 'a.mp3' }, { src: 'b.wav' }], 30);
+  // The mix lands on [amix] and the limiter produces the [aout] the muxer wants.
+  assert.match(f, /amix=inputs=2:normalize=0\[amix\]/);
+  assert.match(f, new RegExp(`\\[amix\\]${LIMITER_FILTER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\[aout\\]`));
+  assert.ok(f.endsWith('[aout]'));
+});
+
+test('encoder: limiter disables alimiter auto-levelling', () => {
+  // level defaults to true in ffmpeg and would BOOST quiet mixes; we only want
+  // peaks caught, so the filter must pin level=0.
+  assert.match(LIMITER_FILTER, /level=0/);
+  assert.match(LIMITER_FILTER, /limit=0\.891/);
+});
+
+test('encoder: single track still gets the limiter, ending in [aout]', () => {
+  const f = buildAudioFilter([{ src: 'a.mp3' }], 30);
+  assert.match(f, /\[a0\]anull\[amix\]/);
+  assert.ok(f.endsWith('[aout]'));
 });
