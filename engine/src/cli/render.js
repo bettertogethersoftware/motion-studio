@@ -21,6 +21,7 @@ import { pathToFileURL } from 'node:url';
 import { renderComposition, renderParallel, captureSingleFrame } from '../core/renderer.js';
 import { validateConfig } from '../core/project.js';
 import { checkPrerequisites } from '../core/prereqs.js';
+import { resolveFfmpegPath } from '../core/settings.js';
 import { ProgressEmitter } from '../core/progress.js';
 import { EngineError, ErrorCodes } from '../core/errors.js';
 
@@ -59,7 +60,8 @@ Options:
   --segment                     internal: render a segment, skip audio pass
   --intermediate                internal: encode segment as lossless FFV1
   --no-preflight                skip the pre-render frame probe (default: probe 5 frames)
-  --ffmpeg <path>               ffmpeg binary to use (default: "ffmpeg" on PATH)
+  --ffmpeg <path>               ffmpeg binary to use (default: $MOTION_STUDIO_FFMPEG,
+                                then settings.json ffmpeg.path, then "ffmpeg" on PATH)
   --doctor                      print prerequisite check results as JSON and exit
 `;
 
@@ -71,10 +73,21 @@ async function main() {
     process.stderr.write(USAGE);
     return 0;
   }
-  const ffmpegPath = args.ffmpeg || 'ffmpeg';
+  // --ffmpeg wins; otherwise the machine's configured binary (env, then the
+  // Studio's settings.json), then PATH — the same rule the Studio and the MCP
+  // server use, so `--doctor` diagnoses the binary a real render would use.
+  // Workers (--segment) are always handed an explicit --ffmpeg by the parent,
+  // so this fallback cannot split a fan-out across two different binaries.
+  const { path: ffmpegPath, source: ffmpegSource } = await resolveFfmpegPath({ override: args.ffmpeg });
   if (args.doctor) {
     const prereqs = await checkPrerequisites({ ffmpegPath });
-    process.stdout.write(JSON.stringify(prereqs, null, 2) + '\n');
+    process.stdout.write(
+      JSON.stringify(
+        { ...prereqs, ffmpeg: { ...prereqs.ffmpeg, effectivePath: ffmpegPath, source: ffmpegSource } },
+        null,
+        2,
+      ) + '\n',
+    );
     return prereqs.ok ? 0 : 3;
   }
   if (!args.project) {

@@ -610,10 +610,12 @@ export async function renderParallel(opts) {
         '--segment', // suppress audio pass in workers
       ];
       if (useIntermediate) workerArgs.push('--intermediate');
-      // Workers encode their own segments, so a non-default ffmpeg must reach
-      // them too — the parent using one binary and the workers another would
-      // be a silent config split.
-      if (ffmpegPath !== 'ffmpeg') workerArgs.push('--ffmpeg', ffmpegPath);
+      // Workers encode their own segments, so the parent's binary must reach
+      // them too — the parent using one and the workers another would be a
+      // silent config split. Passed ALWAYS, including the literal "ffmpeg":
+      // the worker CLI would otherwise resolve its own default from the
+      // environment/settings and could land somewhere else entirely.
+      workerArgs.push('--ffmpeg', ffmpegPath);
       const child = spawn(nodeExecutable, workerArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       children.push(child);
       onChildPid(child.pid);

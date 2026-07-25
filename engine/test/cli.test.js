@@ -62,6 +62,71 @@ async function frameCount(file) {
   return Number(stdout.trim());
 }
 
+/* ---------------------- ffmpeg binary resolution (v0.16) ---------------------- */
+// The CLI used to accept only --ffmpeg, so a machine whose ffmpeg lives outside
+// PATH was configured in the Studio and still broke here. Resolution is now the
+// shared rule: --ffmpeg > MOTION_STUDIO_FFMPEG > settings.json > PATH. These
+// drive the failure path with binaries that cannot exist, so they need no ffmpeg.
+
+const BOGUS = path.join(os.tmpdir(), 'ms-no-such-ffmpeg');
+
+/** Run --doctor with its own data dir; returns the parsed JSON report. */
+async function doctor({ settings, env = {}, args = [] } = {}) {
+  const home = await fsp.mkdtemp(path.join(tmp, 'home-'));
+  if (settings) await fsp.writeFile(path.join(home, 'settings.json'), JSON.stringify(settings));
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, '--doctor', ...args], {
+      env: { ...process.env, MOTION_STUDIO_HOME: home, MOTION_STUDIO_FFMPEG: '', ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.on('close', (code) => resolve({ code, report: JSON.parse(stdout) }));
+  });
+}
+
+test('cli: --doctor probes the binary from settings.json', async () => {
+  const { code, report } = await doctor({ settings: { ffmpeg: { path: BOGUS } } });
+  assert.equal(code, 3);
+  assert.equal(report.ffmpeg.effectivePath, BOGUS);
+  assert.equal(report.ffmpeg.source, 'settings');
+  assert.equal(report.ffmpeg.found, false);
+});
+
+test('cli: MOTION_STUDIO_FFMPEG beats settings.json, and --ffmpeg beats both', async () => {
+  const viaEnv = await doctor({
+    settings: { ffmpeg: { path: BOGUS } },
+    env: { MOTION_STUDIO_FFMPEG: BOGUS + '-env' },
+  });
+  assert.equal(viaEnv.report.ffmpeg.effectivePath, BOGUS + '-env');
+  assert.equal(viaEnv.report.ffmpeg.source, 'env');
+
+  const viaFlag = await doctor({
+    settings: { ffmpeg: { path: BOGUS } },
+    env: { MOTION_STUDIO_FFMPEG: BOGUS + '-env' },
+    args: ['--ffmpeg', BOGUS + '-flag'],
+  });
+  assert.equal(viaFlag.report.ffmpeg.effectivePath, BOGUS + '-flag');
+  assert.equal(viaFlag.report.ffmpeg.source, 'flag');
+});
+
+test('cli: parallel workers inherit the parent\'s binary, not their own environment', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // The parent is told explicitly to use PATH while the environment points
+  // somewhere that does not exist. Workers must take the parent's choice: if a
+  // worker re-resolved for itself it would pick up MOTION_STUDIO_FFMPEG and the
+  // fan-out would encode half the film with a different binary — or, as here,
+  // fail outright. Regression test for the parent-only "--ffmpeg" forwarding.
+  const proj = await makeProject(20);
+  const out = path.join(tmp, 'workers-inherit.mp4');
+  const { code, messages } = await runCli(
+    ['--project', proj, '--output', out, '--workers', '2', '--ffmpeg', 'ffmpeg'],
+    { env: { MOTION_STUDIO_FFMPEG: BOGUS } },
+  );
+  assert.equal(code, 0, `exit ${code}: ${JSON.stringify(messages.at(-1))}`);
+  assert.equal(await frameCount(out), 20);
+});
+
 test('cli: serial render emits protocol and exits 0', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(30);

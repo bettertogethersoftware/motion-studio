@@ -1,5 +1,69 @@
 # Motion Studio — Changelog
 
+## v0.16 (2026-07-26)
+
+Global settings become actually global. v0.15 shipped the ⚙ settings dialog
+under the heading "Global Settings" but scoped it to the Studio UI; agents
+working over MCP ignored every value in it. The headline symptom: a machine
+with FFmpeg installed somewhere other than PATH could be configured in the
+dialog, render happily from the UI, and still fail *every* MCP tool call with
+`prereqs_missing` telling the user to put FFmpeg on PATH — the exact thing
+they had just configured their way around.
+
+### ffmpeg.path reaches every entry point (the bug)
+
+- One resolution rule, `core/settings.js` `resolveFfmpegPath()`, shared by the
+  Studio, the MCP server, and the CLI: explicit override (CLI `--ffmpeg`) →
+  `MOTION_STUDIO_FFMPEG` → `settings.json` `ffmpeg.path` → `ffmpeg` on PATH.
+  The resolved binary feeds the prereq probe *and* the encode, so the check can
+  no longer pass on one binary while the render reaches for another.
+- The MCP server previously resolved a bare `ffmpeg` for both, ignoring
+  `settings.json` entirely; it now feeds the resolved binary to the probe,
+  `render`, and `build_film`. The CLI previously accepted only `--ffmpeg`, so a
+  configured machine still needed the flag on every invocation; `--doctor` now
+  also reports `effectivePath`/`source`, making it diagnose the binary a real
+  render would use.
+- New `MOTION_STUDIO_FFMPEG` env var. MCP servers are spawned by their client
+  and routinely inherit a narrower PATH than the user's shell, so the env hook
+  is the escape hatch that needs no Studio visit. It beats `ffmpeg.path` and
+  is reported in the Studio's read-only environment panel.
+- `renderParallel` now forwards `--ffmpeg` to its workers **always**, including
+  the literal `"ffmpeg"`. It previously skipped forwarding that value as a
+  no-op, which was safe only while the worker CLI had no defaults of its own —
+  the moment it gained them, a parent meaning "use PATH" could have fanned out
+  to workers resolving something else from the environment. Covered by a test
+  that fails against the old forwarding.
+- `prereqs_missing` now reports `ffmpeg.effectivePath` and `ffmpeg.source`
+  (`env`/`settings`/`PATH`), matching the Studio's `/api/prereqs`, and the
+  message no longer tells you to fix your PATH when you configured a path
+  deliberately. The probe re-runs when the effective binary changes, so
+  editing settings.json doesn't need a server restart.
+
+### The rest of the settings follow
+
+- `create_project` over MCP fills unset fps/width/height/durationInFrames from
+  `newProjectDefaults`, and seeds `crf`/`preset` from the ffmpeg encode
+  defaults exactly as the Studio does. Its dimension fields changed from zod
+  `.default()` to `.optional()` — a `.default()` is indistinguishable from a
+  caller who meant that value, which would have made "explicit wins"
+  unenforceable.
+- `render` over MCP uses `render.defaultWorkers` when `workers` is omitted,
+  and the response now reports the `workers` it actually used.
+- The Studio's `POST /api/projects/:id/render` gained the same server-side
+  fallback (the UI already seeded its form), so a direct API caller behaves
+  like every other path.
+- Both front ends now merge through `withNewProjectDefaults` /
+  `outputSeedFromSettings` in `core/settings.js` instead of doing it locally,
+  so the Studio and MCP cannot drift on what a default means.
+
+### Invariants (unchanged, now written down)
+
+- **Explicit wins.** Globals fill gaps only; an agent told to render 4K
+  vertical still gets 4K vertical.
+- **Creation-time only.** No existing `project.json` is ever rewritten because
+  a global changed — a project renders tomorrow the way it renders today.
+  This is what keeps the reproducibility argument for the old scoping intact.
+
 ## v0.15 (2026-07-25)
 
 Studio management surface: the web UI can now fully manage projects, assets,
@@ -47,6 +111,7 @@ configuration anywhere.
 - Scope is deliberate: settings seed the Studio's forms only. They never
   override a project's `project.json` and are not consulted by the CLI or the
   MCP server — agents stay explicit. Machine-level knobs stay env vars.
+  *(Reversed in v0.16: the MCP server honours them too.)*
 - The dialog also reports the environment read-only: data dir, projects
   root, registry/settings paths, and the `MOTION_STUDIO_*` /
   `PUPPETEER_EXECUTABLE_PATH` hooks with their current values.

@@ -13,6 +13,11 @@
  *
  * Environment:
  *   MOTION_STUDIO_HOME          override data dir (default ~/.motion-studio)
+ *   MOTION_STUDIO_FFMPEG        ffmpeg binary to use (default: the Studio's
+ *                               settings.json ffmpeg.path, else "ffmpeg" on PATH).
+ *                               MCP servers are spawned by a GUI client and often
+ *                               inherit a minimal PATH, so this is the escape hatch
+ *                               when ffmpeg is installed but not visible here.
  *   MOTION_STUDIO_MAX_RENDERS   per-session render cap (default unlimited; spec §10)
  *   MOTION_STUDIO_TTS_EXE       path to the Windows text-to-speech exe (optional;
  *                               enables synthesize_speech / list_voices — v0.6)
@@ -35,6 +40,9 @@ import {
   preflightFrameList, MAX_PREVIEW_FRAMES,
 } from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
+import {
+  readSettings, resolveFfmpegPath, withNewProjectDefaults, outputSeedFromSettings,
+} from '../core/settings.js';
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { resolveInProject } from '../core/sandbox.js';
@@ -60,16 +68,39 @@ const jobs = new JobManager({
   maxJobsPerSession: Number(process.env.MOTION_STUDIO_MAX_RENDERS) || Infinity,
 });
 
-/** Cache prereq result; re-check on demand if it previously failed. */
+/**
+ * The ffmpeg binary this server uses — for the prereq probe AND for every
+ * render/film it runs, so the check can never pass on one binary while the
+ * encode reaches for another. Shared with the Studio and the CLI.
+ */
+const resolveFfmpeg = () => resolveFfmpegPath({ dataDir: store.dataDir });
+
+/** The resolved binary, for the tools that spawn ffmpeg themselves. */
+const ffmpegPathOnly = async () => (await resolveFfmpeg()).path;
+
+/**
+ * Cache prereq result; re-check on demand if it previously failed, or if the
+ * effective binary changed (the user can edit settings.json while we're up).
+ */
 let prereqCache = null;
 async function requirePrereqs() {
-  if (!prereqCache || !prereqCache.ok) prereqCache = await checkPrerequisites();
-  if (!prereqCache.ok) {
+  const ffmpeg = await resolveFfmpeg();
+  if (!prereqCache || !prereqCache.result.ok || prereqCache.ffmpeg.path !== ffmpeg.path) {
+    prereqCache = { ffmpeg, result: await checkPrerequisites({ ffmpegPath: ffmpeg.path }) };
+  }
+  if (!prereqCache.result.ok) {
+    const where =
+      ffmpeg.source === 'PATH'
+        ? 'ensure ffmpeg is on PATH'
+        : `the configured binary "${ffmpeg.path}" (from ${ffmpeg.source}) could not be run`;
     throw new EngineError(
       ErrorCodes.PREREQS_MISSING,
       'Node.js and/or FFmpeg prerequisites are not satisfied on this machine. ' +
-        'This must be fixed by the user (install FFmpeg / Node >= 18 and ensure they are on PATH) — do not retry.',
-      prereqCache,
+        `This must be fixed by the user (install FFmpeg / Node >= 18; ${where}) — do not retry.`,
+      {
+        ...prereqCache.result,
+        ffmpeg: { ...prereqCache.result.ffmpeg, effectivePath: ffmpeg.path, source: ffmpeg.source },
+      },
     );
   }
 }
@@ -154,18 +185,31 @@ server.registerTool(
     title: 'Create a project',
     description:
       'Scaffold a new Motion Studio project from the default template. durationInFrames = seconds × fps. ' +
-      'Returns the project id used by all other tools, plus the scaffolded file list.',
+      'Returns the project id used by all other tools, plus the scaffolded file list. ' +
+      "Any dimension you omit comes from the user's global settings (shown in the Studio's Global Settings " +
+      'panel, factory defaults 30fps 1920×1080 150 frames) — pass a value explicitly whenever the video needs ' +
+      'a specific size or length, and read `config` in the response to see what it actually got.',
     inputSchema: {
       name: z.string().min(1).describe('Human-readable project name'),
-      fps: z.number().int().min(1).max(240).default(30),
-      width: z.number().int().min(2).max(7680).default(1920).describe('Must be even'),
-      height: z.number().int().min(2).max(4320).default(1080).describe('Must be even'),
-      durationInFrames: z.number().int().min(1).default(150),
+      fps: z.number().int().min(1).max(240).optional().describe('Default: global setting'),
+      width: z.number().int().min(2).max(7680).optional().describe('Must be even. Default: global setting'),
+      height: z.number().int().min(2).max(4320).optional().describe('Must be even. Default: global setting'),
+      durationInFrames: z.number().int().min(1).optional().describe('Default: global setting'),
     },
   },
   wrap(async ({ name, fps, width, height, durationInFrames }) => {
     await requirePrereqs();
-    const proj = await store.createProject({ name, fps, width, height, durationInFrames });
+    // Unset fields fall back to the user's global defaults; anything the agent
+    // named explicitly wins (withNewProjectDefaults strips undefined first).
+    const settings = await readSettings(store.dataDir).catch(() => null);
+    const proj = await store.createProject(
+      settings
+        ? withNewProjectDefaults(settings, { name, fps, width, height, durationInFrames })
+        : { name, fps, width, height, durationInFrames },
+    );
+    // Global encode defaults seed the scaffolded output config, same as the Studio.
+    const seed = settings && outputSeedFromSettings(settings, proj.config.output);
+    if (seed) proj.config = await store.updateConfig(proj.id, { output: seed });
     const files = await store.listFiles(proj.id);
     return ok({ id: proj.id, name: proj.name, path: proj.path, config: proj.config, files });
   }),
@@ -389,7 +433,8 @@ server.registerTool(
         .tuple([z.number().int().min(0), z.number().int().min(0)])
         .optional()
         .describe('[startFrame, endFrame] inclusive; omit for the full composition'),
-      workers: z.number().int().min(1).max(16).optional().describe('Parallel capture processes (default 1)'),
+      workers: z.number().int().min(1).max(16).optional()
+        .describe("Parallel capture processes (default: the user's global render setting, factory default 1)"),
       outputFilename: z.string().optional().describe('Filename inside the project "out" dir (default from config)'),
       preflight: z
         .boolean()
@@ -406,8 +451,12 @@ server.registerTool(
       throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare filename');
     }
     const outputPath = path.join(entry.path, config.output.dir, name);
+    const settings = await readSettings(store.dataDir).catch(() => null);
+    const effectiveWorkers = workers ?? settings?.render?.defaultWorkers ?? 1;
     const { jobId, state, queuePosition } = jobs.startRender({
-      projectId, projectPath: entry.path, config, outputPath, frameRange, workers, preflight,
+      projectId, projectPath: entry.path, config, outputPath, frameRange, preflight,
+      workers: effectiveWorkers,
+      ffmpegPath: await ffmpegPathOnly(),
       ...(injectedBrowserFactory
         ? { renderFn: (o) => (o.workers > 1 ? renderParallelInjected(o) : renderCompositionInjected(o)) }
         : {}),
@@ -415,6 +464,7 @@ server.registerTool(
     return ok({
       jobId, state, ...(queuePosition ? { queuePosition } : {}), outputPath,
       totalFrames: frameRange ? frameRange[1] - frameRange[0] + 1 : config.durationInFrames,
+      workers: effectiveWorkers,
     });
   }),
 );
@@ -999,6 +1049,7 @@ server.registerTool(
     const result = await assembleFilm({
       scenes: sceneData, format: info.format, outputPath, audioTracks,
       projectRoot: outEntry.path,
+      ffmpegPath: await ffmpegPathOnly(),
       audioLimiter: outCfg.output?.audioLimiter !== false,
       audioTargetPeakDb,
     });

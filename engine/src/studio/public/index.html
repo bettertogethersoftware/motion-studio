@@ -297,8 +297,10 @@
       </label>
       <span id="ffmpeg-probe" class="dim mono probe"></span>
     </div>
-    <p class="dim note">The binary path applies to every Studio render and the prereq check. crf/preset
-    seed <em>newly created</em> projects' output config; existing projects keep their own.</p>
+    <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
+    used for every render and the prereq check; new-project defaults and crf/preset fill in whatever a new
+    project doesn't specify, and an agent that asks for a specific size or codec still gets it.
+    <em>Newly created</em> projects only — existing projects keep their own.</p>
     <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
     <dl id="settings-env" class="env-list mono"></dl>
     <div class="fieldrow right">

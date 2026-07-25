@@ -3,13 +3,26 @@
  *
  *   <dataDir>/settings.json      (dataDir default: ~/.motion-studio)
  *
- * Scope is deliberately narrow: these are *user preferences* that seed the
- * Studio's forms (new-project defaults, default render workers) plus the
- * ffmpeg block (v0.15): a binary path override and encode defaults
- * (crf/preset) that seed newly created projects. They never override a
- * project's own project.json, and they are not consulted by the MCP server —
- * an agent that wants 24 fps says so explicitly (the CLI takes --ffmpeg for
- * the binary path). Other machine-level knobs (data dir, TTS/music exes) stay
+ * This file is the machine's single source of truth: the Studio UI presents it
+ * as "Global Settings", so every front end honours it — the Studio, the MCP
+ * server, and (for the ffmpeg binary) the CLI. A setting that applied only to
+ * whichever surface happened to write it would not be global, it would be a
+ * per-app preference wearing the wrong label.
+ *
+ * What that means in practice:
+ *   newProjectDefaults   fill in the fields a create-project call left unset
+ *   render.defaultWorkers  the default worker count for a render that does not
+ *                        name one
+ *   ffmpeg.path          the binary used for the prereq check AND every encode
+ *   ffmpeg.crf/preset    seed a newly scaffolded project's output config
+ *
+ * Two invariants hold throughout. An explicit argument always beats a global
+ * default — these fill gaps, they do not override a caller who spoke up. And
+ * they only ever apply at project *creation*: an existing project.json is
+ * never rewritten because a global changed. See resolveFfmpegPath() below for
+ * the one full precedence chain (CLI flag > env > this file > PATH).
+ *
+ * Other machine-level knobs (data dir, TTS/music exes) stay
  * env vars (MOTION_STUDIO_*); the Studio settings endpoint reports them
  * read-only so the UI can show where everything lives.
  */
@@ -70,6 +83,59 @@ export function validateSettings(s) {
 
 function settingsPath(dataDir) {
   return path.join(dataDir, 'settings.json');
+}
+
+/**
+ * Resolve the ffmpeg binary for every entry point, so the prereq probe and the
+ * encode can never disagree about which one they mean.
+ *
+ *   explicit override (CLI --ffmpeg)  >  MOTION_STUDIO_FFMPEG  >  ffmpeg.path
+ *   >  "ffmpeg" on PATH
+ *
+ * The env var sits above settings because an MCP server is spawned by its
+ * client and inherits whatever PATH that client had; the override sits above
+ * everything because a caller who names a binary means it.
+ *
+ * @returns {Promise<{path: string, source: 'flag'|'env'|'settings'|'PATH'}>}
+ */
+export async function resolveFfmpegPath({ dataDir = defaultDataDir(), override } = {}) {
+  const flag = override?.trim();
+  if (flag) return { path: flag, source: 'flag' };
+  const env = process.env.MOTION_STUDIO_FFMPEG?.trim();
+  if (env) return { path: env, source: 'env' };
+  // An unreadable dataDir must not be fatal: readSettings already falls back to
+  // defaults for a missing/corrupt file, this covers the directory itself.
+  const settings = await readSettings(dataDir).catch(() => null);
+  const configured = settings?.ffmpeg?.path?.trim();
+  if (configured) return { path: configured, source: 'settings' };
+  return { path: 'ffmpeg', source: 'PATH' };
+}
+
+/**
+ * Apply the global new-project defaults to a create-project request. Only
+ * fields the caller actually left out are filled in — an explicit value always
+ * wins, and `undefined` is stripped first so it cannot clobber a default by
+ * spreading over it (MCP hands unset optional fields through as undefined).
+ */
+export function withNewProjectDefaults(settings, body = {}) {
+  const explicit = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
+  return { ...settings.newProjectDefaults, ...explicit };
+}
+
+/**
+ * The output-config patch implied by the global encode defaults, or null when
+ * neither is set. Applied when scaffolding a project so a user who set
+ * crf/preset once gets them on every new project, whichever front end created
+ * it; existing projects keep their own (same rule as everything else here).
+ */
+export function outputSeedFromSettings(settings, currentOutput = {}) {
+  const { defaultCrf, defaultPreset } = settings.ffmpeg;
+  if (defaultCrf === null && defaultPreset === null) return null;
+  return {
+    ...currentOutput,
+    ...(defaultCrf !== null ? { crf: defaultCrf } : {}),
+    ...(defaultPreset !== null ? { preset: defaultPreset } : {}),
+  };
 }
 
 /** Read settings, falling back to defaults for a missing/unreadable file. */

@@ -11,6 +11,7 @@ import { parseProgressLine, ProgressStreamParser, ProgressEmitter } from '../src
 import { parseFfmpegVersion, parseNodeVersion } from '../src/core/prereqs.js';
 import { buildAudioFilter, LIMITER_FILTER } from '../src/core/encoder.js';
 import { ErrorCodes } from '../src/core/errors.js';
+import { DEFAULT_SETTINGS, withNewProjectDefaults, outputSeedFromSettings } from '../src/core/settings.js';
 
 let tmp;
 beforeEach(async () => { tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-test-')); });
@@ -307,4 +308,57 @@ test('encoder: single track still gets the limiter, ending in [aout]', () => {
   const f = buildAudioFilter([{ src: 'a.mp3' }], 30);
   assert.match(f, /\[a0\]anull\[amix\]/);
   assert.ok(f.endsWith('[aout]'));
+});
+
+/* ------------------------- global settings defaults ------------------------- */
+// These two helpers are the whole reason "Global Settings" is global: the Studio
+// and the MCP server both route project creation through them, so neither can
+// grow its own idea of what a default is.
+
+const settingsWith = (patch) => ({
+  ...DEFAULT_SETTINGS,
+  newProjectDefaults: { ...DEFAULT_SETTINGS.newProjectDefaults, ...(patch.newProjectDefaults ?? {}) },
+  ffmpeg: { ...DEFAULT_SETTINGS.ffmpeg, ...(patch.ffmpeg ?? {}) },
+});
+
+test('settings: new-project defaults fill only the fields a caller left unset', () => {
+  const s = settingsWith({ newProjectDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 } });
+  const merged = withNewProjectDefaults(s, { name: 'x', width: 3840 });
+  assert.equal(merged.width, 3840); // explicit wins
+  assert.equal(merged.fps, 24);     // global fills the gap
+  assert.equal(merged.height, 720);
+  assert.equal(merged.durationInFrames, 48);
+  assert.equal(merged.name, 'x');
+});
+
+test('settings: an explicit undefined does not clobber a global default', () => {
+  // MCP hands unset optional fields through as undefined; a naive spread would
+  // overwrite the default with undefined and silently fall back to 30fps.
+  const s = settingsWith({ newProjectDefaults: { fps: 24 } });
+  const merged = withNewProjectDefaults(s, { name: 'x', fps: undefined, height: undefined });
+  assert.equal(merged.fps, 24);
+  assert.equal(merged.height, DEFAULT_SETTINGS.newProjectDefaults.height);
+});
+
+test('settings: an explicit value equal to the factory default still wins', () => {
+  // Guards the "did the caller mean it?" distinction that .default() destroyed.
+  const s = settingsWith({ newProjectDefaults: { fps: 24 } });
+  assert.equal(withNewProjectDefaults(s, { name: 'x', fps: 30 }).fps, 30);
+});
+
+test('settings: output seed is null unless an encode default is set', () => {
+  assert.equal(outputSeedFromSettings(settingsWith({}), { format: 'mp4' }), null);
+});
+
+test('settings: output seed patches crf/preset over the scaffolded output', () => {
+  const s = settingsWith({ ffmpeg: { defaultCrf: 18, defaultPreset: 'slow' } });
+  const seed = outputSeedFromSettings(s, { format: 'webm', filename: 'out.webm', crf: 32 });
+  assert.deepEqual(seed, { format: 'webm', filename: 'out.webm', crf: 18, preset: 'slow' });
+});
+
+test('settings: a partially set encode default leaves the other field alone', () => {
+  const s = settingsWith({ ffmpeg: { defaultCrf: 18 } });
+  const seed = outputSeedFromSettings(s, { format: 'mp4' });
+  assert.deepEqual(seed, { format: 'mp4', crf: 18 });
+  assert.ok(!('preset' in seed));
 });

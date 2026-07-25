@@ -54,7 +54,9 @@ import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { ProjectStore, MAX_ASSET_BYTES } from '../core/project.js';
-import { readSettings, updateSettings } from '../core/settings.js';
+import {
+  readSettings, updateSettings, resolveFfmpegPath, withNewProjectDefaults, outputSeedFromSettings,
+} from '../core/settings.js';
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
@@ -226,21 +228,20 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         return sendJson(res, 404, { error: 'not_found' });
       }
 
-      // Effective ffmpeg binary: settings override, else "ffmpeg" on PATH.
-      const ffmpegPath = async () => (await readSettings(store.dataDir)).ffmpeg.path || 'ffmpeg';
+      // Effective ffmpeg binary — resolved by the shared rule (see core/settings.js).
+      const ffmpegPath = async () => (await resolveFfmpegPath({ dataDir: store.dataDir })).path;
 
       // GET /api/prereqs — the ffmpeg block names the binary that was actually
       // probed and where that path came from, so a failure can be reported as
       // "not found at <path> (from settings)" rather than an anonymous
       // "prerequisites missing".
       if (req.method === 'GET' && parts[1] === 'prereqs' && parts.length === 2) {
-        const settings = await readSettings(store.dataDir);
-        const effectivePath = settings.ffmpeg.path || 'ffmpeg';
+        const { path: effectivePath, source } = await resolveFfmpegPath({ dataDir: store.dataDir });
         const prereqs = await checkPrerequisites({ ffmpegPath: effectivePath });
         return sendJson(res, 200, {
           ...prereqs,
           minimums: { node: MIN_NODE.join('.'), ffmpeg: MIN_FFMPEG.join('.') },
-          ffmpeg: { ...prereqs.ffmpeg, effectivePath, source: settings.ffmpeg.path ? 'settings' : 'PATH' },
+          ffmpeg: { ...prereqs.ffmpeg, effectivePath, source },
         });
       }
 
@@ -249,13 +250,14 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
       if (parts[1] === 'settings' && parts.length === 2) {
         if (req.method === 'GET') {
           const ENV_HOOKS = [
-            'MOTION_STUDIO_HOME', 'MOTION_STUDIO_TTS_EXE', 'MOTION_STUDIO_MIDI_EXE',
+            'MOTION_STUDIO_HOME', 'MOTION_STUDIO_FFMPEG', 'MOTION_STUDIO_TTS_EXE',
+            'MOTION_STUDIO_MIDI_EXE',
             'MOTION_STUDIO_FLUIDSYNTH', 'MOTION_STUDIO_SOUNDFONT', 'MOTION_STUDIO_LIBS_DIR',
             'MOTION_STUDIO_ALLOW_LOCAL_FETCH', 'MOTION_STUDIO_MAX_RENDERS',
             'PUPPETEER_EXECUTABLE_PATH',
           ];
           const settings = await readSettings(store.dataDir);
-          const effectiveFfmpeg = settings.ffmpeg.path || 'ffmpeg';
+          const { path: effectiveFfmpeg, source } = await resolveFfmpegPath({ dataDir: store.dataDir });
           const probe = await checkPrerequisites({ ffmpegPath: effectiveFfmpeg });
           return sendJson(res, 200, {
             settings,
@@ -264,7 +266,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               projectsRoot: store.projectsRoot,
               registryPath: store.registryPath,
               settingsPath: path.join(store.dataDir, 'settings.json'),
-              ffmpeg: { effectivePath: effectiveFfmpeg, source: settings.ffmpeg.path ? 'settings' : 'PATH', ...probe.ffmpeg },
+              ffmpeg: { effectivePath: effectiveFfmpeg, source, ...probe.ffmpeg },
               env: Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
             },
           });
@@ -281,20 +283,12 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           if (req.method === 'GET') return sendJson(res, 200, { projects: await store.listProjects() });
           if (req.method === 'POST') {
             const body = await readBody(req);
-            // Unset fields fall back to the user's global defaults
-            // (Studio-only nicety; MCP/CLI callers stay explicit).
-            const { newProjectDefaults, ffmpeg } = await readSettings(store.dataDir);
-            const proj = await store.createProject({ ...newProjectDefaults, ...body });
-            // Global encode defaults seed the scaffolded output config.
-            if (ffmpeg.defaultCrf !== null || ffmpeg.defaultPreset !== null) {
-              proj.config = await store.updateConfig(proj.id, {
-                output: {
-                  ...proj.config.output,
-                  ...(ffmpeg.defaultCrf !== null ? { crf: ffmpeg.defaultCrf } : {}),
-                  ...(ffmpeg.defaultPreset !== null ? { preset: ffmpeg.defaultPreset } : {}),
-                },
-              });
-            }
+            // Unset fields fall back to the user's global defaults. Shared with
+            // the MCP server so the two cannot disagree about what "global" means.
+            const settings = await readSettings(store.dataDir);
+            const proj = await store.createProject(withNewProjectDefaults(settings, body));
+            const seed = outputSeedFromSettings(settings, proj.config.output);
+            if (seed) proj.config = await store.updateConfig(proj.id, { output: seed });
             return sendJson(res, 201, proj);
           }
         }
@@ -438,7 +432,9 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             config,
             outputPath,
             frameRange: body.frameRange,
-            workers: body.workers,
+            // The UI seeds its form from the global default, but a direct API
+            // caller may omit it — fall back here so both paths agree with MCP.
+            workers: body.workers ?? (await readSettings(store.dataDir)).render.defaultWorkers,
             ffmpegPath: await ffmpegPath(),
             ...(renderFn ? { renderFn } : {}),
           });
