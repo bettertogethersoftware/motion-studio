@@ -20,10 +20,22 @@
  *                               when ffmpeg is installed but not visible here.
  *   MOTION_STUDIO_MAX_RENDERS   per-session render cap (default unlimited; spec §10)
  *   MOTION_STUDIO_TTS_EXE       path to the Windows text-to-speech exe (optional;
- *                               enables synthesize_speech / list_voices — v0.6)
- *   MOTION_STUDIO_MIDI_EXE      MotionStudioMidi.exe (music, v0.8)
- *   MOTION_STUDIO_FLUIDSYNTH    fluidsynth.exe (music, v0.8)
- *   MOTION_STUDIO_SOUNDFONT     .sf2/.sf3 SoundFont (music, v0.8)
+ *                               enables the "system" speech vendor — v0.6)
+ *   MOTION_STUDIO_TTS_VENDOR    speech vendor for synthesize_speech: "system"
+ *                               (default) or "azure" — v0.17. Overrides
+ *                               settings.json's tts.vendor; a call that names
+ *                               a vendor still wins over both.
+ *   AZURE_SPEECH_KEY            Azure AI Speech resource key + region for the
+ *   AZURE_SPEECH_REGION         "azure" vendor (v0.17). Read from the
+ *                               environment only — never stored in settings.
+ *                               See docs/tts-setup.md.
+ *   MOTION_STUDIO_MUSIC_VENDOR  music vendor for synthesize_music: "node"
+ *                               (default — renders in-process, any OS) or
+ *                               "fluidsynth" (the v0.8 exe chain) — v0.17.
+ *   MOTION_STUDIO_SOUNDFONT     .sf2/.sf3 SoundFont — used by BOTH music
+ *                               vendors (music, v0.8)
+ *   MOTION_STUDIO_MIDI_EXE      MotionStudioMidi.exe (fluidsynth vendor, v0.8)
+ *   MOTION_STUDIO_FLUIDSYNTH    fluidsynth.exe (fluidsynth vendor, v0.8)
  */
 
 import path from 'node:path';
@@ -46,8 +58,15 @@ import {
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { resolveInProject } from '../core/sandbox.js';
-import { synthesizeSpeech, wavDurationSeconds, framesForDuration, checkTts, resolveTtsExe } from '../core/tts.js';
-import { synthesizeMusic, checkMusic } from '../core/music.js';
+import { wavDurationSeconds, framesForDuration } from '../core/tts.js';
+import {
+  resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport,
+  unavailableWithAlternatives, TTS_VENDORS,
+} from '../core/tts-vendors.js';
+import {
+  resolveMusicVendor, checkMusicVendor, synthesizeMusicWithVendor, musicVendorReport,
+  musicUnavailableWithAlternatives, MUSIC_VENDORS,
+} from '../core/music-vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm } from '../core/film.js';
 
@@ -663,20 +682,27 @@ server.registerTool(
   {
     title: 'Synthesize narration (text-to-speech)',
     description:
-      'Turn narration text into a spoken WAV in the project\'s assets/ folder using the system speech engine ' +
-      '(Windows-only; requires MOTION_STUDIO_TTS_EXE — otherwise fails with tts_unavailable). ' +
+      'Turn narration text into a spoken WAV in the project\'s assets/ folder. Two vendors (v0.17): "system" = the ' +
+      'local Windows speech exe (offline, needs MOTION_STUDIO_TTS_EXE), "azure" = Azure AI Speech neural voices ' +
+      '(cross-platform, needs AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in the environment). Omit `vendor` to use the ' +
+      'machine\'s configured default — check it with list_vendors; an unconfigured vendor fails with ' +
+      'tts_unavailable, which the user must fix (do not retry). ' +
       'Returns the clip length as durationSeconds AND durationInFrames — use durationInFrames to size the ' +
       'Sequence() block the narration plays under. mode="attach" (default) also appends the clip to the ' +
       'project\'s audio tracks so the next render mixes it in automatically; mode="asset-only" just writes the ' +
       'WAV and reports its duration, leaving you to wire it later with update_project_config. ' +
-      'List available voices first with list_voices. Text is sent to the engine via a UTF-8 file, so quotes / ' +
-      'newlines / unicode in the narration are safe.',
+      'List available voices first with list_voices. Narration text is passed safely (UTF-8 file for the exe, ' +
+      'escaped SSML for Azure), so quotes / newlines / unicode are safe.',
     inputSchema: {
       projectId: z.string(),
       text: z.string().min(1).describe('Narration text (UTF-8)'),
-      voice: z.string().optional().describe('Voice name from list_voices; omit for the system default'),
+      vendor: z.enum(['system', 'azure']).optional()
+        .describe('Speech vendor; omit to use the configured default (see list_vendors)'),
+      voice: z.string().optional().describe('Voice name from list_voices; omit for the vendor default'),
       rate: z.number().int().min(-10).max(10).optional().describe('Speaking rate (engine scale, e.g. -10..10)'),
       volume: z.number().int().min(0).max(100).optional().describe('Volume 0..100'),
+      style: z.string().optional()
+        .describe('Azure only: expressive style for the voice, e.g. "newscast", "cheerful" (see list_voices styles)'),
       mode: z.enum(['attach', 'asset-only']).default('attach')
         .describe('attach = also add an audio track; asset-only = just synthesize + report'),
       assetPath: z.string().optional()
@@ -685,17 +711,12 @@ server.registerTool(
       gainDb: z.number().optional().describe('attach mode: track gain in dB'),
     },
   },
-  wrap(async ({ projectId, text, voice, rate, volume, mode, assetPath, startInFrames, gainDb }) => {
-    const ttsExe = resolveTtsExe();
-    const probe = await checkTts({ ttsExe });
-    if (!probe.available) {
-      throw new EngineError(
-        ErrorCodes.TTS_UNAVAILABLE,
-        `Speech engine not available: ${probe.error}. Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE ` +
-          'to its path (Windows only), then retry — do not retry blindly.',
-        { error: probe.error },
-      );
-    }
+  wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb }) => {
+    // Probe before touching the project: an unconfigured vendor should fail
+    // without leaving a half-written asset behind.
+    const resolved = await resolveSpeechVendor({ vendor, dataDir: store.dataDir });
+    const probe = await checkSpeechVendor(resolved.vendor, { dataDir: store.dataDir });
+    if (!probe.available) throw await unavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
 
     const entry = await store.getProjectEntry(projectId);
     const config = await store.readConfig(projectId);
@@ -714,14 +735,20 @@ server.registerTool(
     // Reuse the sandbox's write guards (allow-list incl. .wav, traversal/symlink checks).
     const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
 
-    const result = await synthesizeSpeech({ text, outPath: abs, voice, rate, volume, ttsExe });
+    // Pass the caller's `vendor` through as given (possibly undefined) rather
+    // than the resolved id: resolution is deterministic, so the dispatcher
+    // reaches the same vendor — but it also reports where the choice really
+    // came from instead of calling every call an explicit argument.
+    const result = await synthesizeWithVendor({
+      vendor, text, outPath: abs, voice, rate, volume, style, dataDir: store.dataDir,
+    });
 
     const stat = await fsp.stat(abs).catch(() => null);
     if (!stat || stat.size === 0) {
       throw new EngineError(
         ErrorCodes.TTS_FAILED,
         `Speech engine reported success but no audio was written to ${normalized}`,
-        { path: normalized },
+        { path: normalized, vendor: resolved.vendor },
       );
     }
 
@@ -744,7 +771,11 @@ server.registerTool(
     return ok({
       mode,
       assetPath: normalized,
+      vendor: result.vendor,
+      vendorSource: result.vendorSource,
       voice: result.voice ?? voice ?? null,
+      ...(result.style ? { style: result.style } : {}),
+      ...(result.warnings?.length ? { warnings: result.warnings } : {}),
       durationSeconds,
       durationInFrames,
       fps: config.fps,
@@ -763,36 +794,117 @@ server.registerTool(
 server.registerTool(
   'list_voices',
   {
-    title: 'List installed TTS voices',
+    title: 'List available TTS voices',
     description:
-      'List the speech voices installed on this machine, for use as the "voice" argument to synthesize_speech. ' +
-      'Windows-only; requires MOTION_STUDIO_TTS_EXE (otherwise fails with tts_unavailable).',
-    inputSchema: {},
+      'List the speech voices available from a vendor, for use as the "voice" argument to synthesize_speech. ' +
+      'Omit "vendor" to query the configured default (see list_vendors). The system vendor returns the ' +
+      'voices installed on this Windows machine; the azure vendor returns several hundred neural voices, so ' +
+      'filter with "locale" (e.g. "en-US") or "search" — results are capped at "limit" (default 50) and the ' +
+      'response reports the true "total". Each voice carries any expressive "styles" it supports. ' +
+      'Fails with tts_unavailable when the vendor is not configured.',
+    inputSchema: {
+      vendor: z.enum(['system', 'azure']).optional().describe('Speech vendor; omit for the configured default'),
+      locale: z.string().optional().describe('Filter by locale prefix, e.g. "en" or "en-GB" (azure)'),
+      search: z.string().optional().describe('Filter by substring of the name / locale name / gender'),
+      limit: z.number().int().min(1).max(500).default(50).describe('Max voices to return'),
+      offset: z.number().int().min(0).default(0).describe('Skip this many matches (paging)'),
+    },
   },
-  wrap(async () => {
-    const ttsExe = resolveTtsExe();
-    const probe = await checkTts({ ttsExe });
-    if (!probe.available) {
-      throw new EngineError(
-        ErrorCodes.TTS_UNAVAILABLE,
-        `Speech engine not available: ${probe.error}. Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE ` +
-          '(Windows only).',
-        { error: probe.error },
-      );
+  wrap(async ({ vendor, locale, search, limit, offset }) => {
+    const result = await listSpeechVoices({
+      vendor, locale, search, limit, offset, dataDir: store.dataDir,
+    });
+    return ok({
+      vendor: result.vendor,
+      vendorSource: result.vendorSource,
+      total: result.total,
+      returned: result.voices.length,
+      truncated: result.truncated,
+      // Names alone for the system vendor (that is all it has); full metadata
+      // for Azure, where locale/gender/styles are how you actually choose.
+      voices: result.vendor === 'system'
+        ? result.voices.map((v) => v.name)
+        : result.voices.map((v) => ({
+          name: v.name, locale: v.locale, gender: v.gender,
+          ...(v.styles.length ? { styles: v.styles } : {}),
+        })),
+      ...(result.truncated ? { hint: 'Narrow the list with locale/search, or page with offset.' } : {}),
+    });
+  }),
+);
+
+server.registerTool(
+  'list_vendors',
+  {
+    title: 'List generator vendors and their status',
+    description:
+      'Report what this machine can actually generate, per capability: "speech" (narration — synthesize_speech / ' +
+      'list_voices) and "music" (synthesize_music). For each vendor: whether it is available right now, whether it ' +
+      'is the one that will be used when no vendor is named, and — if it is not available — exactly what the user ' +
+      'must configure. Call this when a generator returns tts_unavailable / music_unavailable, so you can tell the ' +
+      'user which vendor to fix, or switch to one that is already working. ' +
+      'Reports credential *sources* only; never a key itself.',
+    inputSchema: {
+      capability: z.enum(['speech', 'music']).optional().describe('Omit to report both'),
+      probe: z.boolean().default(true)
+        .describe('false = report configuration only, skipping the exe spawn / network round-trip'),
+    },
+  },
+  wrap(async ({ capability, probe }) => {
+    const want = (c) => !capability || capability === c;
+    const out = {};
+    if (want('speech')) {
+      const report = await speechVendorReport({ dataDir: store.dataDir, probe });
+      out.speech = {
+        active: report.active,
+        activeSource: report.activeSource,
+        allVendors: TTS_VENDORS,
+        vendors: report.vendors.map((v) => ({
+          id: v.id,
+          label: v.label,
+          active: v.active,
+          available: v.available,
+          voiceCount: v.voiceCount,
+          requires: v.requires,
+          offline: v.offline,
+          ...(v.error ? { error: v.error } : {}),
+          ...(v.locales?.length ? { localeCount: v.locales.length } : {}),
+        })),
+      };
     }
-    return ok({ voices: probe.voices });
+    if (want('music')) {
+      const report = await musicVendorReport({ dataDir: store.dataDir, probe });
+      out.music = {
+        active: report.active,
+        activeSource: report.activeSource,
+        allVendors: MUSIC_VENDORS,
+        targetPeakDb: report.settings?.targetPeakDb ?? null,
+        vendors: report.vendors.map((v) => ({
+          id: v.id,
+          label: v.label,
+          active: v.active,
+          available: v.available,
+          requires: v.requires,
+          offline: v.offline,
+          ...(v.error ? { error: v.error } : {}),
+          ...(v.config?.soundfont ? { soundfont: v.config.soundfont } : {}),
+        })),
+      };
+    }
+    return ok(out);
   }),
 );
 
 server.registerTool(
   'synthesize_music',
   {
-    title: 'Generate music (MIDI → FluidSynth)',
+    title: 'Generate music (note spec → SoundFont)',
     description:
       'Compose a short piece of music from a note spec YOU author, and add it as an audio track. ' +
-      'The spec is rendered to MIDI (DryWetMIDI) then to audio (FluidSynth + a General MIDI SoundFont). ' +
-      'Windows-only; requires the music toolchain (MotionStudioMidi.exe + fluidsynth + a soundfont) — otherwise ' +
-      'fails with music_unavailable (see docs/music-setup.md). ' +
+      'The spec becomes MIDI and is rendered against a General MIDI SoundFont. Two vendors (v0.17): "node" ' +
+      '(default — renders in-process, works on any OS, nothing to install beyond a SoundFont) and "fluidsynth" ' +
+      '(the Windows exe chain). Omit `vendor` to use the machine\'s configured default — check it with ' +
+      'list_vendors; an unconfigured vendor fails with music_unavailable (see docs/music-setup.md). ' +
       'mode="attach" (default) writes assets/music-<n>.wav AND appends the audio track so the next render mixes it; ' +
       'mode="asset-only" writes + reports only. Returns durationSeconds/durationInFrames (the WAV, which includes a ' +
       'reverb tail) and musicalDurationSeconds (the note content). Use durationInFrames to size the video, and ' +
@@ -815,22 +927,20 @@ server.registerTool(
           })).min(1),
         })).min(1),
       }).describe('The piece to compose'),
+      vendor: z.enum(['node', 'fluidsynth']).optional()
+        .describe('Music vendor; omit to use the configured default (see list_vendors)'),
       mode: z.enum(['attach', 'asset-only']).default('attach'),
       assetPath: z.string().optional().describe('Project-relative .wav under assets/ (default assets/music-<n>.wav)'),
       startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
       gainDb: z.number().optional().describe('attach mode: track gain in dB (e.g. -8 for a background bed)'),
     },
   },
-  wrap(async ({ projectId, spec, mode, assetPath, startInFrames, gainDb }) => {
-    const probe = await checkMusic();
-    if (!probe.available) {
-      throw new EngineError(
-        ErrorCodes.MUSIC_UNAVAILABLE,
-        `Music toolchain not available: ${probe.error}. Build MotionStudioMidi.exe, place fluidsynth + a SoundFont, ` +
-          'or set MOTION_STUDIO_MIDI_EXE / MOTION_STUDIO_FLUIDSYNTH / MOTION_STUDIO_SOUNDFONT (Windows only). See docs/music-setup.md.',
-        { error: probe.error },
-      );
-    }
+  wrap(async ({ projectId, spec, vendor, mode, assetPath, startInFrames, gainDb }) => {
+    // Resolve + probe before touching the project, so an unconfigured vendor
+    // fails without leaving a half-written asset behind.
+    const resolved = await resolveMusicVendor({ vendor, dataDir: store.dataDir });
+    const probe = await checkMusicVendor(resolved.vendor, { dataDir: store.dataDir });
+    if (!probe.available) throw await musicUnavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
     const entry = await store.getProjectEntry(projectId);
     const config = await store.readConfig(projectId);
     const assetsDir = path.join(entry.path, 'assets');
@@ -843,11 +953,13 @@ server.registerTool(
     }
     const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
 
-    const result = await synthesizeMusic({ spec, outPath: abs });
+    // As with speech: hand the dispatcher the caller's own `vendor` so the
+    // reported vendorSource stays truthful (see synthesize_speech).
+    const result = await synthesizeMusicWithVendor({ vendor, spec, outPath: abs, dataDir: store.dataDir });
 
     const stat = await fsp.stat(abs).catch(() => null);
     if (!stat || stat.size === 0) {
-      throw new EngineError(ErrorCodes.MUSIC_FAILED, `Rendered no audio to ${normalized}`, { path: normalized });
+      throw new EngineError(ErrorCodes.MUSIC_FAILED, `Rendered no audio to ${normalized}`, { path: normalized, vendor: resolved.vendor });
     }
     const durationSeconds = await wavDurationSeconds(abs);
     const durationInFrames = framesForDuration(durationSeconds, config.fps);
@@ -866,6 +978,8 @@ server.registerTool(
     return ok({
       mode,
       assetPath: normalized,
+      vendor: result.vendor,
+      vendorSource: result.vendorSource,
       bpm: result.bpm,
       tracks: result.tracks,
       notes: result.notes,
@@ -874,6 +988,10 @@ server.registerTool(
       durationInFrames,
       fps: config.fps,
       bytes: stat.size,
+      // The measured peak of what was actually written — you cannot hear it,
+      // and this is how you know whether the bed will fight the narration.
+      peakDb: result.peakDb,
+      ...(result.gainAppliedDb ? { attenuatedDb: result.gainAppliedDb, targetPeakDb: result.targetPeakDb } : {}),
       attached,
       ...(attached
         ? { audioTrackIndex, audio }

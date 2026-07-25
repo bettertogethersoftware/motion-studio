@@ -458,6 +458,69 @@ dialog .fieldrow { margin-bottom: 10px; }
 .ref-list li + li { margin-top: 4px; }
 #delete-note { font-size: 11px; max-width: 380px; }
 
+/* --------------------------- speech vendors ----------------------------- */
+
+/* A full stage page, not a dialog: two vendor cards, a few hundred voices to
+   filter, and an audition player. Same instrument-panel grammar as the rest —
+   hairline rules, one amber accent, the active vendor marked by a left bar. */
+
+.vendors-page {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 18px 24px 28px;
+}
+.page-head {
+  display: flex; gap: 12px; align-items: baseline;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.page-head h2 {
+  margin: 0;
+  font: 600 13px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent);
+}
+.page-head .spacer { flex: 1; }
+.page-head button { align-self: center; }
+#vendors-msg.err { color: var(--err); }
+.vendors-intro { max-width: 760px; margin: 12px 0 16px; }
+.vendors-page code { font: 11px var(--mono); color: var(--text); }
+
+.capability-label { margin-top: 22px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.capability-label:first-of-type { margin-top: 4px; }
+.vendor-cards { display: flex; flex-direction: column; gap: 16px; }
+.music-test { margin-top: 14px; }
+.music-test select { max-width: 340px; }
+.music-test .grow select { width: 100%; }
+.vendor-card {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line);
+  background: var(--ink-2);
+  padding: 14px 16px 16px;
+}
+.vendor-card.active { border-left-color: var(--accent); background: var(--ink-3); }
+.vendor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.vendor-head .pill { margin-left: auto; }
+label.radio {
+  flex-direction: row; align-items: center; gap: 8px;
+  text-transform: none; letter-spacing: 0.04em; cursor: pointer; margin: 0;
+}
+label.radio input { accent-color: var(--accent); }
+.v-title { font: 600 13px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text); }
+.v-summary { font-size: 12px; margin: 0 0 10px; max-width: 760px; }
+.vendor-card .env-list { max-width: 620px; max-height: none; margin-bottom: 10px; }
+.err-line { color: var(--err); font: 11px/1.5 var(--mono); margin: 0 0 10px; max-width: 760px; }
+
+.vendor-grid { margin: 12px 0 4px; grid-template-columns: repeat(3, minmax(140px, 240px)); }
+.vendor-grid label.wide { grid-column: span 2; }
+.vendor-grid select, .vendor-grid input { width: 100%; }
+.vendor-test { margin-top: 12px; align-items: end; }
+.vendor-test .grow input { width: 100%; }
+/* min-width so a select that is still loading (or has no voices) stays a
+   control rather than collapsing to a caret. */
+.vendor-test select { min-width: 190px; max-width: 320px; }
+.test-btn.playing { color: var(--accent); border-color: var(--accent); }
+.vendor-test [data-test-msg] { font-size: 11px; padding-bottom: 7px; }
+.vendor-test [data-test-msg].err { color: var(--err); }
+#vendors-env { max-width: 760px; }
+
 /* ------------------------------- banner -------------------------------- */
 
 .banner {

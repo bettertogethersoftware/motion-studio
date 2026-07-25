@@ -1,7 +1,7 @@
 {
   "name": "motion-studio-engine",
-  "version": "0.15.0",
-  "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, and MCP server.",
+  "version": "0.17.0",
+  "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, MCP server, and pluggable speech/music vendors (Windows voices or Azure AI Speech; in-process SoundFont synth or FluidSynth).",
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
     "studio": "node src/studio/server.js",
@@ -24,6 +24,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "puppeteer": "^23.11.1",
+    "spessasynth_core": "^4.3.15",
     "zod": "^3.25.76"
   },
   "bin": {

@@ -1,4 +1,4 @@
-# Motion Studio — Architecture (v0.15)
+# Motion Studio — Architecture (v0.17)
 
 ## 1. System overview
 
@@ -11,7 +11,7 @@ Motion Studio is three thin entry points around one shared render engine.
    http://127.0.0.1:7345                            │  MCP over stdio
         │ HTTP/SSE (localhost only)                 ▼
         ▼                                   MCP server (engine/src/mcp/server.js)
- Studio server (engine/src/studio/)           27 tools, path sandbox
+ Studio server (engine/src/studio/)           28 tools, path sandbox
    projects / assets / settings                     │
    preview / render API                             │
    hot-reload SSE, output download                  │
@@ -26,7 +26,9 @@ Motion Studio is three thin entry points around one shared render engine.
           formats.js   — output-format registry (mp4 webm gif prores png-seq)
           jobs.js      — job queue, status, logs, cancellation
           progress.js  — JSON-line protocol (+ etaMs)
-          settings.js  — global user preferences (Studio only; see §11)
+          settings.js  — global user preferences (all entry points; see §11)
+          vendors.js   — vendor kit: selection, status, errors (see §9.2)
+          tts-vendors.js / music-vendors.js — per-capability dispatch
                        ▼
         headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
 ```
@@ -264,8 +266,8 @@ in what they depend on:
 
 | source | dependency | failure mode |
 |---|---|---|
-| `synthesize_speech` (v0.6) | Windows TTS exe | `tts_unavailable` |
-| `synthesize_music` (v0.8) | MIDI exe + FluidSynth + SoundFont | `music_unavailable` |
+| `synthesize_speech` (v0.6) | a **speech vendor**: the Windows TTS exe, or Azure AI Speech (v0.17) | `tts_unavailable` |
+| `synthesize_music` (v0.8) | a **music vendor**: an in-process SoundFont synth, or the MIDI exe + FluidSynth chain (v0.17) | `music_unavailable` |
 | `synthesize_sfx` (v0.12) | **none** — pure JS in `core/sfx.js` | *(cannot be unavailable)* |
 
 `core/sfx.js` exists because the other two cannot make an unpitched noise, and
@@ -287,6 +289,66 @@ re-renders byte-identically on a given Node build, but `Math.sin`/`Math.exp` are
 not pinned by ECMAScript, so cross-version identity is not claimed. This does not
 weaken frame-render determinism, which is a property of the composition — audio
 is generated once and thereafter read as a file.
+
+### 9.2 Vendors (v0.17)
+
+Two of the three generators have more than one possible implementation:
+
+```
+speech  →  system (core/tts.js, Windows exe)   |  azure      (core/tts-azure.js)
+music   →  node   (core/music-node.js)         |  fluidsynth (core/music.js)
+```
+
+`core/vendors.js` owns what those axes share — the selection rule, the env
+hooks, the status-report shape, and the sentence a caller sees when a vendor
+cannot be used. `core/tts-vendors.js` and `core/music-vendors.js` supply the
+providers on top; the shared module imports neither, so capability modules
+depend on the kit and never the reverse. Within a capability, providers return
+identical payload and probe shapes, so nothing downstream branches on vendor:
+`synthesize_speech`, `synthesize_music`, the Studio page and the audio mixer
+each see one source.
+
+Selection uses the standard precedence — explicit argument →
+`MOTION_STUDIO_TTS_VENDOR` / `MOTION_STUDIO_MUSIC_VENDOR` → `settings.json` →
+built-in default. The defaults are chosen for what they cost you: speech
+defaults to `system` so a machine that has been narrating locally does not start
+billing a cloud subscription because a newer version knows how to; music
+defaults to `node` because it is the only one that works off Windows and needs
+no binaries a fresh clone must build. The "active" source is read from the
+*stored* settings, not the merged ones, so the UI can distinguish "the user
+chose this" from "this is what ships".
+
+**There is no fallback between vendors, in either capability.** A machine that
+quietly swapped synthesizers would produce a film whose soundtrack changes
+character between scenes — worse than a clear failure naming what to install.
+An unavailable vendor does, however, name any sibling that is ready.
+
+Two rules carry over from §6's error model. Setup problems and failures stay
+distinct: a missing or rejected credential is `tts_unavailable` / a missing
+SoundFont is `music_unavailable` (the caller must stop and tell the user), while
+a rate limit, a bad style or a failed render is `tts_failed` / `music_failed`.
+And an unknown voice is `unsupported_voice` with suggestions rather than a
+silent substitution — validated against the catalogue *before* any audio is
+requested, because a film whose narrator changed between takes is a worse
+outcome than a failed call. Options a vendor lacks are reported in `warnings`,
+not dropped.
+
+Credentials are environment-only (`AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION` and
+their `MOTION_STUDIO_`-prefixed forms). `settings.json` may hold the region,
+default voice, format and style but never a key — a patch carrying one is
+rejected — and every surface that reports a key reports it masked with the
+variable it came from. The Studio page renders in a browser; an unmasked key
+there would be a key in every screenshot.
+
+**Level parity is part of the contract, not an afterthought.** Two
+synthesizers disagree about what a master gain means — measured on one identical
+spec, FluidSynth at `-g 0.7` peaks at −9.1 dBFS where spessasynth at 0.7 peaks
+at −16.1 dBFS. So the Node vendor's default gain is calibrated (1.575, from a
+linear gain curve) to land at the same loudness, and `music.targetPeakDb`
+(default −3) is measured against every render by both vendors, attenuating only
+— the same rule §9.1 gives `synthesize_sfx`. Swapping vendors must not
+re-balance a film's music against its narration, and the measured peak is
+always reported rather than assumed.
 
 ## 10. Security and sandboxing
 
@@ -330,8 +392,11 @@ human through the Studio's hot-reload watcher.
 
 `~/.motion-studio/settings.json` (v0.15, `core/settings.js`) sits alongside it
 and holds *user preferences*, with the same atomic write and a validated
-schema: `newProjectDefaults`, `render.defaultWorkers`, and an `ffmpeg` block
-(binary `path` override plus `defaultCrf`/`defaultPreset`).
+schema: `newProjectDefaults`, `render.defaultWorkers`, an `ffmpeg` block
+(binary `path` override plus `defaultCrf`/`defaultPreset`), and `tts` / `music`
+blocks (v0.17: the active vendor per capability, plus their non-secret options —
+Azure region/voice/format, SoundFont path, sample rate, gain, target peak).
+Credentials are the one thing it will not hold — see §9.2.
 
 The scope line moved in v0.16, and the reasoning is worth recording because it
 reversed. Through v0.15 the MCP server read none of this: an agent asking for
@@ -390,7 +455,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-264 tests across 17 suites; see `engine/test/`. A clean run has **zero
+357 tests across 20 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

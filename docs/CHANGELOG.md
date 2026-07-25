@@ -9,6 +9,196 @@
   instruct agents to create a dedicated film project and pass it as
   `outputProjectId`. Code behavior is unchanged.
 
+## v0.17 (2026-07-26)
+
+Both audio generators get a second implementation, and one place to choose
+between them. Until now "speech" meant spawn `MotionStudioTts.exe` and "music"
+meant spawn a C# exe *and* `fluidsynth.exe` — which made both features
+Windows-only, dependent on ~150 MB of binaries a fresh clone had to build, and
+invisible in the UI. v0.17 adds **Azure AI Speech** and an **in-process Node
+synthesizer**, a **vendors page** in the Studio, and a shared vendor mechanism
+under both.
+
+### Two capabilities, one mechanism (`core/vendors.js`)
+
+```
+speech  →  system (Windows exe)  |  azure (Azure AI Speech)
+music   →  node   (spessasynth)  |  fluidsynth (C# exe + fluidsynth.exe)
+```
+
+`core/vendors.js` owns what the two axes share: the selection rule, the env
+hooks, the shape of a status report, and the sentence a caller sees when a
+vendor cannot be used. `core/tts-vendors.js` and `core/music-vendors.js` supply
+the providers. Selection is layered and explicit —
+
+```
+argument  >  MOTION_STUDIO_<TTS|MUSIC>_VENDOR  >  settings.json  >  default
+```
+
+— with **no silent fallback anywhere**. A machine that quietly swapped
+synthesizers mid-film would produce a soundtrack that changes character between
+scenes, which is far worse than a clear failure naming what to install. What a
+failure *does* do is name the other vendor if it happens to be ready.
+
+The "active" vendor is read from settings **as stored**, not as merged, so the
+UI can distinguish "the user picked this" from "this is what ships" — the two
+read identically once defaults are applied.
+
+### The Azure vendor (`core/tts-azure.js`)
+
+- Plain Node against the documented REST API — `fetch` and nothing else. No
+  SDK, no npm dependency, no binary to build, and it works on any OS. Two
+  calls carry the feature: `GET /cognitiveservices/voices/list` and
+  `POST /cognitiveservices/v1` (SSML in, RIFF PCM WAV out).
+- Output is requested as `riff-*-pcm` because the rest of the engine already
+  speaks PCM WAV: the duration is re-derived from the RIFF header by the same
+  `parseWavHeader`, and FFmpeg re-encodes at mux time exactly as before. A
+  non-RIFF format is refused before the request rather than breaking the
+  duration contract downstream.
+- Narration text is **escaped into SSML**, never interpolated: an ampersand in
+  a script would otherwise be an HTTP 400, and a `<` would be an injection.
+  `rate` keeps the exe vendor's −10..10 scale (each step = 10% of default
+  speed) so a project can switch vendors without re-tuning every call.
+- Expressive **styles** are supported (`newscast`, `cheerful`, …) and validated
+  against the voice's own style list, so the failure names the voice and lists
+  what it does support instead of relaying a bare 400.
+- An unknown voice is `unsupported_voice` **with suggestions**, checked against
+  the catalogue before any audio is requested — the same no-silent-substitution
+  rule the exe vendor follows. A film whose narrator quietly changed between
+  takes would be worse than a failed call.
+- Error mapping splits *setup* from *failure*: a missing/rejected key, a wrong
+  region, or an unreachable service is `tts_unavailable` (stop, tell the user);
+  a rate limit, a 5xx, or a bad style is `tts_failed`.
+
+### Credentials live in the environment, never in settings
+
+`AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` (also accepted:
+`MOTION_STUDIO_AZURE_SPEECH_*`, `SPEECH_KEY`/`SPEECH_REGION`), matching how
+`MOTION_STUDIO_FFMPEG` and the music toolchain already work. `settings.json`
+holds only the non-secret half — region, default voice, output format, style —
+and a patch carrying a `key` is rejected with `invalid_config` instead of being
+quietly honoured. Every surface that reports the key reports `••••1234` plus
+the variable it came from: the Studio page renders in a browser, and a key that
+reaches the DOM is a key in every screenshot.
+
+### One dispatch point (`core/tts-vendors.js`)
+
+The alternative to two parallel speech paths. It owns the vendor list, the
+"which vendor speaks" rule, and the probe/synthesize/list calls; both providers
+return the same payload and probe shapes, so nothing downstream branches on
+vendor. Selection follows the same precedence as every other setting:
+
+```
+synthesize_speech { vendor }  >  MOTION_STUDIO_TTS_VENDOR
+                              >  settings.json tts.vendor  >  "system"
+```
+
+The default stays `system` deliberately — adding a cloud vendor must not start
+billing an existing project's narration to someone's Azure subscription.
+Options a vendor doesn't have are reported rather than dropped: `style` on the
+system vendor succeeds and returns a `warnings` entry saying it was ignored.
+
+### The Node music vendor (`core/music-node.js`)
+
+- The whole music pipeline in-process: `spessasynth_core` (Apache-2.0, **no
+  transitive dependencies**, ~2.5 MB) writes the MIDI *and* renders it against
+  the same General MIDI SoundFont the exe chain uses. Music now works on macOS
+  and Linux, and a fresh clone needs `npm install` rather than a .NET publish
+  plus a FluidSynth download — ~74 MB of binaries stop being mandatory.
+- **Faster by a wide margin**: 60 seconds of 4-track music renders in ~1.4 s
+  (about 45× realtime) against ~5.3 s for the two-process chain on the same
+  spec, with no process spawns. The same spec renders byte-identically twice.
+- The library is imported *dynamically*, so an incomplete `npm install`
+  degrades to `music_unavailable` like every other optional piece instead of
+  taking the engine down at import time.
+- Spec validation moved into JS (`validateMusicSpec`) and now runs for **both**
+  vendors, so a bad spec fails the same way whichever renders it — and reports
+  *every* bad field, not just the first one the exe happened to hit.
+
+### Music levels stop depending on which vendor rendered
+
+Two synthesizers do not agree on what a master gain means. Rendering one
+identical spec through both, FluidSynth at its `-g 0.7` peaks at −9.1 dBFS while
+spessasynth at 0.7 peaks at −16.1 dBFS — 7 dB quieter, which would silently
+re-balance a film's music against its narration on a vendor switch. Two things
+fix that:
+
+- The Node vendor's default gain is **calibrated, not guessed**: gain is exactly
+  linear there (0.7 → −16.14, 1.0 → −13.04, 1.575 → −9.10), so `1.575` is the
+  value that lands a bed at the same loudness as the exe chain. Measured
+  end-to-end afterwards: the same phrase peaks at −11.48 dBFS through `node` and
+  −11.18 dBFS through `fluidsynth`.
+- New `music.targetPeakDb` (default −3 dBFS) applies to **both** vendors and
+  **only ever attenuates** — the rule `core/sfx.js` already used. A quiet
+  arrangement stays quiet, because an agent that asked for quiet meant it.
+  `synthesize_music` now reports the measured `peakDb` of what was actually
+  written, plus `attenuatedDb` when the target pulled it down; an agent cannot
+  hear the mix, so a measured number is the only signal it gets.
+
+`spessasynth_core`'s `audioToWav` normalizes to full scale unless told not to,
+which would have made every one of those numbers a fiction. It is called with
+`normalizeAudio: false`.
+
+### The Studio's vendors page (🗣 in the sidebar footer)
+
+A full stage page, not another dialog — it holds four vendors' configuration,
+several hundred voices, 128 instruments, and an audition player. It is split
+into a **speech** section and a **music** section; each card shows live status,
+where every value came from (`region: eastus ← AZURE_SPEECH_REGION`), and what
+is missing if the vendor is unavailable.
+
+- Speech: the Azure card filters the catalogue by locale/search, tracks the
+  selected voice's styles, and **▶ test** speaks a line so you can hear a voice
+  before committing a render to it (capped at 400 characters — an audition, not
+  a render). A region supplied by the environment outranks the field, so the
+  field is shown disabled with the variable that won, rather than accepting a
+  value that would never be used.
+- Music: SoundFont path, sample rate, synth gain and target peak, plus **▶
+  listen** — a short phrase rendered on any of the 128 General MIDI instruments
+  through the selected vendor. "Does this SoundFont have decent strings" is now
+  answerable in two clicks instead of after a render.
+
+New endpoints: `GET /api/vendors` (both capabilities),
+`GET /api/vendors/speech/:id/voices`, `POST /api/vendors/speech/:id/preview`,
+`POST /api/vendors/music/:id/preview` (both stream `audio/wav`), and `tts` /
+`music` are now patchable through `PATCH /api/settings`.
+
+### Agent surface
+
+- `synthesize_speech` gains `vendor` and `style`, and reports the `vendor` /
+  `vendorSource` / `warnings` it actually used.
+- `list_voices` gains `vendor`, `locale`, `search`, `limit`, `offset` — Azure
+  ships hundreds of voices, so paging is the default rather than an
+  afterthought, and the response reports the true `total`. Azure voices carry
+  `locale`/`gender`/`styles`; the system vendor still returns plain names.
+- `synthesize_music` gains `vendor` and reports the `vendor` / `vendorSource` /
+  `peakDb` it actually used.
+- **New tool `list_vendors`** (28 tools): both capabilities in one answer —
+  which vendor each will use and why, whether each is available, and exactly
+  what the user must configure if not. The answer to a `tts_unavailable` /
+  `music_unavailable` that an agent should not retry blindly. Takes an optional
+  `capability` filter.
+- Both tools pass the caller's `vendor` through *as given* rather than the
+  resolved id, so `vendorSource` reports where the choice really came from
+  instead of labelling every call an explicit argument.
+
+### Tests
+
+Both new vendors are stubbed rather than mocked, so the real code paths run:
+
+- `test/helpers/fake-azure-speech.mjs` stands in for the service the same way
+  `fake-tts.mjs` stands in for the exe — reached through the endpoint override,
+  so headers, SSML body, WAV parsing and error mapping all execute against a
+  local HTTP server with no subscription and no network.
+- `test/helpers/tiny-soundfont.mjs` writes out the 890-byte soundbank
+  `spessasynth_core` ships, so the music tests render **real audio through the
+  real synth** without a 39 MB SoundFont or a committed binary fixture. The
+  previous `fake.sf2` was 82 bytes of nothing, which only worked because the
+  synthesizer itself was stubbed.
+
+79 new tests across `tts-azure.test.js`, `vendors.test.js`,
+`music-vendors.test.js` and the MCP suite (357 total, green on Windows).
+
 ## v0.16 (2026-07-26)
 
 Global settings become actually global. v0.15 shipped the ⚙ settings dialog

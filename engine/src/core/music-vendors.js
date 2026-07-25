@@ -1,0 +1,323 @@
+/**
+ * Music vendors — dispatch for the note-spec → audio pipeline (v0.17).
+ *
+ *   node        core/music-node.js   spessasynth_core, in-process, any OS
+ *   fluidsynth  core/music.js        the v0.8 chain: C# MIDI exe + fluidsynth.exe
+ *
+ * Both take the same spec (docs/music-setup.md) and the same SoundFont, and
+ * both return a PCM WAV plus the same metadata, so `synthesize_music` needs no
+ * per-vendor branching. `node` is the default: it is the only one that works
+ * off Windows, needs no binaries a fresh clone has to build, and renders ~4×
+ * faster. There is no silent fallback between them — see core/vendors.js.
+ *
+ * Level parity is enforced here rather than left to each engine. Every render
+ * is measured, and `targetPeakDb` attenuates (never boosts) a hot one, which is
+ * the rule core/sfx.js already uses. Together with the calibrated per-vendor
+ * gain in core/music-node.js, that means swapping vendors does not re-balance a
+ * film's music against its narration.
+ */
+
+import fsp from 'node:fs/promises';
+import { readStoredSettings, readSettings, MUSIC_VENDORS } from './settings.js';
+import { defaultDataDir } from './project.js';
+import { resolveVendorFrom, unavailableError, buildReport } from './vendors.js';
+import { EngineError, ErrorCodes } from './errors.js';
+import { parseWavHeader } from './tts.js'; // the engine's one WAV header reader
+import {
+  checkMusic, synthesizeMusic, resolveMidiExe, resolveFluidSynth, resolveSoundFont,
+} from './music.js';
+import {
+  checkNodeMusic, synthesizeNodeMusic, validateMusicSpec, MUSIC_NODE_DEFAULTS, ampToDb, dbToAmp,
+} from './music-node.js';
+
+export { MUSIC_VENDORS };
+export const DEFAULT_MUSIC_VENDOR = 'node';
+
+export const MUSIC_VENDOR_INFO = Object.freeze({
+  node: Object.freeze({
+    id: 'node',
+    label: 'Node synthesizer',
+    summary: 'spessasynth_core rendering a General MIDI SoundFont in-process. Cross-platform, no binaries to build, ~45× realtime.',
+    requires: 'a .sf2/.sf3 SoundFont (MOTION_STUDIO_SOUNDFONT, or the bundled default)',
+    offline: true,
+  }),
+  fluidsynth: Object.freeze({
+    id: 'fluidsynth',
+    label: 'FluidSynth (external)',
+    summary: 'The v0.8 chain: MotionStudioMidi.exe authors the MIDI, fluidsynth.exe renders it. Windows-only, ~74 MB of binaries.',
+    requires: 'MOTION_STUDIO_MIDI_EXE + MOTION_STUDIO_FLUIDSYNTH + MOTION_STUDIO_SOUNDFONT',
+    offline: true,
+  }),
+});
+
+/**
+ * General MIDI instrument names, indexed by `program`. Exposed so the Studio's
+ * vendors page can offer a real instrument picker (and so anyone authoring a
+ * spec can see what program 48 actually is) instead of asking people to
+ * memorize a numbering from 1991.
+ */
+export const GM_PROGRAMS = Object.freeze([
+  'Acoustic Grand Piano', 'Bright Acoustic Piano', 'Electric Grand Piano', 'Honky-tonk Piano',
+  'Electric Piano 1', 'Electric Piano 2', 'Harpsichord', 'Clavi',
+  'Celesta', 'Glockenspiel', 'Music Box', 'Vibraphone', 'Marimba', 'Xylophone', 'Tubular Bells', 'Dulcimer',
+  'Drawbar Organ', 'Percussive Organ', 'Rock Organ', 'Church Organ', 'Reed Organ', 'Accordion', 'Harmonica', 'Tango Accordion',
+  'Acoustic Guitar (nylon)', 'Acoustic Guitar (steel)', 'Electric Guitar (jazz)', 'Electric Guitar (clean)',
+  'Electric Guitar (muted)', 'Overdriven Guitar', 'Distortion Guitar', 'Guitar Harmonics',
+  'Acoustic Bass', 'Electric Bass (finger)', 'Electric Bass (pick)', 'Fretless Bass',
+  'Slap Bass 1', 'Slap Bass 2', 'Synth Bass 1', 'Synth Bass 2',
+  'Violin', 'Viola', 'Cello', 'Contrabass', 'Tremolo Strings', 'Pizzicato Strings', 'Orchestral Harp', 'Timpani',
+  'String Ensemble 1', 'String Ensemble 2', 'Synth Strings 1', 'Synth Strings 2',
+  'Choir Aahs', 'Voice Oohs', 'Synth Voice', 'Orchestra Hit',
+  'Trumpet', 'Trombone', 'Tuba', 'Muted Trumpet', 'French Horn', 'Brass Section', 'Synth Brass 1', 'Synth Brass 2',
+  'Soprano Sax', 'Alto Sax', 'Tenor Sax', 'Baritone Sax', 'Oboe', 'English Horn', 'Bassoon', 'Clarinet',
+  'Piccolo', 'Flute', 'Recorder', 'Pan Flute', 'Blown Bottle', 'Shakuhachi', 'Whistle', 'Ocarina',
+  'Lead 1 (square)', 'Lead 2 (sawtooth)', 'Lead 3 (calliope)', 'Lead 4 (chiff)',
+  'Lead 5 (charang)', 'Lead 6 (voice)', 'Lead 7 (fifths)', 'Lead 8 (bass + lead)',
+  'Pad 1 (new age)', 'Pad 2 (warm)', 'Pad 3 (polysynth)', 'Pad 4 (choir)',
+  'Pad 5 (bowed)', 'Pad 6 (metallic)', 'Pad 7 (halo)', 'Pad 8 (sweep)',
+  'FX 1 (rain)', 'FX 2 (soundtrack)', 'FX 3 (crystal)', 'FX 4 (atmosphere)',
+  'FX 5 (brightness)', 'FX 6 (goblins)', 'FX 7 (echoes)', 'FX 8 (sci-fi)',
+  'Sitar', 'Banjo', 'Shamisen', 'Koto', 'Kalimba', 'Bag pipe', 'Fiddle', 'Shanai',
+  'Tinkle Bell', 'Agogo', 'Steel Drums', 'Woodblock', 'Taiko Drum', 'Melodic Tom', 'Synth Drum', 'Reverse Cymbal',
+  'Guitar Fret Noise', 'Breath Noise', 'Seashore', 'Bird Tweet', 'Telephone Ring', 'Helicopter', 'Applause', 'Gunshot',
+]);
+
+/**
+ * The phrase the Studio's "listen" button renders: two bars of arpeggio over a
+ * bass note, long enough to judge an instrument's attack and tail, short enough
+ * that auditioning is instant. Kept here so the page, the tests, and anyone
+ * debugging a vendor all hear the identical thing.
+ */
+export function demoSpec({ program = 0, drums = false, bpm = 100 } = {}) {
+  const lead = [0, 4, 7, 12, 7, 4].map((semi, i) => ({
+    pitch: (drums ? 36 : 60) + (drums ? [0, 6, 2, 6, 0, 6][i] : semi),
+    start: i * 0.5,
+    duration: drums ? 0.25 : 0.5,
+    velocity: 100 - i * 4,
+  }));
+  const tail = drums ? [] : [{ pitch: 72, start: 3, duration: 1.5, velocity: 96 }];
+  const tracks = [{ ...(drums ? { drums: true } : { program }), notes: [...lead, ...tail] }];
+  if (!drums) tracks.push({ program: 32, notes: [{ pitch: 36, start: 0, duration: 3 }, { pitch: 41, start: 3, duration: 1.5 }] });
+  return { bpm, tracks };
+}
+
+/** settings.music, tolerating a missing/older settings file. */
+async function musicSettings(dataDir, settings) {
+  if (settings) return settings.music ?? {};
+  const s = await readSettings(dataDir ?? defaultDataDir()).catch(() => null);
+  return s?.music ?? {};
+}
+
+/**
+ * Which vendor renders music, and why.
+ * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default'}>}
+ */
+export async function resolveMusicVendor({ vendor, dataDir, settings } = {}) {
+  const stored = settings
+    ? settings.music?.vendor
+    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.music?.vendor;
+  return resolveVendorFrom('music', {
+    vendor,
+    storedVendor: stored,
+    allowed: MUSIC_VENDORS,
+    fallback: DEFAULT_MUSIC_VENDOR,
+  });
+}
+
+/**
+ * Probe one vendor. Never throws for an unusable vendor (that is data) — only
+ * for an unknown vendor id.
+ */
+export async function checkMusicVendor(vendor, { dataDir, settings } = {}) {
+  if (!MUSIC_VENDORS.includes(vendor)) {
+    throw new EngineError(
+      ErrorCodes.INVALID_CONFIG,
+      `Unknown music vendor "${vendor}" — expected one of: ${MUSIC_VENDORS.join(', ')}`,
+      { vendor, allowed: MUSIC_VENDORS },
+    );
+  }
+  const music = await musicSettings(dataDir, settings);
+
+  if (vendor === 'node') {
+    const probe = await checkNodeMusic({ soundfont: music.node?.soundfont ?? undefined });
+    return {
+      vendor,
+      available: probe.available,
+      error: probe.error,
+      config: {
+        ...probe.config,
+        sampleRate: music.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
+        gain: music.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
+      },
+    };
+  }
+
+  const probe = await checkMusic({ soundfont: music.node?.soundfont ?? undefined });
+  return {
+    vendor,
+    available: probe.available,
+    error: probe.error,
+    config: {
+      midiExe: resolveMidiExe(),
+      fluidsynth: resolveFluidSynth(),
+      soundfont: resolveSoundFont(music.node?.soundfont ?? undefined),
+    },
+  };
+}
+
+/** The vendors that *are* usable, so a failure can point somewhere useful. */
+async function availableAlternatives(failing, opts) {
+  const others = [];
+  for (const id of MUSIC_VENDORS) {
+    if (id === failing) continue;
+    const probe = await checkMusicVendor(id, opts).catch(() => null);
+    if (probe?.available) others.push(id);
+  }
+  return others;
+}
+
+function fixFor(vendor) {
+  return vendor === 'node'
+    ? 'Point MOTION_STUDIO_SOUNDFONT at a General MIDI .sf2/.sf3 file (or set it on the Studio\'s vendors page), and make sure `npm install` has run in engine/.'
+    : 'Build MotionStudioMidi.exe and install fluidsynth.exe + a SoundFont (see docs/music-setup.md), or switch the music vendor to "node".';
+}
+
+/** "This music vendor cannot be used right now" — phrased once, in core/vendors.js. */
+export function musicUnavailable(vendor, status, alternatives = []) {
+  return unavailableError('music', vendor, status, { fix: fixFor(vendor), alternatives });
+}
+
+/** Same, plus a probe of the other vendors so the message can name a ready one. */
+export async function musicUnavailableWithAlternatives(vendor, status, opts = {}) {
+  return musicUnavailable(vendor, status, await availableAlternatives(vendor, opts));
+}
+
+/** Full status of every music vendor — backs the Studio page and list_vendors. */
+export async function musicVendorReport({ dataDir, settings, probe = true } = {}) {
+  const music = await musicSettings(dataDir, settings);
+  const active = await resolveMusicVendor({ dataDir, settings });
+  const vendors = [];
+  for (const id of MUSIC_VENDORS) {
+    const info = MUSIC_VENDOR_INFO[id];
+    if (!probe) {
+      vendors.push({ ...info, active: id === active.vendor, available: null });
+      continue;
+    }
+    const status = await checkMusicVendor(id, { dataDir, settings });
+    vendors.push({
+      ...info,
+      active: id === active.vendor,
+      available: status.available,
+      error: status.error ?? null,
+      config: status.config,
+    });
+  }
+  return buildReport({
+    capability: 'music',
+    active: active.vendor,
+    activeSource: active.source,
+    settings: music,
+    vendors,
+  });
+}
+
+/* ------------------------------ level control ----------------------------- */
+
+/**
+ * Measure a 16-bit PCM WAV's peak and, if it exceeds the target, scale the file
+ * down in place. Used for the fluidsynth vendor, whose renderer writes the file
+ * itself; the node vendor does the same arithmetic on its float buffers before
+ * writing. Attenuate-only, so the number reported is always the truth about
+ * what is on disk.
+ *
+ * @returns {{peakDb: number|null, rawPeakDb: number|null, gainAppliedDb: number}}
+ */
+export async function conformWavLevel(file, targetPeakDb) {
+  const buf = await fsp.readFile(file);
+  const info = parseWavHeader(buf, file);
+  if (info.bitsPerSample !== 16 || info.dataOffset === undefined) {
+    // Not something we can rescale safely — report nothing rather than guess.
+    return { peakDb: null, rawPeakDb: null, gainAppliedDb: 0 };
+  }
+  const start = info.dataOffset;
+  const end = start + info.dataSize - (info.dataSize % 2);
+
+  let peak = 0;
+  for (let i = start; i + 1 < end; i += 2) {
+    const v = Math.abs(buf.readInt16LE(i));
+    if (v > peak) peak = v;
+  }
+  const rawPeak = peak / 32768;
+  const rawPeakDb = Number(ampToDb(rawPeak).toFixed(2));
+  if (targetPeakDb === null || targetPeakDb === undefined || rawPeak === 0) {
+    return { peakDb: rawPeakDb, rawPeakDb, gainAppliedDb: 0 };
+  }
+  const ceiling = dbToAmp(targetPeakDb);
+  if (rawPeak <= ceiling) return { peakDb: rawPeakDb, rawPeakDb, gainAppliedDb: 0 };
+
+  const scale = ceiling / rawPeak;
+  for (let i = start; i + 1 < end; i += 2) {
+    // Round toward zero and clamp: a scaled-down sample can never overflow, but
+    // rounding it into 32768 would wrap to full-scale negative.
+    const v = Math.max(-32768, Math.min(32767, Math.round(buf.readInt16LE(i) * scale)));
+    buf.writeInt16LE(v, i);
+  }
+  await fsp.writeFile(file, buf);
+  return {
+    peakDb: Number(ampToDb(rawPeak * scale).toFixed(2)),
+    rawPeakDb,
+    gainAppliedDb: Number(ampToDb(scale).toFixed(2)),
+  };
+}
+
+/* -------------------------------- synthesis ------------------------------- */
+
+/**
+ * Render `spec` through whichever vendor is active (or the one named).
+ * Returns the provider's metadata plus `vendor`/`vendorSource` and the measured
+ * level, so a caller can see what it actually got rather than what it asked for.
+ */
+export async function synthesizeMusicWithVendor({
+  vendor, spec, outPath, dataDir, settings, sampleRate, gain, targetPeakDb, timeoutMs,
+}) {
+  const resolved = await resolveMusicVendor({ vendor, dataDir, settings });
+  const music = await musicSettings(dataDir, settings);
+  const target = targetPeakDb === undefined ? (music.targetPeakDb ?? null) : targetPeakDb;
+
+  const status = await checkMusicVendor(resolved.vendor, { dataDir, settings });
+  if (!status.available) throw await musicUnavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
+
+  if (resolved.vendor === 'node') {
+    const result = await synthesizeNodeMusic({
+      spec,
+      outPath,
+      soundfont: music.node?.soundfont ?? undefined,
+      sampleRate: sampleRate ?? music.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
+      gain: gain ?? music.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
+      targetPeakDb: target,
+    });
+    return { ...result, vendor: 'node', vendorSource: resolved.source, targetPeakDb: target };
+  }
+
+  // The exe chain validates the spec itself, but running the shared validator
+  // first means both vendors reject the same bad spec with the same message
+  // instead of one failing at a process boundary.
+  validateMusicSpec(spec);
+  const result = await synthesizeMusic({
+    spec,
+    outPath,
+    soundfont: music.node?.soundfont ?? undefined,
+    ...(sampleRate ? { sampleRate } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+  });
+  const level = await conformWavLevel(outPath, target);
+  return {
+    ...result,
+    ...level,
+    channels: 2,
+    soundfont: resolveSoundFont(music.node?.soundfont ?? undefined),
+    vendor: 'fluidsynth',
+    vendorSource: resolved.source,
+    targetPeakDb: target,
+  };
+}

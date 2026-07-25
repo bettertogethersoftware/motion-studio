@@ -48,6 +48,20 @@ export function resolveTtsExe(explicit) {
   return explicit || process.env.MOTION_STUDIO_TTS_EXE || DEFAULT_TTS_EXE;
 }
 
+/**
+ * The same resolution, but reporting which layer won — mirrors
+ * resolveFfmpegPath()'s {path, source} so the Studio's vendors page can say
+ * "not found at <path> (from env)" instead of an anonymous failure.
+ *
+ * @returns {{path: string, source: 'argument'|'env'|'bundled'}}
+ */
+export function resolveTtsExeInfo(explicit) {
+  if (explicit) return { path: explicit, source: 'argument' };
+  const env = process.env.MOTION_STUDIO_TTS_EXE?.trim();
+  if (env) return { path: env, source: 'env' };
+  return { path: DEFAULT_TTS_EXE, source: 'bundled' };
+}
+
 function spawnArgs(exe, ttsArgs) {
   if (/\.[mc]?js$/i.test(exe)) return { command: process.execPath, argv: [exe, ...ttsArgs] };
   return { command: exe, argv: ttsArgs };
@@ -180,7 +194,7 @@ export function parseWavHeader(buf, filePath = '<buffer>') {
     throw bad('missing RIFF/WAVE header');
   }
   let offset = 12;
-  let byteRate, sampleRate, channels, bitsPerSample, dataSize;
+  let byteRate, sampleRate, channels, bitsPerSample, dataSize, dataOffset;
   while (offset + 8 <= buf.length) {
     const id = buf.toString('ascii', offset, offset + 4);
     const size = buf.readUInt32LE(offset + 4);
@@ -193,12 +207,13 @@ export function parseWavHeader(buf, filePath = '<buffer>') {
     } else if (id === 'data') {
       // Declared size can exceed the actual file for streamed WAVs; clamp.
       dataSize = Math.min(size, Math.max(0, buf.length - body));
+      dataOffset = body; // where the samples start — callers that rewrite levels need it
     }
     offset = body + size + (size & 1); // pad to even boundary
   }
   if (!byteRate) throw bad("no 'fmt ' chunk / zero byte-rate");
   if (dataSize === undefined) throw bad("no 'data' chunk");
-  return { byteRate, sampleRate, channels, bitsPerSample, dataSize };
+  return { byteRate, sampleRate, channels, bitsPerSample, dataSize, dataOffset };
 }
 
 /** Frames a clip of `seconds` occupies at `fps` (rounded up so audio is never clipped short). */

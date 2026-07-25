@@ -22,7 +22,11 @@
  * API (all JSON unless noted):
  *   GET    /api/prereqs
  *   GET    /api/settings                     global settings + environment report (v0.15)
- *   PATCH  /api/settings                     {patch} — newProjectDefaults / render
+ *   PATCH  /api/settings                     {patch} — newProjectDefaults / render / ffmpeg / tts
+ *   GET    /api/vendors                      speech + music vendors: active + live status (v0.17)
+ *   GET    /api/vendors/speech/:id/voices    ?locale=&search=&limit=&offset=  (v0.17)
+ *   POST   /api/vendors/speech/:id/preview   {text,voice,…} → audio/wav sample (v0.17)
+ *   POST   /api/vendors/music/:id/preview    {program,drums} → audio/wav sample (v0.17)
  *   GET    /api/projects
  *   POST   /api/projects                     {name,fps?,width?,height?,durationInFrames?}
  *                                            (unset fields fall back to settings.newProjectDefaults)
@@ -48,6 +52,7 @@
  */
 
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import fs from 'node:fs';
@@ -57,6 +62,14 @@ import { ProjectStore, MAX_ASSET_BYTES } from '../core/project.js';
 import {
   readSettings, updateSettings, resolveFfmpegPath, withNewProjectDefaults, outputSeedFromSettings,
 } from '../core/settings.js';
+import {
+  speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
+} from '../core/tts-vendors.js';
+import {
+  musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
+} from '../core/music-vendors.js';
+import { maskKey } from '../core/tts-azure.js';
+import { parseWavHeader } from '../core/tts.js';
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
@@ -105,7 +118,16 @@ const STATUS_FOR_CODE = {
   [ErrorCodes.ASSET_TOO_LARGE]: 413,
   [ErrorCodes.QUEUE_FULL]: 429,
   [ErrorCodes.PREREQS_MISSING]: 503,
+  // Speech vendors (v0.17): an unconfigured vendor is a 503 like any missing
+  // prerequisite; a bad voice is the caller's fault; a failed synthesis is an
+  // upstream failure.
+  [ErrorCodes.TTS_UNAVAILABLE]: 503,
+  [ErrorCodes.UNSUPPORTED_VOICE]: 400,
+  [ErrorCodes.TTS_FAILED]: 502,
 };
+
+/** Preview clips are for auditioning a voice, not for rendering a script. */
+const MAX_PREVIEW_CHARS = 400;
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data, null, 2);
@@ -267,13 +289,165 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               registryPath: store.registryPath,
               settingsPath: path.join(store.dataDir, 'settings.json'),
               ffmpeg: { effectivePath: effectiveFfmpeg, source, ...probe.ffmpeg },
-              env: Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
+              env: {
+                ...Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
+                // Vendor credentials are reported as "set, ending in …" and
+                // never in full: this endpoint feeds a browser page, and a key
+                // that reaches the DOM is a key in every screenshot.
+                ...Object.fromEntries(AZURE_ENV.key.map((k) => [k, maskKey(process.env[k]?.trim())])),
+                ...Object.fromEntries(
+                  [...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice, 'MOTION_STUDIO_TTS_VENDOR']
+                    .map((k) => [k, process.env[k] ?? null]),
+                ),
+              },
             },
           });
         }
         if (req.method === 'PATCH') {
           const { patch } = await readBody(req);
           return sendJson(res, 200, { settings: await updateSettings(patch ?? {}, store.dataDir) });
+        }
+      }
+
+      /* -------------------------------- vendors ------------------------------ */
+      // v0.17. The vendors page is the human half of core/vendors.js: pick which
+      // vendor narrates and which renders music, configure the non-secret half
+      // of each, browse voices/instruments, and hear one before committing a
+      // render to it.
+      if (parts[1] === 'vendors') {
+        // GET /api/vendors — status of every vendor in both capabilities.
+        // ?probe=0 answers from configuration alone (no exe spawn, no network).
+        if (req.method === 'GET' && parts.length === 2) {
+          const probe = url.searchParams.get('probe') !== '0';
+          const force = url.searchParams.get('force') === '1';
+          const [speech, music] = await Promise.all([
+            speechVendorReport({ dataDir: store.dataDir, probe, force }),
+            musicVendorReport({ dataDir: store.dataDir, probe }),
+          ]);
+          return sendJson(res, 200, {
+            speech,
+            music,
+            azure: { outputFormats: AZURE_WAV_FORMATS, env: AZURE_ENV },
+            gmPrograms: GM_PROGRAMS,
+          });
+        }
+
+        /* --------------------------- music vendors --------------------------- */
+        if (parts[2] === 'music' && parts.length >= 4) {
+          const vendor = parts[3];
+          if (!MUSIC_VENDORS.includes(vendor)) {
+            throw new EngineError(
+              ErrorCodes.INVALID_CONFIG,
+              `Unknown music vendor "${vendor}" — expected one of: ${MUSIC_VENDORS.join(', ')}`,
+              { vendor, allowed: MUSIC_VENDORS },
+            );
+          }
+          // POST …/preview — render the demo phrase and stream the WAV back.
+          // Like the speech preview it writes nothing into a project: trying an
+          // instrument out must not litter assets/ with take-1 files.
+          if (req.method === 'POST' && parts[4] === 'preview' && parts.length === 5) {
+            const body = await readBody(req);
+            const program = Number(body.program ?? 0);
+            if (!Number.isInteger(program) || program < 0 || program > 127) {
+              throw new EngineError(ErrorCodes.INVALID_CONFIG, 'program must be a General MIDI number 0..127');
+            }
+            const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-music-preview-'));
+            const outPath = path.join(dir, 'preview.wav');
+            try {
+              const result = await synthesizeMusicWithVendor({
+                vendor,
+                spec: demoSpec({ program, drums: body.drums === true }),
+                outPath,
+                dataDir: store.dataDir,
+              });
+              const wav = await fsp.readFile(outPath);
+              const { dataSize, byteRate } = parseWavHeader(wav, outPath);
+              res.writeHead(200, {
+                'Content-Type': 'audio/wav',
+                'Content-Length': wav.length,
+                'Cache-Control': 'no-store',
+                'X-Music-Vendor': result.vendor,
+                'X-Music-Peak-Db': String(result.peakDb ?? ''),
+                'X-Music-Duration': (dataSize / byteRate).toFixed(3),
+              });
+              return res.end(wav);
+            } finally {
+              await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+            }
+          }
+        }
+
+        /* --------------------------- speech vendors -------------------------- */
+        if (parts[2] === 'speech' && parts.length >= 4) {
+          const vendor = parts[3];
+          if (!TTS_VENDORS.includes(vendor)) {
+            throw new EngineError(
+              ErrorCodes.INVALID_CONFIG,
+              `Unknown speech vendor "${vendor}" — expected one of: ${TTS_VENDORS.join(', ')}`,
+              { vendor, allowed: TTS_VENDORS },
+            );
+          }
+
+          // GET …/voices — the catalogue, filtered. Azure ships several hundred
+          // voices, so paging is the default rather than an afterthought.
+          if (req.method === 'GET' && parts[4] === 'voices' && parts.length === 5) {
+            const limit = Number(url.searchParams.get('limit')) || 0;
+            const offset = Number(url.searchParams.get('offset')) || 0;
+            return sendJson(res, 200, await listSpeechVoices({
+              vendor,
+              locale: url.searchParams.get('locale') ?? undefined,
+              search: url.searchParams.get('search') ?? undefined,
+              limit, offset,
+              dataDir: store.dataDir,
+              force: url.searchParams.get('force') === '1',
+            }));
+          }
+
+          // POST …/preview — synthesize a sample and stream the WAV straight
+          // back. It is deliberately not written into a project: auditioning a
+          // voice must not litter assets/ with take-1 files.
+          if (req.method === 'POST' && parts[4] === 'preview' && parts.length === 5) {
+            const body = await readBody(req);
+            const text = String(body.text ?? '').trim();
+            if (!text) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'preview needs some text to speak');
+            if (text.length > MAX_PREVIEW_CHARS) {
+              throw new EngineError(
+                ErrorCodes.INVALID_CONFIG,
+                `preview text is limited to ${MAX_PREVIEW_CHARS} characters (got ${text.length})`,
+                { maxChars: MAX_PREVIEW_CHARS },
+              );
+            }
+            const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-voice-preview-'));
+            const outPath = path.join(dir, 'preview.wav');
+            try {
+              const result = await synthesizeWithVendor({
+                vendor, text, outPath,
+                voice: body.voice || undefined,
+                rate: body.rate ?? undefined,
+                volume: body.volume ?? undefined,
+                style: body.style || undefined,
+                dataDir: store.dataDir,
+              });
+              const wav = await fsp.readFile(outPath);
+              // Duration from the WAV header, not the vendor's self-report —
+              // the same rule synthesize_speech follows, so what the page
+              // prints matches what a render would mux.
+              const { dataSize, byteRate } = parseWavHeader(wav, outPath);
+              res.writeHead(200, {
+                'Content-Type': 'audio/wav',
+                'Content-Length': wav.length,
+                'Cache-Control': 'no-store',
+                // The player needs the bytes; the page also wants to print
+                // which voice actually spoke and how long the take is.
+                'X-Speech-Vendor': result.vendor,
+                'X-Speech-Voice': encodeURIComponent(result.voice ?? ''),
+                'X-Speech-Duration': (dataSize / byteRate).toFixed(3),
+              });
+              return res.end(wav);
+            } finally {
+              await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+            }
+          }
         }
       }
 

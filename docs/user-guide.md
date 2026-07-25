@@ -1,4 +1,4 @@
-# Motion Studio — User Guide (v0.15)
+# Motion Studio — User Guide (v0.17)
 
 ## Installation and first run
 
@@ -89,15 +89,21 @@ put there shows up on the next refresh.
   CLI's `--ffmpeg <path>` overrides both (`render.js --doctor` prints which
   binary it settled on and where that came from).
 - a read-only **environment** report: where the data dir, projects root, and
-  registry live, plus the current values of the `MOTION_STUDIO_*` env hooks
-  and `PUPPETEER_EXECUTABLE_PATH`.
+  registry live, plus the current values of the `MOTION_STUDIO_*` env hooks,
+  `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor variables (API keys shown
+  masked, never in full).
+
+The speech vendor lives on its own page — **🗣 vendors**, next to ⚙ settings —
+because it carries two vendors' configuration and a voice catalogue; see
+[Generated narration](#generated-narration-text-to-speech) below.
 
 Settings persist in `~/.motion-studio/settings.json` and are genuinely global:
 the Studio, the CLI, and agents working over MCP all honour them. They fill in
 what a new project or render didn't specify — an explicit choice always wins,
 so an agent told to make a 4K vertical video still gets one — and they apply
 only at creation. A project already on disk is never rewritten because you
-changed a global, so it keeps rendering the way it did.
+changed a global, so it keeps rendering the way it did. One thing that file
+never holds is a credential: API keys are read from the environment only.
 
 The project sidebar sorts by **a–z** or **date** (last modified, newest
 first) via the toggle next to *+ new*, and collapses to a slim strip with the
@@ -200,14 +206,53 @@ skipped with a warning in the logs).
 
 ### Generated narration (text-to-speech)
 
-On Windows you can synthesize a voiceover instead of supplying an audio file.
-An agent calls the `synthesize_speech` MCP tool (see [tts-setup.md](tts-setup.md)):
-it speaks your text to `assets/narration-<n>.wav`, reports the clip's length in
+You can synthesize a voiceover instead of supplying an audio file. An agent
+calls the `synthesize_speech` MCP tool (see [tts-setup.md](tts-setup.md)): it
+speaks your text to `assets/narration-<n>.wav`, reports the clip's length in
 frames, and — in the default `attach` mode — adds it to the `audio` list above
-for you. This is an optional, Windows-only feature that requires the external
-speech executable pointed to by `MOTION_STUDIO_TTS_EXE`; the rest of Motion
-Studio stays cross-platform, and the synthesized WAV mixes through the exact
-audio path described above.
+for you. The synthesized WAV mixes through the exact audio path described above.
+
+Since v0.17 the voice comes from one of two **speech vendors**, chosen on the
+**🗣 vendors** page in the sidebar footer (which also picks the music vendor —
+see below).
+
+- **system** — the local Windows speech executable
+  (`MOTION_STUDIO_TTS_EXE`). Offline and free, but Windows-only and limited to
+  the voices installed on the machine.
+- **azure** — Azure AI Speech: several hundred neural voices across ~140
+  locales, with expressive styles, on any OS. Needs an Azure Speech resource;
+  set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in your Windows environment
+  (`setx AZURE_SPEECH_KEY "<key>"`, then restart the Studio). Keys are read from
+  the environment only and are never written into `settings.json`.
+
+The vendors page shows each vendor's live status, what it is missing if it is
+unavailable, its voice catalogue (filterable by locale), and a **▶ test** button
+that speaks a line so you can hear a voice before committing a render to it.
+Whichever vendor you save is used by the Studio *and* by every agent connected
+over MCP; a tool call can still name a vendor explicitly for one clip. If the
+selected vendor isn't configured, the speech tools return `tts_unavailable` and
+the rest of Motion Studio is unaffected.
+
+### Generated music (note specs)
+
+Music works the same way: an agent authors a short note spec and
+`synthesize_music` renders it against a General MIDI SoundFont into `assets/`,
+adding it to the audio timeline. The **music** section of the vendors page picks
+who renders it:
+
+- **node** *(default)* — renders the SoundFont in-process. Works on any OS,
+  needs nothing installed beyond the SoundFont that already ships, and is about
+  four times faster than the external chain.
+- **fluidsynth** — the original v0.8 pair of executables
+  (`MotionStudioMidi.exe` + `fluidsynth.exe`). Windows-only, and you build or
+  download them yourself.
+
+Both read the same SoundFont and sound the same; **▶ listen** renders a short
+phrase on any of the 128 General MIDI instruments through whichever vendor is
+selected, so you can audition a SoundFont before committing a film to it. The
+**target peak** control (default −3 dBFS) applies to both vendors and only ever
+attenuates, which is what keeps a bed at the same loudness against your
+narration when you switch. See [music-setup.md](music-setup.md).
 
 ## Long-form films (multiple scenes)
 

@@ -1,22 +1,111 @@
 # Motion Studio — Music Generation Setup
 
-Music generation is an **optional, Windows-only** feature (added in v0.8).
-Motion Studio does not synthesize audio itself: an agent authors a small note
-**spec**, and the engine renders it in two spawned stages — exactly the pattern
-the [text-to-speech feature](tts-setup.md) uses for narration:
+An agent authors a small note **spec**; the engine renders it to audio against a
+General MIDI SoundFont and adds it to the project's audio tracks. Since **v0.17**
+that render comes from one of two **music vendors**:
+
+| vendor | what it is | needs | platform |
+|---|---|---|---|
+| `node` *(default)* | `spessasynth_core` rendering the SoundFont in-process | a `.sf2`/`.sf3` SoundFont | any |
+| `fluidsynth` | the v0.8 chain: `MotionStudioMidi.exe` → `fluidsynth.exe` | both exes + a SoundFont | Windows only |
+
+Both take the same spec, read the same SoundFont, and produce the same kind of
+PCM WAV, so nothing downstream knows which one played. This mirrors the speech
+side exactly — see [tts-setup.md](tts-setup.md); the selection rule, the status
+report and the "vendor unavailable" error live in one shared place
+(`engine/src/core/vendors.js`).
 
 ```
 note spec (JSON, from the agent)
-  → MotionStudioMidi.exe  (DryWetMIDI)          → song.mid
-  → FluidSynth + a General MIDI SoundFont       → WAV
-  → a config.audio track, mixed by the same FFmpeg pass as narration
+  → MIDI  ─┬─ node:       spessasynth_core, in-process
+           └─ fluidsynth: MotionStudioMidi.exe → fluidsynth.exe
+  → WAV → a config.audio track, mixed by the same FFmpeg pass as narration
 ```
 
-Everything else in Motion Studio stays cross-platform. If the toolchain isn't
-configured, the one music tool (`synthesize_music`) returns `music_unavailable`
-and the rest of the engine is unaffected.
+If the selected vendor isn't usable, `synthesize_music` returns
+`music_unavailable` naming what is missing — and, if the *other* vendor is
+ready, saying so — and the rest of the engine is unaffected.
 
-## What you need
+## Picking a vendor
+
+**In the Studio:** `npm run studio` → **🗣 vendors** in the sidebar footer, then
+the **music** section. Each card shows live status and where each path came
+from; **▶ listen** renders a short phrase on any of the 128 General MIDI
+instruments through the selected vendor, so you can hear a SoundFont before
+committing a film to it.
+
+**Everywhere else:** the choice is global (`~/.motion-studio/settings.json`,
+`music.vendor`) and applies to the Studio and to every agent over MCP:
+
+```
+explicit argument (synthesize_music { vendor })
+  > MOTION_STUDIO_MUSIC_VENDOR
+  > settings.json music.vendor
+  > "node"
+```
+
+`node` is the default because it is the only one that works off Windows and the
+only one that needs no binaries a fresh clone has to build. There is **no silent
+fallback** between vendors: a machine that quietly swapped synthesizers would
+produce a film whose soundtrack changes character between scenes.
+
+Agents discover all of this with **`list_vendors`**, which reports both
+capabilities (speech and music), which vendor each will use, and what to fix.
+
+---
+
+## Vendor: `node` (v0.17)
+
+Nothing to install beyond a SoundFont. The spec becomes a MIDI file in memory
+(`MIDIBuilder`) and is rendered by `spessasynth_core` — Apache-2.0, no
+transitive dependencies, ~2.5 MB — which is already a dependency of the engine,
+so `npm install` is the entire setup.
+
+| piece | env var | default |
+|---|---|---|
+| instruments | `MOTION_STUDIO_SOUNDFONT` | `engine/vendor/soundfonts/MuseScore_General.sf3` |
+
+Settings (`music.node`) can also carry a `soundfont` path, `sampleRate`
+(default 44100) and `gain`; the environment variable wins over settings, as
+everywhere else.
+
+**Measured on a 60-second, 4-track bed** against `MuseScore_General.sf3`
+(39 MB, 309 presets): the SoundFont loads in ~56 ms and the render takes ~1.4 s
+— about 45× realtime, versus ~5.3 s for the spawned chain on the same spec. The
+same spec renders byte-identically across runs.
+
+### The gain calibration (why `1.575`)
+
+The two synthesizers scale their master gain differently. Rendering one
+identical spec through both, FluidSynth at its `-g 0.7` peaks at **−9.1 dBFS**
+while spessasynth at `0.7` peaks at **−16.1 dBFS** — 7 dB quieter. Gain here is
+exactly linear (0.7 → −16.14, 1.0 → −13.04, 1.575 → −9.10), so the default is
+**1.575**: the value that makes a bed land at the same loudness whichever vendor
+rendered it. Switching vendors must not silently re-balance a film's music
+against its narration.
+
+That default is a setting (`music.node.gain`) — change it if you prefer a
+different working level, but change `music.targetPeakDb` first (below), which is
+the safer knob.
+
+---
+
+## Level control (both vendors)
+
+`music.targetPeakDb` (default **−3 dBFS**) is measured against every render and
+**only ever attenuates** — a quiet arrangement stays quiet, because the agent
+asking for quiet meant it. It is the same rule
+[`synthesize_sfx`](sfx-setup.md) uses, and it is what keeps a vendor swap from
+changing loudness. Set it to `off` on the vendors page (or `null` in settings)
+to leave levels exactly as rendered.
+
+`synthesize_music` reports the measured `peakDb` of what was actually written,
+plus `attenuatedDb` when the target pulled it down. You cannot hear the output;
+that number is how you know whether the bed will fight the narration.
+
+---
+
+## What the `fluidsynth` vendor needs
 
 Three external pieces, each resolvable by an environment variable, each with a
 git-ignored **vendored default** under `engine/vendor/`:
@@ -27,10 +116,9 @@ git-ignored **vendored default** under `engine/vendor/`:
 | synthesizer | `MOTION_STUDIO_FLUIDSYNTH` | `engine/vendor/fluidsynth/bin/fluidsynth.exe` | the [FluidSynth](https://www.fluidsynth.org/) binary |
 | instruments | `MOTION_STUDIO_SOUNDFONT` | `engine/vendor/soundfonts/MuseScore_General.sf3` | any General MIDI `.sf2`/`.sf3` SoundFont |
 
-`checkMusic()` verifies all three exist before the tool runs; whichever is
-missing is named in the `music_unavailable` error. Set the overrides in the MCP
-server's `env` block (see [mcp-setup.md](mcp-setup.md)) or wherever the engine is
-launched.
+All three must exist before the tool runs; whichever is missing is named in the
+`music_unavailable` error. Set the overrides in the MCP server's `env` block
+(see [mcp-setup.md](mcp-setup.md)) or wherever the engine is launched.
 
 ---
 
@@ -63,7 +151,7 @@ options. Times are in **beats** (quarter notes), so they're tempo-independent:
 
 ---
 
-## The MIDI CLI contract
+## The MIDI CLI contract (fluidsynth vendor)
 
 The engine (`engine/src/core/music.js`) and the MIDI exe communicate over a
 fixed command line + one-JSON-line stdout. Any implementation honoring it works;
@@ -149,15 +237,30 @@ about the CLI contract and that a WAV lands at `--out`.
 
 ## Troubleshooting
 
-- **`music_unavailable`** — one of the three pieces is missing; the error names
-  which and its resolved path. A setup problem for the user to fix, not something
-  an agent should retry. (Also raised if the MIDI exe can't be spawned at all.)
-- **`invalid_music_spec`** — the spec had no tracks/notes or wasn't valid JSON;
-  the `detail` carries the exe's message. Fix the spec and retry.
-- **`music_failed`** — the MIDI exe or FluidSynth ran but failed (e.g. a bad
-  SoundFont, or FluidSynth wrote no audio); `detail.stderrTail` has the tail.
+Open the Studio's **🗣 vendors** page first: it names the active music vendor,
+its live status, and what is missing. `list_vendors` is the same information for
+an agent.
+
+- **`music_unavailable` (node)** — no readable SoundFont at the resolved path,
+  or `spessasynth_core` is not installed (`npm install` in `engine/`). The
+  message names which.
+- **`music_unavailable` (fluidsynth)** — one of the three pieces is missing; the
+  error names which and its resolved path. A setup problem for the user to fix,
+  not something an agent should retry. (Also raised if the MIDI exe can't be
+  spawned at all.) If the `node` vendor is usable, the message says so.
+- **`invalid_music_spec`** — the spec had no tracks/notes, or a field was out of
+  range. Since v0.17 both vendors run the same validator, so the message is the
+  same either way and `detail.problems` lists every bad field, not just the
+  first. Fix the spec and retry.
+- **`music_failed`** — the vendor ran but failed (e.g. a corrupt SoundFont, or
+  FluidSynth wrote no audio); `detail.stderrTail` has the tail for the exe path.
 - **Silent / near-silent WAV** — almost always the SoundFont: a DLS file renamed
-  to `.sf2`, or an empty/percussion-only bank. Try MuseScore_General.
+  to `.sf2`, or an empty/percussion-only bank. Try MuseScore_General, and use
+  the vendors page's **▶ listen** button to hear the bank before rendering.
+- **The bed sits at a different level after switching vendors** — it shouldn't;
+  that is what the calibrated gain and `music.targetPeakDb` are for. Check the
+  reported `peakDb` from each vendor, and see the calibration note above if you
+  have changed `music.node.gain`.
 - **No sound in a preview** — expected. Audio is muxed only at the final
   `render`; `capture_preview_frame` is always silent. Confirm the output format
   carries audio (mp4/webm/prores do; gif/png-sequence do not).

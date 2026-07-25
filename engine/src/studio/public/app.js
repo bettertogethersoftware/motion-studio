@@ -148,6 +148,7 @@ async function selectProject(id) {
   stopPlayback();
   stopAudition(); // a clip from the previous project would keep playing with its stop button gone
   stopJobPolling();
+  if (!$('#vendors-page').classList.contains('hidden')) showVendorsPage(false); // picking a project leaves the vendors page
   state.events?.close();
   state.projectId = id;
   const proj = await api(`/api/projects/${id}`);
@@ -1095,6 +1096,435 @@ $('#settings-form').addEventListener('submit', async (e) => {
   }
   setTimeout(() => { msg.textContent = ''; }, 4000);
 });
+
+/* ----------------------------- speech vendors --------------------------- */
+
+/* v0.17. Narration used to have exactly one source — the Windows speech exe —
+ * so there was nothing to choose and nothing to show. With Azure AI Speech
+ * alongside it, "which vendor speaks" is a real setting, and it is global: the
+ * agents connected over MCP narrate through whatever is picked here.
+ *
+ * The page is data-driven from GET /api/vendors, but each card's *options* are
+ * hand-written markup, because they genuinely differ — an exe path is not a
+ * region, and only one of the two has 500 voices worth of filtering. */
+
+const vendorState = {
+  report: null,        // the speech report
+  music: null,         // the music report
+  voices: { system: [], azure: [] },
+  preview: null,       // the <audio> auditioning a voice/instrument sample
+  formatsFilled: false,
+  programsFilled: false,
+};
+
+const vendorEl = {
+  status: (v) => $(`[data-status="${v}"]`),
+  facts: (v) => $(`[data-facts="${v}"]`),
+  error: (v) => $(`[data-error="${v}"]`),
+  voice: (v) => $(`[data-voice="${v}"]`),
+  testBtn: (v) => $(`[data-test="${v}"]`),
+  testText: (v) => $(`[data-test-text="${v}"]`),
+  testMsg: (v) => $(`[data-test-msg="${v}"]`),
+  card: (v) => $(`.vendor-card[data-vendor="${v}"]`),
+};
+
+function defList(dl, rows) {
+  dl.innerHTML = '';
+  for (const [k, v] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    if (v instanceof Node) dd.append(v);
+    else {
+      dd.textContent = v ?? '—';
+      dd.classList.toggle('dim', v == null);
+    }
+    dl.append(dt, dd);
+  }
+}
+
+/** "westeurope (from AZURE_SPEECH_REGION)" — a value is only useful with its origin. */
+const withSource = (value, source) => (value == null ? null : source && source !== 'settings' ? `${value}  ← ${source}` : value);
+
+function showVendorsPage(on) {
+  $('#vendors-page').classList.toggle('hidden', !on);
+  if (on) {
+    stopAudition();
+    $('#workbench').classList.add('hidden');
+    $('#empty-state').classList.add('hidden');
+    stopPlayback();
+  } else {
+    stopVendorPreview();
+    $('#empty-state').classList.toggle('hidden', !!state.projectId);
+    $('#workbench').classList.toggle('hidden', !state.projectId);
+    if (state.projectId) fitPreview();
+  }
+}
+
+$('#btn-vendors').addEventListener('click', () => {
+  const opening = $('#vendors-page').classList.contains('hidden');
+  showVendorsPage(opening);
+  if (opening) loadVendors().catch((err) => setVendorMsg(err.message, true));
+});
+$('#btn-vendors-close').addEventListener('click', () => showVendorsPage(false));
+$('#btn-vendors-refresh').addEventListener('click', () => {
+  setVendorMsg('re-probing…');
+  loadVendors({ force: true }).then(() => setVendorMsg('')).catch((err) => setVendorMsg(err.message, true));
+});
+
+function setVendorMsg(text, isError = false) {
+  const el = $('#vendors-msg');
+  el.textContent = text;
+  el.classList.toggle('err', isError);
+  if (text && !isError) setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 4000);
+}
+
+async function loadVendors({ force = false } = {}) {
+  const data = await api(`/api/vendors${force ? '?force=1' : ''}`);
+  vendorState.report = data.speech;
+  vendorState.music = data.music;
+
+  if (!vendorState.programsFilled) {
+    const sel = $('#mu-program');
+    sel.innerHTML = '';
+    data.gmPrograms.forEach((name, program) => {
+      const o = document.createElement('option');
+      o.value = String(program);
+      o.textContent = `${String(program).padStart(3, '0')} · ${name}`;
+      sel.appendChild(o);
+    });
+    vendorState.programsFilled = true;
+  }
+
+  if (!vendorState.formatsFilled) {
+    const sel = $('#az-format');
+    sel.innerHTML = '';
+    for (const f of data.azure.outputFormats) {
+      const o = document.createElement('option');
+      o.value = f;
+      // riff-24khz-16bit-mono-pcm → "24khz · 16bit mono"
+      o.textContent = f.replace(/^riff-/, '').replace(/-16bit-mono-pcm$/, ' · 16-bit mono');
+      sel.appendChild(o);
+    }
+    vendorState.formatsFilled = true;
+  }
+
+  const azureCfg = data.speech.settings.azure ?? {};
+  $('#az-format').value = azureCfg.outputFormat ?? data.azure.outputFormats[0];
+
+  for (const v of data.speech.vendors) paintVendor(v, data.speech);
+  paintMusic(data.music);
+
+  // The environment block answers "why is it saying that" without a terminal.
+  const { environment } = await api('/api/settings');
+  const vendorKeys = Object.keys(environment.env)
+    .filter((k) => /SPEECH|TTS_VENDOR|TTS_EXE|MUSIC_VENDOR|SOUNDFONT|FLUIDSYNTH|MIDI_EXE/.test(k));
+  defList($('#vendors-env'), vendorKeys.map((k) => [k, environment.env[k]]));
+
+  await Promise.all(data.speech.vendors
+    .filter((v) => v.available)
+    .map((v) => loadVendorVoices(v.id).catch(() => {})));
+}
+
+function paintVendor(v, report) {
+  const pill = vendorEl.status(v.id);
+  const active = report.active === v.id;
+  pill.textContent = v.available ? `ready · ${v.voiceCount} voices` : 'unavailable';
+  pill.className = `pill ${v.available ? 'done' : 'error'}`;
+
+  const radio = vendorEl.card(v.id).querySelector('input[name="active-vendor"]');
+  radio.checked = active;
+  vendorEl.card(v.id).classList.toggle('active', active);
+
+  const err = vendorEl.error(v.id);
+  err.classList.toggle('hidden', !v.error);
+  err.textContent = v.error ?? '';
+
+  const c = v.config ?? {};
+  if (v.id === 'system') {
+    defList(vendorEl.facts(v.id), [
+      ['executable', withSource(c.exePath, c.exeSource)],
+      ['voices', v.available ? String(v.voiceCount) : null],
+      ['active', active ? `yes (from ${report.activeSource})` : 'no'],
+    ]);
+  } else {
+    defList(vendorEl.facts(v.id), [
+      ['api key', c.keyConfigured ? `${c.keyMasked}  ← ${c.keySource}` : null],
+      ['region', withSource(c.region, c.regionSource)],
+      ['endpoint', c.endpoint],
+      ['voices', v.available ? `${v.voiceCount} · ${v.locales.length} locales` : null],
+      ['active', active ? `yes (from ${report.activeSource})` : 'no'],
+    ]);
+
+    // An env-supplied region wins over the field, so show it and lock the input
+    // rather than letting someone type a value that will never be used.
+    const regionInput = $('#az-region');
+    const fromEnv = c.regionSource && c.regionSource !== 'settings' && c.regionSource !== 'argument';
+    regionInput.value = fromEnv ? c.region : (report.settings.azure?.region ?? '');
+    regionInput.disabled = !!fromEnv;
+    regionInput.title = fromEnv ? `set by ${c.regionSource} — clear that variable to edit here` : '';
+    regionInput.closest('label').classList.toggle('disabled', !!fromEnv);
+
+    const locales = $('#az-locale');
+    if (locales.options.length <= 1 && v.locales?.length) {
+      for (const loc of v.locales) {
+        const o = document.createElement('option');
+        o.value = loc;
+        o.textContent = loc;
+        locales.appendChild(o);
+      }
+      // Default the filter to the configured voice's locale so the select
+      // opens on something usable instead of 500 unrelated names.
+      const configured = report.settings.azure?.voice;
+      if (configured) locales.value = v.locales.find((l) => configured.startsWith(l)) ?? '';
+    }
+  }
+}
+
+/** The music half of the page — same card grammar, different knobs. */
+function paintMusic(report) {
+  for (const v of report.vendors) {
+    const pill = vendorEl.status(v.id);
+    const active = report.active === v.id;
+    pill.textContent = v.available ? 'ready' : 'unavailable';
+    pill.className = `pill ${v.available ? 'done' : 'error'}`;
+
+    const card = vendorEl.card(v.id);
+    card.querySelector('input[name="active-music-vendor"]').checked = active;
+    card.classList.toggle('active', active);
+
+    const err = vendorEl.error(v.id);
+    err.classList.toggle('hidden', !v.error);
+    err.textContent = v.error ?? '';
+
+    const c = v.config ?? {};
+    if (v.id === 'node') {
+      defList(vendorEl.facts(v.id), [
+        ['soundfont', c.soundfont],
+        ['library', c.library],
+        ['render', v.available ? `${c.sampleRate} Hz · gain ${c.gain}` : null],
+        ['active', active ? `yes (from ${report.activeSource})` : 'no'],
+      ]);
+    } else {
+      defList(vendorEl.facts(v.id), [
+        ['midi exe', c.midiExe],
+        ['fluidsynth', c.fluidsynth],
+        ['soundfont', c.soundfont],
+        ['active', active ? `yes (from ${report.activeSource})` : 'no'],
+      ]);
+    }
+  }
+
+  const s = report.settings ?? {};
+  $('#mu-soundfont').value = s.node?.soundfont ?? '';
+  $('#mu-samplerate').value = String(s.node?.sampleRate ?? 44100);
+  $('#mu-gain').value = s.node?.gain ?? 1.575;
+  $('#mu-target').value = s.targetPeakDb === null || s.targetPeakDb === undefined ? '' : String(s.targetPeakDb);
+}
+
+/** Fill one vendor's voice <select> (Azure honours the locale/search filters). */
+async function loadVendorVoices(vendor) {
+  const params = new URLSearchParams();
+  if (vendor === 'azure') {
+    const locale = $('#az-locale').value;
+    const search = $('#az-search').value.trim();
+    if (locale) params.set('locale', locale);
+    if (search) params.set('search', search);
+    params.set('limit', '300');
+  }
+  const qs = params.toString();
+  const data = await api(`/api/vendors/speech/${vendor}/voices${qs ? `?${qs}` : ''}`);
+  vendorState.voices[vendor] = data.voices;
+
+  const sel = vendorEl.voice(vendor);
+  // Only the Azure vendor has a stored default voice; the exe vendor's select
+  // is a scratch control for the test line.
+  const configured = vendor === 'azure' ? vendorState.report?.settings?.azure?.voice : null;
+  sel.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = vendor === 'azure' ? '(auto — first neural en-US voice)' : '(first installed voice)';
+  sel.appendChild(none);
+  for (const v of data.voices) {
+    const o = document.createElement('option');
+    o.value = v.name;
+    o.textContent = v.locale
+      ? `${v.name}${v.gender ? ` · ${v.gender.toLowerCase()}` : ''}${v.styles?.length ? ` · ${v.styles.length} styles` : ''}`
+      : v.name;
+    sel.appendChild(o);
+  }
+  if (configured && data.voices.some((v) => v.name === configured)) sel.value = configured;
+  else if (configured && vendor === 'azure') {
+    // Configured voice filtered out of view: keep it selectable so saving the
+    // page doesn't silently drop it.
+    const o = document.createElement('option');
+    o.value = configured;
+    o.textContent = `${configured} (configured)`;
+    sel.appendChild(o);
+    sel.value = configured;
+  }
+  if (vendor === 'azure') syncAzureStyles();
+  if (data.truncated) setVendorMsg(`showing ${data.voices.length} of ${data.total} voices — narrow with the locale filter`);
+}
+
+/** Styles belong to the voice, so the list follows the selection. */
+function syncAzureStyles() {
+  const sel = $('#az-style');
+  const chosen = vendorEl.voice('azure').value;
+  const voice = vendorState.voices.azure.find((v) => v.name === chosen);
+  const styles = voice?.styles ?? [];
+  const previous = sel.value;
+  sel.innerHTML = '<option value="">(none)</option>';
+  for (const s of styles) {
+    const o = document.createElement('option');
+    o.value = s;
+    o.textContent = s;
+    sel.appendChild(o);
+  }
+  const configured = vendorState.report?.settings?.azure?.style;
+  const want = styles.includes(previous) ? previous : (configured && styles.includes(configured) ? configured : '');
+  sel.value = want;
+  sel.disabled = styles.length === 0;
+  sel.closest('label').classList.toggle('disabled', styles.length === 0);
+}
+
+let voiceFilterTimer = null;
+for (const id of ['#az-locale', '#az-search']) {
+  $(id).addEventListener('input', () => {
+    clearTimeout(voiceFilterTimer);
+    voiceFilterTimer = setTimeout(() => loadVendorVoices('azure').catch((e) => setVendorMsg(e.message, true)), 200);
+  });
+}
+vendorEl.voice('azure').addEventListener('change', syncAzureStyles);
+
+// Each capability's cards highlight independently — one active speech vendor
+// and one active music vendor, not one active card on the page.
+for (const group of ['active-vendor', 'active-music-vendor']) {
+  for (const radio of document.querySelectorAll(`input[name="${group}"]`)) {
+    radio.addEventListener('change', () => {
+      for (const input of document.querySelectorAll(`input[name="${group}"]`)) {
+        input.closest('.vendor-card').classList.toggle('active', input.checked);
+      }
+    });
+  }
+}
+
+$('#btn-vendors-save').addEventListener('click', async () => {
+  setVendorMsg('saving…');
+  try {
+    const vendor = document.querySelector('input[name="active-vendor"]:checked')?.value ?? 'system';
+    const musicVendor = document.querySelector('input[name="active-music-vendor"]:checked')?.value ?? 'node';
+    const regionInput = $('#az-region');
+    const patch = {
+      tts: {
+        vendor,
+        azure: {
+          // A disabled field is env-controlled: leave the stored value alone
+          // instead of writing the env value into settings.json.
+          ...(regionInput.disabled ? {} : { region: regionInput.value.trim() || null }),
+          voice: vendorEl.voice('azure').value || null,
+          outputFormat: $('#az-format').value,
+          style: $('#az-style').value || null,
+        },
+      },
+      music: {
+        vendor: musicVendor,
+        targetPeakDb: $('#mu-target').value === '' ? null : Number($('#mu-target').value),
+        node: {
+          soundfont: $('#mu-soundfont').value.trim() || null,
+          sampleRate: Number($('#mu-samplerate').value),
+          gain: Number($('#mu-gain').value),
+        },
+      },
+    };
+    const { settings } = await api('/api/settings', { method: 'PATCH', body: { patch } });
+    state.settings = settings;
+    setVendorMsg('saved ✓');
+    await loadVendors();
+  } catch (err) {
+    setVendorMsg(err.message, true);
+  }
+});
+
+/* ------------------------------ voice test ------------------------------ */
+
+function stopVendorPreview() {
+  vendorState.preview?.pause();
+  if (vendorState.preview?.src.startsWith('blob:')) URL.revokeObjectURL(vendorState.preview.src);
+  vendorState.preview = null;
+  for (const b of document.querySelectorAll('.test-btn')) {
+    // Buttons label themselves ("▶ test" / "▶ listen"); restore what was there.
+    b.textContent = b.dataset.idleLabel ?? '▶ test';
+    b.classList.remove('playing');
+  }
+}
+
+/**
+ * Audition whichever vendor the button belongs to. Speech previews speak the
+ * test line; the music preview renders a short phrase on the chosen instrument
+ * through the *selected* music vendor, so "does this SoundFont sound right"
+ * is answerable before a render rather than after one.
+ */
+async function testVendor(kind) {
+  const btn = vendorEl.testBtn(kind);
+  const msg = vendorEl.testMsg(kind);
+  if (btn.classList.contains('playing')) { stopVendorPreview(); return; }
+  stopVendorPreview();
+  stopAudition(); // never two clips at once
+
+  const music = kind === 'music';
+  const vendor = music
+    ? (document.querySelector('input[name="active-music-vendor"]:checked')?.value ?? 'node')
+    : kind;
+  const idle = btn.dataset.idleLabel ?? btn.textContent;
+  btn.dataset.idleLabel = idle;
+  btn.disabled = true;
+  btn.textContent = '…';
+  msg.textContent = '';
+  msg.classList.remove('err');
+  try {
+    let body;
+    if (music) {
+      body = { program: Number($('#mu-program').value) || 0, drums: $('#mu-drums').checked };
+    } else {
+      body = { text: vendorEl.testText(kind).value, voice: vendorEl.voice(kind).value || undefined };
+      if (kind === 'azure' && $('#az-style').value) body.style = $('#az-style').value;
+    }
+    const res = await fetch(`/api/vendors/${music ? 'music' : 'speech'}/${vendor}/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `preview failed (HTTP ${res.status})`);
+    }
+    const seconds = Number(res.headers.get(music ? 'X-Music-Duration' : 'X-Speech-Duration'));
+    const label = music
+      ? `${vendor} · peak ${res.headers.get('X-Music-Peak-Db')} dBFS`
+      : (decodeURIComponent(res.headers.get('X-Speech-Voice') ?? '') || 'default voice');
+    const url = URL.createObjectURL(await res.blob());
+    const audio = new Audio(url);
+    audio.addEventListener('ended', stopVendorPreview);
+    audio.addEventListener('error', stopVendorPreview);
+    await audio.play();
+    vendorState.preview = audio;
+    btn.textContent = '⏸ stop';
+    btn.classList.add('playing');
+    msg.textContent = `${label} · ${seconds.toFixed(2)}s`;
+  } catch (err) {
+    stopVendorPreview();
+    msg.textContent = err.message;
+    msg.classList.add('err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+for (const kind of ['system', 'azure', 'music']) {
+  const btn = vendorEl.testBtn(kind);
+  btn.dataset.idleLabel = btn.textContent; // "▶ test" / "▶ listen"
+  btn.addEventListener('click', () => testVendor(kind));
+}
 
 /* -------------------------------- tabs -------------------------------- */
 

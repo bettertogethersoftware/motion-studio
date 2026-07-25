@@ -16,7 +16,7 @@
       <span class="brand-mark">▶</span>
       <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
-        <span class="version">v0.15 · deterministic renderer</span>
+        <span class="version">v0.17 · deterministic renderer</span>
       </div>
       <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
@@ -35,6 +35,7 @@
 
     <footer class="rail-foot">
       <span id="engine-status">engine —</span>
+      <button id="btn-vendors" class="ghost foot-btn" title="speech vendors">🗣<span class="foot-label"> vendors</span></button>
       <button id="btn-settings" class="ghost foot-btn" title="global settings">⚙<span class="foot-label"> settings</span></button>
     </footer>
   </aside>
@@ -46,6 +47,190 @@
       Compositions are pure functions of the frame number —<br>
       what you scrub here is exactly what renders.</p>
     </div>
+
+    <!-- Speech vendors (v0.17). A full page rather than another dialog: it
+         holds two vendors' configuration, a few hundred voices, and an
+         audition player — none of which belongs in a modal. -->
+    <section id="vendors-page" class="vendors-page hidden">
+      <header class="page-head">
+        <h2>vendors</h2>
+        <span class="dim">who speaks and who plays — for the Studio <em>and</em> every connected agent</span>
+        <span class="spacer"></span>
+        <span id="vendors-msg" class="dim"></span>
+        <button id="btn-vendors-save" class="primary">save</button>
+        <button id="btn-vendors-refresh" class="ghost" title="re-probe every vendor">re-probe</button>
+        <button id="btn-vendors-close" class="ghost">close</button>
+      </header>
+
+      <p class="dim note vendors-intro">
+        Pick which vendor generates narration and which renders music. The choice is global —
+        <code>synthesize_speech</code> and <code>synthesize_music</code> over MCP use it too, unless a call names a
+        vendor explicitly. API keys are read from the machine's environment only and are never written to
+        <code>settings.json</code>.
+      </p>
+
+      <p class="section-label capability-label">speech <span class="dim">· narration</span></p>
+      <div class="vendor-cards">
+        <!-- ------------------------------ system ------------------------------ -->
+        <article class="vendor-card" data-vendor="system">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="radio" name="active-vendor" value="system">
+              <span class="v-title">system speech</span>
+            </label>
+            <span class="pill" data-status="system">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            The local <code>MotionStudioTts.exe</code> driving the OS voices. Offline, free, no account — Windows only,
+            and limited to the voices installed on this machine.
+          </p>
+          <dl class="env-list mono" data-facts="system"></dl>
+          <p class="v-error err-line hidden" data-error="system"></p>
+
+          <div class="fieldrow vendor-test">
+            <label class="grow">test line
+              <input data-test-text="system" value="Motion Studio. Scene one, take one." maxlength="400">
+            </label>
+            <label>voice
+              <select data-voice="system"></select>
+            </label>
+            <button class="ghost test-btn" data-test="system">▶ test</button>
+            <span class="dim mono" data-test-msg="system"></span>
+          </div>
+        </article>
+
+        <!-- ------------------------------- azure ------------------------------- -->
+        <article class="vendor-card" data-vendor="azure">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="radio" name="active-vendor" value="azure">
+              <span class="v-title">azure ai speech</span>
+            </label>
+            <span class="pill" data-status="azure">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            Microsoft's cloud neural voices over REST — cross-platform, several hundred voices across ~140 locales, with
+            expressive styles. Billed per character by your Azure subscription.
+          </p>
+          <dl class="env-list mono" data-facts="azure"></dl>
+          <p class="v-error err-line hidden" data-error="azure"></p>
+
+          <div class="config-grid vendor-grid">
+            <label>region
+              <input id="az-region" placeholder="eastus" spellcheck="false">
+            </label>
+            <label>output format
+              <select id="az-format"></select>
+            </label>
+            <label>locale filter
+              <select id="az-locale"><option value="">all locales</option></select>
+            </label>
+            <label>search
+              <input id="az-search" placeholder="name / gender" spellcheck="false">
+            </label>
+            <label class="wide">default voice
+              <select data-voice="azure"></select>
+            </label>
+            <label>style
+              <select id="az-style"><option value="">(none)</option></select>
+            </label>
+          </div>
+
+          <div class="fieldrow vendor-test">
+            <label class="grow">test line
+              <input data-test-text="azure" value="Motion Studio. Scene one, take one." maxlength="400">
+            </label>
+            <button class="ghost test-btn" data-test="azure">▶ test</button>
+            <span class="dim mono" data-test-msg="azure"></span>
+          </div>
+
+          <p class="dim note">
+            Set the key on Windows with <code>setx AZURE_SPEECH_KEY "&lt;key&gt;"</code> (and
+            <code>AZURE_SPEECH_REGION</code>), then restart the Studio — a new value only reaches an already-running
+            process on restart. A region set in the environment overrides the field above.
+          </p>
+        </article>
+      </div>
+
+      <p class="section-label capability-label">music <span class="dim">· note specs → audio</span></p>
+      <div class="vendor-cards">
+        <!-- ------------------------------- node -------------------------------- -->
+        <article class="vendor-card" data-vendor="node">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="radio" name="active-music-vendor" value="node">
+              <span class="v-title">node synthesizer</span>
+            </label>
+            <span class="pill" data-status="node">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            Renders a General MIDI SoundFont in-process (<code>spessasynth_core</code>) — no binaries to build, works
+            on any OS, about 45× realtime. Same SoundFont, same spec, same sound as the external chain.
+          </p>
+          <dl class="env-list mono" data-facts="node"></dl>
+          <p class="v-error err-line hidden" data-error="node"></p>
+
+          <div class="config-grid vendor-grid">
+            <label class="wide">soundfont
+              <input id="mu-soundfont" placeholder="(bundled MuseScore_General.sf3)" spellcheck="false">
+            </label>
+            <label>sample rate
+              <select id="mu-samplerate">
+                <option value="22050">22050 Hz</option>
+                <option value="32000">32000 Hz</option>
+                <option value="44100">44100 Hz</option>
+                <option value="48000">48000 Hz</option>
+              </select>
+            </label>
+            <label>synth gain
+              <input id="mu-gain" type="number" step="0.025" min="0.05" max="4">
+            </label>
+          </div>
+        </article>
+
+        <!-- ---------------------------- fluidsynth ------------------------------ -->
+        <article class="vendor-card" data-vendor="fluidsynth">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="radio" name="active-music-vendor" value="fluidsynth">
+              <span class="v-title">fluidsynth (external)</span>
+            </label>
+            <span class="pill" data-status="fluidsynth">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            The v0.8 chain: <code>MotionStudioMidi.exe</code> authors the MIDI, <code>fluidsynth.exe</code> renders it.
+            Windows-only, ~74 MB of binaries you build or download yourself.
+          </p>
+          <dl class="env-list mono" data-facts="fluidsynth"></dl>
+          <p class="v-error err-line hidden" data-error="fluidsynth"></p>
+        </article>
+      </div>
+
+      <div class="fieldrow vendor-test music-test">
+        <label>target peak
+          <select id="mu-target">
+            <option value="">off (raw levels)</option>
+            <option value="-1">−1 dBFS</option>
+            <option value="-3">−3 dBFS</option>
+            <option value="-6">−6 dBFS</option>
+            <option value="-12">−12 dBFS</option>
+          </select>
+        </label>
+        <label class="grow">audition instrument
+          <select id="mu-program"></select>
+        </label>
+        <label class="check"><input id="mu-drums" type="checkbox"> drums</label>
+        <button class="ghost test-btn" data-test="music">▶ listen</button>
+        <span class="dim mono" data-test-msg="music"></span>
+      </div>
+      <p class="dim note">
+        Target peak applies to <em>both</em> music vendors and only ever attenuates — a quiet arrangement stays quiet.
+        It is what keeps a bed at the same loudness against your narration when you switch vendors.
+      </p>
+
+      <p class="section-label">environment <span class="dim">(read-only · keys shown masked)</span></p>
+      <dl id="vendors-env" class="env-list mono"></dl>
+    </section>
 
     <div id="workbench" class="workbench hidden">
       <section class="viewport-wrap">

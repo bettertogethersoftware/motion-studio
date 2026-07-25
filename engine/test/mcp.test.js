@@ -19,6 +19,9 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+import { startFakeAzure } from './helpers/fake-azure-speech.mjs';
+import { writeTinySoundFont } from './helpers/tiny-soundfont.mjs';
+
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.resolve(__dirname, '../src/mcp/server.js');
@@ -29,11 +32,14 @@ const FAKE_FLUIDSYNTH = path.resolve(__dirname, 'helpers/fake-fluidsynth.mjs');
 const FAKE_SOUNDFONT = path.resolve(__dirname, 'fixtures/fake.sf2');
 
 let haveFfmpeg = false;
-let tmp, client, transport;
+let tmp, client, transport, fakeAzure;
 
 before(async () => {
   try { await execFileP('ffmpeg', ['-version']); haveFfmpeg = true; } catch { /* skip below */ }
   tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-mcp-'));
+  // The Azure speech vendor (v0.17) is stubbed by a local HTTP server the child
+  // process reaches through the same env hooks a user would set.
+  fakeAzure = await startFakeAzure();
   transport = new StdioClientTransport({
     command: process.execPath,
     args: [SERVER],
@@ -45,6 +51,14 @@ before(async () => {
       MOTION_STUDIO_MIDI_EXE: FAKE_MIDI,
       MOTION_STUDIO_FLUIDSYNTH: FAKE_FLUIDSYNTH,
       MOTION_STUDIO_SOUNDFONT: FAKE_SOUNDFONT,
+      // Pinned, not inherited: the machine running the tests may have its own
+      // vendors configured. The music vendor is pinned to the v0.8 exe chain
+      // because these tests stub it; the `node` vendor gets its own server
+      // below, with a real (tiny) SoundFont it can actually render.
+      MOTION_STUDIO_TTS_VENDOR: 'system',
+      MOTION_STUDIO_MUSIC_VENDOR: 'fluidsynth',
+      MOTION_STUDIO_AZURE_SPEECH_KEY: 'test-key',
+      MOTION_STUDIO_AZURE_SPEECH_ENDPOINT: fakeAzure.url,
     },
     stderr: 'pipe',
   });
@@ -54,6 +68,7 @@ before(async () => {
 
 after(async () => {
   await client?.close().catch(() => {});
+  await fakeAzure?.close();
 });
 
 const callJson = async (name, args = {}) => {
@@ -87,6 +102,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'synthesize_sfx',
     // new in v0.15 (asset management)
     'list_assets', 'delete_asset', 'rename_asset',
+    // new in v0.17 (speech + music vendors)
+    'list_vendors',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -406,6 +423,93 @@ test('mcp: synthesize_speech rejects an assetPath outside assets/', async (t) =>
   assert.equal(res.data.code, 'path_outside_project');
 });
 
+/* ---------------------------- v0.17 speech vendors -------------------------- */
+
+test('mcp: list_vendors reports both capabilities and which vendor each will use', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { isError, data } = await callJson('list_vendors');
+  assert.equal(isError, false, JSON.stringify(data));
+
+  assert.equal(data.speech.active, 'system');
+  assert.equal(data.speech.activeSource, 'env'); // MOTION_STUDIO_TTS_VENDOR, pinned above
+  const speech = Object.fromEntries(data.speech.vendors.map((v) => [v.id, v]));
+  assert.equal(speech.system.available, true);
+  assert.equal(speech.azure.available, true);
+  assert.equal(speech.azure.voiceCount, 3);
+  assert.equal(speech.system.offline, true);
+
+  assert.equal(data.music.active, 'fluidsynth');
+  const music = Object.fromEntries(data.music.vendors.map((v) => [v.id, v]));
+  assert.equal(music.fluidsynth.available, true);
+  assert.deepEqual(data.music.allVendors, ['node', 'fluidsynth']);
+
+  // Credentials are never echoed to an agent.
+  assert.equal(JSON.stringify(data).includes('test-key'), false);
+});
+
+test('mcp: list_vendors can report one capability at a time', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { data } = await callJson('list_vendors', { capability: 'music', probe: false });
+  assert.ok(data.music);
+  assert.equal(data.speech, undefined);
+  assert.equal(data.music.vendors[0].available, null); // probe: false
+});
+
+test('mcp: list_voices defaults to the active vendor and returns plain names for it', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { data } = await callJson('list_voices');
+  assert.equal(data.vendor, 'system');
+  assert.ok(data.voices.includes('Microsoft David Desktop'), JSON.stringify(data.voices));
+});
+
+test('mcp: list_voices filters the azure catalogue and carries styles', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { data } = await callJson('list_voices', { vendor: 'azure', locale: 'en' });
+  assert.equal(data.vendor, 'azure');
+  assert.equal(data.total, 2);
+  const ava = data.voices.find((v) => v.name === 'en-US-AvaNeural');
+  assert.deepEqual(ava.styles, ['cheerful', 'newscast']);
+
+  const paged = await callJson('list_voices', { vendor: 'azure', limit: 1 });
+  assert.equal(paged.data.returned, 1);
+  assert.equal(paged.data.truncated, true);
+  assert.match(paged.data.hint, /locale/);
+});
+
+test('mcp: synthesize_speech can name the azure vendor per call', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { isError, data } = await callJson('synthesize_speech', {
+    projectId, text: 'The empire, in one breath.', vendor: 'azure', voice: 'en-US-AvaNeural',
+    style: 'newscast', mode: 'asset-only',
+  });
+  assert.equal(isError, false, JSON.stringify(data));
+  assert.equal(data.vendor, 'azure');
+  assert.equal(data.vendorSource, 'argument');
+  assert.equal(data.voice, 'en-US-AvaNeural');
+  assert.equal(data.style, 'newscast');
+  assert.equal(data.sampleRate, 24000);
+  assert.equal(data.durationInFrames, 30); // 1.0s stub clip at 30fps
+});
+
+test('mcp: an unknown azure voice fails with unsupported_voice and suggestions', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { isError, data } = await callJson('synthesize_speech', {
+    projectId, text: 'x', vendor: 'azure', voice: 'en-US-NotAVoice', mode: 'asset-only',
+  });
+  assert.equal(isError, true);
+  assert.equal(data.code, 'unsupported_voice');
+  assert.ok(data.detail.suggestions.length > 0);
+});
+
+test('mcp: the system vendor reports the Azure-only options it ignored', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const { data } = await callJson('synthesize_speech', {
+    projectId, text: 'plain', vendor: 'system', style: 'cheerful', mode: 'asset-only',
+  });
+  assert.equal(data.vendor, 'system');
+  assert.match((data.warnings ?? []).join(' '), /Azure-only/);
+});
+
 test('mcp: list_voices / synthesize_speech return tts_unavailable when the exe is missing', async () => {
   // A second server pointed at a nonexistent exe — no ffmpeg needed (TTS tools do not gate on prereqs).
   const badTransport = new StdioClientTransport({
@@ -416,6 +520,7 @@ test('mcp: list_voices / synthesize_speech return tts_unavailable when the exe i
       MOTION_STUDIO_HOME: path.join(tmp, 'home-no-tts'),
       MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
       MOTION_STUDIO_TTS_EXE: path.join(tmp, 'no-such-tts.exe'),
+      MOTION_STUDIO_TTS_VENDOR: 'system',
     },
     stderr: 'pipe',
   });
@@ -623,6 +728,52 @@ test('mcp: synthesize_music rejects an assetPath outside assets/', async () => {
   assert.equal(res.data.code, 'path_outside_project');
 });
 
+test('mcp: the node music vendor renders end-to-end with no exe at all', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // A second server with the cross-platform vendor and a real (tiny) SoundFont:
+  // no MIDI exe, no fluidsynth, nothing to build.
+  const soundfont = await writeTinySoundFont(tmp);
+  const nodeTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER],
+    env: {
+      ...process.env,
+      MOTION_STUDIO_HOME: path.join(tmp, 'home-node-music'),
+      MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
+      MOTION_STUDIO_MUSIC_VENDOR: 'node',
+      MOTION_STUDIO_SOUNDFONT: soundfont,
+      MOTION_STUDIO_MIDI_EXE: path.join(tmp, 'no-such-midi.exe'),
+      MOTION_STUDIO_FLUIDSYNTH: path.join(tmp, 'no-such-fs.exe'),
+    },
+    stderr: 'pipe',
+  });
+  const nodeClient = new Client({ name: 'ms-test-client-node-music', version: '0.0.1' });
+  await nodeClient.connect(nodeTransport);
+  const call = async (name, args) => {
+    const res = await nodeClient.callTool({ name, arguments: args });
+    return { isError: !!res.isError, data: JSON.parse(res.content.find((c) => c.type === 'text')?.text ?? '{}') };
+  };
+  try {
+    const vendors = await call('list_vendors', { capability: 'music' });
+    const byId = Object.fromEntries(vendors.data.music.vendors.map((v) => [v.id, v]));
+    assert.equal(vendors.data.music.active, 'node');
+    assert.equal(byId.node.available, true, byId.node.error);
+    assert.equal(byId.fluidsynth.available, false, 'the exe chain is deliberately absent here');
+
+    const proj = await call('create_project', { name: 'Node Music', fps: 30, width: 320, height: 240, durationInFrames: 20 });
+    const music = await call('synthesize_music', { projectId: proj.data.id, spec: MUSIC_SPEC, mode: 'attach' });
+    assert.equal(music.isError, false, JSON.stringify(music.data));
+    assert.equal(music.data.vendor, 'node');
+    assert.equal(music.data.vendorSource, 'env');
+    assert.equal(music.data.attached, true);
+    assert.ok(music.data.durationInFrames > 0);
+    assert.ok(typeof music.data.peakDb === 'number', 'the measured level is reported');
+    assert.ok(fs.existsSync(path.join(proj.data.path, ...music.data.assetPath.split('/'))));
+  } finally {
+    await nodeClient.close().catch(() => {});
+  }
+});
+
 test('mcp: synthesize_music returns music_unavailable when the toolchain is missing', async () => {
   const badTransport = new StdioClientTransport({
     command: process.execPath,
@@ -632,6 +783,7 @@ test('mcp: synthesize_music returns music_unavailable when the toolchain is miss
       MOTION_STUDIO_HOME: path.join(tmp, 'home-no-music'),
       MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
       MOTION_STUDIO_TTS_EXE: FAKE_TTS,
+      MOTION_STUDIO_MUSIC_VENDOR: 'fluidsynth',
       MOTION_STUDIO_MIDI_EXE: path.join(tmp, 'no-such-midi.exe'),
       MOTION_STUDIO_FLUIDSYNTH: path.join(tmp, 'no-such-fs.exe'),
       MOTION_STUDIO_SOUNDFONT: path.join(tmp, 'no-such.sf2'),

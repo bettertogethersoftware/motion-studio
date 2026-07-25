@@ -15,6 +15,9 @@
  *                        name one
  *   ffmpeg.path          the binary used for the prereq check AND every encode
  *   ffmpeg.crf/preset    seed a newly scaffolded project's output config
+ *   tts.vendor           which speech vendor narration goes through (v0.17)
+ *   tts.azure.*          the Azure vendor's non-secret options (region, default
+ *                        voice, output format, style) — never the API key
  *
  * Two invariants hold throughout. An explicit argument always beats a global
  * default — these fill gaps, they do not override a caller who spoke up. And
@@ -22,21 +25,32 @@
  * never rewritten because a global changed. See resolveFfmpegPath() below for
  * the one full precedence chain (CLI flag > env > this file > PATH).
  *
- * Other machine-level knobs (data dir, TTS/music exes) stay
- * env vars (MOTION_STUDIO_*); the Studio settings endpoint reports them
- * read-only so the UI can show where everything lives.
+ * Other machine-level knobs (data dir, TTS/music exes) and every credential
+ * stay env vars (MOTION_STUDIO_*, AZURE_SPEECH_KEY); the Studio settings
+ * endpoint reports them read-only — secrets masked — so the UI can show where
+ * everything lives without this file ever holding one.
  */
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir } from './project.js';
+import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
 export const FFMPEG_PRESETS = Object.freeze([
   'ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow',
 ]);
+
+/**
+ * Vendor lists, newest last. They live here rather than in the vendor modules
+ * because they are what validates `tts.vendor` / `music.vendor`, and those
+ * modules already read settings — putting the lists there would make the
+ * import a cycle. The vendor modules re-export them.
+ */
+export const TTS_VENDORS = Object.freeze(['system', 'azure']);
+export const MUSIC_VENDORS = Object.freeze(['node', 'fluidsynth']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
@@ -47,11 +61,29 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // output config (existing projects are untouched — same rule as everything
   // else in this file).
   ffmpeg: Object.freeze({ path: null, defaultCrf: null, defaultPreset: null }),
+  // Which speech vendor narration goes through, and the non-secret half of the
+  // Azure vendor's configuration (v0.17). The API key is deliberately absent:
+  // it is read from the environment only, so this file stays safe to sync,
+  // copy, or paste into a bug report. See core/tts-vendors.js.
+  tts: Object.freeze({
+    vendor: 'system',
+    azure: Object.freeze({ region: null, voice: null, outputFormat: AZURE_DEFAULT_FORMAT, style: null }),
+  }),
+  // Which music vendor renders a note spec (v0.17). "node" is the default
+  // because it is the only one that works off Windows and needs no binaries a
+  // fresh clone has to build. targetPeakDb applies to *both* vendors and only
+  // ever attenuates, so swapping vendors cannot re-balance a film's mix.
+  music: Object.freeze({
+    vendor: 'node',
+    targetPeakDb: -3,
+    node: Object.freeze({ soundfont: null, sampleRate: 44100, gain: 1.575 }),
+  }),
 });
 
 export function validateSettings(s) {
   const problems = [];
   const isPosInt = (v) => Number.isInteger(v) && v > 0;
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
   if (!s || typeof s !== 'object') problems.push('settings must be an object');
   else {
     const d = s.newProjectDefaults;
@@ -74,6 +106,54 @@ export function validateSettings(s) {
       if (f.defaultPreset !== null && !FFMPEG_PRESETS.includes(f.defaultPreset))
         problems.push(`ffmpeg.defaultPreset: null or one of ${FFMPEG_PRESETS.join(', ')}`);
     }
+    const t = s.tts;
+    if (!t || typeof t !== 'object') problems.push('tts: object required');
+    else {
+      if (!TTS_VENDORS.includes(t.vendor)) problems.push(`tts.vendor: one of ${TTS_VENDORS.join(', ')}`);
+      const a = t.azure;
+      if (!a || typeof a !== 'object') problems.push('tts.azure: object required');
+      else {
+        const nullableString = (k) => {
+          if (a[k] !== null && (typeof a[k] !== 'string' || !a[k].trim())) {
+            problems.push(`tts.azure.${k}: non-empty string or null required`);
+          }
+        };
+        nullableString('region');
+        nullableString('voice');
+        nullableString('style');
+        // A non-WAV format would break the duration contract every consumer
+        // relies on, so it is refused here rather than at synthesis time.
+        if (!AZURE_WAV_FORMATS.includes(a.outputFormat)) {
+          problems.push(`tts.azure.outputFormat: one of ${AZURE_WAV_FORMATS.join(', ')}`);
+        }
+        // The key is environment-only. Accepting it here — even to "help" —
+        // would write a live credential into a file users share freely.
+        if ('key' in a || 'apiKey' in a) {
+          problems.push('tts.azure.key: the Azure Speech key is read from the environment only and is never stored in settings.json');
+        }
+      }
+    }
+    const mu = s.music;
+    if (!mu || typeof mu !== 'object') problems.push('music: object required');
+    else {
+      if (!MUSIC_VENDORS.includes(mu.vendor)) problems.push(`music.vendor: one of ${MUSIC_VENDORS.join(', ')}`);
+      // null = leave levels exactly as rendered. A positive value would mean
+      // "boost to here", which this setting deliberately cannot do.
+      if (mu.targetPeakDb !== null && (!isNum(mu.targetPeakDb) || mu.targetPeakDb > 0 || mu.targetPeakDb < -60)) {
+        problems.push('music.targetPeakDb: number in -60..0 (dBFS) or null required');
+      }
+      const n = mu.node;
+      if (!n || typeof n !== 'object') problems.push('music.node: object required');
+      else {
+        if (n.soundfont !== null && (typeof n.soundfont !== 'string' || !n.soundfont.trim())) {
+          problems.push('music.node.soundfont: non-empty path or null required');
+        }
+        if (!isPosInt(n.sampleRate) || n.sampleRate < 8000 || n.sampleRate > 192000) {
+          problems.push('music.node.sampleRate: integer in 8000..192000 required');
+        }
+        if (!isNum(n.gain) || n.gain <= 0 || n.gain > 4) problems.push('music.node.gain: number in 0..4 required');
+      }
+    }
   }
   if (problems.length) {
     throw new EngineError(ErrorCodes.INVALID_CONFIG, `Invalid settings: ${problems.join('; ')}`, { problems });
@@ -83,6 +163,12 @@ export function validateSettings(s) {
 
 function settingsPath(dataDir) {
   return path.join(dataDir, 'settings.json');
+}
+
+/** Copy just the named keys that are actually present on `obj`. */
+function pick(obj, keys) {
+  if (!obj || typeof obj !== 'object') return {};
+  return Object.fromEntries(keys.filter((k) => k in obj).map((k) => [k, obj[k]]));
 }
 
 /**
@@ -138,6 +224,20 @@ export function outputSeedFromSettings(settings, currentOutput = {}) {
   };
 }
 
+/**
+ * The stored file exactly as written, or null when there is none. For callers
+ * that must distinguish "the user chose this" from "this is the default" —
+ * readSettings() answers with a complete object either way, which is right for
+ * *using* a setting and wrong for *explaining* it.
+ */
+export async function readStoredSettings(dataDir = defaultDataDir()) {
+  try {
+    return JSON.parse(await fsp.readFile(settingsPath(dataDir), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 /** Read settings, falling back to defaults for a missing/unreadable file. */
 export async function readSettings(dataDir = defaultDataDir()) {
   let raw;
@@ -153,6 +253,20 @@ export async function readSettings(dataDir = defaultDataDir()) {
     newProjectDefaults: { ...DEFAULT_SETTINGS.newProjectDefaults, ...(raw.newProjectDefaults ?? {}) },
     render: { ...DEFAULT_SETTINGS.render, ...(raw.render ?? {}) },
     ffmpeg: { ...DEFAULT_SETTINGS.ffmpeg, ...(raw.ffmpeg ?? {}) },
+    // Only known fields survive the read. A hand-edited file that parked an
+    // `azure.key` in here is ignored rather than treated as corrupt (which
+    // would reset every *other* setting too) — and the key still never
+    // reaches the vendor, which reads the environment.
+    tts: {
+      ...DEFAULT_SETTINGS.tts,
+      ...pick(raw.tts, ['vendor']),
+      azure: { ...DEFAULT_SETTINGS.tts.azure, ...pick(raw.tts?.azure, ['region', 'voice', 'outputFormat', 'style']) },
+    },
+    music: {
+      ...DEFAULT_SETTINGS.music,
+      ...pick(raw.music, ['vendor', 'targetPeakDb']),
+      node: { ...DEFAULT_SETTINGS.music.node, ...pick(raw.music?.node, ['soundfont', 'sampleRate', 'gain']) },
+    },
   };
   try {
     return validateSettings(merged);
@@ -166,7 +280,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
  * atomically. Unknown top-level keys are rejected so typos fail loudly.
  */
 export async function updateSettings(patch, dataDir = defaultDataDir()) {
-  const ALLOWED = new Set(['newProjectDefaults', 'render', 'ffmpeg']);
+  const ALLOWED = new Set(['newProjectDefaults', 'render', 'ffmpeg', 'tts', 'music']);
   for (const k of Object.keys(patch ?? {})) {
     if (!ALLOWED.has(k)) {
       throw new EngineError(ErrorCodes.INVALID_CONFIG, `Settings field "${k}" cannot be updated`, { field: k });
@@ -178,6 +292,18 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
     newProjectDefaults: { ...cur.newProjectDefaults, ...(patch.newProjectDefaults ?? {}) },
     render: { ...cur.render, ...(patch.render ?? {}) },
     ffmpeg: { ...cur.ffmpeg, ...(patch.ffmpeg ?? {}) },
+    // tts.azure merges one level deeper so a patch may set just the region
+    // without clearing the default voice (and vice versa).
+    tts: {
+      ...cur.tts,
+      ...(patch.tts ?? {}),
+      azure: { ...cur.tts.azure, ...(patch.tts?.azure ?? {}) },
+    },
+    music: {
+      ...cur.music,
+      ...(patch.music ?? {}),
+      node: { ...cur.music.node, ...(patch.music?.node ?? {}) },
+    },
   });
   await fsp.mkdir(dataDir, { recursive: true });
   const abs = settingsPath(dataDir);
