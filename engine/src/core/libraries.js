@@ -51,13 +51,19 @@ export const LIBRARIES = {
   babylon: {
     id: 'babylon',
     name: 'Babylon.js',
-    version: 'stable',
+    // Pinned, was 'stable'. The floating https://cdn.babylonjs.com/babylon.js is
+    // whatever the CDN serves today, so two machines could vendor different code
+    // with nothing recording which. Versioned paths need the `v` prefix
+    // (/v9.18.0/… works, /9.18.0/… 404s). Core and addons must match versions.
+    // NB the pinned build is NOT byte-identical to the floating one even at the
+    // same version — hence the content hashes in engine/vendor.lock.json.
+    version: '9.18.0',
     global: 'BABYLON',
     approxKB: 7990,
     files: [{
       vendor: 'babylon/babylon.js',
       dest: 'babylon.js',
-      url: 'https://cdn.babylonjs.com/babylon.js',
+      url: 'https://cdn.babylonjs.com/v9.18.0/babylon.js',
     }],
     scripts: ['babylon.js'],
     template: 'lib-babylon',
@@ -67,7 +73,7 @@ export const LIBRARIES = {
       loaders: {
         vendor: 'babylon/babylonjs.loaders.min.js',
         dest: 'babylonjs.loaders.min.js',
-        url: 'https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js',
+        url: 'https://cdn.babylonjs.com/v9.18.0/loaders/babylonjs.loaders.min.js',
         note: 'glTF/GLB import via BABYLON.SceneLoader.ImportMeshAsync. Loading a model needs MOTION_STUDIO_ALLOW_LOCAL_FETCH=1 (file:// fetch), an environment texture for PBR, and forceCompilationAsync on the imported meshes before the first frame.',
       },
     },

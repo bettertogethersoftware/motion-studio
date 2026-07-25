@@ -71,7 +71,7 @@ builds return `library_unavailable`.
 
 | tool | arguments | returns / notes |
 |---|---|---|
-| `add_library` | `projectId`, `library` ∈ `three` \| `babylon`, `scaffold?` = true, `addons?` (babylon: `["loaders"]`) | Vendors the library (+ any addons) into the project and (when `scaffold`) replaces `composition.html/js/css` with a frame-driven starter; records `config.libraries`. Returns `{ library, version, global, addons, copied, scaffolded, notes }`. **`three`** = Three.js (~600 KB); **`babylon`** = Babylon.js (~8 MB, built-in glow/bloom/postprocessing). Addon `loaders` adds glTF/GLB import via `SceneLoader`. |
+| `add_library` | `projectId`, `library` ∈ `three` \| `babylon`, `scaffold?` = true, `addons?` (babylon: `["loaders"]`) | Vendors the library (+ any addons) into the project and (when `scaffold`) replaces `composition.html/js/css` with a frame-driven starter; records `config.libraries`. Returns `{ library, version, global, addons, copied, scaffolded, notes }`. **`three`** = Three.js (~600 KB); **`babylon`** = Babylon.js (~8 MB, built-in glow/bloom/postprocessing). Addon `loaders` adds glTF/GLB import via `SceneLoader`.  **Provenance (v0.13):** records `config.libraryBuilds` = `{ version, sha256, bytes }` per copied file, and returns each `copied` entry with its `sha256`. The vendored builds are git-ignored and pinned+hash-locked via `engine/vendor.lock.json`, so a render can be traced to exact bytes — see [3d-libraries.md](3d-libraries.md) §3.5. |
 
 The returned `notes` are **determinism rules you must follow** in the composition:
 drive all animation from the injected `frame` — no `requestAnimationFrame`, no

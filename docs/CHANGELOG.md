@@ -1,5 +1,57 @@
 # Motion Studio — Changelog
 
+## v0.13 (2026-07-25)
+
+### Vendored 3D builds are pinned and content-locked
+
+`libraries.js` declared Babylon as `version: 'stable'` against
+`https://cdn.babylonjs.com/babylon.js`, and `engine/vendor/` is git-ignored. Two
+independent problems hid in that: **acquisition** (two machines fetching at
+different times vendor different builds) and **provenance** (a project could not
+say what it rendered against, even on one machine).
+
+A version pin alone fixes only the first — and, measurably, not even that.
+`/babylon.js` and `/v9.18.0/babylon.js` both self-report `Version="9.18.0"` and
+are **different code**: 8,180,880 vs 8,180,848 bytes, diverging around byte
+2,317,477 where the floating build carries an extra `var t;`. A version string is
+a claim; a hash is a fact. So the fix is content-addressed.
+
+- **`engine/vendor.lock.json`** — committed, unlike the artifacts it describes.
+  Records `{ version, sha256, bytes, url }` per vendored build, keys sorted for a
+  stable diff. Deliberately *not* inside `engine/vendor/`, which is ignored
+  wholesale — the same split npm and cargo use.
+- **`core/vendor-lock.js`** — hashing, self-reported version detection, and
+  verification. `detectVersion` reads what the **bytes** say rather than trusting
+  the URL, and returns `null` rather than guessing: three's `REVISION` minifies to
+  `const e="134"` (and `134` also appears in colour constants) and the Babylon
+  loaders bundle has no banner at all. The hash is the identity; the version is a
+  courtesy label.
+- **`fetch-libs.mjs`** hashes every download and **refuses to overwrite on
+  mismatch**, so a failed run cannot half-upgrade the vendor dir. `--update` is
+  the only way to change the lock; `--verify` checks disk against it and exits 1
+  on drift, printing both hashes.
+- **Both libraries pinned to versioned URLs.** Babylon → `/v9.18.0/babylon.js`
+  and `/v9.18.0/loaders/babylonjs.loaders.min.js` (versioned paths need the `v`
+  prefix — `/9.18.0/…` 404s). Three was already pinned; Babylon was the outlier.
+- **`config.libraryBuilds`** — `add_library` now stamps `{ version, sha256,
+  bytes }` per copied file into the project, and each `copied` entry carries its
+  `sha256`. This is the half a URL pin cannot give: a finished render is traceable
+  to exact bytes despite the vendor dir being ignored.
+
+Because the pinned build is *not* the one that produced the 15-second space-jump
+video, the swap was verified by re-rendering a frame of the ship — identical, so
+the `var t;` difference is immaterial here. Only checking established that.
+
+Docs: `3d-libraries.md` §3.5 rewritten with the pinning/locking workflow, and its
+old "jsdelivr renders nothing" warning narrowed — that described a 6.8 MB
+artifact, whereas at 9.18.0 jsdelivr and the versioned `cdn.babylonjs.com` path
+serve the same 8,180,848 bytes. `knowledge-base.md` §8.3 upgraded from
+"deliberately not fixed" to the measurement that drove the design.
+
+Tests: +10 (`vendor-lock.test.js`), including a check that the **real** committed
+lock is internally consistent and version-pinned, so a hand-edit fails here rather
+than at someone else's clone. 241 total.
+
 ## v0.12.1 (2026-07-25)
 
 Two bugs found by reviewing v0.12 against a real 3D render, plus the knowledge

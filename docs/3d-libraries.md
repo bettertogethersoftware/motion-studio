@@ -191,12 +191,48 @@ than inferring from PNG byte size, which conflates blank and uniform-color frame
 Verified: `super_starfury.glb` (13.5 MB, 18 meshes, metallic PBR) renders as a
 cinematic frame-driven video.
 
-### 3.5 Build/CDN notes
-- Core: `https://cdn.babylonjs.com/babylon.js`. Loaders:
-  `https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js` (the root
-  `/babylonjs.loaders.min.js` 404s). Core and loaders must be the **same
-  version**. The jsdelivr `babylonjs@<v>/babylon.js` build rendered nothing here —
-  prefer the `cdn.babylonjs.com` build.
+### 3.5 Build/CDN notes — pinned and hash-locked (v0.13)
+
+Both libraries are now **version-pinned and content-locked**. The registry points
+at versioned URLs and `engine/vendor.lock.json` (committed, unlike the artifacts
+it describes) records the sha256 of every vendored build:
+
+- Core: `https://cdn.babylonjs.com/v9.18.0/babylon.js`
+- Loaders: `https://cdn.babylonjs.com/v9.18.0/loaders/babylonjs.loaders.min.js`
+- Versioned paths need the **`v` prefix** — `/9.18.0/…` 404s, `/v9.18.0/…` works.
+  The root `/babylonjs.loaders.min.js` also works but is unversioned.
+- Core and loaders must be the **same version**.
+
+**A version pin alone is not enough, and this is measurable.**
+`cdn.babylonjs.com/babylon.js` and `cdn.babylonjs.com/v9.18.0/babylon.js` both
+self-report `Version="9.18.0"` and are **different code** — 8,180,880 vs
+8,180,848 bytes, diverging around byte 2,317,477 where the floating build carries
+an extra `var t;`. A version string is a claim; a hash is a fact. (Both render the
+ship identically, so the difference is immaterial *here* — but only checking told
+us that.)
+
+Verify what you have, and never let a silent swap through:
+
+```bash
+node scripts/fetch-libs.mjs --verify   # check disk against the lock, exit 1 on drift
+node scripts/fetch-libs.mjs            # fetch; refuses to overwrite on hash mismatch
+node scripts/fetch-libs.mjs --update   # accept a new build and rewrite the lock
+```
+
+`add_library` additionally stamps `config.libraryBuilds` into the project
+(`{ version, sha256, bytes }` per copied file), so a finished render can be traced
+to exact bytes even though `engine/vendor/` is git-ignored.
+
+Note the version is recorded as `null` when a build does not state one: three's
+`REVISION` is minified to `const e="134"` and the Babylon loaders bundle has no
+banner at all. **The hash is the identity; the version is a courtesy label** — the
+detector refuses to guess, because a wrong version is worse than no version.
+
+The old warning that the jsdelivr `babylonjs@<v>/babylon.js` build "rendered
+nothing" appears to be **version-specific**, not a property of jsdelivr: it
+described a 6.8 MB artifact, whereas at 9.18.0 jsdelivr and the versioned
+`cdn.babylonjs.com` path serve the same 8,180,848 bytes. Prefer
+`cdn.babylonjs.com` anyway — it is the channel with known-good history here.
 
 ### 3.6 Status
 Shipped and tested: `add_library` (three + babylon) with the babylon **`loaders`

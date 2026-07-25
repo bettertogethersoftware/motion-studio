@@ -31,6 +31,7 @@ import { EngineError, ErrorCodes } from './errors.js';
 import { resolveInProject, ASSET_EXTENSIONS } from './sandbox.js';
 import { FORMATS, getFormat, normalizeOutputFilename } from './formats.js';
 import { getLibrary, libsVendorDir, LIBRARY_IDS } from './libraries.js';
+import { detectVersion, sha256 } from './vendor-lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_DIR = path.resolve(__dirname, '../../templates/default');
@@ -84,6 +85,22 @@ export function validateConfig(cfg) {
     if (cfg.libraries !== undefined) {
       if (!Array.isArray(cfg.libraries) || cfg.libraries.some((l) => typeof l !== 'string'))
         problems.push('libraries: must be an array of strings');
+    }
+    // Provenance for vendored library builds (v0.13): which bytes this project
+    // actually holds, so a render can be traced to an exact build. The vendor dir
+    // is git-ignored and a version string is not enough to identify a build, so
+    // the hash is the identity — see core/vendor-lock.js.
+    if (cfg.libraryBuilds !== undefined) {
+      const b = cfg.libraryBuilds;
+      if (b === null || typeof b !== 'object' || Array.isArray(b)) {
+        problems.push('libraryBuilds: must be an object keyed by project-relative file path');
+      } else {
+        for (const [k, v] of Object.entries(b)) {
+          if (!v || typeof v !== 'object' || typeof v.sha256 !== 'string' || typeof v.bytes !== 'number') {
+            problems.push(`libraryBuilds.${k}: must be { sha256: string, bytes: number, version?: string|null }`);
+          }
+        }
+      }
     }
   }
   if (problems.length) {
@@ -187,7 +204,7 @@ export class ProjectStore {
   async updateConfig(projectId, patch) {
     const entry = await this.getProjectEntry(projectId);
     const cfg = await this.readConfig(projectId);
-    const ALLOWED = new Set(['fps', 'width', 'height', 'durationInFrames', 'audio', 'output', 'name', 'libraries']);
+    const ALLOWED = new Set(['fps', 'width', 'height', 'durationInFrames', 'audio', 'output', 'name', 'libraries', 'libraryBuilds']);
     for (const k of Object.keys(patch)) {
       if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_CONFIG, `Config field "${k}" cannot be updated`, { field: k });
     }
@@ -410,6 +427,7 @@ export class ProjectStore {
 
     // 1) copy the vendored library + addon build(s) into the project
     const copied = [];
+    const builds = {};
     for (const f of [...spec.files, ...addonSpecs]) {
       const srcAbs = path.join(vendorDir, f.vendor);
       if (!fs.existsSync(srcAbs)) {
@@ -422,7 +440,13 @@ export class ProjectStore {
       const abs = resolveInProject(entry.path, f.dest, { forWrite: true });
       await fsp.mkdir(path.dirname(abs), { recursive: true });
       await fsp.copyFile(srcAbs, abs);
-      copied.push({ path: f.dest, bytes: (await fsp.stat(abs)).size });
+      // Hash what we actually copied, so the project records the exact build it
+      // holds. The vendor dir is git-ignored and a version string does not
+      // identify a build (see core/vendor-lock.js), so this is the only durable
+      // answer to "what was this rendered against?".
+      const bytes = await fsp.readFile(abs);
+      builds[f.dest] = { version: detectVersion(bytes), sha256: sha256(bytes), bytes: bytes.length };
+      copied.push({ path: f.dest, bytes: bytes.length, sha256: builds[f.dest].sha256 });
     }
 
     // Addon <script> tags injected into the scaffolded HTML (after the core lib).
@@ -450,7 +474,10 @@ export class ProjectStore {
 
     // 3) record the library in config
     const libs = Array.from(new Set([...(cfg.libraries || []), spec.id]));
-    const config = await this.updateConfig(projectId, { libraries: libs });
+    const config = await this.updateConfig(projectId, {
+      libraries: libs,
+      libraryBuilds: { ...(cfg.libraryBuilds || {}), ...builds },
+    });
 
     // Addon notes are appended to `notes` rather than dropped. The registry has
     // always carried them (e.g. the glTF addon's note that loading a model needs

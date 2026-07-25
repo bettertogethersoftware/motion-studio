@@ -1,0 +1,24 @@
+{
+  "comment": "Content hashes for the git-ignored engine/vendor/libs builds. Run \"node scripts/fetch-libs.mjs --update\" to change.",
+  "lockfileVersion": 1,
+  "files": {
+    "babylon/babylon.js": {
+      "version": "9.18.0",
+      "sha256": "1b7e6718668aa1a6ca53c9539aaa7d539dbf166bd1ded9eef262e58cb575a3a7",
+      "bytes": 8180848,
+      "url": "https://cdn.babylonjs.com/v9.18.0/babylon.js"
+    },
+    "babylon/babylonjs.loaders.min.js": {
+      "version": null,
+      "sha256": "c70ebed08e11260c17f6ebc204655e7fa2eae6153b3f9602271e64159977dcb9",
+      "bytes": 523396,
+      "url": "https://cdn.babylonjs.com/v9.18.0/loaders/babylonjs.loaders.min.js"
+    },
+    "three/three.min.js": {
+      "version": null,
+      "sha256": "74782bdbcf6518f7745ed77035968fcae95ed4ab5c9a0f90cf646a69c20785ec",
+      "bytes": 615601,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/build/three.min.js"
+    }
+  }
+}

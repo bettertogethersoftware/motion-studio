@@ -389,17 +389,46 @@ is CORS-blocked. `<img>`/`<audio>`/CSS assets never need it.
 never saw it. Addon notes are now appended to `notes`, attributed as
 `[loaders] …`, with a test asserting the string survives.
 
-### 8.3 A library pinned to "stable" is not pinned
+### 8.3 A library pinned to "stable" is not pinned · **FIXED IN ENGINE**
 
-`libraries.js` declares Babylon as `version: 'stable'` fetching
-`https://cdn.babylonjs.com/babylon.js`. `vendor/` is git-ignored, so re-running
-`fetch-libs.mjs` on another machine can vendor a *different* build. Nothing in a
-project records which one it was rendered against.
+**Symptom.** None available — a render simply could not be traced to the code
+that produced it.
 
-**Not fixed** — flagged deliberately. If a 3D render needs to be reproducible
-long-term, pin a versioned CDN URL. Related known-good facts: core and loaders
-must be the **same** version, and the jsdelivr `babylonjs@<v>/babylon.js` build
-rendered nothing in this setup while `cdn.babylonjs.com/babylon.js` works.
+**Root cause.** `libraries.js` declared Babylon as `version: 'stable'` fetching
+`https://cdn.babylonjs.com/babylon.js`, and `engine/vendor/` is git-ignored. Two
+independent failures hid in that: **acquisition** (two machines fetching at
+different times get different builds) and **provenance** (a project cannot say
+what it rendered against, even on one machine).
+
+**The measurement that settled the design.** A version pin fixes only the first —
+and here, not even that. `/babylon.js` and `/v9.18.0/babylon.js` both self-report
+`Version="9.18.0"` and are different code: 8,180,880 vs 8,180,848 bytes, diverging
+at byte 2,317,477 where the floating build carries an extra `var t;`. So pinning
+the version would have reported "9.18.0" and still handed over a different
+artifact than the one that rendered the space-jump video.
+
+**Fix.** Content addressing, in `core/vendor-lock.js` + a committed
+`engine/vendor.lock.json` — the npm/cargo split of ignored artifacts and a tracked
+lock. `fetch-libs.mjs` hashes every download, **refuses to overwrite on mismatch**
+(so a failed run cannot half-upgrade the vendor dir), and `--update` is the only
+way to change the lock. `--verify` checks disk against the lock and exits 1 on
+drift. Both libraries are now pinned to versioned URLs, and `add_library` stamps
+`config.libraryBuilds` (`{version, sha256, bytes}` per file) so the *project*
+records its own build.
+
+Because the pinned build is not the one that made the video, the swap was
+confirmed by re-rendering a frame of the ship — identical. **Verify the
+substitution, don't assume a same-version build is the same build.**
+
+**Lesson.** *A version string is a claim; a hash is a fact.* For anything
+git-ignored, record the checkable one. And when a fix has two halves, name them
+separately — pinning the URL and recording the hash solve different problems, and
+only one of them makes a finished artifact traceable.
+
+Corollary found along the way: `detectVersion` returns **null** for three
+(`REVISION` minifies to `const e="134"`, and `134` also appears in colour
+constants) and for the Babylon loaders bundle (no banner). Refusing to guess is
+correct — a wrong version is worse than no version.
 
 ---
 
