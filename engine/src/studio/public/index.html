@@ -10,19 +10,24 @@
 <body>
 <div id="prereq-banner" class="banner hidden"></div>
 
-<div class="frame">
+<div class="frame" id="frame">
   <aside class="rail">
     <header class="brand">
       <span class="brand-mark">▶</span>
-      <div>
+      <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
         <span class="version">v0.5 · deterministic renderer</span>
       </div>
+      <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
 
     <div class="rail-section">
       <div class="rail-head">
         <span>projects</span>
+        <span class="sort-toggle" title="sort projects">
+          <button id="sort-name" class="sort-btn" title="sort by name">a–z</button>
+          <button id="sort-date" class="sort-btn" title="sort by last modified">date</button>
+        </span>
         <button id="btn-new" class="ghost" title="New project">+ new</button>
       </div>
       <ul id="project-list" class="project-list"></ul>
@@ -30,6 +35,7 @@
 
     <footer class="rail-foot">
       <span id="engine-status">engine —</span>
+      <button id="btn-settings" class="ghost foot-btn" title="global settings">⚙<span class="foot-label"> settings</span></button>
     </footer>
   </aside>
 
@@ -67,7 +73,10 @@
         <nav class="tabs">
           <button data-tab="render" class="tab active">render</button>
           <button data-tab="config" class="tab">config</button>
+          <button data-tab="audio" class="tab">audio</button>
+          <button data-tab="assets" class="tab">assets</button>
           <button data-tab="outputs" class="tab">outputs</button>
+          <button id="btn-panel-toggle" class="panel-toggle" title="collapse this panel">▾</button>
         </nav>
 
         <div id="tab-render" class="tab-body">
@@ -105,28 +114,89 @@
         </div>
 
         <div id="tab-config" class="tab-body hidden">
-          <form id="config-form" class="config-grid" autocomplete="off">
-            <label>name <input name="name"></label>
-            <label>fps <input name="fps" type="number" min="1" max="240"></label>
-            <label>width <input name="width" type="number" step="2"></label>
-            <label>height <input name="height" type="number" step="2"></label>
-            <label>frames <input name="durationInFrames" type="number" min="1"></label>
-            <label>format
-              <select name="format">
-                <option value="mp4">mp4 · H.264</option>
-                <option value="webm">webm · VP9</option>
-                <option value="gif">gif</option>
-                <option value="prores">prores · .mov</option>
-                <option value="png-sequence">png sequence</option>
-              </select>
-            </label>
-            <label>crf <input name="crf" type="number" min="0" max="63"></label>
-            <label class="check"><input name="transparent" type="checkbox"> transparent (alpha)</label>
+          <form id="config-form" autocomplete="off">
+            <p class="section-label">composition</p>
+            <div class="config-grid">
+              <label>name <input name="name"></label>
+              <label>fps <input name="fps" type="number" min="1" max="240"></label>
+              <label>width <input name="width" type="number" step="2"></label>
+              <label>height <input name="height" type="number" step="2"></label>
+              <label>frames <input name="durationInFrames" type="number" min="1"></label>
+            </div>
+
+            <p class="section-label">output</p>
+            <div class="config-grid">
+              <label>format
+                <select name="format">
+                  <option value="mp4">mp4 · H.264</option>
+                  <option value="webm">webm · VP9</option>
+                  <option value="gif">gif</option>
+                  <option value="prores">prores · .mov</option>
+                  <option value="png-sequence">png sequence</option>
+                </select>
+              </label>
+              <label>dir <input name="dir" spellcheck="false"></label>
+              <label>filename <input name="filename" spellcheck="false"></label>
+              <label>crf <input name="crf" type="number" min="0" max="63"></label>
+              <label>preset
+                <select name="preset">
+                  <option value="">(unset)</option>
+                  <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+                  <option>faster</option><option>fast</option><option>medium</option>
+                  <option>slow</option><option>slower</option><option>veryslow</option>
+                </select>
+              </label>
+              <label>pix fmt <input name="pixFmt" spellcheck="false" placeholder="yuv420p"></label>
+              <label class="check"><input name="transparent" type="checkbox"> transparent (alpha)</label>
+              <label class="check"><input name="audioLimiter" type="checkbox"> audio limiter (−1 dBFS)</label>
+            </div>
+            <p id="format-note" class="dim note"></p>
+
             <div class="config-actions">
               <button type="submit" class="primary">apply</button>
               <span id="config-msg" class="dim"></span>
             </div>
           </form>
+
+          <p class="section-label">project facts <span class="dim">(read-only)</span></p>
+          <dl id="config-facts" class="env-list mono"></dl>
+
+          <details id="raw-config">
+            <summary>raw project.json</summary>
+            <pre id="raw-config-body" class="logs"></pre>
+          </details>
+
+          <div class="meta-row">
+            <span class="meta-label">location</span>
+            <span id="project-path" class="mono path-chip" title=""></span>
+            <button id="btn-copy-path" class="ghost" title="copy the project folder path">copy</button>
+            <button id="btn-delete-project" class="ghost danger" title="remove this project">delete project…</button>
+          </div>
+        </div>
+
+        <div id="tab-audio" class="tab-body hidden">
+          <div class="fieldrow assets-head">
+            <button id="btn-add-track" class="primary">+ add track</button>
+            <span class="dim">tracks are mixed without normalization and trimmed to the video length</span>
+            <span class="spacer"></span>
+            <button id="btn-save-audio" class="ghost">save tracks</button>
+            <span id="audio-msg" class="dim"></span>
+          </div>
+          <ul id="audio-list" class="audio-list"></ul>
+          <datalist id="audio-asset-options"></datalist>
+          <p id="audio-note" class="dim note"></p>
+        </div>
+
+        <div id="tab-assets" class="tab-body hidden">
+          <div class="fieldrow assets-head">
+            <button id="btn-upload" class="primary">+ upload</button>
+            <input type="file" id="asset-file-input" multiple hidden>
+            <span class="dim">or drop files anywhere on this panel · 25 MB max each</span>
+            <span class="spacer"></span>
+            <span id="assets-path" class="mono path-chip" title=""></span>
+            <button id="btn-copy-assets-path" class="ghost" title="copy the assets folder path">copy</button>
+          </div>
+          <ul id="asset-list" class="asset-list"></ul>
         </div>
 
         <div id="tab-outputs" class="tab-body hidden">
@@ -152,6 +222,89 @@
     <div class="fieldrow right">
       <button type="button" id="btn-new-cancel" class="ghost">cancel</button>
       <button type="submit" class="primary">create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-dialog">
+  <form id="delete-form" method="dialog">
+    <h2>delete project</h2>
+    <p id="delete-summary"></p>
+    <label class="check"><input name="deleteFiles" type="checkbox"> also delete files on disk</label>
+    <p class="dim" id="delete-note">Unchecked: the project is only unregistered from the list; its folder stays.
+    Folders outside the managed projects root are never deleted from disk.</p>
+    <div class="fieldrow right">
+      <button type="button" id="btn-delete-cancel" class="ghost">cancel</button>
+      <button type="submit" class="primary">delete</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="asset-delete-dialog">
+  <form id="asset-delete-form" method="dialog">
+    <h2>delete asset</h2>
+    <p id="asset-delete-summary"></p>
+    <div id="asset-delete-refs" class="hidden">
+      <p class="warn-line">⚠ <span id="asset-delete-count"></span></p>
+      <ul id="asset-delete-list" class="ref-list mono"></ul>
+      <label class="check"><input name="updateAudio" type="checkbox" checked> also remove those audio tracks</label>
+      <p class="dim note">Left in place, the tracks point at a missing file and the next render fails
+      when ffmpeg tries to mix them.</p>
+    </div>
+    <div class="fieldrow right">
+      <button type="button" id="btn-asset-delete-cancel" class="ghost">cancel</button>
+      <button type="submit" class="primary">delete</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog">
+  <form id="settings-form" method="dialog" autocomplete="off">
+    <h2>global settings</h2>
+    <p class="section-label">new-project defaults</p>
+    <div class="fieldrow">
+      <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
+      <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
+    </div>
+    <div class="fieldrow">
+      <label>fps <input name="fps" type="number" min="1" max="240"></label>
+      <label>frames <input name="durationInFrames" type="number" min="1"></label>
+    </div>
+    <p class="section-label">render</p>
+    <div class="fieldrow">
+      <label>default workers
+        <select name="defaultWorkers">
+          <option value="1">1 (serial)</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+    </div>
+    <p class="section-label">ffmpeg</p>
+    <div class="fieldrow">
+      <label class="grow">binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
+    </div>
+    <div class="fieldrow">
+      <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>
+      <label>default preset
+        <select name="ffmpegPreset">
+          <option value="">engine default</option>
+          <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+          <option>faster</option><option>fast</option><option>medium</option>
+          <option>slow</option><option>slower</option><option>veryslow</option>
+        </select>
+      </label>
+      <span id="ffmpeg-probe" class="dim mono probe"></span>
+    </div>
+    <p class="dim note">The binary path applies to every Studio render and the prereq check. crf/preset
+    seed <em>newly created</em> projects' output config; existing projects keep their own.</p>
+    <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
+    <dl id="settings-env" class="env-list mono"></dl>
+    <div class="fieldrow right">
+      <span id="settings-msg" class="dim"></span>
+      <button type="button" id="btn-settings-close" class="ghost">close</button>
+      <button type="submit" class="primary">save</button>
     </div>
   </form>
 </dialog>

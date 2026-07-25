@@ -1,5 +1,192 @@
 # Motion Studio — Changelog
 
+## v0.15 (2026-07-25)
+
+Studio management surface: the web UI can now fully manage projects, assets,
+and a small set of global preferences — previously create/configure was the
+only lifecycle the UI offered (delete existed in the API but had no button),
+assets could only arrive via MCP or a file manager, and there was no global
+configuration anywhere.
+
+### Projects: complete the CRUD loop in the UI
+
+- **delete project…** (config tab) opens a confirm dialog wired to the
+  existing `DELETE /api/projects/:id`. "Also delete files on disk" maps to
+  `?deleteFiles=1`; as before, folders outside the managed projects root are
+  never deleted from disk, and the dialog says so.
+- **location** row in the config tab shows the project's absolute folder path
+  with a copy button — the "where is this actually?" answer the UI never gave.
+- The new-project dialog is pre-filled from the user's saved defaults (below).
+
+### Assets: first-class CRUD (new *assets* tab)
+
+- `GET /api/projects/:id/assets` — recursive listing of `assets/` with size,
+  mtime, and a coarse kind (image/audio/font/data). Backed by the new
+  `ProjectStore.listAssets`.
+- `PUT /api/projects/:id/asset?path=assets/…` — **raw-body** upload (no
+  base64 detour, so the browser can stream a `File` directly); shares the
+  25 MB cap, extension allow-list, and assets/-confinement with the MCP
+  `write_asset_file` tool via the extracted `ProjectStore.writeAssetBuffer`
+  (the base64 tool now decodes and delegates — one enforcement point).
+- `GET /api/projects/:id/asset?path=…&download=1`, `DELETE …/asset?path=…`,
+  and `POST …/asset/rename {from,to}` (rename refuses to clobber an existing
+  destination). All go through the same path sandbox; escapes are 403s.
+- The tab shows image thumbnails (served through the existing sandboxed
+  `/preview/:id/` route), in-place audio audition, upload via button or
+  drag-and-drop, per-asset copy-relative-path (the string you paste into a
+  composition), download, rename, and delete. The assets folder's absolute
+  path is shown with a copy button.
+
+### Global configuration (new ⚙ settings dialog + `core/settings.js`)
+
+- `<dataDir>/settings.json` — user preferences with a validated schema:
+  `newProjectDefaults` (fps/width/height/durationInFrames) and
+  `render.defaultWorkers`. Read/patched via `GET`/`PATCH /api/settings`;
+  writes are atomic (temp + rename), unknown keys are rejected, and a
+  corrupted file degrades to defaults instead of bricking the UI.
+- Scope is deliberate: settings seed the Studio's forms only. They never
+  override a project's `project.json` and are not consulted by the CLI or the
+  MCP server — agents stay explicit. Machine-level knobs stay env vars.
+- The dialog also reports the environment read-only: data dir, projects
+  root, registry/settings paths, and the `MOTION_STUDIO_*` /
+  `PUPPETEER_EXECUTABLE_PATH` hooks with their current values.
+
+### The viewport stops jumping when you switch tabs
+
+The workbench grid was `1fr auto`, so the bottom panel was sized by whatever
+tab was open and the preview resized under you on every tab switch — the one
+thing a scrubbing surface must never do. It is now a fixed **50/50 split**
+(`1fr 1fr`) with each tab body scrolling inside its own half, so the viewport
+height is identical on render/config/audio/assets/outputs.
+
+A **▾ toggle** at the right end of the tab bar collapses the panel to just its
+tabs, giving the preview the full height (measured: 356 px → 774 px on a
+900 px window); ▴ brings it back, as does clicking any tab while collapsed.
+The state persists per browser and the preview re-fits on each change.
+
+### Project list: sorting + collapsible sidebar
+
+- Sort toggle in the sidebar header: **a–z** (case-insensitive by name) or
+  **date** (last modified, newest first — the date is shown per row in this
+  mode). Choice persists per browser (localStorage).
+- The sidebar collapses to a 46 px strip (« / » button, persisted); the
+  preview re-fits to the reclaimed width.
+
+### ffmpeg: global binary path + encode defaults
+
+`settings.json` gains an `ffmpeg` block, editable from the settings dialog:
+
+- **`ffmpeg.path`** — binary override (null = `ffmpeg` on PATH). Honored by
+  `/api/prereqs`, every Studio render job (threaded through
+  `JobManager.startRender`), and — new `--ffmpeg <path>` CLI flag — by
+  `render.js`, including `--doctor`. `renderParallel` forwards the flag to its
+  worker processes, since each worker encodes its own segment and a parent /
+  worker binary split would be silent. The settings dialog live-probes the
+  effective binary and shows `✓ <version> via PATH|settings` or `✗ not found`;
+  a bad path is saved (it may not exist *yet*) but the footer/banner reflect
+  it immediately. The MCP server intentionally keeps using PATH — its
+  environment is the agent host's concern.
+- **`ffmpeg.defaultCrf` / `ffmpeg.defaultPreset`** — seed *newly created*
+  projects' `output` config (null = the engine's per-format defaults).
+  Existing projects keep their own values, per the settings-seed-only rule.
+
+### Every project.json field is visible (and mostly editable)
+
+The config tab showed 8 of the ~15 fields a project actually carries; the rest
+could only be inspected by opening `project.json` in an editor. Now:
+
+- **Full output block** — `dir`, `filename`, `preset`, `pixFmt` and
+  `audioLimiter` join format/crf/transparent. Fields a format doesn't consume
+  are shown **disabled rather than hidden** (with a per-format note saying
+  why), so the tab is a complete picture rather than a curated subset.
+- **`null` clears a field.** The config PATCH merge means an omitted key keeps
+  its current value, so there was no way to remove one; the handler now drops
+  null-valued `output` keys, which is how the UI un-sets e.g. an x264 preset.
+- **Project facts** (read-only): `entry`, `schemaVersion`, track count,
+  attached `libraries`, and each `libraryBuilds` entry's version, short
+  sha256 and size — the render provenance recorded in v0.13 had never been
+  visible anywhere.
+- **Raw `project.json`** in a disclosure at the bottom, so nothing is hidden
+  by construction.
+
+### Audio timeline editor (new *audio* tab)
+
+`config.audio` — the one genuinely structured part of a project — was
+invisible in the UI; seeing a film's timeline meant reading JSON. The new tab
+edits tracks directly: `src` (autocompleted from the project's audio assets),
+`startInFrames` (with the frame→seconds conversion shown live), `gainDb`,
+plus per-row audition and remove. Edits stage in memory and commit with one
+PATCH, so a half-typed path never reaches disk. For formats that can't carry
+audio (gif, png-sequence) the tab says so rather than silently ignoring the
+tracks at render time.
+
+### One audition player, and ▶ actually stops
+
+The assets and audio tabs each grew their own preview-playback code, and the
+audio tab's could start a clip but never stop it — clicking ▶ again just
+layered another copy on top. Both now call a single `toggleAudition`:
+
+- ▶ ⇄ ⏸ on the same button; starting a clip stops whatever was playing.
+- Buttons fall back to ▶ when playback **ends, errors, or is superseded**, so
+  a mistyped path can't strand a ⏸ that no longer stops anything.
+- The state is synced across tabs by path, so a clip started from the assets
+  tab shows its stop control on the matching audio-track row too.
+- A track row with no path yet has its button disabled, and switching
+  projects stops playback — previously the clip kept playing while its stop
+  button was removed from the DOM with the old project's rows.
+
+### Deleting an asset no longer silently breaks the audio timeline
+
+Removing (or renaming) a file that `config.audio` references used to succeed
+quietly and fail much later, as an ffmpeg mux error minutes into the next
+render. Now the reference is tracked end to end:
+
+- `listAssets` reports **`audioRefs`** per file, and the assets tab shows a
+  **♫ n** badge — the consequence is visible before the click, not only in
+  the confirm dialog.
+- **`deleteAsset(id, path, {updateAudio})`** and
+  **`renameAsset(id, from, to, {updateAudio})`** report `audioRefs` always,
+  and when asked, drop or rewrite exactly the matching tracks in one
+  `updateConfig` (other track fields — start frame, gain — survive a rename).
+  Exposed as `?updateAudio=1` on the DELETE and `updateAudio` in the rename
+  body; the response carries the new config so the UI stays in step.
+- The delete dialog lists the offending tracks and offers "also remove those
+  audio tracks", checked by default. Declining is allowed and leaves the
+  reference dangling on purpose — the point is that it is never silent.
+  Matching is lenient (slashes, leading `./`, case) so a reference is caught
+  rather than missed.
+
+### Fixed: "Prerequisites missing:" with nothing after it
+
+The banner built its text from `p.problems`, a field `checkPrerequisites()`
+has never returned (it reports `node`/`ffmpeg` blocks) — the `|| []` swallowed
+it, so the banner rendered a bare label. Latent since v0.5 and near
+unreachable, but the new ffmpeg path override made a typo enough to trigger
+it. The text is now derived from the actual response, and `/api/prereqs`
+additionally reports `ffmpeg.effectivePath`, `ffmpeg.source` and the version
+`minimums`, so the banner reads e.g. *"ffmpeg not found at C:/wrong/ffmpeg.exe
+(path from settings — clear it to use PATH)"*.
+
+### Tests
+
+`test/studio.test.js` grows from 10 to 19 cases: settings defaults/patch/
+validation/persistence, new-project default inheritance (explicit fields still
+win), the full asset upload→list→download→rename→delete loop, sandbox
+enforcement on every asset endpoint, the ffmpeg block (probe report, path
+override reflected in `/api/prereqs`, crf/preset seeding), prereq path
+attribution, whole-output-block patching including null-clearing, and audio
+track round-tripping with validation.
+
+`cli: SIGTERM mid-render cancels with exit code 4` now **skips on Windows**
+instead of failing there permanently. Windows has no signal mechanism, so
+`child.kill('SIGTERM')` falls back to `TerminateProcess()` — the process dies
+before any handler runs and `close` reports `null` instead of the CLI's exit
+code 4. The assertion is POSIX-only and was never fixable in the engine;
+cancellation on Windows goes through `JobManager.cancel`'s in-process abort,
+which is covered on every platform. A permanently-red case teaches you to
+skim past failures, so the Windows suite is now green at 259 passed /
+0 failed / 2 skipped.
+
 ## v0.14 (2026-07-25)
 
 Hardening from the first full dogfood run (an 8-scene, five-minute narrated

@@ -368,22 +368,24 @@ export class ProjectStore {
    * to assets/, extensions are allow-listed, and the decoded size is capped.
    */
   async writeAssetFile(projectId, relPath, base64Content, { maxBytes = MAX_ASSET_BYTES } = {}) {
-    const entry = await this.getProjectEntry(projectId);
-    const normalized = relPath.replace(/\\/g, '/');
-    if (!normalized.startsWith('assets/')) {
-      throw new EngineError(
-        ErrorCodes.PATH_OUTSIDE_PROJECT,
-        `Assets must be written under assets/ (got "${relPath}")`,
-        { path: relPath },
-      );
-    }
-    const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
     let buf;
     try {
       buf = Buffer.from(base64Content, 'base64');
     } catch (e) {
       throw new EngineError(ErrorCodes.INVALID_CONFIG, `content is not valid base64: ${e.message}`);
     }
+    return this.writeAssetBuffer(projectId, relPath, buf, { maxBytes });
+  }
+
+  /**
+   * Buffer-level asset write shared by the base64 MCP path and the Studio's
+   * raw-body upload (v0.15) — one place enforces the assets/ confinement, the
+   * extension allow-list, and the size cap.
+   */
+  async writeAssetBuffer(projectId, relPath, buf, { maxBytes = MAX_ASSET_BYTES } = {}) {
+    const entry = await this.getProjectEntry(projectId);
+    const normalized = this._assetRelPath(relPath);
+    const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
     if (buf.length === 0) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'decoded asset is empty');
     if (buf.length > maxBytes) {
       throw new EngineError(
@@ -397,6 +399,155 @@ export class ProjectStore {
     await fsp.writeFile(tmp, buf);
     await fsp.rename(tmp, abs);
     return { path: normalized, bytes: buf.length };
+  }
+
+  /**
+   * Audio tracks in `config` whose src points at `relPath` (v0.15).
+   *
+   * Comparison is deliberately lenient — slashes normalized, leading "./"
+   * dropped, case-insensitive — because the goal is to *catch* a reference
+   * before the file disappears under it. A missed match means a render that
+   * fails at the mux step with a confusing ffmpeg error; a false match only
+   * means the UI offers to fix one extra track, which the user can decline.
+   */
+  static audioRefs(config, relPath) {
+    const norm = (p) => String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+    const target = norm(relPath);
+    return (config?.audio ?? [])
+      .map((track, index) => ({ track, index }))
+      .filter(({ track }) => norm(track.src) === target);
+  }
+
+  /** Normalize + confine a caller-supplied path to the assets/ folder. */
+  _assetRelPath(relPath) {
+    const normalized = String(relPath ?? '').replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/')) {
+      throw new EngineError(
+        ErrorCodes.PATH_OUTSIDE_PROJECT,
+        `Assets must live under assets/ (got "${relPath}")`,
+        { path: relPath },
+      );
+    }
+    return normalized;
+  }
+
+  /**
+   * List everything under assets/ (v0.15): project-relative path, size,
+   * mtime, and a coarse kind (image/audio/font/data) for UI grouping.
+   */
+  async listAssets(projectId) {
+    const entry = await this.getProjectEntry(projectId);
+    const root = path.join(entry.path, 'assets');
+    const files = [];
+    // Reference count per asset, so the UI can warn *before* a delete rather
+    // than after. A broken config must not make the asset list unusable.
+    const config = await this.readConfig(projectId).catch(() => null);
+    const kindOf = (ext) => {
+      if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)) return 'image';
+      if (['.mp3', '.wav', '.ogg', '.m4a', '.flac'].includes(ext)) return 'audio';
+      if (['.woff', '.woff2', '.ttf', '.otf'].includes(ext)) return 'font';
+      return 'data';
+    };
+    const walk = async (dir, rel) => {
+      let entries;
+      try { entries = await fsp.readdir(dir, { withFileTypes: true }); }
+      catch { return; } // assets/ deleted out from under us: report empty
+      for (const d of entries) {
+        if (d.name.startsWith('.') || d.name.includes('.tmp-')) continue;
+        const abs = path.join(dir, d.name);
+        const relPath = `${rel}/${d.name}`;
+        if (d.isDirectory()) { await walk(abs, relPath); continue; }
+        const st = await fsp.stat(abs).catch(() => null);
+        if (!st) continue;
+        files.push({
+          path: relPath,
+          bytes: st.size,
+          mtime: st.mtime.toISOString(),
+          kind: kindOf(path.extname(d.name).toLowerCase()),
+          audioRefs: ProjectStore.audioRefs(config, relPath).length,
+        });
+      }
+    };
+    await walk(root, 'assets');
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    return files;
+  }
+
+  /**
+   * Delete a single file under assets/ (v0.15).
+   *
+   * `updateAudio` also drops any config.audio track pointing at the file.
+   * Without it the tracks are left alone and reported in `audioRefs`, because
+   * a dangling reference is the caller's decision to make — but it is never
+   * silent: deleting narration a film still references would otherwise
+   * surface as an ffmpeg mux failure minutes into the next render.
+   */
+  async deleteAsset(projectId, relPath, { updateAudio = false } = {}) {
+    const entry = await this.getProjectEntry(projectId);
+    const normalized = this._assetRelPath(relPath);
+    const abs = resolveInProject(entry.path, normalized);
+    let st;
+    try { st = await fsp.stat(abs); }
+    catch { throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `No such asset: ${normalized}`, { path: normalized }); }
+    if (!st.isFile()) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, `Not a file: ${normalized} (folders are managed on disk)`, { path: normalized });
+    }
+
+    const cfg = await this.readConfig(projectId).catch(() => null);
+    const refs = ProjectStore.audioRefs(cfg, normalized);
+
+    await fsp.rm(abs);
+
+    let audioTracksRemoved = 0;
+    let config;
+    if (updateAudio && refs.length) {
+      const drop = new Set(refs.map((r) => r.index));
+      const kept = (cfg.audio ?? []).filter((_, i) => !drop.has(i));
+      config = await this.updateConfig(projectId, { audio: kept });
+      audioTracksRemoved = refs.length;
+    }
+    return {
+      path: normalized,
+      deleted: true,
+      audioRefs: refs.length,
+      audioTracksRemoved,
+      ...(config ? { config } : {}),
+    };
+  }
+
+  /**
+   * Rename/move a file within assets/ (v0.15). The destination must not
+   * already exist — an accidental overwrite of a hand-placed 20 MB soundtrack
+   * is exactly the mistake this surface should refuse.
+   */
+  async renameAsset(projectId, fromRel, toRel, { updateAudio = false } = {}) {
+    const entry = await this.getProjectEntry(projectId);
+    const from = this._assetRelPath(fromRel);
+    const to = this._assetRelPath(toRel);
+    const absFrom = resolveInProject(entry.path, from);
+    const absTo = resolveInProject(entry.path, to, { forWrite: true, asAsset: true });
+    if (!fs.existsSync(absFrom)) {
+      throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `No such asset: ${from}`, { path: from });
+    }
+    if (fs.existsSync(absTo)) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, `Destination already exists: ${to}`, { path: to });
+    }
+
+    const cfg = await this.readConfig(projectId).catch(() => null);
+    const refs = ProjectStore.audioRefs(cfg, from);
+
+    await fsp.mkdir(path.dirname(absTo), { recursive: true });
+    await fsp.rename(absFrom, absTo);
+
+    let audioTracksUpdated = 0;
+    let config;
+    if (updateAudio && refs.length) {
+      const move = new Set(refs.map((r) => r.index));
+      const next = (cfg.audio ?? []).map((t, i) => (move.has(i) ? { ...t, src: to } : t));
+      config = await this.updateConfig(projectId, { audio: next });
+      audioTracksUpdated = refs.length;
+    }
+    return { from, to, audioRefs: refs.length, audioTracksUpdated, ...(config ? { config } : {}) };
   }
 
   /**

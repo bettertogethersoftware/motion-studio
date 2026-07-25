@@ -61,7 +61,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn, preflight }) {
+  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -96,7 +96,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { projectPath, config, outputPath, frameRange, workers, renderFn, preflight },
+      _run: { projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -144,10 +144,11 @@ export class JobManager {
       }
     });
 
-    const { projectPath, config, outputPath, frameRange, workers, renderFn, preflight } = job._run;
+    const { projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
       projectPath, config, outputPath, frameRange, workers,
+      ...(ffmpegPath ? { ffmpegPath } : {}),
       ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
       progress,

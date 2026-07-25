@@ -83,6 +83,39 @@ body {
   border-top: 1px solid var(--line);
   font: 11px var(--mono); color: var(--dim);
 }
+
+/* sort toggle (rail head) */
+.sort-toggle { display: inline-flex; border: 1px solid var(--line); margin-left: auto; margin-right: 8px; }
+.sort-btn {
+  background: none; border: none; color: var(--dim);
+  font: 10px var(--mono); letter-spacing: 0.08em;
+  padding: 3px 7px; cursor: pointer;
+}
+.sort-btn + .sort-btn { border-left: 1px solid var(--line); }
+.sort-btn:hover { color: var(--text); }
+.sort-btn.active { color: var(--accent-ink); background: var(--accent); }
+
+/* collapsible rail */
+.collapse-btn { margin-left: auto; padding: 2px 7px; font-size: 12px; align-self: start; }
+.rail-collapsed .rail { border-right: 1px solid var(--line); }
+.rail-collapsed.frame { grid-template-columns: 46px 1fr; }
+.rail-collapsed .brand { padding: 14px 8px; justify-content: center; }
+.rail-collapsed .brand-text,
+.rail-collapsed .brand-mark,
+.rail-collapsed .rail-section,
+.rail-collapsed .rail-foot #engine-status { display: none; }
+.rail-collapsed .collapse-btn { margin: 0; }
+.rail-collapsed .rail-foot { padding: 10px 8px; justify-content: center; }
+.rail-collapsed .foot-btn { margin: 0; }
+.rail-collapsed .foot-label { display: none; }
+
+/* settings dialog extras */
+label.grow { flex: 1; }
+label.grow input { width: 100%; }
+.probe { align-self: center; font-size: 11px; }
+.probe .ok { color: var(--ok); }
+.probe .err { color: var(--err); }
+dialog .note { font-size: 11px; max-width: 420px; margin: 6px 0 0; }
 .rail-foot .ok { color: var(--ok); }
 .rail-foot .err { color: var(--err); }
 
@@ -94,12 +127,19 @@ body {
 }
 .empty p:first-child { font: 16px var(--mono); color: var(--accent); }
 
+/* Fixed 50/50 split. The panel used to be sized by its content (1fr auto),
+   so every tab switch resized the viewport and the preview jumped — the one
+   thing a scrubbing surface must never do. Tab bodies scroll inside their
+   half instead. */
 .workbench {
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: 1fr 1fr;
   height: 100%;
   min-height: 0;
 }
+/* Collapsed: the panel keeps only its tab bar and the viewport takes the rest. */
+.workbench.panel-collapsed { grid-template-rows: 1fr auto; }
+.workbench.panel-collapsed .tab-body { display: none; }
 
 .viewport-wrap { display: flex; flex-direction: column; min-height: 0; padding: 16px 20px 0; }
 .viewport-head {
@@ -172,8 +212,21 @@ body {
 
 /* -------------------------------- panel -------------------------------- */
 
-.panel { border-top: 1px solid var(--line); background: var(--ink-2); }
-.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.panel {
+  border-top: 1px solid var(--line);
+  background: var(--ink-2);
+  display: flex; flex-direction: column;
+  min-height: 0; /* let the body scroll instead of stretching the grid row */
+}
+.tabs { display: flex; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.panel-toggle {
+  margin-left: auto;
+  background: none; border: 1px solid var(--line); color: var(--dim);
+  font-size: 11px; line-height: 1;
+  padding: 4px 10px; margin: 6px 12px 0 auto;
+  cursor: pointer;
+}
+.panel-toggle:hover { color: var(--accent); border-color: var(--accent); }
 .tab {
   background: none; border: none; color: var(--dim);
   font: 12px var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
@@ -184,7 +237,7 @@ body {
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-.tab-body { padding: 14px 20px 18px; max-height: 320px; overflow-y: auto; }
+.tab-body { padding: 14px 20px 18px; flex: 1; min-height: 0; overflow-y: auto; }
 
 .fieldrow { display: flex; gap: 14px; align-items: end; flex-wrap: wrap; }
 .fieldrow.right { justify-content: flex-end; }
@@ -262,6 +315,35 @@ button.ghost.danger:hover { color: var(--err); border-color: var(--err); }
 }
 .config-actions { grid-column: 1 / -1; display: flex; gap: 12px; align-items: center; }
 
+/* -------------------------------- audio -------------------------------- */
+
+.audio-list { list-style: none; margin: 0; padding: 0; }
+.audio-list li {
+  display: flex; gap: 10px; align-items: end;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.audio-list .t-src { width: 100%; }
+.audio-list .t-num { width: 78px; }
+.audio-list .t-at { font-size: 11px; padding-bottom: 7px; min-width: 56px; }
+.audio-list .a-btn { margin-bottom: 1px; }
+.audio-list .a-btn.danger:hover { color: var(--err); border-color: var(--err); }
+#audio-msg.warn { color: var(--accent); }
+
+/* config: disabled fields stay visible (greyed) so the tab shows all of project.json */
+label.disabled { opacity: 0.4; }
+label.disabled input, label.disabled select { cursor: not-allowed; }
+.note { font-size: 11px; margin: 8px 0 0; max-width: 620px; }
+#config-facts { margin-bottom: 12px; }
+#raw-config { margin: 0 0 4px; }
+#raw-config summary {
+  cursor: pointer; color: var(--dim);
+  font: 11px var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 4px 0;
+}
+#raw-config summary:hover { color: var(--text); }
+#raw-config .logs { max-height: 220px; }
+
 /* ------------------------------- outputs ------------------------------- */
 
 .output-list { list-style: none; margin: 0; padding: 0; font: 12px var(--mono); }
@@ -287,6 +369,94 @@ dialog::backdrop { background: rgba(4, 5, 8, 0.7); }
 dialog h2 { margin: 0 0 14px; font: 600 13px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
 dialog label { margin-bottom: 10px; }
 dialog .fieldrow { margin-bottom: 10px; }
+
+/* ------------------------------- assets -------------------------------- */
+
+.assets-head { margin-bottom: 12px; align-items: center; }
+.assets-head .spacer { flex: 1; }
+.path-chip {
+  font-size: 11px;
+  color: var(--dim);
+  max-width: 340px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left; /* keep the tail (folder name) visible */
+}
+#tab-assets.dropping { outline: 1px dashed var(--accent); outline-offset: -6px; }
+
+.asset-list { list-style: none; margin: 0; padding: 0; font: 12px var(--mono); }
+.asset-list li {
+  display: flex; gap: 12px; align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+.a-thumb {
+  width: 40px; height: 26px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    repeating-conic-gradient(#23262e 0% 25%, #1a1d24 0% 50%) 0 0 / 12px 12px;
+  border: 1px solid var(--line);
+  color: var(--dim); font-size: 12px;
+  overflow: hidden;
+}
+.a-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.a-play {
+  background: none; border: none; color: var(--accent);
+  font-size: 12px; cursor: pointer; width: 100%; height: 100%;
+}
+.audition-btn.playing { color: var(--accent); border-color: var(--accent); }
+.audition-btn:disabled { opacity: 0.35; cursor: default; }
+.a-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.a-ref {
+  flex-shrink: 0; font-size: 10px;
+  color: var(--accent); border: 1px solid var(--accent);
+  padding: 1px 5px; letter-spacing: 0.04em;
+}
+.a-size { flex-shrink: 0; min-width: 64px; text-align: right; }
+.a-actions { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+.a-btn { padding: 3px 8px; font-size: 11px; }
+.download-link { color: var(--accent); text-decoration: none; border: 1px solid var(--line); }
+.download-link:hover { border-color: var(--accent); }
+
+/* --------------------------- config meta row ---------------------------- */
+
+.meta-row {
+  margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: flex; gap: 10px; align-items: center;
+}
+.meta-label { font: 11px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+.meta-row #btn-delete-project { margin-left: auto; }
+
+/* ------------------------------ settings ------------------------------- */
+
+.foot-btn { margin-left: auto; padding: 2px 8px; font-size: 10px; }
+.rail-foot { display: flex; align-items: center; gap: 8px; }
+#settings-dialog { min-width: 460px; max-width: 620px; }
+.section-label {
+  margin: 12px 0 8px;
+  font: 11px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
+}
+.env-list {
+  margin: 0; padding: 8px 10px;
+  border: 1px solid var(--line); background: var(--ink);
+  font-size: 11px;
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 14px;
+  max-height: 180px; overflow-y: auto;
+}
+.env-list dt { color: var(--dim); white-space: nowrap; }
+.env-list dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#delete-summary { font-size: 13px; margin: 0 0 10px; }
+#asset-delete-dialog { max-width: 520px; }
+#asset-delete-summary { font-size: 13px; margin: 0 0 10px; }
+.warn-line { color: var(--accent); font-size: 12px; margin: 0 0 8px; }
+.ref-list {
+  list-style: none; margin: 0 0 10px; padding: 8px 10px;
+  border: 1px solid var(--line); background: var(--ink);
+  font-size: 11px; color: var(--dim);
+  max-height: 110px; overflow-y: auto;
+}
+.ref-list li + li { margin-top: 4px; }
+#delete-note { font-size: 11px; max-width: 380px; }
 
 /* ------------------------------- banner -------------------------------- */
 

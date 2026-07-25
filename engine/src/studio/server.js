@@ -21,14 +21,23 @@
  *
  * API (all JSON unless noted):
  *   GET    /api/prereqs
+ *   GET    /api/settings                     global settings + environment report (v0.15)
+ *   PATCH  /api/settings                     {patch} — newProjectDefaults / render
  *   GET    /api/projects
- *   POST   /api/projects                     {name,fps,width,height,durationInFrames}
+ *   POST   /api/projects                     {name,fps?,width?,height?,durationInFrames?}
+ *                                            (unset fields fall back to settings.newProjectDefaults)
  *   GET    /api/projects/:id                 config + file list
  *   PATCH  /api/projects/:id/config          {patch}
  *   DELETE /api/projects/:id?deleteFiles=1
  *   GET    /api/projects/:id/events          SSE: {type:"change"} on file edits (hot reload)
  *   GET    /api/projects/:id/outputs         list files in the out dir
  *   GET    /api/projects/:id/output?file=    download a rendered output
+ *   GET    /api/projects/:id/assets          list files under assets/ + audioRefs (v0.15)
+ *   PUT    /api/projects/:id/asset?path=     raw-body upload into assets/ (v0.15)
+ *   GET    /api/projects/:id/asset?path=     stream/download an asset (v0.15)
+ *   DELETE /api/projects/:id/asset?path=     delete an asset; &updateAudio=1 also
+ *                                            drops config.audio tracks using it (v0.15)
+ *   POST   /api/projects/:id/asset/rename    {from,to,updateAudio?} within assets/ (v0.15)
  *   POST   /api/projects/:id/render          {frameRange?,workers?} → job
  *   POST   /api/projects/:id/still           {frame,outputFilename?}
  *   GET    /api/jobs                         all jobs
@@ -44,10 +53,11 @@ import fsp from 'node:fs/promises';
 import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { ProjectStore } from '../core/project.js';
+import { ProjectStore, MAX_ASSET_BYTES } from '../core/project.js';
+import { readSettings, updateSettings } from '../core/settings.js';
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
-import { checkPrerequisites } from '../core/prereqs.js';
+import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInProject } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 
@@ -131,6 +141,25 @@ function readBody(req, limit = 5 * 1024 * 1024) {
   });
 }
 
+/** Collect a raw (binary) request body — asset uploads bypass JSON/base64. */
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new EngineError(ErrorCodes.ASSET_TOO_LARGE, `upload exceeds ${limit} bytes`, { maxBytes: limit }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 async function streamFile(res, absPath, { download = false } = {}) {
   let stat;
   try {
@@ -197,9 +226,53 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         return sendJson(res, 404, { error: 'not_found' });
       }
 
-      // GET /api/prereqs
+      // Effective ffmpeg binary: settings override, else "ffmpeg" on PATH.
+      const ffmpegPath = async () => (await readSettings(store.dataDir)).ffmpeg.path || 'ffmpeg';
+
+      // GET /api/prereqs — the ffmpeg block names the binary that was actually
+      // probed and where that path came from, so a failure can be reported as
+      // "not found at <path> (from settings)" rather than an anonymous
+      // "prerequisites missing".
       if (req.method === 'GET' && parts[1] === 'prereqs' && parts.length === 2) {
-        return sendJson(res, 200, await checkPrerequisites());
+        const settings = await readSettings(store.dataDir);
+        const effectivePath = settings.ffmpeg.path || 'ffmpeg';
+        const prereqs = await checkPrerequisites({ ffmpegPath: effectivePath });
+        return sendJson(res, 200, {
+          ...prereqs,
+          minimums: { node: MIN_NODE.join('.'), ffmpeg: MIN_FFMPEG.join('.') },
+          ffmpeg: { ...prereqs.ffmpeg, effectivePath, source: settings.ffmpeg.path ? 'settings' : 'PATH' },
+        });
+      }
+
+      // /api/settings — global settings + a read-only environment report so
+      // the UI has one place that answers "where does everything live".
+      if (parts[1] === 'settings' && parts.length === 2) {
+        if (req.method === 'GET') {
+          const ENV_HOOKS = [
+            'MOTION_STUDIO_HOME', 'MOTION_STUDIO_TTS_EXE', 'MOTION_STUDIO_MIDI_EXE',
+            'MOTION_STUDIO_FLUIDSYNTH', 'MOTION_STUDIO_SOUNDFONT', 'MOTION_STUDIO_LIBS_DIR',
+            'MOTION_STUDIO_ALLOW_LOCAL_FETCH', 'MOTION_STUDIO_MAX_RENDERS',
+            'PUPPETEER_EXECUTABLE_PATH',
+          ];
+          const settings = await readSettings(store.dataDir);
+          const effectiveFfmpeg = settings.ffmpeg.path || 'ffmpeg';
+          const probe = await checkPrerequisites({ ffmpegPath: effectiveFfmpeg });
+          return sendJson(res, 200, {
+            settings,
+            environment: {
+              dataDir: store.dataDir,
+              projectsRoot: store.projectsRoot,
+              registryPath: store.registryPath,
+              settingsPath: path.join(store.dataDir, 'settings.json'),
+              ffmpeg: { effectivePath: effectiveFfmpeg, source: settings.ffmpeg.path ? 'settings' : 'PATH', ...probe.ffmpeg },
+              env: Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
+            },
+          });
+        }
+        if (req.method === 'PATCH') {
+          const { patch } = await readBody(req);
+          return sendJson(res, 200, { settings: await updateSettings(patch ?? {}, store.dataDir) });
+        }
       }
 
       // /api/projects...
@@ -208,7 +281,20 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           if (req.method === 'GET') return sendJson(res, 200, { projects: await store.listProjects() });
           if (req.method === 'POST') {
             const body = await readBody(req);
-            const proj = await store.createProject(body);
+            // Unset fields fall back to the user's global defaults
+            // (Studio-only nicety; MCP/CLI callers stay explicit).
+            const { newProjectDefaults, ffmpeg } = await readSettings(store.dataDir);
+            const proj = await store.createProject({ ...newProjectDefaults, ...body });
+            // Global encode defaults seed the scaffolded output config.
+            if (ffmpeg.defaultCrf !== null || ffmpeg.defaultPreset !== null) {
+              proj.config = await store.updateConfig(proj.id, {
+                output: {
+                  ...proj.config.output,
+                  ...(ffmpeg.defaultCrf !== null ? { crf: ffmpeg.defaultCrf } : {}),
+                  ...(ffmpeg.defaultPreset !== null ? { preset: ffmpeg.defaultPreset } : {}),
+                },
+              });
+            }
             return sendJson(res, 201, proj);
           }
         }
@@ -231,7 +317,15 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           const { patch } = await readBody(req);
           const cur = await store.readConfig(projectId);
           const merged = { ...patch };
-          if (merged.output) merged.output = { ...cur.output, ...merged.output };
+          if (merged.output) {
+            merged.output = { ...cur.output, ...merged.output };
+            // An omitted key keeps its current value through the merge, so
+            // null is how a caller says "remove this and use the format's
+            // default" (e.g. clearing an x264 preset).
+            for (const [k, v] of Object.entries(merged.output)) {
+              if (v === null) delete merged.output[k];
+            }
+          }
           const config = await store.updateConfig(projectId, merged);
           return sendJson(res, 200, { config });
         }
@@ -301,6 +395,37 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           return await streamFile(res, abs, { download: url.searchParams.get('download') === '1' });
         }
 
+        // assets CRUD (v0.15) — all paths are project-relative and confined
+        // to assets/ by ProjectStore/sandbox; the UI previews images through
+        // the existing /preview/:id/ route.
+        if (req.method === 'GET' && parts[3] === 'assets') {
+          return sendJson(res, 200, { files: await store.listAssets(projectId) });
+        }
+        if (parts[3] === 'asset' && parts.length === 4) {
+          const rel = url.searchParams.get('path') ?? '';
+          if (req.method === 'GET') {
+            const entry = await store.getProjectEntry(projectId);
+            if (!rel.replace(/\\/g, '/').startsWith('assets/')) {
+              throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Assets must live under assets/ (got "${rel}")`);
+            }
+            const abs = resolveInProject(entry.path, rel);
+            return await streamFile(res, abs, { download: url.searchParams.get('download') === '1' });
+          }
+          if (req.method === 'PUT') {
+            const buf = await readRawBody(req, MAX_ASSET_BYTES);
+            const result = await store.writeAssetBuffer(projectId, rel, buf);
+            return sendJson(res, 201, result);
+          }
+          if (req.method === 'DELETE') {
+            const updateAudio = url.searchParams.get('updateAudio') === '1';
+            return sendJson(res, 200, await store.deleteAsset(projectId, rel, { updateAudio }));
+          }
+        }
+        if (req.method === 'POST' && parts[3] === 'asset' && parts[4] === 'rename') {
+          const { from, to, updateAudio = false } = await readBody(req);
+          return sendJson(res, 200, await store.renameAsset(projectId, from, to, { updateAudio }));
+        }
+
         // render / still
         if (req.method === 'POST' && parts[3] === 'render') {
           const body = await readBody(req);
@@ -314,6 +439,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             outputPath,
             frameRange: body.frameRange,
             workers: body.workers,
+            ffmpegPath: await ffmpegPath(),
             ...(renderFn ? { renderFn } : {}),
           });
           return sendJson(res, 202, { ...submitted, outputPath });

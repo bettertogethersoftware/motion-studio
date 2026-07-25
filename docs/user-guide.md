@@ -34,11 +34,72 @@ Projects live under `~/.motion-studio/projects/` by default and are listed
 from a shared registry — projects created by an AI agent through MCP appear
 in the same list, because they are the same thing on disk.
 
+The **config** tab is a complete view of `project.json`: the composition
+fields (name/fps/size/duration), the whole `output` block (format, dir,
+filename, crf, preset, pix fmt, transparent, audio limiter), read-only
+**project facts** (entry file, schema version, attached 3D libraries and the
+exact build each project vendored), and a **raw project.json** disclosure at
+the bottom. Settings a given format doesn't use are greyed out rather than
+hidden — mp4 has no alpha, GIF ignores crf, and so on — with a note
+explaining why. Clearing an optional field (preset, pix fmt, crf) removes it
+so the format's own default applies again.
+
+The tab also shows the project's absolute folder location with a copy button,
+and **delete project…** removes it: by default the project is only
+unregistered from the list (the folder stays); tick *also delete files on
+disk* to remove the folder too. Folders outside the managed projects root
+are never deleted from disk, no matter what you tick.
+
 Edit `composition.js` in your editor of choice against the Frame API
 ([frame-api.md](frame-api.md) — read it before writing your first
 composition; the one-paragraph version: everything must be a pure function
 of the frame number, no clocks, no CSS transitions, register your function
 with `MotionStudio.registerComposition`).
+
+## Assets (v0.15)
+
+The **assets** tab lists everything under the project's `assets/` folder —
+image thumbnails, in-place audio audition, size — and manages it: upload via
+the **+ upload** button or by dropping files onto the panel (25 MB per file;
+images, audio, fonts, JSON/TXT), rename/move within `assets/`, delete, and
+download. **copy** puts the *project-relative* path (`assets/…`) on your
+clipboard — exactly the string a composition or an `audio` track references.
+A **♫ n** badge marks files the project's audio timeline uses; deleting one
+asks whether to remove those tracks too (and renaming offers to repoint
+them), so a stale reference can't quietly turn into an ffmpeg error mid-render.
+The folder's absolute path is shown in the tab header (copy button next to
+it) if you'd rather drop large files in with your file manager; anything you
+put there shows up on the next refresh.
+
+## Global settings (v0.15)
+
+**⚙ settings** in the sidebar footer opens the global configuration:
+
+- **new-project defaults** — the fps/dimensions/duration the *+ new* dialog
+  is pre-filled with.
+- **default workers** — the render tab's initial workers selection.
+- **ffmpeg** — a binary path override (leave empty to use `ffmpeg` on PATH;
+  the dialog live-probes the effective binary and shows its version or a
+  ✗ if it can't be run — the footer status updates too) and default
+  crf/preset values that seed *newly created* projects' output config.
+  The path override applies to every Studio render; the same override is
+  available to the CLI as `--ffmpeg <path>`.
+- a read-only **environment** report: where the data dir, projects root, and
+  registry live, plus the current values of the `MOTION_STUDIO_*` env hooks
+  and `PUPPETEER_EXECUTABLE_PATH`.
+
+Settings persist in `~/.motion-studio/settings.json`. They only seed the
+Studio's forms and renders — they never override a project's `project.json`,
+and agents rendering over MCP are unaffected.
+
+The project sidebar sorts by **a–z** or **date** (last modified, newest
+first) via the toggle next to *+ new*, and collapses to a slim strip with the
+**«** button — both choices are remembered per browser.
+
+The workbench is a fixed half preview, half panel, so switching tabs never
+resizes the preview; long tabs scroll inside their half. The **▾** button at
+the right of the tab bar collapses the panel when you want the full height
+for scrubbing, and clicking any tab brings it back.
 
 ## Preview and scrubbing
 
@@ -109,7 +170,7 @@ real transparent `lower-third.webm` and a proof composite over green.
 
 ## Audio
 
-Add tracks to `project.json`:
+Use the **audio** tab, or add tracks to `project.json` directly:
 
 ```json
 "audio": [
@@ -117,6 +178,11 @@ Add tracks to `project.json`:
   { "src": "assets/voiceover.wav", "startInFrames": 45 }
 ]
 ```
+
+The tab edits exactly this list: **+ add track** appends a row, `src`
+autocompletes from the project's audio assets, the start frame shows its
+equivalent in seconds as you type, and ▶ auditions the file. Edits are staged
+until you press **save tracks**, so a half-typed path never reaches disk.
 
 Each track can start at a frame offset and carry a gain in dB; multiple
 tracks are mixed without normalization (so adding a quiet track doesn't duck

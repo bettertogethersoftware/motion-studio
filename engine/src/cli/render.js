@@ -38,6 +38,7 @@ function parseArgs(argv) {
       case '--intermediate': out.intermediate = true; break;
       case '--doctor': out.doctor = true; break;
       case '--no-preflight': out.preflight = false; break;
+      case '--ffmpeg': out.ffmpeg = argv[++i]; break;
       case '--capture-frame': out.captureFrame = Number(argv[++i]); break;
       case '--capture-out': out.captureOut = argv[++i]; break;
       case '--help': case '-h': out.help = true; break;
@@ -58,6 +59,7 @@ Options:
   --segment                     internal: render a segment, skip audio pass
   --intermediate                internal: encode segment as lossless FFV1
   --no-preflight                skip the pre-render frame probe (default: probe 5 frames)
+  --ffmpeg <path>               ffmpeg binary to use (default: "ffmpeg" on PATH)
   --doctor                      print prerequisite check results as JSON and exit
 `;
 
@@ -69,8 +71,9 @@ async function main() {
     process.stderr.write(USAGE);
     return 0;
   }
+  const ffmpegPath = args.ffmpeg || 'ffmpeg';
   if (args.doctor) {
-    const prereqs = await checkPrerequisites();
+    const prereqs = await checkPrerequisites({ ffmpegPath });
     process.stdout.write(JSON.stringify(prereqs, null, 2) + '\n');
     return prereqs.ok ? 0 : 3;
   }
@@ -80,7 +83,7 @@ async function main() {
     return 2;
   }
 
-  const prereqs = await checkPrerequisites();
+  const prereqs = await checkPrerequisites({ ffmpegPath });
   if (!prereqs.ok) {
     progress.error(new EngineError(ErrorCodes.PREREQS_MISSING, 'Node.js/FFmpeg prerequisites not satisfied', prereqs));
     return 3;
@@ -149,6 +152,7 @@ async function main() {
       // purpose, and the parent holds one lock covering all of them. A worker
       // taking its own would deadlock the fan-out against itself.
       lock: !args.segment,
+      ffmpegPath,
       ...(browserFactory ? { browserFactory } : {}),
     };
     if (args.workers && args.workers > 1) {

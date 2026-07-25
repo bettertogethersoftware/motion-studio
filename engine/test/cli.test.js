@@ -124,7 +124,19 @@ test('cli: missing project.json → exit 2 with invalid_config', async (t) => {
   assert.equal(messages.find((m) => m.type === 'error')?.code, 'invalid_config');
 });
 
+/**
+ * POSIX-only. Windows has no signal mechanism: child.kill('SIGTERM') cannot
+ * deliver anything, so libuv falls back to TerminateProcess(), which destroys
+ * the process before any handler runs — `close` then reports code `null`
+ * rather than the 4 the CLI would have chosen. Nothing here is fixable in the
+ * engine, and cancellation itself is not affected: the Studio and MCP paths
+ * abort in-process through JobManager.cancel (covered on every platform by
+ * studio.test.js "queue is visible over HTTP and cancel works"), and Ctrl+C
+ * still works because Node translates Windows console control events into
+ * SIGINT. Skipped rather than left failing so a red run stays meaningful.
+ */
 test('cli: SIGTERM mid-render cancels with exit code 4', async (t) => {
+  if (process.platform === 'win32') return t.skip('signals are not deliverable on Windows (TerminateProcess kills outright)');
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(500);
   const out = path.join(tmp, 'cancelled.mp4');
