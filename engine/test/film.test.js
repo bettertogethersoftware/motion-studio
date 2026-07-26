@@ -11,7 +11,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { validateScenes, assembleFilm, sceneSignature, sceneOutputPath, sceneHasAudio } from '../src/core/film.js';
+import { validateScenes, assembleFilm, sceneSignature, sceneOutputPath, sceneHasAudio, filmLayout } from '../src/core/film.js';
 
 const execFileP = promisify(execFile);
 let haveFfmpeg = false;
@@ -53,6 +53,41 @@ test('sceneHasAudio reflects config.audio + format capability', () => {
 
 test('validateScenes rejects an empty film', () => {
   assert.throws(() => validateScenes([]), (e) => e.code === 'inconsistent_scenes');
+});
+
+/* ------------------------ film layout (v0.22) ------------------------ */
+
+test('filmLayout returns each scene\'s cumulative filmOffset', () => {
+  // The real case: nine scenes whose offsets used to be accumulated by hand.
+  const scenes = [
+    { projectId: 'a', config: cfg({ durationInFrames: 501, name: 'Islands' }) },
+    { projectId: 'b', config: cfg({ durationInFrames: 573 }) },
+    { projectId: 'c', config: cfg({ durationInFrames: 510 }) },
+  ];
+  const layout = filmLayout(scenes);
+  assert.deepEqual(layout.map((s) => s.filmOffset), [0, 501, 1074]);
+  assert.deepEqual(layout.map((s) => s.durationInFrames), [501, 573, 510]);
+  assert.equal(layout[0].name, 'Islands');
+  // startSeconds is the same number in the unit an editor thinks in.
+  assert.equal(layout[1].startSeconds, Number((501 / 30).toFixed(3)));
+  // The last offset plus its duration is the film length.
+  const total = layout[2].filmOffset + layout[2].durationInFrames;
+  assert.equal(total, 1584);
+});
+
+test('validateScenes can skip the rendered check for planning', async () => {
+  await withTmp(async (root) => {
+    const scenes = [
+      await scene(root, 'a', cfg(), { rendered: false }),
+      await scene(root, 'b', cfg(), { rendered: false }),
+    ];
+    // Default: unrendered scenes are refused…
+    assert.throws(() => validateScenes(scenes), (e) => e.code === 'scene_not_rendered');
+    // …but planning only needs the configs, which exist before any render.
+    const info = validateScenes(scenes, { requireRendered: false });
+    assert.equal(info.fps, 30);
+    assert.deepEqual(filmLayout(scenes).map((s) => s.filmOffset), [0, 15]);
+  });
 });
 
 test('validateScenes rejects a non-concatenable format', async () => {

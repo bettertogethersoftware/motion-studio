@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Film assembly: the mix you audition is the mix you ship, and offsets come back
+
+Four fixes found by building a real nine-scene film end-to-end over MCP.
+
+- **`build_film` master audio takes the full track shape.** `trimEndInFrames`,
+  `fadeInFrames`, `fadeOutFrames` and `duck` always worked in the mixer —
+  `film.js` hands tracks straight to `encoder.muxAudio`/`buildAudioFilter` —
+  but the MCP schema listed only `src`/`startInFrames`/`gainDb` and the
+  handler rebuilt each track from those three fields. So a mix tuned and
+  measured with `preview_audio` (ducked bed, fades) could not be reproduced by
+  the film, and the caller had to guess a compensating gain. Both the schema
+  and the pass-through now carry every field.
+- **`sceneLayout` is returned.** Every doc and the `synthesize_sfx` description
+  referred to a scene's `filmOffset` — "a chime on every scene cut is a plain
+  map over your scene offsets" — but nothing ever returned it: `assembleFilm`
+  computed the cumulative offsets internally and reported only a scene *count*.
+  `build_film` now returns `sceneLayout: [{ projectId, name, filmOffset,
+  durationInFrames, startSeconds }]`, and **`plan: true`** returns that layout
+  (validating scene consistency, skipping the rendered-output requirement)
+  without assembling anything — offsets are needed *before* the render, to
+  place narration and cues.
+- **`wait_for_render` no longer advertises timeouts the transport cannot
+  survive.** The cap was 600 s with a 300 s default, but a wait longer than the
+  MCP client's ~60 s request timeout returns a transport error instead of the
+  documented `timedOut: true` snapshot — so the default itself was unusable.
+  Now capped at 50 s, default 30 s, with the call-again pattern and the
+  in-memory lifetime of job ids spelled out.
+- **`canvas-save-restore` lint.** A named function calling `ctx.save()` more
+  often than `ctx.restore()` leaves the transform/clip/style stack mutated for
+  every later draw call in the frame — in the real film it silently relocated
+  the title, letterbox and vignette and broke an entire scene, while remaining
+  perfectly valid JavaScript that still rendered. Same class as
+  `classlist-mutation`: state that outlives the drawing it belonged to.
+
+Docs corrected alongside: SKILL.md no longer advises "assemble, then do one
+final encode" (the concat is `-c copy` and no MCP tool re-encodes — the scenes'
+own crf is what ships), and now warns that job ids die with the server.
+
 ### Scene-structure guardrails: the "every scene visible at once" failure is now machine-caught
 
 A real 161-second film shipped with all nine scenes stacked on screen for its

@@ -78,7 +78,7 @@ import {
 import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
-import { validateScenes, assembleFilm } from '../core/film.js';
+import { validateScenes, assembleFilm, filmLayout } from '../core/film.js';
 import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -667,17 +667,21 @@ server.registerTool(
       'same shape as get_render_status, including the structured error for failed jobs and the measured `audio` ' +
       'block for finished ones — check states individually, since one failed scene does not stop the others. ' +
       'Waiting on queued jobs is fine; they complete in FIFO order. A timeout is NOT an error: the jobs keep ' +
-      'running and you get the current snapshots with timedOut: true (wait again to keep watching). ' +
-      'Errors: job_not_found if any id is unknown.',
+      'running and you get the current snapshots with timedOut: true — CALL IT AGAIN to keep watching, which is the ' +
+      'normal way to wait out a long render. The ceiling is deliberately below the typical 60s MCP client request ' +
+      'timeout: waiting longer in one call returns a transport error instead of the snapshot, which tells you nothing ' +
+      'about the jobs. Job ids live in server memory only — if the server restarts they are gone and every id returns ' +
+      'job_not_found, so verify finished work by its output file, not by id. Errors: job_not_found if any id is unknown.',
     inputSchema: {
       jobIds: z.array(z.string()).min(1).max(16).describe('Job ids from render; every id must exist'),
       timeoutMs: z
         .number()
         .int()
         .min(1_000)
-        .max(600_000)
-        .default(300_000)
-        .describe('Stop waiting after this long; the jobs themselves are unaffected'),
+        .max(50_000)
+        .default(30_000)
+        .describe('Stop waiting after this long, then return snapshots with timedOut:true; the jobs are unaffected. ' +
+          'Capped below the MCP client request timeout on purpose — call again to keep waiting'),
     },
   },
   wrap(async ({ jobIds, timeoutMs }) => ok(await jobs.waitFor(jobIds, { timeoutMs }))),
@@ -1562,10 +1566,16 @@ server.registerTool(
       'scene must already be rendered, or it fails with scene_not_rendered listing which. Mismatched scenes fail with ' +
       'inconsistent_scenes. Audio: with no `audio`, each scene\'s own audio is preserved (all scenes must be consistently audio ' +
       'or all silent); pass `audio` to lay ONE master timeline (music bed + narration, startInFrames/gainDb like config.audio) over ' +
-      'the whole film, which replaces per-scene audio. When a master timeline is present the result includes an `audio` block with ' +
+      'the whole film, which replaces per-scene audio. Master tracks take the SAME shaping as config.audio — startInFrames, ' +
+      'gainDb, trimEndInFrames, fadeInFrames, fadeOutFrames and duck (v0.22) — so a mix auditioned with preview_audio ' +
+      'reproduces exactly here. When a master timeline is present the result includes an `audio` block with ' +
       'the measured peak/mean dBFS and a `clipping` flag — check it, since a bad mix is the one defect you cannot see. Pass ' +
       '`audioTargetPeakDb` (e.g. -2) to have the film measured and re-muxed once to that level instead of guessing gains. ' +
-      'Tip for quality: render scenes as prores (or low crf), assemble, then do a single final encode. See docs/film-setup.md.',
+      'The result also carries `sceneLayout` — each scene\'s `filmOffset`, duration and start time — which is what you place ' +
+      'master audio and sfx cues against instead of accumulating durations by hand. Pass `plan: true` to get that layout ' +
+      'BEFORE rendering anything (nothing is assembled or written), which is when you actually need the offsets. ' +
+      'Concatenation is lossless `-c copy` and there is no re-encode step, so choose the deliverable quality at ' +
+      'scene-render time (output.crf / prores) — it is what ships. See docs/film-setup.md.',
     inputSchema: {
       scenes: z.array(z.object({ projectId: z.string() })).min(1)
         .describe('Scene projects in play order; each must already be rendered'),
@@ -1578,13 +1588,28 @@ server.registerTool(
         src: z.string().describe('Project-relative audio under assets/ of the output project'),
         startInFrames: z.number().int().min(0).optional().describe('Track start offset in frames'),
         gainDb: z.number().optional().describe('Track gain in dB (e.g. -8 for a background bed)'),
+        // v0.22: the film timeline takes the SAME per-track shaping as
+        // config.audio. These always worked in the mixer; the schema simply
+        // dropped them, so a mix auditioned with preview_audio could not be
+        // reproduced by build_film.
+        trimEndInFrames: z.number().int().min(1).optional()
+          .describe('Keep only the clip\'s first N frames (clip-relative)'),
+        fadeInFrames: z.number().int().min(0).optional()
+          .describe('Fade up from silence over the clip\'s first N frames'),
+        fadeOutFrames: z.number().int().min(0).optional()
+          .describe('Fade to silence over the last N frames before trimEndInFrames (or the film end)'),
+        duck: z.boolean().optional()
+          .describe('Auto-duck this track under the mix of all non-ducked tracks (music bed under narration)'),
       })).optional().describe('Optional master audio laid over the entire film (replaces per-scene audio)'),
+      plan: z.boolean().optional()
+        .describe('Compute and return the scene layout WITHOUT assembling — works before the scenes are rendered, ' +
+          'which is when you need each filmOffset to place narration and cues. Assembles nothing, writes nothing.'),
       audioTargetPeakDb: z.number().min(-60).max(0).optional()
         .describe('Measure the mixed film and re-mux once so it peaks here (e.g. -2). Shifts every track by the ' +
           'same amount, so your relative balance is preserved. Use it instead of guessing a master gain.'),
     },
   },
-  wrap(async ({ scenes, outputProjectId, outputFilename, audio, audioTargetPeakDb }) => {
+  wrap(async ({ scenes, outputProjectId, outputFilename, audio, audioTargetPeakDb, plan }) => {
     await requirePrereqs();
     const sceneData = [];
     for (const s of scenes) {
@@ -1592,7 +1617,27 @@ server.registerTool(
       const config = await store.readConfig(s.projectId);
       sceneData.push({ projectId: s.projectId, path: entry.path, config });
     }
-    const info = validateScenes(sceneData, { hasMasterAudio: !!(audio && audio.length) });
+    const info = validateScenes(sceneData, {
+      hasMasterAudio: !!(audio && audio.length),
+      requireRendered: !plan,
+    });
+
+    // Planning stops here: consistency is checked and the timeline is
+    // reported, but nothing is read from out/ and nothing is written.
+    if (plan) {
+      const layout = filmLayout(sceneData);
+      const totalFrames = layout.reduce((n, s) => n + s.durationInFrames, 0);
+      return ok({
+        plan: true,
+        sceneOrder: scenes.map((s) => s.projectId),
+        sceneLayout: layout,
+        scenes: layout.length,
+        totalFrames,
+        durationSeconds: Number((totalFrames / info.fps).toFixed(3)),
+        fps: info.fps,
+        format: info.format,
+      });
+    }
 
     const outId = outputProjectId ?? scenes[0].projectId;
     const outEntry = await store.getProjectEntry(outId);
@@ -1618,7 +1663,9 @@ server.registerTool(
         const abs = resolveInProject(outEntry.path, normalized, { asAsset: true });
         const stat = await fsp.stat(abs).catch(() => null);
         if (!stat) throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `master audio not found: ${normalized} in project ${outId}`, { path: normalized });
-        audioTracks.push({ src: abs, startInFrames: t.startInFrames, gainDb: t.gainDb });
+        // Pass the whole track through: dropping fields here is what made a
+        // preview_audio-tuned mix unreproducible in a film (v0.22).
+        audioTracks.push({ ...t, src: abs });
       }
     }
 

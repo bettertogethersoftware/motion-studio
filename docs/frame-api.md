@@ -194,6 +194,7 @@ MotionStudio.registerComposition(async (frame) => {
 - [ ] All per-frame async work (font/image loading) is awaited inside the frame function
 - [ ] Multi-element timing uses `Sequence` rather than frame-offset arithmetic scattered through the code
 - [ ] Scene containers are hidden by **default in CSS** and only turned on by their own `Sequence`; no `classList.add`/`remove` anywhere in the frame function (§3's scene-visibility recipe)
+- [ ] **Canvas work:** every `ctx.save()` has a matching `ctx.restore()` (an unrestored transform relocates everything drawn later in the frame), and `fillStyle`/`strokeStyle` are set *inside* loops whose bodies call helpers that also set them
 - [ ] Literal `Sequence(start, duration)` calls tile the full composition duration — no unscheduled gaps (`sequence-gap` warnings are clean)
 - [ ] Springy/looping motion uses `spring()` / `Loop()` (pure functions of frame) — never incremental per-frame physics or accumulated state
 - [ ] Particle-style effects (steam, dust, sparks, rain) use `particles()` — never a library particle system or per-frame velocity accumulation

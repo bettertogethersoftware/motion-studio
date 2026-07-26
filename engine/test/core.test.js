@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { resolveInProject } from '../src/core/sandbox.js';
-import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism, checkSequenceCoverage } from '../src/core/project.js';
+import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism, checkSequenceCoverage, checkCanvasStateBalance } from '../src/core/project.js';
 import { parseProgressLine, ProgressStreamParser, ProgressEmitter } from '../src/core/progress.js';
 import { parseFfmpegVersion, parseNodeVersion } from '../src/core/prereqs.js';
 import { buildAudioFilter, LIMITER_FILTER, computeBalanceWarnings } from '../src/core/encoder.js';
@@ -231,6 +231,38 @@ test('checkDeterminism: classList.add/remove flagged, toggle-with-state exempt (
   const w = checkDeterminism(src, 'composition.js');
   assert.deepEqual(w.map((x) => x.rule), ['classlist-mutation', 'classlist-mutation']);
   assert.deepEqual(w.map((x) => x.line), [2, 3]);
+});
+
+test('checkCanvasStateBalance: unrestored ctx.save() is flagged, balanced helpers are not (v0.22)', () => {
+  // The real bug: a drawing helper that translates and never restores, so the
+  // title/letterbox/vignette drawn afterwards were silently relocated.
+  const src = [
+    'function pottery(cx, baseY, s) {',
+    '  ctx.save(); ctx.translate(cx, baseY);',
+    '  ctx.fill();',
+    '}',
+    'function samurai(cx, baseY) {',
+    '  ctx.save();',
+    '  ctx.save(); ctx.rotate(-0.5); ctx.restore();',   // nested pair
+    '  ctx.restore();',
+    '}',
+  ].join('\n');
+  const w = checkCanvasStateBalance(src);
+  assert.equal(w.length, 1);
+  assert.equal(w[0].rule, 'canvas-save-restore');
+  assert.equal(w[0].line, 1);
+  assert.match(w[0].message, /pottery\(\)/);
+});
+
+test('checkCanvasStateBalance: ignores save/restore inside comments and strings', () => {
+  const src = [
+    'function draw() {',
+    '  // ctx.save() mentioned in a comment',
+    '  const s = "ctx.save()";',
+    '  ctx.fill();',
+    '}',
+  ].join('\n');
+  assert.deepEqual(checkCanvasStateBalance(src), []);
 });
 
 test('checkSequenceCoverage: names gaps and uncovered tails against the duration (v0.22)', () => {

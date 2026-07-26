@@ -52,10 +52,41 @@ export function sceneHasAudio(cfg) {
 }
 
 /**
+ * Where each scene lands on the film timeline (v0.22).
+ *
+ * Every doc and the synthesize_sfx tool description call this a scene's
+ * `filmOffset` — "a chime on every scene cut is a plain map over your scene
+ * offsets" — but until now nothing returned it, so callers had to accumulate
+ * durations by hand and a single slip silently desynced narration from
+ * picture. The numbers were always here; this just hands them back.
+ *
+ * @param {Array} scenes [{ projectId, config }] in play order
+ */
+export function filmLayout(scenes) {
+  let filmOffset = 0;
+  return scenes.map((s) => {
+    const durationInFrames = s.config.durationInFrames;
+    const entry = {
+      projectId: s.projectId,
+      name: s.config.name,
+      filmOffset,
+      durationInFrames,
+      startSeconds: Number((filmOffset / s.config.fps).toFixed(3)),
+    };
+    filmOffset += durationInFrames;
+    return entry;
+  });
+}
+
+/**
  * Validate a scene list. `scenes` = [{ projectId, path, config }] in play order.
  * Throws EngineError on any problem; returns { format, fps, signature } on success.
+ *
+ * `requireRendered: false` skips the "already rendered" check — used by the
+ * planning path, which answers "where will each scene land?" BEFORE the
+ * scenes exist, which is exactly when you need the offsets to place audio.
  */
-export function validateScenes(scenes, { hasMasterAudio = false } = {}) {
+export function validateScenes(scenes, { hasMasterAudio = false, requireRendered = true } = {}) {
   if (!scenes.length) throw new EngineError(ErrorCodes.INCONSISTENT_SCENES, 'a film needs at least one scene');
 
   const format = scenes[0].config.output?.format ?? 'mp4';
@@ -73,7 +104,9 @@ export function validateScenes(scenes, { hasMasterAudio = false } = {}) {
       { expected: signature, mismatched: mismatched.map((s) => ({ projectId: s.projectId, signature: sceneSignature(s.config) })) });
   }
 
-  const unrendered = scenes.filter((s) => !fs.existsSync(sceneOutputPath(s.path, s.config)));
+  const unrendered = requireRendered
+    ? scenes.filter((s) => !fs.existsSync(sceneOutputPath(s.path, s.config)))
+    : [];
   if (unrendered.length) {
     throw new EngineError(ErrorCodes.SCENE_NOT_RENDERED,
       'render these scenes before assembling the film — nothing found at the expected output path ' +
@@ -175,6 +208,9 @@ export async function assembleFilm({
 
   return {
     scenes: scenes.length,
+    // Where each scene landed — the `filmOffset` the docs reference. Returned
+    // so a caller never has to re-derive what this function already knows.
+    sceneLayout: filmLayout(scenes),
     totalFrames,
     durationSeconds: Number(videoDurationSec.toFixed(3)),
     fps,

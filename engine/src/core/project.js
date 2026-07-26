@@ -318,6 +318,7 @@ export class ProjectStore {
     // that leave holes against the configured duration. Config read is
     // best-effort — a missing/broken project.json must not fail the write.
     if (ext === '.js' || ext === '.mjs') {
+      warnings.push(...checkCanvasStateBalance(content));
       const config = await this.readConfig(projectId).catch(() => null);
       if (config?.durationInFrames) {
         warnings.push(...checkSequenceCoverage(content, config.durationInFrames));
@@ -854,6 +855,53 @@ export function checkDeterminism(source, filename = 'composition.js') {
     }
   }
   return warnings.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * Canvas save/restore balance check (v0.22).
+ *
+ * `ctx.save()` without a matching `ctx.restore()` leaves the transform, clip
+ * and style stack mutated for EVERY later draw call in that frame — the title,
+ * the letterbox, the vignette all silently relocate or vanish. It is the
+ * canvas twin of the DOM-state rule above: state that outlives the drawing it
+ * belonged to. Cost a whole scene in a real film; nothing flagged it, because
+ * the code is perfectly valid JavaScript and the frame still renders.
+ *
+ * Scoped to named function declarations, where drawing helpers live: a helper
+ * that pushes more than it pops is nearly always a bug, whereas whole-file
+ * counting would flag legitimate conditional save/restore pairs.
+ */
+export function checkCanvasStateBalance(source) {
+  const scanned = blankJs(source);
+  const warnings = [];
+  const lines = source.split('\n');
+  const decl = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
+  let m;
+  while ((m = decl.exec(scanned))) {
+    // Walk braces from the body's opening { to find its end.
+    let depth = 0, i = m.index + m[0].length - 1, end = -1;
+    for (; i < scanned.length; i++) {
+      if (scanned[i] === '{') depth++;
+      else if (scanned[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) continue;
+    const body = scanned.slice(m.index, end);
+    const saves = (body.match(/\.\s*save\s*\(\s*\)/g) ?? []).length;
+    const restores = (body.match(/\.\s*restore\s*\(\s*\)/g) ?? []).length;
+    if (saves > restores) {
+      const line = scanned.slice(0, m.index).split('\n').length;
+      warnings.push({
+        rule: 'canvas-save-restore',
+        line,
+        snippet: (lines[line - 1] ?? '').trim().slice(0, 120),
+        message: `${m[1]}() calls save() ${saves}× but restore() ${restores}× — an unrestored canvas state leaks its ` +
+          'transform/clip/style into every later draw call in the frame (titles and overlays end up moved or ' +
+          'invisible). Pair every save() with a restore().',
+      });
+    }
+    decl.lastIndex = end;
+  }
+  return warnings;
 }
 
 /**
