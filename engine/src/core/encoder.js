@@ -311,6 +311,65 @@ export function buildAudioFilter(tracks, fps, { limiter = true, videoDurationSec
 }
 
 /**
+ * Flag tracks that are almost certainly inaudible in the mix (v0.22).
+ *
+ * A track buried under a much louder concurrent track is the OTHER audio
+ * failure an agent cannot hear: the render succeeds, nothing clips (the mix
+ * only got quieter), and every automated check passes — yet a layer is
+ * missing to the ear. Seen in practice when gains are assigned by template
+ * ("lead -2, layers -6/-10") against source files whose own levels already
+ * differ by more than the template assumes.
+ *
+ * Pure function over measured data so it is unit-testable and both callers
+ * (preview_audio and the render's audio report) share one definition:
+ *
+ *   tracks: config.audio entries + { clipMeanDb, clipDurationSec? } —
+ *     clipMeanDb is the file's own measured mean level; null skips the track.
+ *     clipDurationSec bounds its play window; null = plays to the end.
+ *
+ * A warning fires when a track's effective mean (clipMeanDb + gainDb) sits
+ * >= thresholdDb below a louder track that overlaps at least half of its play
+ * window. Default 8 dB: the motivating real-world case had a layer 9.3 dB
+ * down and the user reported hearing only the lead. Tracks marked duck:true
+ * are declared background — being under the foreground is their job, so they
+ * never warn as the quiet side.
+ */
+export function computeBalanceWarnings(tracks, { fps, videoDurationSec, thresholdDb = 8 } = {}) {
+  const infos = tracks.map((t) => {
+    const start = (t.startInFrames ?? 0) / fps;
+    const clipLen = t.trimEndInFrames !== undefined
+      ? t.trimEndInFrames / fps
+      : (typeof t.clipDurationSec === 'number' ? t.clipDurationSec : null);
+    const end = Math.min(clipLen !== null ? start + clipLen : videoDurationSec, videoDurationSec);
+    const gain = t.gainDb ?? 0;
+    const level = typeof t.clipMeanDb === 'number' ? t.clipMeanDb + gain : null;
+    return { t, start, end, gain, level };
+  });
+
+  const warnings = [];
+  for (const a of infos) {
+    if (a.level === null || a.t.duck || a.end <= a.start) continue;
+    let loudest = null;
+    for (const b of infos) {
+      if (b === a || b.level === null) continue;
+      const overlap = Math.min(a.end, b.end) - Math.max(a.start, b.start);
+      if (overlap < 0.5 * (a.end - a.start)) continue;
+      if (b.level - a.level >= thresholdDb && (!loudest || b.level > loudest.level)) loudest = b;
+    }
+    if (loudest) {
+      const gap = Math.round(loudest.level - a.level);
+      warnings.push(
+        `${a.t.src} plays ~${gap} dB below ${loudest.t.src} while they overlap — likely inaudible. ` +
+          `Effective mean ${a.level.toFixed(1)} dBFS (clip ${a.t.clipMeanDb.toFixed(1)} + gain ${a.gain}) vs ` +
+          `${loudest.level.toFixed(1)} dBFS. Raise this track's gainDb, lower the louder track's, or mark ` +
+          `this track duck:true if it is meant as background.`,
+      );
+    }
+  }
+  return warnings;
+}
+
+/**
  * Decode a rendered file and report its integrated/peak audio level in dBFS
  * (v0.10). Used to tell the caller whether the mix clipped — the one audio
  * failure an agent has no way to notice on its own.

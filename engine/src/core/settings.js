@@ -74,6 +74,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // scalar; only a chain of two or more introduces fallback, and then only
     // past a vendor that is *not configured*. See core/vendors.js.
     vendors: null,
+    // Voices the user starred in the Studio (v0.22), keyed by vendor:
+    // { azure: ["en-US-AvaNeural"], piper: [...] }. null = none recorded.
+    // Surfaced through list_vendors so narrating agents can prefer voices the
+    // user actually auditioned and chose. Mirrors music.favoritePrograms.
+    favoriteVoices: null,
     azure: Object.freeze({ region: null, voice: null, outputFormat: AZURE_DEFAULT_FORMAT, style: null }),
     // Piper (v0.18): where the CLI and the downloaded .onnx voices live, and
     // which voice to use when a call doesn't name one. All paths, no secrets.
@@ -93,6 +98,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
     vendor: 'node',
     vendors: null,          // ordered preference chain (v0.19) — see tts.vendors
     targetPeakDb: -3,
+    // General MIDI programs (0..127) the user has auditioned and starred in
+    // the Studio (v0.22). null = no preference recorded. Surfaced through
+    // list_vendors so composing agents can voice music with instruments the
+    // user actually likes instead of defaulting to piano-and-strings.
+    favoritePrograms: null,
     node: Object.freeze({ soundfont: null, sampleRate: 44100, gain: 1.575 }),
   }),
 });
@@ -202,6 +212,25 @@ export function validateSettings(s) {
       }
       cloudVendor('openai', ['voice', 'model', 'instructions'], 'OpenAI');
       cloudVendor('deepgram', ['voice'], 'Deepgram');
+      // Starred voices (v0.22): a map of vendor → distinct voice names.
+      // Unknown vendor keys are refused rather than dropped, same reasoning
+      // as duplicate chain entries: they mean the author misunderstood.
+      const fv = t.favoriteVoices;
+      if (fv !== null && fv !== undefined) {
+        if (typeof fv !== 'object' || Array.isArray(fv)) {
+          problems.push('tts.favoriteVoices: object mapping vendor → array of voice names, or null required');
+        } else {
+          for (const [vendor, voices] of Object.entries(fv)) {
+            if (!TTS_VENDORS.includes(vendor)) {
+              problems.push(`tts.favoriteVoices.${vendor}: unknown vendor (one of ${TTS_VENDORS.join(', ')})`);
+            } else if (!Array.isArray(voices) || voices.some((v) => typeof v !== 'string' || !v.trim())) {
+              problems.push(`tts.favoriteVoices.${vendor}: array of non-empty voice names required`);
+            } else if (new Set(voices).size !== voices.length) {
+              problems.push(`tts.favoriteVoices.${vendor}: duplicate voices not allowed`);
+            }
+          }
+        }
+      }
     }
     const mu = s.music;
     if (!mu || typeof mu !== 'object') problems.push('music: object required');
@@ -212,6 +241,17 @@ export function validateSettings(s) {
       // "boost to here", which this setting deliberately cannot do.
       if (mu.targetPeakDb !== null && (!isNum(mu.targetPeakDb) || mu.targetPeakDb > 0 || mu.targetPeakDb < -60)) {
         problems.push('music.targetPeakDb: number in -60..0 (dBFS) or null required');
+      }
+      // Empty array is allowed (= no favorites left after un-starring); null
+      // means the feature was never used. Duplicates refused like vendor
+      // chains: a repeated program means the author misunderstood the list.
+      const fav = mu.favoritePrograms;
+      if (fav !== null && fav !== undefined) {
+        if (!Array.isArray(fav) || fav.some((p) => !Number.isInteger(p) || p < 0 || p > 127)) {
+          problems.push('music.favoritePrograms: array of General MIDI programs (integers 0..127) or null required');
+        } else if (new Set(fav).size !== fav.length) {
+          problems.push('music.favoritePrograms: duplicate programs not allowed');
+        }
       }
       const n = mu.node;
       if (!n || typeof n !== 'object') problems.push('music.node: object required');
@@ -330,7 +370,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
     // reaches the vendor, which reads the environment.
     tts: {
       ...DEFAULT_SETTINGS.tts,
-      ...pick(raw.tts, ['vendor', 'vendors']),
+      ...pick(raw.tts, ['vendor', 'vendors', 'favoriteVoices']),
       azure: { ...DEFAULT_SETTINGS.tts.azure, ...pick(raw.tts?.azure, ['region', 'voice', 'outputFormat', 'style']) },
       piper: { ...DEFAULT_SETTINGS.tts.piper, ...pick(raw.tts?.piper, ['exe', 'python', 'voicesDir', 'voice']) },
       elevenlabs: { ...DEFAULT_SETTINGS.tts.elevenlabs, ...pick(raw.tts?.elevenlabs, ['voice', 'model', 'outputFormat']) },
@@ -339,7 +379,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
     },
     music: {
       ...DEFAULT_SETTINGS.music,
-      ...pick(raw.music, ['vendor', 'vendors', 'targetPeakDb']),
+      ...pick(raw.music, ['vendor', 'vendors', 'targetPeakDb', 'favoritePrograms']),
       node: { ...DEFAULT_SETTINGS.music.node, ...pick(raw.music?.node, ['soundfont', 'sampleRate', 'gain']) },
     },
   };

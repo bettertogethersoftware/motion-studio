@@ -199,6 +199,7 @@ async function selectProject(id) {
   stopAudition(); // a clip from the previous project would keep playing with its stop button gone
   stopJobPolling();
   if (vendorState.openCapability) showVendorsPage(null); // picking a project leaves the vendor pages
+  if (state.settingsOpen) showSettingsPage(false);       // …and the settings page
   state.events?.close();
   state.projectId = id;
   const proj = await api(`/api/projects/${id}`);
@@ -1073,7 +1074,28 @@ async function loadSettings() {
 }
 $('#rd-workers').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
 
+/** Show/hide the inline settings page (v0.22 — was a modal dialog). Mirrors
+ *  showVendorsPage: it owns the stage while open, and closing restores
+ *  whatever the project state says should be there. */
+function showSettingsPage(open) {
+  if (open) {
+    if (vendorState.openCapability) showVendorsPage(null);
+    stopPlayback();
+    stopAudition();
+    $('#workbench').classList.add('hidden');
+    $('#empty-state').classList.add('hidden');
+  } else {
+    $('#empty-state').classList.toggle('hidden', !!state.projectId);
+    $('#workbench').classList.toggle('hidden', !state.projectId);
+    if (state.projectId) fitPreview();
+  }
+  $('#settings-page').classList.toggle('hidden', !open);
+  $('#btn-settings').classList.toggle('active', open);
+  state.settingsOpen = open;
+}
+
 $('#btn-settings').addEventListener('click', async () => {
+  if (state.settingsOpen) { showSettingsPage(false); return; }
   try {
     const { settings, environment } = await loadSettings();
     const f = $('#settings-form');
@@ -1103,12 +1125,12 @@ $('#btn-settings').addEventListener('click', async () => {
     row('projects root', environment.projectsRoot);
     row('settings file', environment.settingsPath);
     for (const [k, v] of Object.entries(environment.env)) row(k, v);
-    $('#settings-dialog').showModal();
+    showSettingsPage(true);
   } catch (err) {
     toastError(err);
   }
 });
-$('#btn-settings-close').addEventListener('click', () => $('#settings-dialog').close());
+$('#btn-settings-close').addEventListener('click', () => showSettingsPage(false));
 $('#settings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
@@ -1176,6 +1198,12 @@ const vendorState = {
   preview: null,       // the <audio> auditioning a voice/instrument sample
   formatsFilled: false,
   programsFilled: false,
+  gmPrograms: [],      // GM program names, for favorite-chip labels
+  favoritePrograms: [], // starred GM programs (v0.22); seeded from settings
+  favoriteVoices: {},  // starred voices per vendor (v0.22); seeded from settings
+  // One visible vendor card per capability (v0.22 tabs); touched = user clicked.
+  tab: { speech: null, music: null },
+  tabTouched: { speech: false, music: false },
   // Edited preference order per capability; seeded from each report's `chain`.
   chain: { speech: [], music: [] },
 };
@@ -1257,7 +1285,7 @@ function buildCloudVendorCards() {
       <dl class="env-list mono" data-facts="${d.id}"></dl>
       <p class="v-error err-line hidden" data-error="${d.id}"></p>
       <div class="config-grid vendor-grid">
-        <label class="wide">default voice<select data-voice="${d.id}"></select></label>
+        <label class="wide">default voice<span class="voice-pick"><select data-voice="${d.id}"></select><button type="button" class="ghost tiny" data-fav-voice="${d.id}" title="star this voice — agents narrating are told to prefer starred voices">☆</button></span></label>
         ${knobs}
       </div>
       <div class="fieldrow vendor-test">
@@ -1413,6 +1441,12 @@ function moveChainVendor(vendor, delta) {
 function showVendorsPage(capability) {
   vendorState.openCapability = capability ?? null;
   const open = !!capability;
+  if (open && state.settingsOpen) {
+    // The stage holds one page at a time; opening a capability replaces settings.
+    $('#settings-page').classList.add('hidden');
+    $('#btn-settings').classList.remove('active');
+    state.settingsOpen = false;
+  }
   $('#vendors-page').classList.toggle('hidden', !open);
   $('#cap-speech').classList.toggle('hidden', capability !== 'speech');
   $('#cap-music').classList.toggle('hidden', capability !== 'music');
@@ -1479,6 +1513,7 @@ async function loadVendors({ force = false } = {}) {
     });
     vendorState.programsFilled = true;
   }
+  vendorState.gmPrograms = data.gmPrograms;
 
   if (!vendorState.formatsFilled) {
     const sel = $('#az-format');
@@ -1513,6 +1548,13 @@ async function loadVendors({ force = false } = {}) {
   paintMusic(data.music);
   paintChain('speech');
   paintChain('music');
+
+  const fv = data.speech.settings.favoriteVoices ?? {};
+  vendorState.favoriteVoices = Object.fromEntries(Object.entries(fv).map(([k, v]) => [k, [...v]]));
+  renderFavoriteVoices();
+  // Land on the vendor that will actually run — until the user picks a tab.
+  if (!vendorState.tabTouched.speech && data.speech.active) selectVendorTab('speech', data.speech.active);
+  if (!vendorState.tabTouched.music && data.music.active) selectVendorTab('music', data.music.active);
 
   // Each capability gets its own environment block, under its own cards —
   // one shared list at the foot of the page meant the speech variables read as
@@ -1636,7 +1678,142 @@ function paintMusic(report) {
   $('#mu-samplerate').value = String(s.node?.sampleRate ?? 44100);
   $('#mu-gain').value = s.node?.gain ?? 1.575;
   $('#mu-target').value = s.targetPeakDb === null || s.targetPeakDb === undefined ? '' : String(s.targetPeakDb);
+  vendorState.favoritePrograms = [...(s.favoritePrograms ?? [])];
+  renderFavoritePrograms();
 }
+
+/* ------------------------- favorite instruments ------------------------- */
+
+/** Chip list + star state for the audition instrument (v0.22). Starred
+ *  programs save with the music settings and reach agents via list_vendors. */
+function renderFavoritePrograms() {
+  const list = $('#mu-fav-list');
+  list.innerHTML = '';
+  for (const p of vendorState.favoritePrograms) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'fav-chip mono';
+    chip.title = 'remove from favorites';
+    chip.textContent = `${String(p).padStart(3, '0')} · ${vendorState.gmPrograms[p] ?? '?'} ×`;
+    chip.addEventListener('click', () => {
+      vendorState.favoritePrograms = vendorState.favoritePrograms.filter((x) => x !== p);
+      renderFavoritePrograms();
+    });
+    list.appendChild(chip);
+  }
+  if (!vendorState.favoritePrograms.length) {
+    const hint = document.createElement('span');
+    hint.className = 'dim';
+    hint.textContent = 'none starred yet';
+    list.appendChild(hint);
+  }
+  syncFavToggle();
+}
+
+function syncFavToggle() {
+  const p = Number($('#mu-program').value) || 0;
+  const starred = vendorState.favoritePrograms.includes(p);
+  $('#mu-fav-toggle').textContent = starred ? '★ unfavorite' : '☆ favorite';
+}
+
+$('#mu-fav-toggle').addEventListener('click', () => {
+  const p = Number($('#mu-program').value) || 0;
+  vendorState.favoritePrograms = vendorState.favoritePrograms.includes(p)
+    ? vendorState.favoritePrograms.filter((x) => x !== p)
+    : [...vendorState.favoritePrograms, p].sort((a, b) => a - b);
+  renderFavoritePrograms();
+});
+$('#mu-program').addEventListener('change', syncFavToggle);
+
+/* --------------------------- favorite voices ---------------------------- */
+
+/** Speech twin of the instrument favorites (v0.22): ☆ next to each vendor's
+ *  voice picker, one shared chip row, saved as tts.favoriteVoices. */
+function renderFavoriteVoices() {
+  const list = $('#voice-fav-list');
+  list.innerHTML = '';
+  const entries = Object.entries(vendorState.favoriteVoices)
+    .flatMap(([vendor, voices]) => voices.map((voice) => ({ vendor, voice })));
+  for (const { vendor, voice } of entries) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'fav-chip mono';
+    chip.title = 'remove from favorites';
+    chip.textContent = `${vendor} · ${voice} ×`;
+    chip.addEventListener('click', () => {
+      vendorState.favoriteVoices[vendor] = (vendorState.favoriteVoices[vendor] ?? []).filter((x) => x !== voice);
+      renderFavoriteVoices();
+    });
+    list.appendChild(chip);
+  }
+  if (!entries.length) {
+    const hint = document.createElement('span');
+    hint.className = 'dim';
+    hint.textContent = 'none starred yet';
+    list.appendChild(hint);
+  }
+  syncFavVoiceButtons();
+}
+
+function syncFavVoiceButtons() {
+  for (const btn of document.querySelectorAll('[data-fav-voice]')) {
+    const vendor = btn.dataset.favVoice;
+    const voice = vendorEl.voice(vendor)?.value ?? '';
+    btn.textContent = voice && (vendorState.favoriteVoices[vendor] ?? []).includes(voice) ? '★' : '☆';
+  }
+}
+
+for (const btn of document.querySelectorAll('[data-fav-voice]')) {
+  btn.addEventListener('click', () => {
+    const vendor = btn.dataset.favVoice;
+    const voice = vendorEl.voice(vendor)?.value;
+    if (!voice) return; // "(vendor default)" — a concrete voice must be picked first
+    const cur = vendorState.favoriteVoices[vendor] ?? [];
+    vendorState.favoriteVoices[vendor] = cur.includes(voice)
+      ? cur.filter((x) => x !== voice)
+      : [...cur, voice];
+    renderFavoriteVoices();
+  });
+}
+for (const sel of document.querySelectorAll('[data-voice]')) {
+  sel.addEventListener('change', syncFavVoiceButtons);
+}
+
+/* ------------------------------ vendor tabs ------------------------------ */
+
+/** One card at a time per capability (v0.22) — six speech cards made the page
+ *  a long scroll. Tab labels come from each card's own title. */
+function buildVendorTabs() {
+  for (const cap of ['speech', 'music']) {
+    const nav = $(`#${cap === 'speech' ? 'speech' : 'music'}-tabs`);
+    if (!nav || nav.children.length) continue;
+    for (const vendor of CAP_VENDORS[cap]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tab';
+      btn.dataset.vendorTab = vendor;
+      btn.textContent = vendorEl.card(vendor)?.querySelector('.v-title')?.textContent ?? vendor;
+      btn.addEventListener('click', () => {
+        vendorState.tabTouched[cap] = true;
+        selectVendorTab(cap, vendor);
+      });
+      nav.appendChild(btn);
+    }
+    selectVendorTab(cap, CAP_VENDORS[cap][0]);
+  }
+}
+
+function selectVendorTab(cap, vendor) {
+  vendorState.tab[cap] = vendor;
+  for (const v of CAP_VENDORS[cap]) {
+    vendorEl.card(v)?.classList.toggle('tab-active', v === vendor);
+  }
+  const nav = $(`#${cap === 'speech' ? 'speech' : 'music'}-tabs`);
+  for (const btn of nav.querySelectorAll('[data-vendor-tab]')) {
+    btn.classList.toggle('active', btn.dataset.vendorTab === vendor);
+  }
+}
+buildVendorTabs();
 
 /** Fill one vendor's voice <select> (Azure honours the locale/search filters). */
 async function loadVendorVoices(vendor) {
@@ -1755,6 +1932,9 @@ $('#btn-vendors-save').addEventListener('click', async () => {
           vendor: chain[0],
           vendors: chain,
           targetPeakDb: $('#mu-target').value === '' ? null : Number($('#mu-target').value),
+          // null when empty keeps "never used" and "un-starred everything"
+          // looking the same in settings.json.
+          favoritePrograms: vendorState.favoritePrograms.length ? [...vendorState.favoritePrograms] : null,
           node: {
             soundfont: $('#mu-soundfont').value.trim() || null,
             sampleRate: Number($('#mu-samplerate').value),
@@ -1764,10 +1944,16 @@ $('#btn-vendors-save').addEventListener('click', async () => {
       };
     } else {
       const regionInput = $('#az-region');
+      // Drop vendors whose star list is empty; null when nothing is starred
+      // at all — same "never used" convention as music.favoritePrograms.
+      const fv = Object.fromEntries(
+        Object.entries(vendorState.favoriteVoices).filter(([, voices]) => voices.length),
+      );
       patch = {
         tts: {
           vendor: chain[0],   // chain head, for anything reading the scalar
           vendors: chain,
+          favoriteVoices: Object.keys(fv).length ? fv : null,
           azure: {
             // A disabled field is env-controlled: leave the stored value alone
             // instead of writing the env value into settings.json.

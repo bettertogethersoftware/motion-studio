@@ -103,6 +103,61 @@ pattern matches nothing — and a run with no tests is not a failure.
 **Lesson.** A green suite with a suspiciously round number is a red flag. Read
 the test count, not just the exit code.
 
+### 1.5 "Maximum quality" mp4 that plays as black video · **WARNED IN ENGINE**
+
+**Symptom.** The rendered mp4 plays audio but shows no picture in Windows
+Movies & TV (and most phones, TVs, and browsers). Every automated check
+passed: correct frame count, healthy file size, audio levels fine. It looks
+exactly like "the render produced no visuals."
+
+**Root cause.** `output.crf` was set to `0` — presumably as "best quality."
+For libx264, CRF 0 means *lossless*, and the H.264 spec forces lossless
+bitstreams into the **High 4:4:4 Predictive** profile even at `yuv420p`.
+Consumer decoders don't implement that profile and typically render black
+while the plain AAC audio plays. ffmpeg/VLC decode it fine — which makes
+diagnosis worse, because probing the file shows 900 valid frames.
+
+**Fix.** `crf: 18` (the mp4 default) is visually indistinguishable and plays
+everywhere. The existing lossless file didn't need re-rendering: one
+`ffmpeg -c:v libx264 -crf 18 -c:a copy` transcode from the lossless source is
+pixel-equivalent to a fresh render. Since v0.22 the engine warns:
+`encodingCompatibilityWarnings()` (core/formats.js) flags mp4+crf 0 at render
+start — a `[warn]` job-log line and `encodingWarnings` on the result/status.
+
+**Lesson.** "Lossless" and "highest quality" are not the same knob. CRF 0 is
+a *compatibility* decision, not a quality one — if you need lossless, that's
+what `prores` and `png-sequence` are for.
+
+### 1.6 Every scene visible at once, for the whole film · **WARNED IN ENGINE**
+
+**Symptom.** A 161-second video where all nine scenes' text is stacked on
+screen simultaneously from frame 0 to the end — titles, price charts,
+checklist, and the closing disclaimer all at once. Every automated check
+passed: syntax clean, determinism lint clean, render verified, audio fine.
+
+**Root cause.** One composition held all nine scenes, shown/hidden by adding
+a `.section` class *at runtime* inside each `Sequence` and a per-frame reset
+loop that only selects that class. Sections carried no default `opacity: 0`
+and no class in the markup — so a scene became hideable only *after its own
+sequence had already run*. Every scene whose time hadn't come sat at full
+opacity over the current one. Bonus defects from the same structure: a
+298-frame hole where one `Sequence`'s duration was retimed but not
+recomputed, and `classList.add` making frames depend on call history (a
+parallel worker starting mid-film renders differently than a serial pass).
+
+**Fix.** Structural: scene containers hidden by **default in CSS**, each
+`Sequence` only turns its own scene on, no `classList.add`/`remove` in the
+frame function — and for anything measured in minutes, one project per scene
+stitched with `build_film` instead of a single DOM juggling every scene.
+Since v0.22 the engine warns on all three fronts: `classlist-mutation` and
+`sequence-gap` lints in `write_composition_file`, and `structureWarnings`
+from `create_project`/`update_project_config` past ~90 seconds.
+
+**Lesson.** "It passed every check" only means the checks that exist. A
+low-effort agent follows the letter of a principle ("reset every frame ✓")
+without verifying its semantics (the reset selected nothing) — guidance for
+such agents must be recipes and machine-checked warnings, not principles.
+
 ---
 
 ## 2. Audio levels — measure, never inherit

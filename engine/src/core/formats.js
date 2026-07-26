@@ -88,6 +88,33 @@ export const FORMATS = Object.freeze({
   },
 });
 
+/**
+ * Player-compatibility warnings for an output config (v0.22).
+ *
+ * mp4 + crf 0 is the known trap: libx264's CRF 0 means LOSSLESS, and the
+ * H.264 spec puts lossless bitstreams in the "High 4:4:4 Predictive" profile
+ * even at yuv420p. Most consumer decoders (Windows Movies & TV, phone/TV/GPU
+ * hardware paths, browsers) cannot decode that profile — the file plays as
+ * black video with working audio, which reads as "the render produced no
+ * visuals" when the frames are all there. Happened with a real project;
+ * ffmpeg/VLC decode it fine, which makes the confusion worse.
+ *
+ * Never fatal — crf 0 stays legal (the file is valid, and a lossless master
+ * can be intentional). Same advisory contract as computeBalanceWarnings.
+ */
+export function encodingCompatibilityWarnings(output = {}) {
+  const warnings = [];
+  if ((output.format ?? 'mp4') === 'mp4' && output.crf === 0) {
+    warnings.push(
+      'mp4 with crf 0 encodes lossless H.264 ("High 4:4:4 Predictive" profile), which most players ' +
+        '(Windows Movies & TV, phones, TVs, browsers) cannot decode — the file shows BLACK VIDEO with ' +
+        'working audio. Use crf 18 for visually near-lossless mp4 that plays everywhere, or prores / ' +
+        'png-sequence if you truly need lossless.',
+    );
+  }
+  return warnings;
+}
+
 export function getFormat(name = 'mp4') {
   const fmt = FORMATS[name];
   if (!fmt) {

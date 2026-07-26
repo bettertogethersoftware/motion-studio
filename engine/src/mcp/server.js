@@ -79,7 +79,7 @@ import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm } from '../core/film.js';
-import { mixAudioOnly, measureAudioLevels } from '../core/encoder.js';
+import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -257,7 +257,9 @@ server.registerTool(
       'Returns the project id used by all other tools, plus the scaffolded file list. ' +
       "Any dimension you omit comes from the user's global settings (shown in the Studio's Global Settings " +
       'panel, factory defaults 30fps 1920×1080 150 frames) — pass a value explicitly whenever the video needs ' +
-      'a specific size or length, and read `config` in the response to see what it actually got.',
+      'a specific size or length, and read `config` in the response to see what it actually got. A duration ' +
+      'over ~90 seconds returns structureWarnings: long videos should be one project per SCENE stitched with ' +
+      'build_film, not one giant composition — heed it before authoring.',
     inputSchema: {
       name: z.string().min(1).describe('Human-readable project name'),
       fps: z.number().int().min(1).max(240).optional().describe('Default: global setting'),
@@ -280,7 +282,10 @@ server.registerTool(
     const seed = settings && outputSeedFromSettings(settings, proj.config.output);
     if (seed) proj.config = await store.updateConfig(proj.id, { output: seed });
     const files = await store.listFiles(proj.id);
-    return ok({ id: proj.id, name: proj.name, path: proj.path, config: proj.config, files });
+    return ok({
+      id: proj.id, name: proj.name, path: proj.path, config: proj.config, files,
+      ...structureAdvisory(proj.config),
+    });
   }),
 );
 
@@ -361,9 +366,32 @@ server.registerTool(
     const cur = await store.readConfig(projectId);
     if (patch.output) patch.output = { ...cur.output, ...patch.output };
     const config = await store.updateConfig(projectId, patch);
-    return ok({ config });
+    // Only nag when this call is what made it long — resizing audio on an
+    // already-long project shouldn't repeat the advisory every time.
+    return ok({ config, ...(patch.durationInFrames ? structureAdvisory(config) : {}) });
   }),
 );
+
+/**
+ * Long-composition advisory (v0.22). A single composition manages every
+ * scene's visibility in one DOM — the structure where scene-bleed bugs live —
+ * and one broken frame forces re-rendering the whole thing. The engine can't
+ * know the agent's intent, so this is advisory: returned once, at the moment
+ * the duration is set, which is when restructuring is still free.
+ */
+function structureAdvisory(config) {
+  const seconds = config.durationInFrames / config.fps;
+  if (seconds <= 90) return {};
+  return {
+    structureWarnings: [
+      `This composition is ${Math.round(seconds)}s long (${config.durationInFrames} frames). Motion Studio's ` +
+        'intended shape for long videos is one project per scene, stitched losslessly with build_film — a single ' +
+        'multi-minute composition must keep every scene hidden-by-default and switch visibility per frame in one ' +
+        'DOM, which is exactly where scene-bleed bugs come from, and any fix re-renders the entire length. ' +
+        'Split into scenes unless there is a strong reason not to (see the skill\'s "Long-form: multi-scene films").',
+    ],
+  };
+}
 
 server.registerTool(
   'read_composition_file',
@@ -389,8 +417,11 @@ server.registerTool(
       'Author against the frame API (resource motion-studio://reference/frame-api): no wall-clock time, ' +
       'register via MotionStudio.registerComposition(fn). ' +
       'JS/CSS is also scanned for frame-driven contract violations (Date.now, setInterval, Math.random, ' +
-      'requestAnimationFrame, THREE.Clock, real-time CSS transitions). Those come back as a "warnings" array ' +
-      'on success — the file IS written; fix them unless you are certain the usage is outside the frame function.',
+      'requestAnimationFrame, THREE.Clock, real-time CSS transitions, and classList.add/remove — persistent DOM ' +
+      'state that breaks frame purity: hide scene containers by DEFAULT in CSS and have each Sequence only turn ' +
+      'its own scene on). Literal Sequence(start, duration) calls are additionally checked against the project ' +
+      'duration: gaps and uncovered tails come back as "sequence-gap" warnings. All of it arrives as a "warnings" ' +
+      'array on success — the file IS written; fix each one unless you are certain it is deliberate.',
     inputSchema: {
       projectId: z.string(),
       path: z.string().describe('Project-relative path, e.g. composition.js'),
@@ -521,7 +552,10 @@ server.registerTool(
       'ignored), skip pre-flight and the audio mux, keep wall-clock duration (encoded at fps/frameStep), and ' +
       'write to <name>.proxy.<ext> so they never overwrite the deliverable. If another job is ' +
       'running, the new job is QUEUED (FIFO, one render at a time) and starts automatically — the response ' +
-      'then has state "queued" and a queuePosition. A full queue fails with queue_full.',
+      'then has state "queued" and a queuePosition. A full queue fails with queue_full. Do NOT set mp4 crf to 0 ' +
+      'for "maximum quality": CRF 0 is lossless H.264 (Hi444PP profile), which most players show as BLACK video ' +
+      'with working audio — crf 18 is the visually-lossless choice that plays everywhere. Such a render still ' +
+      'succeeds but carries encodingWarnings in the job status; relay them to the user.',
     inputSchema: {
       projectId: z.string(),
       frameRange: z
@@ -723,7 +757,10 @@ server.registerTool(
       'final render will use (delay, gain, trim/fades, limiter), minus the video (new in v0.19). Takes seconds ' +
       'instead of a full render: use it to audition the mix and check levels BEFORE rendering. Returns the mixed ' +
       'peakDb/meanDb, a clipping flag, and each source clip\'s own measured level so a bad balance points at the ' +
-      'track that caused it. mix.envelopeDb is the per-second RMS of the mix (null = digital silence) and ' +
+      'track that caused it. balanceWarnings lists tracks whose effective level (clip mean + gainDb) sits >=8 dB ' +
+      'below a louder overlapping track — such a track is likely INAUDIBLE even though the render succeeds and ' +
+      'nothing clips; fix the gains before rendering (gainDb must compensate each file\'s measured level, not ' +
+      'encode a template). mix.envelopeDb is the per-second RMS of the mix (null = digital silence) and ' +
       'mix.silentTailSeconds the length of the dead tail, so a mix that goes silent early is visible here ' +
       'without measuring the WAV yourself. Fails with no_audio_tracks when config.audio is empty.',
     inputSchema: {
@@ -763,13 +800,19 @@ server.registerTool(
     for (const t of config.audio) {
       const abs = path.resolve(entry.path, t.src);
       let levels = { peakDb: null, meanDb: null };
+      let clipDurationSec = null;
       if (/\.wav$/i.test(t.src)) {
         levels = await measureWavLevels(abs).catch(() => levels);
+        clipDurationSec = await wavDurationSeconds(abs).catch(() => null);
       } else {
         levels = (await measureAudioLevels({ filePath: abs, ffmpegPath })) ?? levels;
       }
-      tracks.push({ ...t, clipPeakDb: levels.peakDb, clipMeanDb: levels.meanDb });
+      tracks.push({ ...t, clipPeakDb: levels.peakDb, clipMeanDb: levels.meanDb, ...(clipDurationSec !== null ? { clipDurationSec: Number(clipDurationSec.toFixed(3)) } : {}) });
     }
+    // Balance check: a track buried >=10 dB under a louder overlapping track
+    // renders "successfully" and never clips — this is the only place the
+    // problem becomes visible to a caller that cannot listen.
+    const balanceWarnings = computeBalanceWarnings(tracks, { fps: config.fps, videoDurationSec });
     const mix = await measureWavLevels(outputPath).catch(() => ({ peakDb: null, meanDb: null }));
     // Whole-file peak/mean can look healthy while the tail is dead — report a
     // per-second envelope so a mix that goes silent early is visible here
@@ -780,6 +823,7 @@ server.registerTool(
       outputPath,
       durationSeconds: Number(videoDurationSec.toFixed(3)),
       limiter: config.output.audioLimiter !== false,
+      balanceWarnings,
       tracks,
       mix: {
         peakDb: mix.peakDb,
@@ -890,7 +934,9 @@ server.registerTool(
       '"openai" = OpenAI gpt-4o-mini-tts (style-instructable, needs OPENAI_API_KEY, no free tier), "deepgram" = ' +
       'Deepgram Aura-2 (best free cloud tier — $200 signup credit, needs DEEPGRAM_API_KEY). ' +
       'Omit `vendor` to use the machine\'s configured default — check it with list_vendors; an unconfigured vendor ' +
-      'fails with tts_unavailable, which the user must fix (do not retry). ' +
+      'fails with tts_unavailable, which the user must fix (do not retry). The user may have STARRED favorite ' +
+      'voices in the Studio: check `favoriteVoices` (vendor → voice names) in list_vendors\' speech settings and ' +
+      'prefer one of them when the request doesn\'t name a voice — they are voices the user auditioned and chose. ' +
       'Returns the clip length as durationSeconds AND durationInFrames — use durationInFrames to size the ' +
       'Sequence() block the narration plays under — plus the measured peakDb/meanDb of the clip, so you can set ' +
       'a music bed\'s gainDb relative to the narration without rendering first. ' +
@@ -1143,7 +1189,10 @@ server.registerTool(
       'head, `active` as the vendor that will ACTUALLY run (the first one in the chain that is available), and ' +
       '`fellBack: true` when those differ; each vendor carries its 1-based `priority` in the chain, or null when ' +
       'it is not in it. A chain of one is the common case and behaves exactly as a single configured vendor. ' +
-      'Reports credential *sources* only; never a key itself.',
+      'The music capability\'s settings include `favoritePrograms` (v0.22) — General MIDI instruments the user ' +
+      'starred in the Studio; prefer them when composing. The speech capability\'s settings likewise include ' +
+      '`favoriteVoices` (vendor → starred voice names) — prefer them when narrating. Reports credential ' +
+      '*sources* only; never a key itself.',
     inputSchema: {
       capability: z.enum(['speech', 'music']).optional().describe('Omit to report both'),
       probe: z.boolean().default(true)
@@ -1210,7 +1259,9 @@ server.registerTool(
       'reverb tail) and musicalDurationSeconds (the note content). Use durationInFrames to size the video, and ' +
       'startInFrames/gainDb to place and balance the bed against narration. ' +
       'Spec: bpm, plus tracks of notes. program = General MIDI instrument 0..127 (0 piano, 24 nylon guitar, 32 acoustic ' +
-      'bass, 40 violin, 48 strings, 56 trumpet, 73 flute…). drums:true routes the track to GM percussion. ' +
+      'bass, 40 violin, 48 strings, 56 trumpet, 73 flute…). The user may have STARRED favorite instruments in the ' +
+      'Studio: check `favoritePrograms` in list_vendors\' music settings and prefer those programs when the brief ' +
+      'doesn\'t name instruments — they are sounds the user auditioned and chose. drums:true routes the track to GM percussion. ' +
       'Each note: pitch 0..127 (60 = middle C), start & duration in beats (quarter notes), velocity 1..127. ' +
       'OR (v0.20) skip note-writing: pass a chord progression + style and the server compiles the notes — e.g. ' +
       "spec: { bpm: 96, progression: ['D','A','Bm','G'], style: 'pad-ballad', bars: 8 }. Chords are letters " +

@@ -202,6 +202,9 @@ export class JobManager {
       error: job.error,
       // Measured level of the muxed mix (v0.10) — the caller cannot hear it.
       ...(job.result?.audio ? { audio: job.result.audio } : {}),
+      // Player-compatibility advisories (v0.22, e.g. mp4 crf 0 → Hi444PP) —
+      // the caller cannot try the file in a consumer player either.
+      ...(job.result?.encodingWarnings ? { encodingWarnings: job.result.encodingWarnings } : {}),
       ...(queuePosition ? { queuePosition } : {}),
     };
   }

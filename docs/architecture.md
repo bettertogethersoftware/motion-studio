@@ -287,10 +287,22 @@ catch it. The graph therefore ends `[amix] → alimiter(limit=0.891, level=0) �
 alimiter's auto-levelling pinned off so it can never *boost* a quiet mix. Set
 `output.audioLimiter: false` to pass the sum through untouched. After muxing,
 the result is decoded once with `volumedetect` and reported as
-`audio: { tracks, limiter, peakDb, meanDb, clipping }` on the render result and
-in `get_render_status` — an agent cannot listen to the output, so a measured
-number is the only way it learns the mix clipped. Measurement failure is logged
-and ignored; it never fails an otherwise good render.
+`audio: { tracks, limiter, peakDb, meanDb, clipping, balanceWarnings }` on the
+render result and in `get_render_status` — an agent cannot listen to the
+output, so a measured number is the only way it learns the mix clipped.
+Measurement failure is logged and ignored; it never fails an otherwise good
+render.
+
+**Balance warnings (v0.22).** Clipping's inverse — a track buried under a
+louder concurrent track — fails no check at all: the mix only gets quieter.
+`computeBalanceWarnings()` (encoder.js, pure) flags any track whose effective
+mean (`clipMeanDb + gainDb`) sits ≥8 dB below a louder track overlapping at
+least half of its play window; `duck: true` tracks are declared background and
+exempt as the quiet side. Both `preview_audio` and the render report
+(`reportAudioLevels`, which measures each source clip — WAVs by direct PCM
+read, the rest via `volumedetect`) surface the same list, so the problem is
+visible whether or not the caller previewed. Same non-fatal contract as the
+clipping check.
 
 ### 9.1 Generated audio: three sources, one mixer (v0.12)
 

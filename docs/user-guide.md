@@ -74,7 +74,9 @@ put there shows up on the next refresh.
 
 ## Global settings (v0.15)
 
-**⚙ settings** in the sidebar footer opens the global configuration:
+**⚙ settings** in the sidebar footer opens the global configuration — since
+v0.22 an inline stage page like the tts/music vendor pages (it replaces the
+project view while open; close restores it), no longer a popup dialog:
 
 - **new-project defaults** — the fps/dimensions/duration the *+ new* dialog
   is pre-filled with, and what any new project gets when its creator didn't
@@ -196,6 +198,16 @@ Switching format automatically fixes the output filename's extension.
 `crf` = quality (lower is better/bigger; 0–63). Dimensions must be even for
 mp4/webm/prores (chroma subsampling); gif and png-sequence take any size.
 
+**Do not set mp4 `crf` to 0 for "maximum quality."** CRF 0 makes x264 encode
+*lossless* H.264, which the spec forces into the High 4:4:4 Predictive
+profile — a profile most players (Windows Movies & TV, phones, TVs,
+browsers) cannot decode. The symptom is black video with working audio, and
+it looks exactly like a broken render even though every frame is in the
+file. The render still succeeds but logs a `[warn]` and reports
+`encodingWarnings` in the job status. Use `crf` 18 (the default) for
+visually-lossless mp4 that plays everywhere; if you truly need lossless,
+use `prores` or `png-sequence` instead.
+
 **Transparency**: tick *transparent (alpha)* (webm, prores, or png-sequence
 only), give your composition a transparent background (no `background` on
 `html/body`), and everything unpainted renders as alpha 0. The result drops
@@ -253,6 +265,16 @@ the dead run at the end. Whole-file peak/mean can look perfectly healthy while
 the last seconds are silent; the envelope makes a mix that dies early visible
 in the tool result instead of only in the rendered film.
 
+The result's `balanceWarnings` list flags the opposite of clipping: a track
+whose effective level (its own measured mean plus its `gainDb`) sits 8 dB or
+more below a louder track playing at the same time. Such a track is almost
+certainly inaudible in the mix, yet the render succeeds and nothing clips —
+the mix only got quieter — so without this check the only symptom is "I can't
+hear one of my tracks". Gains should compensate each file's measured level,
+not apply a fixed template. Mark an intentional background layer `duck: true`
+and it is exempt. The final render runs the same check: warnings appear as
+`[warn]` lines in the job log and in the completion status's `audio` block.
+
 ### Generated narration (text-to-speech)
 
 You can synthesize a voiceover instead of supplying an audio file. An agent
@@ -280,13 +302,23 @@ Since v0.17 the voice comes from one of several **speech vendors**, chosen on th
   `MOTION_STUDIO_PIPER_VOICES`. Everything in that folder shows up in the
   picker.
 
-The page shows each vendor's live status, what it is missing if it is
+Since v0.22 the page shows **one vendor at a time behind tabs** (six cards made
+it a long scroll); the tab strip opens on whichever vendor would actually run.
+Each card shows the vendor's live status, what it is missing if it is
 unavailable, its voice catalogue (filterable by locale), and a **▶ test** button
 that speaks a line so you can hear a voice before committing a render to it.
+The music page uses the same tabs.
 Whichever vendor you save is used by the Studio *and* by every agent connected
 over MCP; a tool call can still name a vendor explicitly for one clip. If the
 selected vendor isn't configured, the speech tools return `tts_unavailable` and
 the rest of Motion Studio is unaffected.
+
+**Starring voices for agents (v0.22).** The **☆** next to each vendor's voice
+picker stars the selected voice; starred voices show as chips at the top of
+the page (click to remove) and save as `tts.favoriteVoices`, keyed by vendor.
+Connected agents see them in `list_vendors` and are instructed to prefer a
+starred voice when a request doesn't name one — the speech twin of the music
+page's starred instruments. An explicit voice in your request still wins.
 
 #### Ticking more than one vendor (preference chain)
 
@@ -328,6 +360,15 @@ Ticking both makes a preference chain, exactly as on the tts page above. The
 **target peak** control (default −3 dBFS) applies to both vendors and only ever
 attenuates, which is what keeps a bed at the same loudness against your
 narration when you switch. See [music-setup.md](music-setup.md).
+
+**Starring instruments for agents (v0.22).** Next to the audition picker, the
+**☆ favorite** button stars the selected instrument; starred programs show as
+chips (click one to remove it) and save with the music settings as
+`music.favoritePrograms`. Connected agents see the list in `list_vendors` and
+are instructed to prefer starred programs when composing — so auditioning
+sounds you like directly steers what generated music uses, instead of every
+piece defaulting to piano and strings. An explicit instrument in your request
+still wins.
 
 ## Long-form films (multiple scenes)
 

@@ -31,9 +31,14 @@ engine is unaffected.
 
 ## Picking a vendor
 
-**In the Studio:** `npm run studio` → **🗣 tts** in the sidebar footer. Each card shows that vendor's live status, what it is
+**In the Studio:** `npm run studio` → **🗣 tts** in the sidebar footer. Vendors sit behind tabs (v0.22, one card at a
+time; the strip opens on the vendor that would actually run). Each card shows that vendor's live status, what it is
 missing, its voice catalogue, and a ▶ test button that speaks a line so you can
 hear a voice before committing a render to it. Tick one, press **save**.
+The **☆** next to each voice picker stars the selected voice (v0.22): starred
+voices save as `tts.favoriteVoices` and are reported to agents via
+`list_vendors`, which are instructed to prefer them when no voice is named —
+auditioning directly steers what narration sounds like.
 
 **Everywhere else:** the choice is global — it lives in
 `~/.motion-studio/settings.json` as `tts.vendor` and applies to the Studio *and*

@@ -55,8 +55,9 @@ import { spawn } from 'node:child_process';
 import { EngineError, ErrorCodes, asEngineError } from './errors.js';
 import { ProgressEmitter, ProgressStreamParser } from './progress.js';
 import { createPuppeteerBrowser, isBrowserCrash } from './browser.js';
-import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount } from './encoder.js';
-import { getFormat, INTERMEDIATE } from './formats.js';
+import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount, computeBalanceWarnings } from './encoder.js';
+import { measureWavLevels, wavDurationSeconds } from './tts.js';
+import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -210,14 +211,22 @@ async function runPreflight(page, frames, signal, progress) {
  * clipped mix is that it sounds bad, which an agent cannot hear. Never fatal:
  * a measurement failure must not fail an otherwise good render.
  */
-async function reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal }) {
+async function reportAudioLevels({ outputPath, config, output, ffmpegPath, projectRoot, progress, onChildPid, signal }) {
   const levels = await measureAudioLevels({
     filePath: outputPath, ffmpegPath, onSpawn: onChildPid, signal,
   }).catch(() => null);
   const limiter = output.audioLimiter !== false;
+  // Balance check (v0.22): a buried track passes every automated check — the
+  // mix only gets QUIETER — so measure each source clip and flag any track
+  // sitting far under a louder overlapping one. Never fatal, like the rest of
+  // this function: a measurement failure just skips that track.
+  const balanceWarnings = projectRoot
+    ? await measureTrackBalance({ config, projectRoot, ffmpegPath, onChildPid, signal }).catch(() => [])
+    : [];
+  for (const w of balanceWarnings) progress.log('warn', w);
   if (!levels) {
     progress.log('warn', 'Could not measure output audio levels.');
-    return { tracks: config.audio.length, limiter };
+    return { tracks: config.audio.length, limiter, balanceWarnings };
   }
   const clipping = levels.peakDb !== null && levels.peakDb >= -0.1;
   if (clipping) {
@@ -229,7 +238,31 @@ async function reportAudioLevels({ outputPath, config, output, ffmpegPath, progr
           : 'Lower the track gainDb values, or set output.audioLimiter to true.'),
     );
   }
-  return { tracks: config.audio.length, limiter, ...levels, clipping };
+  return { tracks: config.audio.length, limiter, ...levels, clipping, balanceWarnings };
+}
+
+/** Measure each config.audio clip's own level/duration and run the shared
+ *  balance check. WAVs are read directly (fast header+PCM pass); anything else
+ *  decodes through ffmpeg. Unmeasurable clips are skipped, never fatal. */
+async function measureTrackBalance({ config, projectRoot, ffmpegPath, onChildPid, signal }) {
+  if (!config.audio || config.audio.length < 2) return [];
+  const measured = [];
+  for (const t of config.audio) {
+    const abs = path.resolve(projectRoot, t.src);
+    let clipMeanDb = null;
+    let clipDurationSec = null;
+    if (/\.wav$/i.test(t.src)) {
+      clipMeanDb = (await measureWavLevels(abs).catch(() => ({ meanDb: null }))).meanDb;
+      clipDurationSec = await wavDurationSeconds(abs).catch(() => null);
+    } else {
+      clipMeanDb = ((await measureAudioLevels({ filePath: abs, ffmpegPath, onSpawn: onChildPid, signal })) ?? {}).meanDb ?? null;
+    }
+    measured.push({ ...t, clipMeanDb, clipDurationSec });
+  }
+  return computeBalanceWarnings(measured, {
+    fps: config.fps,
+    videoDurationSec: config.durationInFrames / config.fps,
+  });
 }
 
 /**
@@ -344,6 +377,10 @@ export async function renderComposition(opts) {
   const entryUrl = pathToFileURL(path.resolve(projectPath, config.entry)).href;
 
   progress.start({ jobId, totalFrames, fps: config.fps, width: capture.width, height: capture.height });
+  // Advisory, never fatal: the render proceeds, but the caller learns NOW that
+  // the file may not play (crf 0 → Hi444PP), not after shipping black video.
+  const encodingWarnings = skipAudio ? [] : encodingCompatibilityWarnings(output);
+  for (const w of encodingWarnings) progress.log('warn', w);
   await fsp.mkdir(isPngSequence ? outPath : path.dirname(outPath), { recursive: true });
 
   // Before Chromium: a lock failure should cost nothing.
@@ -491,7 +528,7 @@ export async function renderComposition(opts) {
         } finally {
           await fsp.unlink(silent).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath: outPath, config, output, ffmpegPath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath: outPath, config, output, ffmpegPath, projectRoot: projectPath, progress, onChildPid, signal });
       }
     }
 
@@ -509,6 +546,7 @@ export async function renderComposition(opts) {
       framesVerified: verified.verified,
       ...(audio ? { audio } : {}),
       ...(prx ? { proxy: prx } : {}),
+      ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
   } catch (err) {
     const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
@@ -673,6 +711,11 @@ export async function renderParallel(opts) {
   const startedAt = Date.now();
   progress.start({ jobId, totalFrames, fps: config.fps, width: config.width, height: config.height });
 
+  // Warn once from the parent — workers run with --segment (skipAudio) and
+  // stay quiet, and the concat inherits the segments' profile anyway.
+  const encodingWarnings = encodingCompatibilityWarnings(output);
+  for (const w of encodingWarnings) progress.log('warn', w);
+
   // One browser launch here buys the chance to fail before spawning N of them.
   if (preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
     const probeBrowser = await browserFactory({});
@@ -833,7 +876,7 @@ export async function renderParallel(opts) {
         } finally {
           await fsp.unlink(silentOut).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, projectRoot: projectPath, progress, onChildPid, signal });
       } else if (config.audio?.length && !fmt.audioArgs) {
         progress.log('warn', `Format "${output.format}" cannot carry audio; audio tracks skipped.`);
       }
@@ -851,6 +894,7 @@ export async function renderParallel(opts) {
       outputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(audio ? { audio } : {}),
+      ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
   } catch (err) {
     killChildren();

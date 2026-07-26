@@ -280,6 +280,37 @@ test('chain: synthesis runs on the fallback vendor, not the unavailable favourit
   }
 });
 
+/* ------------------------ favorite voices (v0.22) ------------------------ */
+
+test('settings: favoriteVoices round-trips and reaches the speech report', async () => {
+  await updateSettings({ tts: { favoriteVoices: { azure: ['en-US-AvaNeural'], piper: ['en_US-lessac-high'] } } }, home);
+  const s = await readSettings(home);
+  assert.deepEqual(s.tts.favoriteVoices, { azure: ['en-US-AvaNeural'], piper: ['en_US-lessac-high'] });
+  const report = await speechVendorReport({ dataDir: home, probe: false });
+  assert.deepEqual(report.settings.favoriteVoices, { azure: ['en-US-AvaNeural'], piper: ['en_US-lessac-high'] });
+  await updateSettings({ tts: { favoriteVoices: null } }, home);
+  assert.equal((await readSettings(home)).tts.favoriteVoices, null);
+});
+
+test('settings: favoriteVoices refuses unknown vendors, empty names, duplicates', () => {
+  for (const bad of [
+    { notavendor: ['x'] },
+    { azure: ['', 'ok'] },
+    { azure: ['dup', 'dup'] },
+    { azure: 'en-US-AvaNeural' },
+    ['azure'],
+  ]) {
+    assert.throws(
+      () => validateSettings({ ...DEFAULT_SETTINGS, tts: { ...DEFAULT_SETTINGS.tts, favoriteVoices: bad } }),
+      (e) => e.code === 'invalid_config',
+      `expected invalid_config for ${JSON.stringify(bad)}`,
+    );
+  }
+  // An empty map and an empty per-vendor list are both legal (nothing starred).
+  validateSettings({ ...DEFAULT_SETTINGS, tts: { ...DEFAULT_SETTINGS.tts, favoriteVoices: {} } });
+  validateSettings({ ...DEFAULT_SETTINGS, tts: { ...DEFAULT_SETTINGS.tts, favoriteVoices: { azure: [] } } });
+});
+
 test('vendors: both stubs probe as available', async () => {
   const report = await speechVendorReport({ dataDir: home });
   const byId = Object.fromEntries(report.vendors.map((v) => [v.id, v]));

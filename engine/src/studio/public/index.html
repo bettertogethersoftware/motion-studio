@@ -75,7 +75,17 @@
 
       <div id="cap-speech">
       <p class="chain-note mono" id="speech-chain-note"></p>
-      <div class="vendor-cards">
+      <div class="fieldrow music-fav">
+        <span class="section-label" style="margin:0">favorite voices</span>
+        <span id="voice-fav-list"></span>
+      </div>
+      <p class="dim note">
+        Star a voice with the ☆ next to any vendor's voice picker. Starred voices save with the speech
+        settings and are reported to connected agents (<code>favoriteVoices</code> in <code>list_vendors</code>),
+        so narration prefers voices you actually chose. Click a chip to remove it.
+      </p>
+      <nav class="vendor-tabs" id="speech-tabs"></nav>
+      <div class="vendor-cards tabbed">
         <!-- ------------------------------ system ------------------------------ -->
         <article class="vendor-card" data-vendor="system">
           <header class="vendor-head">
@@ -100,7 +110,10 @@
               <input data-test-text="system" value="Motion Studio. Scene one, take one." maxlength="400">
             </label>
             <label>voice
-              <select data-voice="system"></select>
+              <span class="voice-pick">
+                <select data-voice="system"></select>
+                <button type="button" class="ghost tiny" data-fav-voice="system" title="star this voice — agents narrating are told to prefer starred voices">☆</button>
+              </span>
             </label>
             <button class="ghost test-btn" data-test="system">▶ test</button>
             <span class="dim mono" data-test-msg="system"></span>
@@ -140,7 +153,10 @@
               <input id="az-search" placeholder="name / gender" spellcheck="false">
             </label>
             <label class="wide">default voice
-              <select data-voice="azure"></select>
+              <span class="voice-pick">
+                <select data-voice="azure"></select>
+                <button type="button" class="ghost tiny" data-fav-voice="azure" title="star this voice — agents narrating are told to prefer starred voices">☆</button>
+              </span>
             </label>
             <label>style
               <select id="az-style"><option value="">(none)</option></select>
@@ -199,7 +215,10 @@
               <input data-test-text="piper" value="Motion Studio. Scene one, take one." maxlength="400">
             </label>
             <label>voice
-              <select data-voice="piper"></select>
+              <span class="voice-pick">
+                <select data-voice="piper"></select>
+                <button type="button" class="ghost tiny" data-fav-voice="piper" title="star this voice — agents narrating are told to prefer starred voices">☆</button>
+              </span>
             </label>
             <button class="ghost test-btn" data-test="piper">▶ test</button>
             <span class="dim mono" data-test-msg="piper"></span>
@@ -219,7 +238,8 @@
 
       <div id="cap-music" class="hidden">
       <p class="chain-note mono" id="music-chain-note"></p>
-      <div class="vendor-cards">
+      <nav class="vendor-tabs" id="music-tabs"></nav>
+      <div class="vendor-cards tabbed">
         <!-- ------------------------------- node -------------------------------- -->
         <article class="vendor-card" data-vendor="node">
           <header class="vendor-head">
@@ -295,6 +315,15 @@
         <button class="ghost test-btn" data-test="music">▶ listen</button>
         <span class="dim mono" data-test-msg="music"></span>
       </div>
+      <div class="fieldrow music-fav">
+        <button id="mu-fav-toggle" class="ghost" type="button" title="star the audition instrument — agents composing music are told to prefer starred programs">☆ favorite</button>
+        <span id="mu-fav-list"></span>
+      </div>
+      <p class="dim note">
+        Starred instruments save with the music settings and are reported to connected agents
+        (<code>favoritePrograms</code> in <code>list_vendors</code>), so generated music leans on the sounds
+        you actually like instead of defaulting to piano and strings.
+      </p>
       <p class="dim note">
         Target peak applies to <em>both</em> music vendors and only ever attenuates — a quiet arrangement stays quiet.
         It is what keeps a bed at the same loudness against your narration when you switch vendors.
@@ -303,6 +332,66 @@
       <p class="section-label">environment <span class="dim">(read-only)</span></p>
       <dl id="music-env" class="env-list mono"></dl>
       </div><!-- /cap-music -->
+    </section>
+
+    <!-- Global settings (v0.22): an inline stage page like the vendor pages,
+         not a modal — same header grammar, same close/save placement. -->
+    <section id="settings-page" class="vendors-page hidden">
+      <header class="page-head">
+        <h2>global settings</h2>
+        <span class="dim">defaults and paths — for the Studio and every connected agent</span>
+        <span class="spacer"></span>
+        <span id="settings-msg" class="dim"></span>
+        <button id="btn-settings-close" class="ghost">close</button>
+      </header>
+      <form id="settings-form" autocomplete="off">
+        <p class="section-label">new-project defaults</p>
+        <div class="fieldrow">
+          <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
+          <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
+          <label>fps <input name="fps" type="number" min="1" max="240"></label>
+          <label>frames <input name="durationInFrames" type="number" min="1"></label>
+        </div>
+        <p class="section-label">render</p>
+        <div class="fieldrow">
+          <label>default workers
+            <select name="defaultWorkers">
+              <option value="1">1 (serial)</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="6">6</option>
+              <option value="8">8</option>
+              <option value="10">10</option>
+            </select>
+          </label>
+        </div>
+        <p class="section-label">ffmpeg</p>
+        <div class="fieldrow">
+          <label class="grow">binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
+        </div>
+        <div class="fieldrow">
+          <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>
+          <label>default preset
+            <select name="ffmpegPreset">
+              <option value="">engine default</option>
+              <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+              <option>faster</option><option>fast</option><option>medium</option>
+              <option>slow</option><option>slower</option><option>veryslow</option>
+            </select>
+          </label>
+          <span id="ffmpeg-probe" class="dim mono probe"></span>
+        </div>
+        <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
+        used for every render and the prereq check; new-project defaults and crf/preset fill in whatever a new
+        project doesn't specify, and an agent that asks for a specific size or codec still gets it.
+        <em>Newly created</em> projects only — existing projects keep their own.</p>
+        <div class="fieldrow">
+          <button type="submit" class="primary">save</button>
+        </div>
+        <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
+        <dl id="settings-env" class="env-list mono"></dl>
+      </form>
     </section>
 
     <div id="workbench" class="workbench hidden">
@@ -515,62 +604,6 @@
     <div class="fieldrow right">
       <button type="button" id="btn-asset-delete-cancel" class="ghost">cancel</button>
       <button type="submit" class="primary">delete</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="settings-dialog">
-  <form id="settings-form" method="dialog" autocomplete="off">
-    <h2>global settings</h2>
-    <p class="section-label">new-project defaults</p>
-    <div class="fieldrow">
-      <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
-      <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
-    </div>
-    <div class="fieldrow">
-      <label>fps <input name="fps" type="number" min="1" max="240"></label>
-      <label>frames <input name="durationInFrames" type="number" min="1"></label>
-    </div>
-    <p class="section-label">render</p>
-    <div class="fieldrow">
-      <label>default workers
-        <select name="defaultWorkers">
-          <option value="1">1 (serial)</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-          <option value="6">6</option>
-          <option value="8">8</option>
-          <option value="10">10</option>
-        </select>
-      </label>
-    </div>
-    <p class="section-label">ffmpeg</p>
-    <div class="fieldrow">
-      <label class="grow">binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
-    </div>
-    <div class="fieldrow">
-      <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>
-      <label>default preset
-        <select name="ffmpegPreset">
-          <option value="">engine default</option>
-          <option>ultrafast</option><option>superfast</option><option>veryfast</option>
-          <option>faster</option><option>fast</option><option>medium</option>
-          <option>slow</option><option>slower</option><option>veryslow</option>
-        </select>
-      </label>
-      <span id="ffmpeg-probe" class="dim mono probe"></span>
-    </div>
-    <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
-    used for every render and the prereq check; new-project defaults and crf/preset fill in whatever a new
-    project doesn't specify, and an agent that asks for a specific size or codec still gets it.
-    <em>Newly created</em> projects only — existing projects keep their own.</p>
-    <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
-    <dl id="settings-env" class="env-list mono"></dl>
-    <div class="fieldrow right">
-      <span id="settings-msg" class="dim"></span>
-      <button type="button" id="btn-settings-close" class="ghost">close</button>
-      <button type="submit" class="primary">save</button>
     </div>
   </form>
 </dialog>

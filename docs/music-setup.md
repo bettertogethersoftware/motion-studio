@@ -31,7 +31,10 @@ ready, saying so — and the rest of the engine is unaffected.
 **In the Studio:** `npm run studio` → **♫ music** in the sidebar footer. Each card shows live status and where each path came
 from; **▶ listen** renders a short phrase on any of the 128 General MIDI
 instruments through the selected vendor, so you can hear a SoundFont before
-committing a film to it.
+committing a film to it. **☆ favorite** (v0.22) stars the auditioned
+instrument: starred programs save as `music.favoritePrograms` and are
+reported to agents via `list_vendors`, which are instructed to prefer them
+when composing — auditioning directly steers generated music.
 
 **Everywhere else:** the choice is global (`~/.motion-studio/settings.json`,
 `music.vendor`) and applies to the Studio and to every agent over MCP:

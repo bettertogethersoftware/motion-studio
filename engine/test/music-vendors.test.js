@@ -293,6 +293,31 @@ test('settings: patching one music field keeps the others', async () => {
   await updateSettings({ music: { targetPeakDb: -3, node: { gain: DEFAULT_SETTINGS.music.node.gain } } }, home);
 });
 
+/* ------------------------ favorite programs (v0.22) ------------------------ */
+
+test('settings: favoritePrograms round-trips through save and read', async () => {
+  await updateSettings({ music: { favoritePrograms: [19, 30, 118] } }, home);
+  const s = await readSettings(home);
+  assert.deepEqual(s.music.favoritePrograms, [19, 30, 118]);
+  // The vendor report carries them to list_vendors / the Studio verbatim.
+  const report = await musicVendorReport({ dataDir: home, probe: false });
+  assert.deepEqual(report.settings.favoritePrograms, [19, 30, 118]);
+  await updateSettings({ music: { favoritePrograms: null } }, home);
+  assert.equal((await readSettings(home)).music.favoritePrograms, null);
+});
+
+test('settings: favoritePrograms refuses out-of-range programs and duplicates', () => {
+  for (const bad of [[128], [-1], [1.5], ['piano'], [19, 19]]) {
+    assert.throws(
+      () => validateSettings({ ...DEFAULT_SETTINGS, music: { ...DEFAULT_SETTINGS.music, favoritePrograms: bad } }),
+      (e) => e.code === 'invalid_config',
+      `expected invalid_config for ${JSON.stringify(bad)}`,
+    );
+  }
+  // Empty array = "un-starred everything" — allowed.
+  validateSettings({ ...DEFAULT_SETTINGS, music: { ...DEFAULT_SETTINGS.music, favoritePrograms: [] } });
+});
+
 /* ------------------------------ studio routes ----------------------------- */
 
 test('studio: GET /api/vendors reports speech and music side by side', async () => {

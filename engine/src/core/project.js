@@ -314,6 +314,15 @@ export class ProjectStore {
     }
     // Advisory only — a determinism violation still writes (v0.10).
     const warnings = checkDeterminism(content, relPath);
+    // Sequence-coverage advisory (v0.22): literal Sequence(start, dur) calls
+    // that leave holes against the configured duration. Config read is
+    // best-effort — a missing/broken project.json must not fail the write.
+    if (ext === '.js' || ext === '.mjs') {
+      const config = await this.readConfig(projectId).catch(() => null);
+      if (config?.durationInFrames) {
+        warnings.push(...checkSequenceCoverage(content, config.durationInFrames));
+      }
+    }
 
     await fsp.mkdir(path.dirname(abs), { recursive: true });
     const tmp = abs + '.tmp-' + process.pid;
@@ -791,6 +800,19 @@ const JS_RULES = [
     message: 'engine.runRenderLoop() drives itself off the wall clock. Call scene.render() inside setFrame.' },
   { rule: 'babylon-begin-animation', re: /\.\s*beginAnimation\s*\(/g,
     message: 'scene.beginAnimation() is wall-clock based. Animate transforms from `frame`.' },
+  // Persistent DOM state (v0.22): classList.add/remove inside composition code
+  // accumulates across frames — a class added at frame N is still there at
+  // frame N+1000, and NEVER there for a worker that starts mid-film. The
+  // real-world failure: scenes shown by adding a class when their Sequence
+  // first runs, "hidden" by a reset that only selects that class — so every
+  // scene whose time hasn't come yet is fully visible over the current one.
+  // classList.toggle(name, condition) is exempt: with a boolean it sets an
+  // absolute per-frame state, which is the correct pattern.
+  { rule: 'classlist-mutation', re: /\bclassList\s*\.\s*(?:add|remove)\s*\(/g,
+    message: 'classList.add/remove persists across frames and breaks frame purity — a worker starting mid-film ' +
+      'never sees classes earlier frames would have added. Hide scene containers by DEFAULT in CSS and have each ' +
+      'Sequence only turn its own scene on (direct style writes, or classList.toggle(name, condition) which sets ' +
+      'an absolute state every frame).' },
 ];
 
 const CSS_RULES = [
@@ -832,6 +854,61 @@ export function checkDeterminism(source, filename = 'composition.js') {
     }
   }
   return warnings.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * Static Sequence-coverage check (v0.22). A long composition is usually a
+ * chain of literal `Sequence(start, duration, …)` calls; when they don't tile
+ * the configured duration, the result is dead air (a gap nothing animates) or
+ * a scene that never plays — both invisible to the determinism lint and to a
+ * spot-check of frames that happen to land inside covered ranges. The
+ * real-world failure: a 4,840-frame film with a 298-frame hole where one
+ * Sequence's duration was retimed but not recomputed.
+ *
+ * Only literal number pairs are considered, and only when there are at least
+ * two of them — dynamically computed sequences (variables, arithmetic) make
+ * coverage unknowable statically, and a single Sequence is usually a partial
+ * overlay by design. Advisory, never a rejection, same contract as
+ * checkDeterminism.
+ */
+export function checkSequenceCoverage(source, durationInFrames, { gapFrames = 30 } = {}) {
+  if (!Number.isInteger(durationInFrames) || durationInFrames <= 0) return [];
+  const scanned = blankJs(source);
+  const calls = [];
+  const re = /\bSequence\s*\(\s*(\d+)\s*,\s*(\d+)/g;
+  let m;
+  while ((m = re.exec(scanned))) {
+    calls.push({
+      start: Number(m[1]),
+      end: Number(m[1]) + Number(m[2]),
+      line: scanned.slice(0, m.index).split('\n').length,
+    });
+  }
+  if (calls.length < 2) return [];
+
+  const lines = source.split('\n');
+  const snippetAt = (line) => (lines[line - 1] ?? '').trim().slice(0, 120);
+  const warnings = [];
+  const warn = (line, message) =>
+    warnings.push({ rule: 'sequence-gap', line, snippet: snippetAt(line), message });
+
+  // Merge into covered intervals, then walk for holes.
+  const sorted = [...calls].sort((a, b) => a.start - b.start);
+  let coveredEnd = 0;
+  for (const c of sorted) {
+    if (c.start > coveredEnd + gapFrames) {
+      warn(c.line,
+        `Sequence coverage gap: frames ${coveredEnd}–${c.start} have no Sequence scheduled — ` +
+        `${c.start - coveredEnd} frames of dead air unless a base layer animates there.`);
+    }
+    coveredEnd = Math.max(coveredEnd, Math.min(c.end, durationInFrames));
+  }
+  if (coveredEnd < durationInFrames - gapFrames) {
+    warn(sorted[sorted.length - 1].line,
+      `Sequence coverage ends at frame ${coveredEnd} but the composition runs to ` +
+      `${durationInFrames} — the last ${durationInFrames - coveredEnd} frames have no Sequence scheduled.`);
+  }
+  return warnings;
 }
 
 /**

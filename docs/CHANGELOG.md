@@ -2,6 +2,108 @@
 
 ## Unreleased
 
+### Scene-structure guardrails: the "every scene visible at once" failure is now machine-caught
+
+A real 161-second film shipped with all nine scenes stacked on screen for its
+entire length — visibility managed by `classList.add` inside each `Sequence`
+plus a reset loop selecting that runtime-added class, so nothing was ever
+hidden until its own scene had already played. Every existing check passed.
+Three new advisories close the holes that let it through:
+
+- **`classlist-mutation` lint** (`write_composition_file`): `classList.add`/
+  `remove` in composition code accumulates DOM state across frames and never
+  exists for a worker starting mid-film; `classList.toggle(name, bool)` is
+  exempt (absolute per-frame state).
+- **`sequence-gap` lint**: literal `Sequence(start, duration)` calls are
+  statically checked against the project duration — coverage holes and
+  uncovered tails are named with frame ranges (the real case had a 298-frame
+  hole from a retimed duration). Dynamic arguments and single sequences are
+  left alone.
+- **`structureWarnings`** from `create_project` / `update_project_config`
+  when the duration exceeds ~90 seconds: long videos belong in one project
+  per scene stitched with `build_film`, and the advisory fires at the moment
+  restructuring is still free.
+
+`docs/frame-api.md` (and the MCP resource) gains the scene-visibility recipe
+(§3) and two checklist items; SKILL.md states the recipe and tells agents to
+treat `structureWarnings` as a stop-and-restructure signal. All advisory,
+never write/render rejections — same contract as the determinism lint.
+
+### Favorite voices, vendor tabs, and an inline settings page
+
+Three Studio UI changes in one pass:
+
+- **Favorite voices** — the speech twin of favorite instruments. A **☆** next
+  to every vendor's voice picker stars the selected voice; starred voices
+  render as chips at the top of the tts page and save as `tts.favoriteVoices`
+  (vendor → distinct voice names, validated against the vendor list, `null`
+  when unused). They flow through the speech vendor report to `list_vendors`,
+  and the `synthesize_speech`/`list_vendors` descriptions (plus SKILL.md)
+  tell agents to prefer a starred voice when the request doesn't name one.
+- **Vendor tabs** — six speech cards had made the tts page a long scroll.
+  Both vendor pages now show one card at a time behind a tab strip (same tab
+  grammar as the workbench panel); the strip opens on the vendor that would
+  actually run, and enable/priority controls stay on each card.
+- **Global settings is a stage page, not a popup** — ⚙ settings now opens an
+  inline page styled like the vendor pages (replaces the project view while
+  open; close restores it), instead of a modal dialog. Same fields, same
+  save; the `#settings-dialog` modal is gone.
+
+### Favorite instruments: auditioning now steers what agents compose
+
+The Studio's audition-instrument picker was for your ears only — an agent
+composing via `synthesize_music` never knew what you liked and defaulted to
+piano and strings. A **☆ favorite** button next to the picker now stars
+General MIDI programs; they render as removable chips, save with the music
+settings (`music.favoritePrograms`, validated 0..127, no duplicates, `null`
+when unused), and flow through the music vendor report to `list_vendors`.
+The `synthesize_music` and `list_vendors` tool descriptions (and SKILL.md)
+tell agents to prefer starred programs when the brief doesn't name
+instruments — an explicit instrument in the request still wins.
+
+### Encoding-compatibility warnings: mp4 crf 0 no longer fails silently at playback
+
+`crf: 0` on mp4 reads as "maximum quality" but means **lossless** to libx264,
+and the H.264 spec puts lossless bitstreams in the High 4:4:4 Predictive
+profile — which most consumer decoders (Windows Movies & TV, phones, TVs,
+browsers) cannot play. The result is black video with working audio on a
+render that passed every check (real case: 900 verified frames, healthy
+size, correct audio — and nothing visible in the player).
+
+`encodingCompatibilityWarnings()` (core/formats.js — the registry that
+already owns all codec decisions) flags the combination at render start, in
+both the serial and parallel paths (workers stay quiet; the parent warns
+once). Surfaced as `[warn]` job-log lines, `encodingWarnings` on the render
+result and `get_render_status`, and a "do not set crf 0" note in the MCP
+render tool description. Never fatal — crf 0 stays legal for an intentional
+lossless master; the warning names `prores`/`png-sequence` as the formats
+actually meant for that.
+
+### Audio balance warnings: a buried track is now reported, not just audible
+
+A track sitting far below a louder overlapping track was the one mix failure
+nothing reported: the render succeeds, nothing clips (the mix only got
+*quieter*), and every check passes — but a layer is missing to the ear. Seen
+in practice when track gains are assigned as a template ("lead −2, layers
+−6/−10") against source files whose own levels already differ by more than
+the template assumes.
+
+`computeBalanceWarnings()` (core/encoder.js, pure and unit-tested) compares
+each track's effective mean level (`clipMeanDb + gainDb`) against louder
+tracks overlapping at least half of its play window, and warns at a ≥8 dB gap
+(the motivating case had a layer 9.3 dB down that the user reported as
+inaudible). Tracks marked `duck: true` are declared background and never warn
+as the quiet side. Surfaced in both places an agent looks:
+
+- **`preview_audio`** now returns `balanceWarnings` (plus each clip's
+  `clipDurationSec` for WAVs) alongside the existing per-clip levels.
+- **The render report** (`audio.balanceWarnings` on the `done` status, and
+  `[warn]` lines in the job log) runs the same check by measuring each source
+  clip — so the warning reaches even a caller that skipped the preview.
+
+Never fatal: unmeasurable clips are skipped and a measurement failure cannot
+fail an otherwise good render, same contract as the existing clipping check.
+
 ### Three more cloud speech vendors: ElevenLabs, OpenAI, Deepgram
 
 `synthesize_speech` now speaks through six vendors. The new three follow the

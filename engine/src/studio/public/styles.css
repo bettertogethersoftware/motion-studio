@@ -436,7 +436,6 @@ dialog .fieldrow { margin-bottom: 10px; }
 .foot-btn { flex: 1; padding: 3px 6px; font-size: 10px; }
 .foot-btn.active { color: var(--accent); border-color: var(--accent); }
 .rail-foot { display: flex; align-items: center; gap: 6px; }
-#settings-dialog { min-width: 460px; max-width: 620px; }
 .section-label {
   margin: 12px 0 8px;
   font: 11px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
@@ -514,6 +513,25 @@ dialog .fieldrow { margin-bottom: 10px; }
 button.ghost.tiny {
   font-size: 10px; line-height: 1; padding: 3px 5px; min-width: 0;
 }
+/* Favorite-instrument chips (v0.22): starred GM programs, click to remove. */
+.music-fav { align-items: center; flex-wrap: wrap; }
+#mu-fav-list, #voice-fav-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fav-chip {
+  font: 11px var(--mono);
+  padding: 2px 8px; border: 1px solid var(--accent); border-radius: 2px;
+  background: none; color: var(--accent); cursor: pointer; white-space: nowrap;
+}
+.fav-chip:hover { color: var(--err); border-color: var(--err); }
+/* Voice picker + its ☆ star sit on one line inside the label (v0.22). */
+.voice-pick { display: flex; gap: 4px; align-items: stretch; }
+.voice-pick select { flex: 1; min-width: 0; }
+/* Vendor tabs (v0.22): one card visible per capability — same tab grammar as
+   the workbench panel. Cards not behind the active tab are simply hidden. */
+.vendor-tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin: 10px 0 14px; }
+.vendor-cards.tabbed .vendor-card { display: none; }
+.vendor-cards.tabbed .vendor-card.tab-active { display: block; }
+/* The settings page reuses the vendors-page shell; keep the form readable. */
+#settings-page form { max-width: 720px; }
 button.ghost.tiny:disabled { opacity: 0.25; cursor: default; }
 .chain-note { font-size: 11px; color: var(--dim); margin: 0 0 14px; }
 .chain-note.warn { color: var(--warn, var(--err)); }

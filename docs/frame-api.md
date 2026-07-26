@@ -62,6 +62,14 @@ MotionStudio.registerComposition((frame) => {
 
 Sequences need not be contiguous or non-overlapping. Because elements a sequence controls keep their last styles when the sequence ends, reset/hide elements at the top of every frame (as above) so each frame is fully determined by that frame alone.
 
+**Scene visibility, the safe recipe (v1.4).** When one composition holds several scenes, the *only* robust pattern is:
+
+1. every scene container is **hidden by default in CSS** (`.scene { opacity: 0; }` on markup that carries the class in the HTML — not added later);
+2. each `Sequence` turns **its own scene on** (`el.style.opacity = 1`) and never touches the others;
+3. nothing inside the frame function calls `classList.add`/`classList.remove` — a class added at frame N persists to every later frame *and never exists for a render worker that starts mid-film*, so both a reset loop that selects a runtime-added class and any show/hide scheme built on class accumulation are broken by construction. `classList.toggle(name, condition)` with a boolean is fine: it sets an absolute state each frame.
+
+The failure mode this prevents: every scene of a multi-minute video visible at once, stacked, for the entire duration — while all automated checks pass, because nothing about it is an error. The `write_composition_file` lint flags `classList.add/remove` and statically checks literal `Sequence(start, duration)` calls against the composition duration (gaps and uncovered tails come back as `sequence-gap` warnings).
+
 ## 4. `window.frameReady` (manual mode)
 
 If you assign `window.setFrame` yourself instead of using `registerComposition`, you own the readiness handshake: set `window.frameReady = true` only once the DOM for the current frame is fully settled — fonts loaded, images decoded, layout stable. The capture loop polls this flag, screenshots when it sees `true`, and resets it before the next frame.
@@ -185,6 +193,8 @@ MotionStudio.registerComposition(async (frame) => {
 - [ ] Frame function produces identical output for the same `frame` value regardless of call history; elements hidden/reset at the top of each frame
 - [ ] All per-frame async work (font/image loading) is awaited inside the frame function
 - [ ] Multi-element timing uses `Sequence` rather than frame-offset arithmetic scattered through the code
+- [ ] Scene containers are hidden by **default in CSS** and only turned on by their own `Sequence`; no `classList.add`/`remove` anywhere in the frame function (§3's scene-visibility recipe)
+- [ ] Literal `Sequence(start, duration)` calls tile the full composition duration — no unscheduled gaps (`sequence-gap` warnings are clean)
 - [ ] Springy/looping motion uses `spring()` / `Loop()` (pure functions of frame) — never incremental per-frame physics or accumulated state
 - [ ] Particle-style effects (steam, dust, sparks, rain) use `particles()` — never a library particle system or per-frame velocity accumulation
 - [ ] `frame-api.js` is included via `<script>` **before** `composition.js`

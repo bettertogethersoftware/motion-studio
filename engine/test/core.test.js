@@ -6,10 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { resolveInProject } from '../src/core/sandbox.js';
-import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism } from '../src/core/project.js';
+import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism, checkSequenceCoverage } from '../src/core/project.js';
 import { parseProgressLine, ProgressStreamParser, ProgressEmitter } from '../src/core/progress.js';
 import { parseFfmpegVersion, parseNodeVersion } from '../src/core/prereqs.js';
-import { buildAudioFilter, LIMITER_FILTER } from '../src/core/encoder.js';
+import { buildAudioFilter, LIMITER_FILTER, computeBalanceWarnings } from '../src/core/encoder.js';
+import { encodingCompatibilityWarnings } from '../src/core/formats.js';
 import { ErrorCodes } from '../src/core/errors.js';
 import { DEFAULT_SETTINGS, withNewProjectDefaults, outputSeedFromSettings } from '../src/core/settings.js';
 
@@ -217,6 +218,51 @@ test('checkDeterminism: clean frame-driven composition produces no warnings', ()
   assert.deepEqual(checkDeterminism(src, 'composition.js'), []);
 });
 
+test('checkDeterminism: classList.add/remove flagged, toggle-with-state exempt (v0.22)', () => {
+  // add/remove accumulate DOM state across frames; toggle(name, bool) sets an
+  // absolute per-frame state and is the correct pattern.
+  const src = [
+    'MotionStudio.registerComposition((frame) => {',
+    "  intro.classList.add('section');",
+    "  old.classList.remove('visible');",
+    "  cursor.classList.toggle('cursor', frame % 2 === 0);",
+    '});',
+  ].join('\n');
+  const w = checkDeterminism(src, 'composition.js');
+  assert.deepEqual(w.map((x) => x.rule), ['classlist-mutation', 'classlist-mutation']);
+  assert.deepEqual(w.map((x) => x.line), [2, 3]);
+});
+
+test('checkSequenceCoverage: names gaps and uncovered tails against the duration (v0.22)', () => {
+  // The real failure: nine sequences with a 298-frame hole (2258–2556) and
+  // everything else contiguous.
+  const src = [
+    'Sequence(0, 137, (f) => {});',
+    'Sequence(137, 410, (f) => {});',
+    'Sequence(547, 1711, (f) => {});',   // ends 2258
+    'Sequence(2556, 2284, (f) => {});',  // starts after a 298-frame hole; ends 4840
+  ].join('\n');
+  const w = checkSequenceCoverage(src, 4840);
+  assert.equal(w.length, 1);
+  assert.equal(w[0].rule, 'sequence-gap');
+  assert.match(w[0].message, /2258–2556/);
+  assert.equal(w[0].line, 4);
+
+  // Uncovered tail: coverage stops well before the end.
+  const tail = checkSequenceCoverage('Sequence(0, 100, f => {});\nSequence(100, 100, f => {});', 900);
+  assert.equal(tail.length, 1);
+  assert.match(tail[0].message, /last 700 frames/);
+});
+
+test('checkSequenceCoverage: silent for dynamic args, single sequences, and full tiling', () => {
+  // Computed starts make coverage unknowable — do not guess.
+  assert.deepEqual(checkSequenceCoverage('Sequence(start, DUR, f => {});\nSequence(start + DUR, DUR, f => {});', 600), []);
+  // One sequence is usually a partial overlay by design.
+  assert.deepEqual(checkSequenceCoverage('Sequence(30, 60, f => {});', 600), []);
+  // Contiguous tiling with overlap: no warnings.
+  assert.deepEqual(checkSequenceCoverage('Sequence(0, 300, f => {});\nSequence(280, 320, f => {});', 600), []);
+});
+
 test('checkDeterminism: CSS real-time transitions flagged, zero/none ignored', () => {
   assert.equal(checkDeterminism('.a { transition: opacity 300ms ease; }', 'styles.css').length, 1);
   assert.equal(checkDeterminism('.a { animation: spin 2s linear infinite; }', 'styles.css').length, 1);
@@ -317,6 +363,94 @@ test('encoder: single track still gets the limiter, ending in [aout]', () => {
   const f = buildAudioFilter([{ src: 'a.mp3' }], 30);
   assert.match(f, /\[a0\]anull\[amix\]/);
   assert.ok(f.endsWith('[aout]'));
+});
+
+/* ---------------------- encoding warnings (v0.22) ---------------------- */
+
+test('formats: mp4 crf 0 warns — lossless lands in Hi444PP, unplayable on most decoders', () => {
+  const w = encodingCompatibilityWarnings({ format: 'mp4', crf: 0 });
+  assert.equal(w.length, 1);
+  assert.match(w[0], /High 4:4:4 Predictive/);
+  assert.match(w[0], /crf 18/);
+});
+
+test('formats: normal mp4 crf values do not warn', () => {
+  assert.deepEqual(encodingCompatibilityWarnings({ format: 'mp4', crf: 18 }), []);
+  assert.deepEqual(encodingCompatibilityWarnings({ format: 'mp4' }), []); // default crf
+});
+
+test('formats: crf 0 on non-mp4 formats does not warn', () => {
+  // VP9's crf 0 is just "best lossy" — lossless is a separate flag it never sets.
+  assert.deepEqual(encodingCompatibilityWarnings({ format: 'webm', crf: 0 }), []);
+  assert.deepEqual(encodingCompatibilityWarnings({ format: 'prores', crf: 0 }), []);
+  assert.deepEqual(encodingCompatibilityWarnings({ format: 'png-sequence', crf: 0 }), []);
+});
+
+test('formats: missing format defaults to mp4 for the crf 0 check', () => {
+  assert.equal(encodingCompatibilityWarnings({ crf: 0 }).length, 1);
+});
+
+/* ---------------------- balance warnings (v0.22) ---------------------- */
+
+const BAL_OPTS = { fps: 30, videoDurationSec: 60 };
+
+test('encoder: computeBalanceWarnings flags tracks buried under a louder concurrent track', () => {
+  // The real case that motivated this: template gains (-2/-6/-10) applied to
+  // files whose own levels already differ, burying two of three layers.
+  const w = computeBalanceWarnings([
+    { src: 'music-1.wav', gainDb: -2, clipMeanDb: -25.6 },
+    { src: 'music-2.wav', gainDb: -6, clipMeanDb: -30.9 },
+    { src: 'music-3.wav', gainDb: -10, clipMeanDb: -36.5 },
+  ], BAL_OPTS);
+  assert.equal(w.length, 2);
+  assert.match(w[0], /music-2\.wav/);
+  assert.match(w[0], /music-1\.wav/);
+  assert.match(w[1], /music-3\.wav/);
+});
+
+test('encoder: computeBalanceWarnings passes a level-matched mix', () => {
+  // Same files, gains compensating each file's measured level: all ≈ -27.6.
+  const w = computeBalanceWarnings([
+    { src: 'music-1.wav', gainDb: -2, clipMeanDb: -25.6 },
+    { src: 'music-2.wav', gainDb: 3, clipMeanDb: -30.9 },
+    { src: 'music-3.wav', gainDb: 9, clipMeanDb: -36.5 },
+  ], BAL_OPTS);
+  assert.deepEqual(w, []);
+});
+
+test('encoder: duck:true declares background — the quiet side never warns', () => {
+  const w = computeBalanceWarnings([
+    { src: 'narration.wav', gainDb: 0, clipMeanDb: -20 },
+    { src: 'bed.wav', gainDb: -14, clipMeanDb: -20, duck: true },
+  ], BAL_OPTS);
+  assert.deepEqual(w, []);
+});
+
+test('encoder: a quiet non-duck track still warns even when the loud track ducks', () => {
+  // Narration buried under a hot bed is a real problem regardless of ducking.
+  const w = computeBalanceWarnings([
+    { src: 'narration.wav', gainDb: 0, clipMeanDb: -34 },
+    { src: 'bed.wav', gainDb: 0, clipMeanDb: -20, duck: true },
+  ], BAL_OPTS);
+  assert.equal(w.length, 1);
+  assert.match(w[0], /narration\.wav/);
+});
+
+test('encoder: sequential clips do not warn — overlap must cover half the window', () => {
+  // Big level gap but the clips never play together (bounded by duration/trim).
+  const w = computeBalanceWarnings([
+    { src: 'loud.wav', gainDb: 0, clipMeanDb: -18, startInFrames: 0, clipDurationSec: 20 },
+    { src: 'quiet.wav', gainDb: 0, clipMeanDb: -40, startInFrames: 900, trimEndInFrames: 600 },
+  ], BAL_OPTS);
+  assert.deepEqual(w, []);
+});
+
+test('encoder: unmeasurable clips are skipped, not warned about', () => {
+  const w = computeBalanceWarnings([
+    { src: 'a.mp3', gainDb: 0, clipMeanDb: null },
+    { src: 'b.wav', gainDb: 0, clipMeanDb: -20 },
+  ], BAL_OPTS);
+  assert.deepEqual(w, []);
 });
 
 /* ---------------------- audio trim / fades / duck (v0.19) ---------------------- */
