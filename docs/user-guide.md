@@ -139,9 +139,11 @@ render.
 
 The **render** tab starts a job for the full composition (or a `start-end`
 frame range for a cheap pacing check). The workers selector parallelizes
-capture across 1–4 Chromium processes; segments are merged losslessly at the
-end. Expect near-linear speedup to about 4 workers, then diminishing returns
-as Chromium instances compete for memory.
+capture across Chromium processes (1, 2, 3, 4, 6, 8, or 10); segments are
+merged losslessly at the end. Expect near-linear speedup to about 4 workers,
+then diminishing returns beyond that as Chromium instances compete for memory
+— watch RAM usage at 6+ workers, since paging (not CPU) is usually the real
+ceiling.
 
 **Proxy/motion preview (v0.21):** when you want to check *motion* — pacing,
 easing, a camera move — before paying for the real thing, render a proxy: a

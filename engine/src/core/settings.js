@@ -129,7 +129,7 @@ export function validateSettings(s) {
     }
     const r = s.render;
     if (!r || typeof r !== 'object') problems.push('render: object required');
-    else if (!isPosInt(r.defaultWorkers) || r.defaultWorkers > 8) problems.push('render.defaultWorkers: integer in 1..8 required');
+    else if (!isPosInt(r.defaultWorkers) || r.defaultWorkers > 10) problems.push('render.defaultWorkers: integer in 1..10 required');
     const f = s.ffmpeg;
     if (!f || typeof f !== 'object') problems.push('ffmpeg: object required');
     else {
