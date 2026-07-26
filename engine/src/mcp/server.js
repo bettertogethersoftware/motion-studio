@@ -420,7 +420,9 @@ server.registerTool(
       'requestAnimationFrame, THREE.Clock, real-time CSS transitions, and classList.add/remove — persistent DOM ' +
       'state that breaks frame purity: hide scene containers by DEFAULT in CSS and have each Sequence only turn ' +
       'its own scene on). Literal Sequence(start, duration) calls are additionally checked against the project ' +
-      'duration: gaps and uncovered tails come back as "sequence-gap" warnings. All of it arrives as a "warnings" ' +
+      'duration: gaps and uncovered tails come back as "sequence-gap" warnings, and a function calling ctx.save() ' +
+      'more often than ctx.restore() as "canvas-save-restore" (the leaked transform/clip moves or hides everything ' +
+      'drawn later in the frame). All of it arrives as a "warnings" ' +
       'array on success — the file IS written; fix each one unless you are certain it is deliberate.',
     inputSchema: {
       projectId: z.string(),

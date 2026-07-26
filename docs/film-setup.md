@@ -52,11 +52,20 @@ between scenes — they affect encoding, not stream compatibility.)
 - **Per-scene audio (default).** With no `audio` argument, each scene's own audio
   is preserved through the concat. All scenes must be **consistently audio or all
   silent** (mixing the two breaks a stream copy → `inconsistent_scenes`).
-- **Master audio timeline.** Pass `audio: [{ src, startInFrames?, gainDb? }, …]`
-  (the same shape as `config.audio`, relative to the output project's `assets/`) to
-  lay **one** music-bed-plus-narration timeline over the *entire* film. This
-  **replaces** per-scene audio and is the clean choice for long-form — a score that
-  spans scene cuts, VO placed by absolute frame across the whole film.
+- **Master audio timeline.** Pass
+  `audio: [{ src, startInFrames?, gainDb?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }, …]`
+  (relative to the output project's `assets/`) to lay **one**
+  music-bed-plus-narration timeline over the *entire* film. This **replaces**
+  per-scene audio and is the clean choice for long-form — a score that spans
+  scene cuts, VO placed by absolute frame across the whole film.
+
+  As of **v0.22** this is genuinely the same shape as `config.audio`: trims,
+  fades and `duck` all reach the mixer. Before that the tool accepted only
+  `src`/`startInFrames`/`gainDb` and silently dropped the rest, so a bed you
+  tuned and measured with `preview_audio` — ducked under the narration, faded
+  at the ends — could not be reproduced in the film and you were left guessing
+  a static gain. If you are following the "audition, then assemble" loop below,
+  pass the **same track objects** to both.
 
 ### Tiling a music loop across the film
 
@@ -84,7 +93,18 @@ film.)
 
 A scene that chains clips — narrator, a quotation in a second voice, narrator
 again — derives every offset from the **measured** clip lengths, never from the
-text. For a scene starting at `filmOffset`:
+text.
+
+**Get `filmOffset` from the tool, never by adding up durations yourself**
+(v0.22): `build_film { scenes, plan: true }` returns `sceneLayout` — every
+scene's `filmOffset`, `durationInFrames` and `startSeconds` — and `plan` mode
+assembles nothing and does **not** require the scenes to be rendered, so you
+can call it as soon as the scene projects exist and their durations are set.
+That is exactly when you need the numbers, because narration and cue frames
+are derived from them. Accumulating the offsets by hand works right up until
+one slip silently desyncs audio from picture, and nothing downstream checks it.
+
+For a scene starting at `filmOffset`:
 
 ```
 a = filmOffset + LEAD                  # narr-a starts after the scene lead-in

@@ -36,9 +36,23 @@ Four fixes found by building a real nine-scene film end-to-end over MCP.
   perfectly valid JavaScript that still rendered. Same class as
   `classlist-mutation`: state that outlives the drawing it belonged to.
 
-Docs corrected alongside: SKILL.md no longer advises "assemble, then do one
-final encode" (the concat is `-c copy` and no MCP tool re-encodes — the scenes'
-own crf is what ships), and now warns that job ids die with the server.
+The rule is scoped per function *body* — declarations, function expressions
+and arrow functions alike, since `.forEach((p) => { ctx.save(); … })` is as
+common a drawing helper as a named one — and only the innermost unbalanced
+scope is reported, so a nested offender does not also indict every function
+enclosing it.
+
+Docs corrected alongside. SKILL.md now states the canvas save/restore rule,
+lists all three structural lint rules (`classlist-mutation`, `sequence-gap`,
+`canvas-save-restore`) among the warnings to treat as bugs, drops the advice to
+"assemble, then do one final encode" (the concat is `-c copy` and no MCP tool
+re-encodes — the scenes' own crf is what ships), and warns that job ids die
+with the server. The `write_composition_file` tool description names the canvas
+check.
+`film-setup.md` documents the widened master-timeline shape and points
+"Placing multi-clip narration" at `plan: true` for its `filmOffset`s instead of
+hand arithmetic; `sfx-setup.md`'s "chime on every scene cut" example now maps
+over a real `sceneLayout` rather than a `plan` object that never existed.
 
 ### Scene-structure guardrails: the "every scene visible at once" failure is now machine-caught
 

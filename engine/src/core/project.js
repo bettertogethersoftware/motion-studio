@@ -867,41 +867,72 @@ export function checkDeterminism(source, filename = 'composition.js') {
  * belonged to. Cost a whole scene in a real film; nothing flagged it, because
  * the code is perfectly valid JavaScript and the frame still renders.
  *
- * Scoped to named function declarations, where drawing helpers live: a helper
- * that pushes more than it pops is nearly always a bug, whereas whole-file
- * counting would flag legitimate conditional save/restore pairs.
+ * Scoped per function body — declarations, function expressions and arrow
+ * functions with a block body, since drawing helpers are written in all three
+ * (`.forEach((p) => { ctx.save(); … })` is as common as a named helper).
+ * Whole-file counting would instead flag legitimate conditional pairs.
+ *
+ * A nested offender makes its enclosing scopes look unbalanced too, so only
+ * the INNERMOST unbalanced scope is reported — that is the one to fix.
  */
 export function checkCanvasStateBalance(source) {
   const scanned = blankJs(source);
-  const warnings = [];
   const lines = source.split('\n');
-  const decl = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
-  let m;
-  while ((m = decl.exec(scanned))) {
-    // Walk braces from the body's opening { to find its end.
-    let depth = 0, i = m.index + m[0].length - 1, end = -1;
-    for (; i < scanned.length; i++) {
-      if (scanned[i] === '{') depth++;
-      else if (scanned[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+
+  // Every construct whose body is a `{ … }` block we should balance-check.
+  // The capture group, where present, is the name we can show the author.
+  const OPENERS = [
+    /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^)]*\)\s*\{/g,        // function decl + expr
+    // named arrow — parenthesised or bare single param
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g,
+    /(?:async\s+)?\([^)]*\)\s*=>\s*\{/g,                                // inline arrow, e.g. forEach
+    // bare single-param arrow; the identifier is the PARAMETER, not a name to
+    // report, so it is deliberately not captured.
+    /(?:async\s+)?(?:[A-Za-z_$][\w$]*)\s*=>\s*\{/g,
+  ];
+
+  const scopes = [];
+  for (const re of OPENERS) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(scanned))) {
+      const open = scanned.indexOf('{', m.index + m[0].length - 1);
+      if (open < 0) continue;
+      let depth = 0, end = -1;
+      for (let i = open; i < scanned.length; i++) {
+        if (scanned[i] === '{') depth++;
+        else if (scanned[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end < 0) continue;
+      const body = scanned.slice(open, end);
+      const saves = (body.match(/\.\s*save\s*\(\s*\)/g) ?? []).length;
+      const restores = (body.match(/\.\s*restore\s*\(\s*\)/g) ?? []).length;
+      if (saves > restores) scopes.push({ start: m.index, end, name: m[1], saves, restores });
     }
-    if (end < 0) continue;
-    const body = scanned.slice(m.index, end);
-    const saves = (body.match(/\.\s*save\s*\(\s*\)/g) ?? []).length;
-    const restores = (body.match(/\.\s*restore\s*\(\s*\)/g) ?? []).length;
-    if (saves > restores) {
-      const line = scanned.slice(0, m.index).split('\n').length;
-      warnings.push({
+  }
+
+  // Keep only innermost offenders, and one warning per body.
+  const seen = new Set();
+  return scopes
+    // Strictly-nested only: several patterns can match the SAME body (a named
+    // arrow also matches the inline-arrow pattern), and those are one function,
+    // not an outer and an inner. Same `end` ⇒ same body ⇒ dedupe below keeps
+    // the first, which is the pattern that knows the name.
+    .filter((s) => !scopes.some((o) => o.start > s.start && o.end < s.end))
+    .filter((s) => (seen.has(s.end) ? false : seen.add(s.end)))
+    .map((s) => {
+      const line = scanned.slice(0, s.start).split('\n').length;
+      const who = s.name ? `${s.name}()` : `the function at line ${line}`;
+      return {
         rule: 'canvas-save-restore',
         line,
         snippet: (lines[line - 1] ?? '').trim().slice(0, 120),
-        message: `${m[1]}() calls save() ${saves}× but restore() ${restores}× — an unrestored canvas state leaks its ` +
+        message: `${who} calls save() ${s.saves}× but restore() ${s.restores}× — an unrestored canvas state leaks its ` +
           'transform/clip/style into every later draw call in the frame (titles and overlays end up moved or ' +
           'invisible). Pair every save() with a restore().',
-      });
-    }
-    decl.lastIndex = end;
-  }
-  return warnings;
+      };
+    })
+    .sort((a, b) => a.line - b.line);
 }
 
 /**

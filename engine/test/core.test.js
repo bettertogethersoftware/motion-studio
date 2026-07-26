@@ -254,6 +254,30 @@ test('checkCanvasStateBalance: unrestored ctx.save() is flagged, balanced helper
   assert.match(w[0].message, /pottery\(\)/);
 });
 
+test('checkCanvasStateBalance: covers arrows and function expressions, not just declarations', () => {
+  // Drawing helpers get written in every function form — `.forEach((p) => {
+  // ctx.save(); … })` is as common as a named helper — so the rule must not be
+  // limited to `function name()`.
+  const named = checkCanvasStateBalance('const b = (ctx) => { ctx.save(); ctx.fill(); };');
+  assert.equal(named.length, 1);
+  assert.match(named[0].message, /^b\(\)/);                       // names the binding
+  assert.equal(checkCanvasStateBalance('const c = function () { ctx.save(); };').length, 1);
+  assert.equal(checkCanvasStateBalance('xs.forEach((p) => { ctx.save(); });').length, 1);
+  assert.equal(checkCanvasStateBalance('xs.forEach(p => { ctx.save(); });').length, 1);
+  // A balanced arrow nested in a balanced function is clean.
+  assert.deepEqual(
+    checkCanvasStateBalance('function e(){ xs.forEach((p) => { ctx.save(); ctx.restore(); }); }'), []);
+});
+
+test('checkCanvasStateBalance: reports the innermost offender once, not every enclosing scope', () => {
+  // The outer function is balanced on its own; the nested arrow is not. Naive
+  // counting would flag both, sending the author to the wrong line.
+  const src = 'function f(){ ctx.save(); ctx.restore(); xs.forEach((q) => { ctx.save(); }); }';
+  const w = checkCanvasStateBalance(src);
+  assert.equal(w.length, 1);
+  assert.match(w[0].message, /save\(\) 1× but restore\(\) 0×/);
+});
+
 test('checkCanvasStateBalance: ignores save/restore inside comments and strings', () => {
   const src = [
     'function draw() {',

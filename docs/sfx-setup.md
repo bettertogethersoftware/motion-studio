@@ -51,7 +51,9 @@ timeline, and a scene's `filmOffset`. That makes "a chime on every scene cut" a
 plain map:
 
 ```js
-cues: plan.scenes.map((s, i) => ({ atFrame: s.filmOffset, type: 'chime', pitch: PENT[i % 6] }))
+// sceneLayout comes straight from build_film { scenes, plan: true } (v0.22) —
+// it reports each scene's filmOffset without assembling or rendering anything.
+cues: sceneLayout.map((s, i) => ({ atFrame: s.filmOffset, type: 'chime', pitch: PENT[i % 6] }))
 ```
 
 `at` (seconds) is accepted for non-film use. Set **exactly one** of the two — a
