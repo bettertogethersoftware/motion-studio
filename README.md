@@ -15,13 +15,16 @@ two kinds of users through one shared render engine:
   preferences including an FFmpeg binary override.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
   tool surface (29 tools): author compositions, manage assets, synthesize
-  narration (local Windows voices, Azure AI Speech, or local neural Piper —
-  with measured levels and per-sentence timings), music beds (an in-process
-  SoundFont synth or FluidSynth) and sound effects, audition the audio mix
-  without a render (`preview_audio`), attach 3D libraries
-  (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as
-  images, render, poll, cancel, and assemble multi-scene films. No shell, no
-  arbitrary file access.
+  narration through **six speech vendors** (local Windows voices, local neural
+  Piper, or Azure / ElevenLabs / OpenAI / Deepgram in the cloud — with
+  measured levels, per-sentence timings, and a `deterministic` option), music
+  beds **composed from a chord progression** (`['D','A','Bm','G']` + a style)
+  or from raw notes (in-process SoundFont synth or FluidSynth) and sound
+  effects, audition the audio mix without a render (`preview_audio`), attach
+  3D libraries (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview
+  frames as images, render — including cheap **proxy motion drafts**
+  (`proxy: { scale, frameStep }`) — poll, cancel, and assemble multi-scene
+  films. No shell, no arbitrary file access.
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -122,7 +125,7 @@ motion-studio/
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.3 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      412 tests across 21 suites (see below)
+│   └── test/                      492 tests across 26 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4)
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
@@ -167,7 +170,7 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-412 tests across 21 suites: core units, pipeline integration (real FFmpeg,
+492 tests across 26 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure REST

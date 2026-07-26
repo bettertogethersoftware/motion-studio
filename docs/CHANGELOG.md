@@ -2,6 +2,88 @@
 
 ## Unreleased
 
+### Three more cloud speech vendors: ElevenLabs, OpenAI, Deepgram
+
+`synthesize_speech` now speaks through six vendors. The new three follow the
+Azure vendor's contract exactly — plain `fetch`, no SDK, PCM WAV whose header
+is the authoritative duration, and **API keys read from the environment only**
+(a key written into `settings.json` is refused with `invalid_config`, same as
+Azure's):
+
+- **`elevenlabs`** — the quality pick. Your account's voice library (voice_id
+  or unique display name; premade preferred by default), `wav_*` output
+  validated like Azure's formats (default `wav_24000` — 44.1k+ WAV is
+  Pro-gated), model selectable (`eleven_multilingual_v2` default).
+  `deterministic: true` now also works here, as a fixed request seed. Free
+  tier: 10,000 credits/month, API included, attribution required. Needs
+  `ELEVENLABS_API_KEY`.
+- **`openai`** — `gpt-4o-mini-tts` (13 fixed voices, `marin` default; four are
+  mini-only and model-gated). `style` becomes a natural-language instruction.
+  Text past the 4,096-char cap is chunked at sentence seams and joined
+  gaplessly (`chunked: N` reported). No free tier (~$0.015/min). Needs
+  `OPENAI_API_KEY`.
+- **`deepgram`** — the best free cloud tier: $200 signup credit, no card, no
+  expiry (≈6.6M characters). Forty Aura-2 English voices (`aura-2-thalia-en`
+  default), with an `aura-2-<speaker>-<lang>` passthrough for voices Deepgram
+  ships without notice. 2,000-char cap, chunked like OpenAI. Needs
+  `DEEPGRAM_API_KEY`.
+
+Each is stubbed by a local HTTP fake (including ElevenLabs pagination and
+Deepgram's Token-not-Bearer auth), so all six vendors are tested with zero
+network. The "deterministic is Piper-only" warning now names the vendors that
+do support it.
+
+The Studio's speech page scales with them: the three new cards are **generated
+from a descriptor table** (`CLOUD_VENDOR_CARDS` in `app.js`) rather than
+hand-written — env-only key, voice pick, per-vendor knobs, ▶ test, and chain
+checkbox/rank all come from the shared card grammar, so vendor #7 is a table
+row, not fifty lines of markup. The settings dialog's environment report now
+masks and lists the new key variables.
+
+### Compose music from a chord progression — no more hand-written MIDI notes
+
+`synthesize_music`'s `spec` now takes a **progression form** as an alternative
+to writing notes by hand:
+`{ bpm: 96, progression: ['D','A','Bm','G'], style: 'pad-ballad', bars: 8 }`.
+A new pure compiler (`engine/src/core/music-theory.js`) expands chord symbols —
+letters (`C`, `F#m`, `Bb7`, `Dmaj7`, `Esus4`, `C/E`) or roman numerals (`I`,
+`vi`, `V7`, `bVII`) with `key` — across `bars`, voiced into styled layers
+(`pad`, `pad-ballad`, `arp`, `drive`, `lullaby`), and emits the exact note spec
+both vendors already accept, so neither renderer changed. Chords are
+voice-led, registers are fixed per role (bass 36..50, arps 60..84), velocities
+leave mix headroom, and every piece ends on a held tonic bar. Output is fully
+deterministic; an optional integer `seed` varies the take via the same
+mulberry32 PRNG the Frame API uses. Optional `beatsPerBar`, `layers` (subset)
+and `key` refine the result; exactly one of `tracks`/`progression` is allowed,
+and unknown chords/styles/layers fail as `invalid_music_spec` naming the
+offender. The tool response gains `compiled: { style, bars, chords, notes }`.
+See docs/music-setup.md §Composing without writing notes.
+
+### Proxy/motion preview — check motion in ~1/8 the time
+
+Preview stills answer "does frame 40 look right?"; they cannot answer "does
+the move *read*?". The render tool's new `proxy: { scale?, frameStep? }`
+option (CLI: `--proxy [scale] --frame-step N`) renders a cheap draft for
+exactly that question: the Puppeteer viewport shrinks to `width×scale`
+(default 0.5, floored to EVEN dims — mp4/webm/prores reject odd ones) with
+the fixed-pixel composition mapped onto it by an inline
+`transform: scale(sx, sy)` on `documentElement` (safe under the frame
+contract: compositions never read window dimensions), and every
+`frameStep`-th frame (default 2) is captured and encoded at the rational rate
+`fps/frameStep` (`"30/2"` straight to `-framerate`), so wall-clock duration —
+the thing being judged — is preserved exactly.
+
+Deliberate constraints, all documented: proxies are serial (`workers` is
+ignored — a proxy is already cheap, and a Chromium fan-out would cost more in
+launches than it saves), skip pre-flight (the proxy IS the pre-flight), skip
+the audio mux (it's a motion check; audio would dominate the time saved), and
+the renderer itself inserts `.proxy` before the extension
+(`output.proxy.mp4`), so a draft can never overwrite the deliverable.
+`get_render_status` carries `proxy: { scale, frameStep }` so the Studio and
+agents can tell a draft from the real thing. Works with every configured
+format (gif/png-sequence/prores included); bad values fail up front with
+`invalid_config` naming the offending field.
+
 ### Sentence timings no longer change the narration's pacing
 
 `sentenceTimings: true` existed to *measure* a clip, but it was also silently
@@ -227,9 +309,8 @@ the same three things in every 3D composition.
 
 ### Deferred
 
-- **Proxy/motion preview** (cheap low-res or frame-skip render for checking
-  motion before committing) — needs capture-loop and viewport work in the
-  renderer; tracked for a future release.
+- ~~Proxy/motion preview~~ — shipped in this release (see "Proxy/motion
+  preview" above).
 
 ## v0.18 (2026-07-26)
 

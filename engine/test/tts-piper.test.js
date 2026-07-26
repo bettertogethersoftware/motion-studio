@@ -289,11 +289,14 @@ test('the vendor layer treats piper like any other speech vendor', async () => {
   }
 });
 
-test('the speech report lists all three vendors', async () => {
+test('the speech report lists every registered vendor', async () => {
   process.env.MOTION_STUDIO_PIPER_EXE = FAKE_PIPER;
   process.env.MOTION_STUDIO_PIPER_VOICES = voicesDir;
   const report = await speechVendorReport({ dataDir: home });
-  assert.deepEqual(report.vendors.map((v) => v.id), ['system', 'azure', 'piper']);
+  assert.deepEqual(
+    report.vendors.map((v) => v.id),
+    ['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram'],
+  );
   const piper = report.vendors.find((v) => v.id === 'piper');
   assert.equal(piper.available, true, piper.error);
   assert.equal(piper.offline, true, 'piper runs locally — that is its whole point');

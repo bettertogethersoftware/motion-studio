@@ -493,6 +493,41 @@ the render differ only in Chromium being headless. The agent preview,
 (real Puppeteer capture), so what the agent sees is byte-what-renders. The
 render is always the source of truth.
 
+### 12.1 Proxy/motion preview (v0.21)
+
+Between "a handful of preview stills" and "the full render" sits the question
+stills cannot answer: *does the motion read?* A proxy render
+(`proxy: { scale?, frameStep? }` on the render tool, `--proxy [scale]
+--frame-step N` on the CLI) answers it in roughly 1/8 the time by cutting the
+two costs that dominate a render:
+
+- **Screenshot size** (`scale`, default 0.5): the Puppeteer viewport is set to
+  `width×scale by height×scale`, **floored to even numbers** because
+  mp4/webm/prores reject odd dimensions and a proxy must work with whatever
+  format the project is configured for. The fixed-pixel composition is mapped
+  onto the small viewport by an inline `transform: scale(sx, sy);
+  transform-origin: 0 0` on `documentElement` — the one element compositions
+  never style themselves — with per-axis factors derived from the even-floored
+  dims so the content fills the viewport exactly. This is safe because of the
+  frame contract (§2): compositions are pure functions of frame authored at
+  fixed pixel sizes and never read window dimensions. The screenshot is *of the
+  small viewport* — capturing large and downscaling would keep the very cost
+  the proxy exists to cut.
+- **Frame count** (`frameStep`, default 2): frames `start, start+N, start+2N, …`
+  are captured (exact arithmetic — the final frame is not forced in) and
+  encoded at the rational rate `fps/frameStep` (FFmpeg takes `"30/2"`
+  verbatim), so wall-clock duration — the thing being judged — is preserved.
+
+Proxies are **serial by design** (`renderParallel` delegates and ignores
+`workers`: a proxy is already cheap, and a Chromium fan-out would cost more in
+launches than it saves in capture), **skip pre-flight** (the proxy *is* the
+pre-flight), and **skip the audio mux** (it is a motion check; on a typical
+project the audio pass would dominate the time saved). The output name gets
+`.proxy` inserted before the extension (`output.proxy.mp4`) by the renderer
+itself, so a proxy can never overwrite the deliverable, and job status carries
+`proxy: { scale, frameStep }` so the Studio and agents can tell a draft from
+the real thing.
+
 ## 13. Testability
 
 The renderer takes an injectable `browserFactory`; tests substitute a fake
@@ -508,7 +543,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-374 tests across 21 suites; see `engine/test/`. A clean run has **zero
+492 tests across 26 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

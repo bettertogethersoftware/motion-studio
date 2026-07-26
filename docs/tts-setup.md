@@ -8,12 +8,20 @@ vendors**:
 | `system` *(default)* | the local `MotionStudioTts.exe` driving the OS voices | `MOTION_STUDIO_TTS_EXE` | Windows only |
 | `azure` | Azure AI Speech neural voices over REST, in plain Node | `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | any |
 | `piper` *(v0.18)* | [Piper](https://github.com/OHF-Voice/piper1-gpl) neural voices, running locally | Piper installed + downloaded `.onnx` voices | any |
+| `elevenlabs` *(v0.20)* | ElevenLabs cloud voices over REST | `ELEVENLABS_API_KEY` | any |
+| `openai` *(v0.20)* | OpenAI `gpt-4o-mini-tts` over REST | `OPENAI_API_KEY` | any |
+| `deepgram` *(v0.20)* | Deepgram Aura-2 voices over REST | `DEEPGRAM_API_KEY` | any |
 
-The short version of choosing: `system` is free and offline but Windows-only
-and stuck with whatever voices Windows has; `azure` has the best voices and
-~140 locales but needs an account and bills per character; `piper` is neural
-*and* offline *and* free, at the cost of installing it and downloading voices
-yourself.
+The short version of choosing: the local vendors are still the recommended
+starting point — `system` is free and offline but Windows-only and stuck with
+whatever voices Windows has; `piper` is neural *and* offline *and* free, at
+the cost of installing it and downloading voices yourself. Among the cloud
+vendors: `azure` has the widest catalogue (~140 locales, expressive styles)
+but needs an account and bills per character; **`elevenlabs` has the best
+voice quality** and a real free tier (10,000 credits/month, attribution
+required); **`deepgram` is the best free cloud tier** — $200 of signup credit
+with no card and no expiry, roughly 6.6M characters; `openai` is solid and
+style-instructable but has no free tier at all (~$0.015/min of audio).
 
 They all write the same thing — a PCM WAV in the project's `assets/` — and all
 are driven by the same tools (`synthesize_speech`, `list_voices`) and the same
@@ -285,6 +293,172 @@ Expect roughly 1–2 seconds per line on CPU, most of it model loading; the
 
 ---
 
+## Vendor: `elevenlabs` (ElevenLabs) — v0.20
+
+The quality pick among the cloud vendors, and the second-best free option
+after Deepgram. Plain `fetch` (`engine/src/core/tts-elevenlabs.js`) against
+two REST endpoints — no SDK, no npm dependency:
+
+```
+GET  {endpoint}/v2/voices                              (paged voice library)
+POST {endpoint}/v1/text-to-speech/{voice_id}?output_format=wav_24000
+```
+
+### Setup
+
+1. Create an account at [elevenlabs.io](https://elevenlabs.io) and copy an API
+   key (profile → API keys).
+2. Set it on the machine. On Windows: `setx ELEVENLABS_API_KEY "<key>"`.
+3. Open a new terminal and restart the Studio / the MCP client.
+
+| purpose | variables (in precedence order) |
+|---|---|
+| key | `MOTION_STUDIO_ELEVENLABS_KEY`, `ELEVENLABS_API_KEY`, `XI_API_KEY` |
+| endpoint override | `MOTION_STUDIO_ELEVENLABS_ENDPOINT` (default `https://api.elevenlabs.io`; exists for tests) |
+| default voice | `MOTION_STUDIO_ELEVENLABS_VOICE` |
+
+As with every cloud vendor, **the key is environment-only** — writing one into
+`settings.json` is rejected with `invalid_config`. The non-secret half lives in
+`settings.json` as `tts.elevenlabs.voice` / `.model` / `.outputFormat`.
+
+**Free-tier reality:** 10,000 credits/month with API access included —
+enough to audition seriously — but **attribution is required and the free
+tier carries no commercial license**. Paid tiers lift both.
+
+### Voices, model, and options
+
+`list_voices` (vendor `"elevenlabs"`) returns your account's voice library —
+premade voices plus anything you cloned — as `voice_id`s with display names.
+Pass the `voice_id` verbatim, or a display name when it is unique in your
+library; anything else is a hard `unsupported_voice` with suggestions. With
+nothing configured the vendor prefers a `premade` voice over a clone.
+
+`tts.elevenlabs.model` picks the model: the default `eleven_multilingual_v2`
+is the proven narration model (10,000-char request cap); `eleven_v3` is more
+expressive but capped at 5,000 chars; `eleven_flash_v2_5` is the cheap/fast
+option.
+
+`tts.elevenlabs.outputFormat` defaults to `wav_24000`; only `wav_*` (headered
+RIFF) formats are offered, for the same duration-contract reason as Azure —
+and the default stays at 24 kHz deliberately, because ElevenLabs gates
+44.1 kHz+ WAV to Pro plans and the default must work on the free tier.
+
+- `rate` maps onto `voice_settings.speed`, which ElevenLabs only accepts in a
+  narrow 0.7–1.2 window — each engine step is 5% rather than the usual 10%,
+  so the sign and ordering of your rate choices survive a vendor switch even
+  though the magnitude compresses.
+- **`deterministic: true` sends a fixed seed** — the ElevenLabs counterpart of
+  Piper's noise-zeroing, same reproducibility intent.
+- `volume`, `style`, `pitch` have no mapping and are reported in `warnings`.
+
+---
+
+## Vendor: `openai` (OpenAI TTS) — v0.20
+
+OpenAI's `gpt-4o-mini-tts` voices over REST
+(`engine/src/core/tts-openai.js`). **No free tier** — narration costs roughly
+$0.015 per minute of audio on the default model — but the voices are strong
+and uniquely *style-instructable*:
+
+```
+GET  {endpoint}/v1/models/gpt-4o-mini-tts    (the probe: 200 = key works)
+POST {endpoint}/v1/audio/speech              JSON → binary WAV
+```
+
+### Setup
+
+1. Create an API key at [platform.openai.com](https://platform.openai.com).
+2. On Windows: `setx OPENAI_API_KEY "<key>"`.
+3. Open a new terminal and restart the Studio / the MCP client.
+
+| purpose | variables (in precedence order) |
+|---|---|
+| key | `MOTION_STUDIO_OPENAI_KEY`, `OPENAI_API_KEY` |
+| endpoint override | `MOTION_STUDIO_OPENAI_ENDPOINT` (default `https://api.openai.com`) |
+| default voice | `MOTION_STUDIO_OPENAI_VOICE` |
+
+The key is environment-only (a stored key is rejected); `settings.json` holds
+`tts.openai.voice` / `.model` / `.instructions`.
+
+### Voices, styles, and the character cap
+
+There is **no voice-listing API** — the catalogue is fixed: `alloy`, `ash`,
+`ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`, `shimmer`,
+`verse`, `marin`, `cedar`. The default is `marin`. Four of them (`ballad`,
+`verse`, `marin`, `cedar`) exist only on `gpt-4o-mini-tts`; asking a legacy
+model (`tts-1` / `tts-1-hd`) for one fails as `unsupported_voice` naming the
+voices that model does support.
+
+`style` becomes a natural-language instruction — `style: "cheerful"` is sent
+as `instructions: "Speak in a cheerful style."` — so any adjective works, no
+per-voice style list to consult. `tts.openai.instructions` can hold a standing
+instruction sentence instead (a per-call `style` outranks it). The legacy
+models predate the `instructions` parameter entirely: on those the option is
+reported in `warnings` and omitted from the request.
+
+**The chunking caveat:** the API hard-caps `input` at 4,096 characters. Longer
+narration is split at sentence boundaries, packed into ≤4,000-char chunks,
+synthesized per chunk, and joined gaplessly into one WAV — the response
+reports `chunked: N` when it happened. The tradeoff is cross-chunk prosody:
+the model reads each chunk independently, so intonation resets at each seam
+(the seams sit on sentence boundaries to keep that inaudible).
+
+`rate` maps onto the API's `speed` (0.25–4.0, each engine step = 10%).
+`volume`, `pitch`, `deterministic` are unsupported and reported in `warnings`.
+
+---
+
+## Vendor: `deepgram` (Deepgram Aura) — v0.20
+
+**The best free cloud tier**: a new [Deepgram](https://console.deepgram.com)
+account gets **$200 of credit with no card and no expiry** — at Aura's
+per-character price roughly **6.6 million characters** of narration, which for
+most film work is "free indefinitely". Plain `fetch`
+(`engine/src/core/tts-deepgram.js`):
+
+```
+GET  {endpoint}/v1/projects        (the probe: 200 = key works)
+POST {endpoint}/v1/speak?model=<voice>&encoding=linear16&container=wav&sample_rate=24000
+```
+
+### Setup
+
+1. Sign up at [console.deepgram.com](https://console.deepgram.com) (no card)
+   and create an API key.
+2. On Windows: `setx DEEPGRAM_API_KEY "<key>"`.
+3. Open a new terminal and restart the Studio / the MCP client.
+
+| purpose | variables (in precedence order) |
+|---|---|
+| key | `MOTION_STUDIO_DEEPGRAM_KEY`, `DEEPGRAM_API_KEY` |
+| endpoint override | `MOTION_STUDIO_DEEPGRAM_ENDPOINT` (default `https://api.deepgram.com`) |
+| default voice | `MOTION_STUDIO_DEEPGRAM_VOICE` |
+
+The key is environment-only (a stored key is rejected); `settings.json` holds
+only `tts.deepgram.voice`.
+
+### Voices and the character cap
+
+There is **no voice-listing API** — the catalogue is the documented Aura-2
+English set, named `aura-2-<speaker>-en` (`aura-2-thalia-en` is the default;
+`list_voices` shows all forty, from `andromeda` to `zeus`). A bare speaker
+name like `orion` also resolves. Deepgram ships new voices without notice, so
+**any name matching `aura-2-<speaker>-<lang>` is passed through** to the
+service even when it is not in the list — a genuinely unknown one comes back
+as `unsupported_voice`.
+
+**The chunking caveat:** the API hard-caps a request at 2,000 characters
+(413 beyond). Longer narration is split at sentence boundaries into
+≤1,900-char chunks and joined gaplessly, exactly like the `openai` vendor —
+`chunked: N` in the response, cross-chunk prosody as the tradeoff. Aura's
+seams are the most noticeable of the chunking vendors simply because the cap
+is the smallest, so prefer it for scene-length lines over essay-length ones.
+
+Aura's API takes text and a voice — nothing else. `rate`, `volume`, `style`,
+`pitch`, and `deterministic` are all reported in `warnings`.
+
+---
+
 ## Vendor: `system` (Windows speech exe) — v0.6
 
 Offline, free, no account, and the reason narration existed before v0.17. Motion
@@ -364,7 +538,8 @@ Notes:
 vendor and probe it (→ `tts_unavailable` before anything is written); resolve a
 destination under the project's `assets/` (default `assets/narration-<n>.wav`,
 sandbox-checked); hand the text to the vendor
-(`core/tts-vendors.js` → the exe, Azure, or Piper); parse the WAV header for the
+(`core/tts-vendors.js` → the exe, Azure, Piper, ElevenLabs, OpenAI, or
+Deepgram); parse the WAV header for the
 authoritative duration; measure the clip's `peakDb`/`meanDb` (v0.19 — a direct
 PCM read, so a music bed's `gainDb` can be set relative to the narration
 without rendering first); then, in `attach` mode, append a
@@ -412,8 +587,8 @@ the Studio UI) keep using the default.
 
 `core/tts-vendors.js` is the only vendor-aware module: it owns the vendor list,
 the precedence rule, and the probe/synthesize/list calls, so the Studio, the MCP
-server, and the CLI cannot disagree about which vendor is active. Both providers
-return the same payload shape (`{ ok, voice, durationSeconds, sampleRate,
+server, and the CLI cannot disagree about which vendor is active. Every provider
+returns the same payload shape (`{ ok, voice, durationSeconds, sampleRate,
 channels, bytes, outPath }`) and the same probe shape
 (`{ available, voices, error }`).
 
@@ -424,10 +599,11 @@ the `system` vendor succeeds and returns
 The exe path resolves as: explicit argument → `MOTION_STUDIO_TTS_EXE` → a
 bundled default at `engine/vendor/tts/MotionStudioTts.exe`. A `.js`/`.mjs`
 target is run through Node (used by the test stub
-`engine/test/helpers/fake-tts.mjs`); the Azure vendor is stubbed the same way by
-a local HTTP server (`engine/test/helpers/fake-azure-speech.mjs`) pointed at
-through the endpoint override, so both vendors are covered by tests with no exe,
-no subscription, and no network.
+`engine/test/helpers/fake-tts.mjs`); each cloud vendor is stubbed the same way
+by a local HTTP server (`engine/test/helpers/fake-azure-speech.mjs`,
+`fake-elevenlabs.mjs`, `fake-openai-tts.mjs`, `fake-deepgram.mjs`) pointed at
+through that vendor's endpoint override, so every vendor is covered by tests
+with no exe, no subscription, and no network.
 
 ---
 
@@ -502,6 +678,11 @@ terminal. `list_vendors` is the same information for an agent.
 - **`tts_unavailable` (azure)** — no key or region in the environment, a key
   Azure rejected (401/403), a region that doesn't resolve (404), or the service
   was unreachable. The message says which.
+- **`tts_unavailable` (elevenlabs / openai / deepgram)** — no key in the
+  environment (`ELEVENLABS_API_KEY` / `OPENAI_API_KEY` / `DEEPGRAM_API_KEY`),
+  a key the service rejected (401/403), or the service was unreachable. The
+  message says which, and names where to get a key — including that Deepgram's
+  signup credit is free and ElevenLabs' free tier includes API access.
 - **The key is set but the Studio says it isn't** — `setx` only affects
   *new* processes. Restart the Studio (and the MCP client, which passes its own
   environment to the server).

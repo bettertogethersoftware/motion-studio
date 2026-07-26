@@ -441,15 +441,16 @@ test('mcp: sentenceTimings gap replaces vendor pacing and duration math adds up'
     `reportedDurationSeconds ${res.data.reportedDurationSeconds}`);
 });
 
-test('mcp: deterministic flag is warned about, not dropped, on a non-piper vendor', async (t) => {
+test('mcp: deterministic flag is warned about, not dropped, on an unsupporting vendor', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const res = await callJson('synthesize_speech', {
     projectId, text: 'Pinned take.', voice: 'Microsoft David Desktop',
     mode: 'asset-only', deterministic: true,
   });
   assert.equal(res.isError, false, JSON.stringify(res.data));
+  // The warning names the vendors that DO support the flag (piper, elevenlabs).
   assert.ok(
-    (res.data.warnings ?? []).some((w) => /deterministic.*Piper-only/i.test(w)),
+    (res.data.warnings ?? []).some((w) => /deterministic.*piper and elevenlabs/i.test(w)),
     JSON.stringify(res.data.warnings),
   );
 });
@@ -842,6 +843,41 @@ test('mcp: synthesize_music returns music_unavailable when the toolchain is miss
   } finally {
     await badClient.close().catch(() => {});
   }
+});
+
+test('mcp: synthesize_music compiles a progression spec before dispatch (v0.20)', async () => {
+  // Self-contained: its own project, the shared (stubbed-fluidsynth) server.
+  // The compile step runs in the MCP server before any vendor work, so the
+  // stub receives — and echoes — the already-compiled note spec.
+  const proj = await callJson('create_project', { name: 'Progression MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+  const res = await callJson('synthesize_music', {
+    projectId: proj.data.id,
+    spec: { bpm: 96, progression: ['D', 'A', 'Bm', 'G'], style: 'pad-ballad', bars: 8, key: 'D' },
+    mode: 'asset-only',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.compiled.style, 'pad-ballad');
+  assert.equal(res.data.compiled.bars, 8);
+  assert.equal(res.data.compiled.chords, 9, '8 bars of progression + the held close');
+  assert.ok(res.data.compiled.notes > 0);
+  assert.equal(res.data.bpm, 96);
+  assert.equal(res.data.notes, res.data.compiled.notes, 'the vendor rendered exactly the compiled notes');
+
+  // A bad chord fails as invalid_music_spec, naming the chord — before any vendor runs.
+  const bad = await callJson('synthesize_music', { projectId: proj.data.id, spec: { progression: ['H7'] } });
+  assert.equal(bad.isError, true);
+  assert.equal(bad.data.code, 'invalid_music_spec');
+  assert.match(bad.data.message, /H7/);
+
+  // tracks + progression together is refused (whether by schema or compiler).
+  const both = await client.callTool({
+    name: 'synthesize_music',
+    arguments: {
+      projectId: proj.data.id,
+      spec: { progression: ['C'], tracks: [{ program: 0, notes: [{ pitch: 60, start: 0, duration: 1 }] }] },
+    },
+  }).then((r) => !!r.isError, () => true);
+  assert.equal(both, true, 'tracks and progression together must be refused');
 });
 
 /* ---------------------------- v0.12 sound effects ----------------------------- */

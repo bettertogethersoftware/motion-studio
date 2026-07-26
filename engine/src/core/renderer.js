@@ -13,6 +13,20 @@
  *   captureFrames(opts)         — N frames from ONE page load (v0.10)
  *   renderStill(opts)           — one frame written to disk as a PNG still
  *   preflightFrameList(a, b, n) — the frames a pre-flight pass probes
+ *   normalizeProxy(p)           — validate/default a proxy request (v0.21)
+ *   proxyDimensions(w, h, s)    — scaled capture size, floored to even
+ *   steppedFrameList(a, b, n)   — the frames a frame-step render captures
+ *   proxyOutputPath(p)          — "output.mp4" → "output.proxy.mp4"
+ *
+ * Proxy/motion preview (v0.21): `proxy: { scale?, frameStep? }` renders a
+ * cheap draft for checking motion before committing to the real thing. The
+ * viewport shrinks to width×scale (so the screenshot — the dominant capture
+ * cost — is small), every frameStep-th frame is captured, and the encode runs
+ * at the rational rate fps/frameStep so wall-clock duration is preserved.
+ * Proxies are serial-only (already cheap; renderParallel delegates), skip
+ * pre-flight (the proxy IS the pre-flight), skip the audio mux (it is a
+ * motion check, and audio would dominate the time saved), and write to
+ * `<name>.proxy.<ext>` so a proxy can never overwrite the deliverable.
  *
  * Pre-flight (v0.10): a composition that throws only at, say, frame 90 used to
  * take the whole render down after ~90 frames of work (and after spawning every
@@ -100,6 +114,73 @@ export function preflightFrameList(startFrame, endFrame, count = 5) {
     frames.add(startFrame + Math.round(((total - 1) * i) / (n - 1)));
   }
   return [...frames].sort((a, b) => a - b);
+}
+
+/* ------------------------------------------------------------------ */
+/* Proxy/motion preview (v0.21)                                        */
+/* ------------------------------------------------------------------ */
+
+/** Factory defaults for a bare `proxy: {}` request: half size, every 2nd
+ *  frame — roughly 1/8 the capture work of a full render. */
+export const PROXY_DEFAULTS = Object.freeze({ scale: 0.5, frameStep: 2 });
+
+/**
+ * Validate a proxy request and fill defaults. The floor of 0.1 keeps the
+ * scaled viewport from collapsing below anything a human could judge motion
+ * on; there is no ceiling on frameStep because "one frame per second" is a
+ * legitimate blocking check for slow moves.
+ */
+export function normalizeProxy(proxy) {
+  const scale = proxy.scale ?? PROXY_DEFAULTS.scale;
+  const frameStep = proxy.frameStep ?? PROXY_DEFAULTS.frameStep;
+  if (typeof scale !== 'number' || !Number.isFinite(scale) || scale < 0.1 || scale > 1) {
+    throw new EngineError(
+      ErrorCodes.INVALID_CONFIG,
+      `proxy.scale must be a number between 0.1 and 1 (got ${JSON.stringify(proxy.scale)})`,
+    );
+  }
+  if (!Number.isInteger(frameStep) || frameStep < 1) {
+    throw new EngineError(
+      ErrorCodes.INVALID_CONFIG,
+      `proxy.frameStep must be an integer >= 1 (got ${JSON.stringify(proxy.frameStep)})`,
+    );
+  }
+  return { scale, frameStep };
+}
+
+/**
+ * The scaled capture size for a proxy: floored to EVEN numbers because the
+ * mp4/webm/prores encoders reject odd dimensions (chroma subsampling), and a
+ * proxy must work with whatever format the project is configured for.
+ * Clamped to 2 so a tiny composition at scale 0.1 cannot round to zero.
+ */
+export function proxyDimensions(width, height, scale) {
+  const even = (n) => Math.max(2, Math.floor((n * scale) / 2) * 2);
+  return { width: even(width), height: even(height) };
+}
+
+/**
+ * The frames a frame-step render captures: start, start+step, start+2·step, …
+ * within the inclusive range. Deliberately does NOT force the final frame in:
+ * keeping the arithmetic exactly "every Nth frame" is what lets the encode
+ * rate fps/frameStep reproduce wall-clock timing without a hiccup at the end.
+ */
+export function steppedFrameList(startFrame, endFrame, step = 1) {
+  const frames = [];
+  for (let frame = startFrame; frame <= endFrame; frame += step) frames.push(frame);
+  return frames;
+}
+
+/**
+ * Insert ".proxy" before the extension (output.mp4 → output.proxy.mp4), or
+ * append it when there is none (a png-sequence output is a directory).
+ * Idempotent, because both the MCP server (to report the path up front) and
+ * renderComposition (as the single enforcement point) apply it.
+ */
+export function proxyOutputPath(outputPath) {
+  const ext = path.extname(outputPath);
+  const base = outputPath.slice(0, outputPath.length - ext.length);
+  return base.endsWith('.proxy') ? outputPath : base + '.proxy' + ext;
 }
 
 /**
@@ -198,6 +279,10 @@ function outputSettings(config) {
  * @param {string} [opts.framesDir]     if set: write PNG sequence, encode second-pass
  * @param {boolean} [opts.skipAudio]    used for parallel segments (audio muxed once at the end)
  * @param {boolean} [opts.asIntermediate]  encode to the lossless intermediate codec (parallel workers)
+ * @param {{scale?: number, frameStep?: number}} [opts.proxy]  proxy/motion
+ *   preview (v0.21): capture at width×scale (floored to even), every
+ *   frameStep-th frame, encoded at fps/frameStep, written to <name>.proxy.<ext>.
+ *   Implies no pre-flight and no audio mux; see the module header.
  * @param {boolean} [opts.lock=true]    take the project's cross-process render lock.
  *   Parallel *workers* must pass false: they render the same project by design,
  *   and their parent already holds the lock on their behalf.
@@ -210,6 +295,7 @@ export async function renderComposition(opts) {
   const {
     projectPath, config, outputPath,
     frameRange, framesDir, skipAudio = false, asIntermediate = false,
+    proxy = null,
     signal, progress = new ProgressEmitter(null),
     browserFactory = createPuppeteerBrowser,
     ffmpegPath = 'ffmpeg',
@@ -220,10 +306,11 @@ export async function renderComposition(opts) {
     lock = true,
   } = opts;
 
-  let startFrame, endFrame, settings;
+  let startFrame, endFrame, settings, prx;
   try {
     [startFrame, endFrame] = resolveRange(config, frameRange);
     settings = outputSettings(config);
+    prx = proxy ? normalizeProxy(proxy) : null;
   } catch (err) {
     const e = asEngineError(err);
     progress.error(e);
@@ -233,12 +320,31 @@ export async function renderComposition(opts) {
   const isPngSequence = output.format === 'png-sequence' && !asIntermediate;
   const encodeOutput = asIntermediate ? { ...output, intermediate: true } : output;
 
-  const totalFrames = endFrame - startFrame + 1;
+  // Proxy geometry and rate. capture is the viewport (= screenshot) size;
+  // contentScale is the exact per-axis factor that maps the fixed-pixel
+  // composition onto it — derived from the EVEN-floored dims, not the
+  // requested scale, so the content fills the viewport with no letterbox
+  // strip from the rounding. Frames are `every frameStep-th`, encoded at the
+  // rational rate fps/frameStep (FFmpeg accepts "30/2"), which preserves
+  // wall-clock duration exactly. The output name gets ".proxy" here — the
+  // renderer is the single enforcement point for "a proxy never overwrites
+  // the deliverable", whatever path the caller handed in.
+  const capture = prx
+    ? proxyDimensions(config.width, config.height, prx.scale)
+    : { width: config.width, height: config.height };
+  const contentScale = prx
+    ? { x: capture.width / config.width, y: capture.height / config.height }
+    : null;
+  const encodeFps = prx && prx.frameStep > 1 ? `${config.fps}/${prx.frameStep}` : config.fps;
+  const outPath = prx ? proxyOutputPath(outputPath) : outputPath;
+
+  const frameList = steppedFrameList(startFrame, endFrame, prx ? prx.frameStep : 1);
+  const totalFrames = frameList.length;
   const startedAt = Date.now();
   const entryUrl = pathToFileURL(path.resolve(projectPath, config.entry)).href;
 
-  progress.start({ jobId, totalFrames, fps: config.fps, width: config.width, height: config.height });
-  await fsp.mkdir(isPngSequence ? outputPath : path.dirname(outputPath), { recursive: true });
+  progress.start({ jobId, totalFrames, fps: config.fps, width: capture.width, height: capture.height });
+  await fsp.mkdir(isPngSequence ? outPath : path.dirname(outPath), { recursive: true });
 
   // Before Chromium: a lock failure should cost nothing.
   let held = null;
@@ -263,12 +369,16 @@ export async function renderComposition(opts) {
   try {
     throwIfAborted(signal);
     const openPage = () =>
-      browser.openPage({ url: entryUrl, width: config.width, height: config.height, transparent });
+      browser.openPage({
+        url: entryUrl, width: capture.width, height: capture.height, transparent,
+        ...(contentScale ? { contentScale } : {}),
+      });
     let page = await openPage();
 
     // Free here: the page is already warm, so probing costs a few frame renders
-    // instead of the tail of a doomed render.
-    if (preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
+    // instead of the tail of a doomed render. A proxy skips it: the proxy IS
+    // the pre-flight — its whole run costs about what a probe pass would.
+    if (!prx && preflight && totalFrames >= MIN_FRAMES_FOR_PREFLIGHT) {
       await runPreflight(page, preflightFrameList(startFrame, endFrame, preflightCount), signal, progress);
     }
 
@@ -312,20 +422,22 @@ export async function renderComposition(opts) {
     };
 
     progress.phase('capturing');
-    const sequenceDir = isPngSequence ? outputPath : framesDir;
+    const sequenceDir = isPngSequence ? outPath : framesDir;
     if (sequenceDir) {
       await fsp.mkdir(sequenceDir, { recursive: true });
     } else {
-      sink = new FfmpegFrameSink({ outputPath, fps: config.fps, output: encodeOutput, ffmpegPath, onSpawn: onChildPid });
+      sink = new FfmpegFrameSink({ outputPath: outPath, fps: encodeFps, output: encodeOutput, ffmpegPath, onSpawn: onChildPid });
     }
 
     let framesDone = 0;
-    for (let frame = startFrame; frame <= endFrame; frame++) {
+    for (const frame of frameList) {
       throwIfAborted(signal);
       const png = await captureWithRecovery(frame);
       if (sequenceDir) {
-        // zero-padded, range-relative index so a sequence encode is contiguous
-        const name = `frame-${String(frame - startFrame).padStart(6, '0')}.png`;
+        // zero-padded, list-relative index (== range-relative for a full
+        // render; contiguous even under a proxy's frameStep) so a sequence
+        // encode is contiguous
+        const name = `frame-${String(framesDone).padStart(6, '0')}.png`;
         try {
           await fsp.writeFile(path.join(sequenceDir, name), png);
         } catch (e) {
@@ -343,29 +455,32 @@ export async function renderComposition(opts) {
     if (!isPngSequence) {
       progress.phase('encoding');
       if (framesDir) {
-        await encodePngSequence({ framesDir, outputPath, fps: config.fps, output: encodeOutput, ffmpegPath, onSpawn: onChildPid });
+        await encodePngSequence({ framesDir, outputPath: outPath, fps: encodeFps, output: encodeOutput, ffmpegPath, onSpawn: onChildPid });
       } else {
         await sink.finish();
         sink = null;
       }
     }
 
+    // A proxy skips the mux entirely: it exists to check MOTION, and on a
+    // typical project the audio pass (decode, filter graph, re-mux) would
+    // dominate the very time the proxy just saved.
     let audio;
-    if (!skipAudio && !isPngSequence && config.audio?.length) {
+    if (!skipAudio && !prx && !isPngSequence && config.audio?.length) {
       const fmt = getFormat(output.format);
       if (!fmt.audioArgs) {
         progress.log('warn', `Format "${output.format}" cannot carry audio; audio tracks skipped.`);
       } else {
         throwIfAborted(signal);
         progress.phase('audio');
-        const ext = path.extname(outputPath);
-        const silent = outputPath.slice(0, -ext.length) + '.video-only' + ext;
-        await fsp.rename(outputPath, silent);
+        const ext = path.extname(outPath);
+        const silent = outPath.slice(0, -ext.length) + '.video-only' + ext;
+        await fsp.rename(outPath, silent);
         try {
           await muxAudio({
             videoPath: silent,
             audioTracks: config.audio,
-            outputPath,
+            outputPath: outPath,
             fps: config.fps,
             projectRoot: projectPath,
             output,
@@ -376,21 +491,24 @@ export async function renderComposition(opts) {
         } finally {
           await fsp.unlink(silent).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath: outPath, config, output, ffmpegPath, progress, onChildPid, signal });
       }
     }
 
-    // A segment is one chunk of a bigger render; only the whole file is checked.
+    // A segment is one chunk of a bigger render; only the whole file is
+    // checked. A proxy IS the whole file, so it is verified like any render —
+    // expected is the stepped count, which is what the sink was fed.
     const verified = isPngSequence || skipAudio
       ? { frames: totalFrames, verified: false }
-      : await verifyFrameCount({ outputPath, expected: totalFrames, progress, onChildPid, signal });
+      : await verifyFrameCount({ outputPath: outPath, expected: totalFrames, progress, onChildPid, signal });
 
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio });
+    progress.done({ outputPath: outPath, frames: totalFrames, elapsedMs, audio });
     return {
-      outputPath, frames: totalFrames, elapsedMs,
+      outputPath: outPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(audio ? { audio } : {}),
+      ...(prx ? { proxy: prx } : {}),
     };
   } catch (err) {
     const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
@@ -504,6 +622,7 @@ export async function renderParallel(opts) {
   const {
     projectPath, config, outputPath,
     frameRange, workers = Math.max(1, Math.min(os.cpus().length, 4)),
+    proxy = null,
     signal, progress = new ProgressEmitter(null),
     browserFactory = createPuppeteerBrowser,
     ffmpegPath = 'ffmpeg',
@@ -529,8 +648,11 @@ export async function renderParallel(opts) {
   const workerCount = Math.max(1, Math.min(workers, totalFrames));
 
   // Delegating, not locking: renderComposition takes the lock itself, so taking
-  // it here first would deadlock against our own delegate.
-  if (workerCount === 1) {
+  // it here first would deadlock against our own delegate. Proxies are SERIAL
+  // BY DESIGN, whatever `workers` says: a proxy is already ~1/8 the work, so
+  // fanning out N Chromium processes to save seconds would cost more in
+  // launches than it saves in capture — the workers value is simply ignored.
+  if (workerCount === 1 || proxy) {
     return renderComposition({ ...opts, frameRange: [startFrame, endFrame] });
   }
 

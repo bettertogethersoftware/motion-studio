@@ -5,6 +5,7 @@
  *   node render.js --project <folder> --output <file.mp4>
  *                  [--frame-range <start> <end>] [--workers N]
  *                  [--frames-dir <dir>] [--segment]
+ *                  [--proxy [scale]] [--frame-step N]
  *                  [--capture-frame N --capture-out <file.png>]
  *
  * stdout: JSON-line progress protocol (src/core/progress.js) — nothing else.
@@ -37,6 +38,18 @@ function parseArgs(argv) {
       case '--frames-dir': out.framesDir = argv[++i]; break;
       case '--segment': out.segment = true; break;
       case '--intermediate': out.intermediate = true; break;
+      case '--proxy': {
+        // Optional value: `--proxy` takes the default scale, `--proxy 0.25`
+        // sets it. Only consume the next token when it parses as a number, so
+        // `--proxy --workers 2` keeps working.
+        out.proxy = {};
+        const peek = argv[i + 1];
+        if (peek !== undefined && peek !== '' && !Number.isNaN(Number(peek))) {
+          out.proxy.scale = Number(argv[++i]);
+        }
+        break;
+      }
+      case '--frame-step': out.frameStep = Number(argv[++i]); break;
       case '--doctor': out.doctor = true; break;
       case '--no-preflight': out.preflight = false; break;
       case '--ffmpeg': out.ffmpeg = argv[++i]; break;
@@ -56,6 +69,13 @@ const USAGE = `Usage:
 Options:
   --frame-range <start> <end>   inclusive frame range (default: full composition)
   --workers N                   parallel worker processes (default: 1)
+  --proxy [scale]               proxy/motion preview: capture at scale (0.1-1,
+                                default 0.5, dims floored to even), every 2nd
+                                frame, encoded at fps/step so duration is kept.
+                                Serial (ignores --workers), skips audio and
+                                pre-flight, and writes to <output>.proxy.<ext>
+                                so it can never overwrite the deliverable
+  --frame-step N                with --proxy: capture every Nth frame (default 2)
   --frames-dir <dir>            write PNG sequence to dir, encode second-pass
   --segment                     internal: render a segment, skip audio pass
   --intermediate                internal: encode segment as lossless FFV1
@@ -148,6 +168,16 @@ async function main() {
       progress.error(new EngineError(ErrorCodes.INVALID_CONFIG, 'Missing --output'));
       return 2;
     }
+    // --frame-step only means something inside a proxy render; a bare
+    // --frame-step is almost always a forgotten --proxy, so say so instead of
+    // silently rendering every frame.
+    if (args.frameStep !== undefined && !args.proxy) {
+      progress.error(new EngineError(ErrorCodes.INVALID_CONFIG, '--frame-step requires --proxy'));
+      return 2;
+    }
+    const proxy = args.proxy
+      ? { ...args.proxy, ...(args.frameStep !== undefined ? { frameStep: args.frameStep } : {}) }
+      : undefined;
     const common = {
       projectPath,
       config,
@@ -156,6 +186,9 @@ async function main() {
       framesDir: args.framesDir ? path.resolve(args.framesDir) : undefined,
       skipAudio: !!args.segment,
       asIntermediate: !!args.intermediate,
+      // The renderer inserts ".proxy" before the extension itself, so the
+      // deliverable at --output is safe even when both name the same file.
+      ...(proxy ? { proxy } : {}),
       signal: controller.signal,
       progress,
       // Workers render a slice each and are spawned by an already-pre-flighted

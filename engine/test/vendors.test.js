@@ -18,6 +18,7 @@ import { ProjectStore } from '../src/core/project.js';
 import { JobManager } from '../src/core/jobs.js';
 import {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport, filterVoices,
+  VENDOR_INFO, unavailable, TTS_VENDORS,
 } from '../src/core/tts-vendors.js';
 import { updateSettings, readSettings, validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
 import { resolveVendorFrom, walkVendorChain, normalizeVendorChain, chainFallbackNote } from '../src/core/vendors.js';
@@ -40,6 +41,13 @@ before(async () => {
   delete process.env.MOTION_STUDIO_AZURE_SPEECH_KEY;
   delete process.env.MOTION_STUDIO_AZURE_SPEECH_REGION;
   delete process.env.MOTION_STUDIO_AZURE_SPEECH_VOICE;
+  // The v0.20 cloud vendors must stay unconfigured here — a real key in this
+  // process would turn the all-vendor probes below into live network calls.
+  for (const k of [
+    'MOTION_STUDIO_ELEVENLABS_KEY', 'ELEVENLABS_API_KEY', 'XI_API_KEY', 'MOTION_STUDIO_ELEVENLABS_ENDPOINT',
+    'MOTION_STUDIO_OPENAI_KEY', 'OPENAI_API_KEY', 'MOTION_STUDIO_OPENAI_ENDPOINT',
+    'MOTION_STUDIO_DEEPGRAM_KEY', 'DEEPGRAM_API_KEY', 'MOTION_STUDIO_DEEPGRAM_ENDPOINT',
+  ]) delete process.env[k];
 
   home = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-vendors-'));
   store = new ProjectStore(home);
@@ -88,7 +96,30 @@ test('vendors: MOTION_STUDIO_TTS_VENDOR overrides settings, an argument override
 });
 
 test('vendors: an unknown vendor is invalid_config, not a silent fallback', async () => {
-  await assert.rejects(resolveSpeechVendor({ vendor: 'elevenlabs', dataDir: home }), (e) => e.code === 'invalid_config');
+  await assert.rejects(resolveSpeechVendor({ vendor: 'polly', dataDir: home }), (e) => e.code === 'invalid_config');
+});
+
+test('vendors: every TTS vendor id has registry info and a usable fix hint', () => {
+  assert.deepEqual([...TTS_VENDORS], ['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram']);
+  for (const id of TTS_VENDORS) {
+    const info = VENDOR_INFO[id];
+    assert.ok(info, `${id} is missing a VENDOR_INFO entry`);
+    assert.equal(info.id, id);
+    for (const k of ['label', 'summary', 'requires']) {
+      assert.equal(typeof info[k], 'string', `${id}.${k} must be a string`);
+      assert.ok(info[k].length > 0, `${id}.${k} must not be empty`);
+    }
+    assert.equal(typeof info.offline, 'boolean', `${id}.offline must be a boolean`);
+    // Every vendor must have a fix sentence — an unavailable error with no
+    // "what to do" is exactly what the fixFor registry exists to prevent.
+    const err = unavailable(id, { error: 'probe failed' });
+    assert.equal(err.code, 'tts_unavailable');
+    assert.ok(err.message.length > 60, `${id}'s unavailable message is too thin: ${err.message}`);
+  }
+  // The cloud vendors' hints must name the env var the user has to set.
+  assert.match(unavailable('elevenlabs', {}).message, /ELEVENLABS_API_KEY/);
+  assert.match(unavailable('openai', {}).message, /OPENAI_API_KEY/);
+  assert.match(unavailable('deepgram', {}).message, /DEEPGRAM_API_KEY/);
 });
 
 /* -------------------- preference chains (v0.19) -------------------- */
@@ -131,7 +162,7 @@ test('chain: a comma-separated env var is a chain; a typo in it throws', () => {
   try {
     assert.deepEqual(resolveVendorFrom('speech', base),
       { vendor: 'piper', source: 'env', chain: ['piper', 'system'] });
-    process.env.MOTION_STUDIO_TTS_VENDOR = 'piper,elevenlabs';
+    process.env.MOTION_STUDIO_TTS_VENDOR = 'piper,polly';
     assert.throws(() => resolveVendorFrom('speech', base), (e) => e.code === 'invalid_config');
   } finally {
     delete process.env.MOTION_STUDIO_TTS_VENDOR;
@@ -182,7 +213,7 @@ test('chain: settings accept an ordered array and refuse a broken one', () => {
   const withTts = (tts) => ({ ...structuredClone(DEFAULT_SETTINGS), tts: { ...DEFAULT_SETTINGS.tts, ...tts } });
   assert.ok(validateSettings(withTts({ vendors: ['piper', 'system'] })));
   assert.ok(validateSettings(withTts({ vendors: null })));
-  for (const bad of [[], ['piper', 'piper'], ['elevenlabs'], 'piper']) {
+  for (const bad of [[], ['piper', 'piper'], ['polly'], 'piper']) {
     assert.throws(() => validateSettings(withTts({ vendors: bad })), (e) => e.code === 'invalid_config',
       `expected ${JSON.stringify(bad)} to be refused`);
   }
@@ -347,7 +378,7 @@ test('studio: GET /api/vendors reports both vendors and the active one', async (
   const { status, data } = await j('/api/vendors');
   assert.equal(status, 200, JSON.stringify(data));
   assert.equal(data.speech.active, 'system');
-  assert.deepEqual(data.speech.vendors.map((v) => v.id), ['system', 'azure', 'piper']);
+  assert.deepEqual(data.speech.vendors.map((v) => v.id), ['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram']);
   assert.ok(data.azure.outputFormats.includes('riff-24khz-16bit-mono-pcm'));
   assert.equal(JSON.stringify(data).includes('test-key'), false);
 });
@@ -368,7 +399,7 @@ test('studio: voice listing filters and pages', async () => {
 });
 
 test('studio: an unknown vendor is a 400, not a 404 or a crash', async () => {
-  const { status, data } = await j('/api/vendors/speech/elevenlabs/voices');
+  const { status, data } = await j('/api/vendors/speech/polly/voices');
   assert.equal(status, 400);
   assert.equal(data.code, 'invalid_config');
 });

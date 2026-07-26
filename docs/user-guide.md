@@ -143,6 +143,17 @@ capture across 1–4 Chromium processes; segments are merged losslessly at the
 end. Expect near-linear speedup to about 4 workers, then diminishing returns
 as Chromium instances compete for memory.
 
+**Proxy/motion preview (v0.21):** when you want to check *motion* — pacing,
+easing, a camera move — before paying for the real thing, render a proxy: a
+half-resolution, every-2nd-frame draft that takes roughly 1/8 the time and
+keeps wall-clock duration (it encodes at `fps/frameStep`, so playback speed is
+true). Proxies skip audio and the pre-flight probe, always render serially,
+and write to `output.proxy.mp4` so they never overwrite your deliverable.
+Available via the `render` MCP tool's `proxy` option and the CLI's
+`--proxy [scale] --frame-step N` flags; they work with whatever output format
+the project is configured for (scaled dimensions are floored to even numbers
+where the encoder demands it).
+
 While a job runs you get a progress bar, effective render fps, an **ETA**,
 and live logs. Starting another render while one is running **queues** it
 (you'll see `queued #1`); it starts automatically when the slot frees.
@@ -335,6 +346,7 @@ Everything the Studio does is scriptable:
 ```bash
 node src/cli/render.js --project <folder> --output out/clip.mp4 --workers 4
 node src/cli/render.js --project <folder> --frame-range 0 59 --output out/pace-check.mp4
+node src/cli/render.js --project <folder> --proxy 0.5 --frame-step 2 --output out/clip.mp4   # → out/clip.proxy.mp4
 node src/cli/render.js --project <folder> --capture-frame 42 --capture-out check.png
 node src/cli/render.js --doctor
 ```

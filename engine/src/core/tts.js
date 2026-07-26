@@ -287,9 +287,18 @@ export function concatWavBuffers(buffers, { gapSeconds = 0 } = {}) {
   });
 
   const data = Buffer.concat(chunks);
+  return {
+    buffer: Buffer.concat([makeWavHeader(data.length, { sampleRate, channels }), data]),
+    sampleRate, channels, segments,
+  };
+}
+
+/** The canonical 44-byte RIFF header for 16-bit PCM. One writer, shared. */
+function makeWavHeader(dataLength, { sampleRate, channels }) {
+  const blockAlign = channels * 2;
   const header = Buffer.alloc(44);
   header.write('RIFF', 0);
-  header.writeUInt32LE(36 + data.length, 4);
+  header.writeUInt32LE(36 + dataLength, 4);
   header.write('WAVE', 8);
   header.write('fmt ', 12);
   header.writeUInt32LE(16, 16);
@@ -300,8 +309,32 @@ export function concatWavBuffers(buffers, { gapSeconds = 0 } = {}) {
   header.writeUInt16LE(blockAlign, 32);
   header.writeUInt16LE(16, 34);
   header.write('data', 36);
-  header.writeUInt32LE(data.length, 40);
-  return { buffer: Buffer.concat([header, data]), sampleRate, channels, segments };
+  header.writeUInt32LE(dataLength, 40);
+  return header;
+}
+
+/**
+ * Wrap headerless 16-bit PCM in a RIFF WAV container. The cloud vendors that
+ * return raw PCM (ElevenLabs `pcm_*` formats, Gemini's inline audio) go
+ * through here so every narration asset on disk honours the same contract:
+ * "a PCM WAV whose header is the authoritative duration".
+ */
+export function pcmToWavBuffer(pcm, { sampleRate, channels = 1 }) {
+  if (!Buffer.isBuffer(pcm) || pcm.length === 0) {
+    throw new EngineError(ErrorCodes.TTS_FAILED, 'pcmToWavBuffer: empty PCM body');
+  }
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
+    throw new EngineError(ErrorCodes.TTS_FAILED, `pcmToWavBuffer: bad sampleRate ${sampleRate}`);
+  }
+  // 16-bit frames: an odd byte count means the stream is not what we were told.
+  const blockAlign = channels * 2;
+  if (pcm.length % blockAlign !== 0) {
+    throw new EngineError(
+      ErrorCodes.TTS_FAILED,
+      `pcmToWavBuffer: PCM length ${pcm.length} is not a multiple of the ${blockAlign}-byte frame (16-bit × ${channels}ch)`,
+    );
+  }
+  return Buffer.concat([makeWavHeader(pcm.length, { sampleRate, channels }), pcm]);
 }
 
 /**

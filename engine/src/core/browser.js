@@ -5,7 +5,7 @@
  * `browserFactory` returning this interface:
  *
  *   {
- *     openPage({ url, width, height }): Promise<FramePage>
+ *     openPage({ url, width, height, transparent?, contentScale? }): Promise<FramePage>
  *     close(): Promise<void>
  *     pid: number | null            // Chromium pid, for process-tree cleanup
  *   }
@@ -93,7 +93,7 @@ export async function createPuppeteerBrowser({
   return {
     pid: browser.process()?.pid ?? null,
 
-    async openPage({ url, width, height, transparent = false }) {
+    async openPage({ url, width, height, transparent = false, contentScale = null }) {
       const page = await browser.newPage();
       await page.setViewport({ width, height, deviceScaleFactor: 1 });
 
@@ -105,6 +105,25 @@ export async function createPuppeteerBrowser({
       });
 
       await page.goto(url, { waitUntil: 'load', timeout: COMPOSITION_READY_TIMEOUT_MS });
+
+      // Proxy renders (v0.21): the viewport above is the SMALL proxy size —
+      // shrinking the screenshot is the whole saving — while the composition
+      // is authored at fixed pixel dimensions (the frame contract: a pure
+      // function of frame that never reads window size). This visual-only
+      // transform maps the fixed-px content onto the small viewport. It goes
+      // on documentElement, not body: it is the one element compositions
+      // never style themselves (their world starts at body/their root), so
+      // an inline transform here cannot collide with author CSS, and scaling
+      // at the outermost box scales body and everything in it uniformly.
+      // Per-axis factors because even-floored proxy dims round each axis
+      // independently. The non-proxy path passes no contentScale and is
+      // untouched.
+      if (contentScale) {
+        await page.evaluate(({ x, y }) => {
+          document.documentElement.style.transformOrigin = '0 0';
+          document.documentElement.style.transform = `scale(${x}, ${y})`;
+        }, contentScale);
+      }
 
       // The composition must expose window.setFrame (usually via
       // MotionStudio.registerComposition) before capture can begin.

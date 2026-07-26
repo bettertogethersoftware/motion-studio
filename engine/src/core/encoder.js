@@ -71,7 +71,10 @@ export class FfmpegFrameSink {
   /**
    * @param {object} opts
    * @param {string} opts.outputPath
-   * @param {number} opts.fps
+   * @param {number|string} opts.fps  frames per second. A rational string like
+   *   "30/2" is passed to -framerate verbatim — FFmpeg takes rationals — which
+   *   is how proxy frame-step renders (v0.21) keep wall-clock duration exact
+   *   at fractional rates no float could represent cleanly (e.g. 30/4 = 7.5).
    * @param {object} [opts.output]   { format, crf, preset, pixFmt, transparent, intermediate } from project config
    * @param {string} [opts.ffmpegPath]
    * @param {(pid:number)=>void} [opts.onSpawn]  report pid for process-tree cleanup
@@ -120,7 +123,8 @@ export class FfmpegFrameSink {
   }
 }
 
-/** Encode a directory of zero-padded PNGs (frame-%06d.png) to the target format. */
+/** Encode a directory of zero-padded PNGs (frame-%06d.png) to the target format.
+ *  `fps` takes the same number-or-rational-string as FfmpegFrameSink. */
 export async function encodePngSequence({ framesDir, outputPath, fps, output = {}, ffmpegPath = 'ffmpeg', onSpawn }) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-y',

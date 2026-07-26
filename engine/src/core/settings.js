@@ -36,6 +36,7 @@ import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir } from './project.js';
 import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
+import { ELEVENLABS_WAV_FORMATS, ELEVENLABS_DEFAULT_FORMAT } from './tts-elevenlabs.js';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -49,7 +50,7 @@ export const FFMPEG_PRESETS = Object.freeze([
  * modules already read settings — putting the lists there would make the
  * import a cycle. The vendor modules re-export them.
  */
-export const TTS_VENDORS = Object.freeze(['system', 'azure', 'piper']);
+export const TTS_VENDORS = Object.freeze(['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram']);
 export const MUSIC_VENDORS = Object.freeze(['node', 'fluidsynth']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -77,6 +78,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // Piper (v0.18): where the CLI and the downloaded .onnx voices live, and
     // which voice to use when a call doesn't name one. All paths, no secrets.
     piper: Object.freeze({ exe: null, python: null, voicesDir: null, voice: null }),
+    // The v0.20 cloud vendors, each following azure's rule: the non-secret
+    // half only — every API key is environment-only. See the vendor modules
+    // (core/tts-elevenlabs.js, core/tts-openai.js, core/tts-deepgram.js).
+    elevenlabs: Object.freeze({ voice: null, model: null, outputFormat: ELEVENLABS_DEFAULT_FORMAT }),
+    openai: Object.freeze({ voice: null, model: null, instructions: null }),
+    deepgram: Object.freeze({ voice: null }),
   }),
   // Which music vendor renders a note spec (v0.17). "node" is the default
   // because it is the only one that works off Windows and needs no binaries a
@@ -168,6 +175,33 @@ export function validateSettings(s) {
           }
         }
       }
+      // The v0.20 cloud vendors, mirroring the azure rules above: nullable
+      // strings for the non-secret knobs, and a key is refused rather than
+      // stored — accepting one, even to "help", would write a live credential
+      // into a file users share freely.
+      const cloudVendor = (section, fields, label) => {
+        const c = t[section];
+        if (!c || typeof c !== 'object') {
+          problems.push(`tts.${section}: object required`);
+          return null;
+        }
+        for (const k of fields) {
+          if (c[k] !== null && (typeof c[k] !== 'string' || !c[k].trim())) {
+            problems.push(`tts.${section}.${k}: non-empty string or null required`);
+          }
+        }
+        if ('key' in c || 'apiKey' in c) {
+          problems.push(`tts.${section}.key: the ${label} API key is read from the environment only and is never stored in settings.json`);
+        }
+        return c;
+      };
+      const el = cloudVendor('elevenlabs', ['voice', 'model'], 'ElevenLabs');
+      // Same duration contract as tts.azure.outputFormat: only headered WAV.
+      if (el && !ELEVENLABS_WAV_FORMATS.includes(el.outputFormat)) {
+        problems.push(`tts.elevenlabs.outputFormat: one of ${ELEVENLABS_WAV_FORMATS.join(', ')}`);
+      }
+      cloudVendor('openai', ['voice', 'model', 'instructions'], 'OpenAI');
+      cloudVendor('deepgram', ['voice'], 'Deepgram');
     }
     const mu = s.music;
     if (!mu || typeof mu !== 'object') problems.push('music: object required');
@@ -299,6 +333,9 @@ export async function readSettings(dataDir = defaultDataDir()) {
       ...pick(raw.tts, ['vendor', 'vendors']),
       azure: { ...DEFAULT_SETTINGS.tts.azure, ...pick(raw.tts?.azure, ['region', 'voice', 'outputFormat', 'style']) },
       piper: { ...DEFAULT_SETTINGS.tts.piper, ...pick(raw.tts?.piper, ['exe', 'python', 'voicesDir', 'voice']) },
+      elevenlabs: { ...DEFAULT_SETTINGS.tts.elevenlabs, ...pick(raw.tts?.elevenlabs, ['voice', 'model', 'outputFormat']) },
+      openai: { ...DEFAULT_SETTINGS.tts.openai, ...pick(raw.tts?.openai, ['voice', 'model', 'instructions']) },
+      deepgram: { ...DEFAULT_SETTINGS.tts.deepgram, ...pick(raw.tts?.deepgram, ['voice']) },
     },
     music: {
       ...DEFAULT_SETTINGS.music,
@@ -337,6 +374,9 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
       ...(patch.tts ?? {}),
       azure: { ...cur.tts.azure, ...(patch.tts?.azure ?? {}) },
       piper: { ...cur.tts.piper, ...(patch.tts?.piper ?? {}) },
+      elevenlabs: { ...cur.tts.elevenlabs, ...(patch.tts?.elevenlabs ?? {}) },
+      openai: { ...cur.tts.openai, ...(patch.tts?.openai ?? {}) },
+      deepgram: { ...cur.tts.deepgram, ...(patch.tts?.deepgram ?? {}) },
     },
     music: {
       ...cur.music,

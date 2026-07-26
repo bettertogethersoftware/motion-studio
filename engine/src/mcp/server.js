@@ -54,7 +54,7 @@ import { ProjectStore } from '../core/project.js';
 import { JobManager } from '../core/jobs.js';
 import {
   captureSingleFrame, captureFrames, renderComposition, renderParallel, renderStill,
-  preflightFrameList, MAX_PREVIEW_FRAMES,
+  preflightFrameList, MAX_PREVIEW_FRAMES, normalizeProxy, proxyOutputPath,
 } from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
 import {
@@ -75,6 +75,7 @@ import {
   resolveMusicVendor, checkMusicVendor, synthesizeMusicWithVendor, musicVendorReport,
   musicUnavailableWithAlternatives, MUSIC_VENDORS,
 } from '../core/music-vendors.js';
+import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm } from '../core/film.js';
@@ -497,6 +498,16 @@ server.registerTool(
   }),
 );
 
+/**
+ * Proxy metadata per jobId, so get_render_status can tell a proxy draft from
+ * a deliverable render. It lives BESIDE the JobManager rather than inside it:
+ * the job manager schedules renders and does not know what a proxy is, and
+ * teaching it would put MCP-surface concerns in core. Pruned against the
+ * manager's own job map on insert, so it tracks the manager's retention
+ * instead of growing for the session's lifetime.
+ */
+const proxyByJob = new Map();
+
 server.registerTool(
   'render',
   {
@@ -505,7 +516,10 @@ server.registerTool(
       'Start rendering the composition to the configured output format (mp4/webm/gif/prores/png-sequence — ' +
       'set via update_project_config). Returns a jobId immediately; block on it with wait_for_render (or poll ' +
       'get_render_status) until state is done/error/cancelled. Optional frameRange renders a cheap partial ' +
-      'segment first. If another job is ' +
+      'segment first. Pass `proxy` for a proxy/motion preview — a low-res, frame-skipping draft that checks ' +
+      'motion in roughly 1/8 the time before committing to a full render. Proxy renders are serial (workers is ' +
+      'ignored), skip pre-flight and the audio mux, keep wall-clock duration (encoded at fps/frameStep), and ' +
+      'write to <name>.proxy.<ext> so they never overwrite the deliverable. If another job is ' +
       'running, the new job is QUEUED (FIFO, one render at a time) and starts automatically — the response ' +
       'then has state "queued" and a queuePosition. A full queue fails with queue_full.',
     inputSchema: {
@@ -515,37 +529,74 @@ server.registerTool(
         .optional()
         .describe('[startFrame, endFrame] inclusive; omit for the full composition'),
       workers: z.number().int().min(1).max(16).optional()
-        .describe("Parallel capture processes (default: the user's global render setting, factory default 1)"),
+        .describe("Parallel capture processes (default: the user's global render setting, factory default 1; ignored for proxy renders)"),
       outputFilename: z.string().optional().describe('Filename inside the project "out" dir (default from config)'),
       preflight: z
         .boolean()
         .optional()
-        .describe('Probe a few evenly-spaced frames before committing to the render (default true; skipped under 30 frames)'),
+        .describe('Probe a few evenly-spaced frames before committing to the render (default true; skipped under 30 frames and for proxy renders)'),
+      proxy: z
+        .object({
+          scale: z.number().optional()
+            .describe('Capture scale, 0.1–1 (default 0.5); scaled dimensions are floored to even numbers for the encoders'),
+          frameStep: z.number().optional()
+            .describe('Capture every Nth frame (default 2); playback speed is preserved by encoding at fps/frameStep'),
+        })
+        .optional()
+        .describe('Proxy/motion preview: cheap low-res + frame-skip draft. {} takes both defaults. No audio, no pre-flight, serial, output gets ".proxy" before the extension.'),
     },
   },
-  wrap(async ({ projectId, frameRange, workers, outputFilename, preflight }) => {
+  wrap(async ({ projectId, frameRange, workers, outputFilename, preflight, proxy }) => {
     await requirePrereqs();
+    // Validate the proxy request FIRST so bad values fail this call with
+    // invalid_config and a named value, instead of surfacing later as a
+    // failed job the caller has to go fish the error out of.
+    const prx = proxy ? normalizeProxy(proxy) : null;
     const entry = await store.getProjectEntry(projectId);
     const config = await store.readConfig(projectId);
     const name = outputFilename ?? config.output.filename;
     if (name.includes('/') || name.includes('\\') || name.includes('..')) {
       throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare filename');
     }
-    const outputPath = path.join(entry.path, config.output.dir, name);
+    // The renderer inserts ".proxy" itself (its own overwrite guard); applying
+    // the same idempotent rename here just makes the path in THIS response the
+    // path the file really lands at.
+    const outputPath0 = path.join(entry.path, config.output.dir, name);
+    const outputPath = prx ? proxyOutputPath(outputPath0) : outputPath0;
     const settings = await readSettings(store.dataDir).catch(() => null);
-    const effectiveWorkers = workers ?? settings?.render?.defaultWorkers ?? 1;
+    // Proxies are serial by design: already ~1/8 the work, so a Chromium
+    // fan-out would cost more in launches than it saves in capture.
+    const effectiveWorkers = prx ? 1 : (workers ?? settings?.render?.defaultWorkers ?? 1);
     const { jobId, state, queuePosition } = jobs.startRender({
       projectId, projectPath: entry.path, config, outputPath, frameRange, preflight,
       workers: effectiveWorkers,
       ffmpegPath: await ffmpegPathOnly(),
-      ...(injectedBrowserFactory
-        ? { renderFn: (o) => (o.workers > 1 ? renderParallelInjected(o) : renderCompositionInjected(o)) }
-        : {}),
+      // A proxy always goes straight to the serial renderer with the proxy
+      // options attached; otherwise the injected-factory split is as before.
+      ...(prx
+        ? { renderFn: (o) => (injectedBrowserFactory ? renderCompositionInjected : renderComposition)({ ...o, proxy: prx }) }
+        : injectedBrowserFactory
+          ? { renderFn: (o) => (o.workers > 1 ? renderParallelInjected(o) : renderCompositionInjected(o)) }
+          : {}),
     });
+    const span = frameRange ? frameRange[1] - frameRange[0] + 1 : config.durationInFrames;
+    // Captured frames under frameStep: 0, N, 2N, … within the span.
+    const totalFrames = prx ? Math.floor((span - 1) / prx.frameStep) + 1 : span;
+    if (prx) {
+      // The JobManager sized job.totalFrames from the frame range; a stepped
+      // proxy captures fewer, so fix the snapshot at submission — otherwise
+      // percent tops out around 100/frameStep and a finished job reads
+      // half-done. Reaching into the record here keeps the manager
+      // proxy-agnostic (see proxyByJob above).
+      jobs.jobs.get(jobId).totalFrames = totalFrames;
+      for (const id of proxyByJob.keys()) if (!jobs.jobs.has(id)) proxyByJob.delete(id);
+      proxyByJob.set(jobId, prx);
+    }
     return ok({
       jobId, state, ...(queuePosition ? { queuePosition } : {}), outputPath,
-      totalFrames: frameRange ? frameRange[1] - frameRange[0] + 1 : config.durationInFrames,
+      totalFrames,
       workers: effectiveWorkers,
+      ...(prx ? { proxy: prx } : {}),
     });
   }),
 );
@@ -559,10 +610,17 @@ server.registerTool(
       'percent, renderFps, etaMs (null until measurable), queuePosition while queued, and the structured error ' +
       'if it failed. Wait for a terminal state before reporting completion. When the render carried audio, the ' +
       'done status also has `audio` with the measured peakDb/meanDb of the final mix and a `clipping` flag. ' +
+      'Proxy jobs carry `proxy: { scale, frameStep }` so a draft is never mistaken for the deliverable. ' +
       'To wait for one or more jobs without a polling loop, use wait_for_render instead.',
     inputSchema: { jobId: z.string() },
   },
-  wrap(async ({ jobId }) => ok(jobs.getStatus(jobId))),
+  wrap(async ({ jobId }) => {
+    // proxy rides on the status rather than living in the JobManager — the
+    // manager stays proxy-agnostic; see the map beside the render tool.
+    const status = jobs.getStatus(jobId);
+    const prx = proxyByJob.get(jobId);
+    return ok(prx ? { ...status, proxy: prx } : status);
+  }),
 );
 
 server.registerTool(
@@ -824,10 +882,13 @@ server.registerTool(
   {
     title: 'Synthesize narration (text-to-speech)',
     description:
-      'Turn narration text into a spoken WAV in the project\'s assets/ folder. Three vendors: "system" = the ' +
+      'Turn narration text into a spoken WAV in the project\'s assets/ folder. Six vendors: "system" = the ' +
       'local Windows speech exe (offline, needs MOTION_STUDIO_TTS_EXE), "azure" = Azure AI Speech neural voices ' +
       '(cloud, needs AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in the environment, billed per character), "piper" = ' +
-      'local neural voices (offline and free, any OS, needs Piper installed plus downloaded .onnx voices). ' +
+      'local neural voices (offline and free, any OS, needs Piper installed plus downloaded .onnx voices), ' +
+      '"elevenlabs" = ElevenLabs cloud voices (best quality, needs ELEVENLABS_API_KEY, free tier with attribution), ' +
+      '"openai" = OpenAI gpt-4o-mini-tts (style-instructable, needs OPENAI_API_KEY, no free tier), "deepgram" = ' +
+      'Deepgram Aura-2 (best free cloud tier — $200 signup credit, needs DEEPGRAM_API_KEY). ' +
       'Omit `vendor` to use the machine\'s configured default — check it with list_vendors; an unconfigured vendor ' +
       'fails with tts_unavailable, which the user must fix (do not retry). ' +
       'Returns the clip length as durationSeconds AND durationInFrames — use durationInFrames to size the ' +
@@ -837,13 +898,14 @@ server.registerTool(
       'start/duration in seconds AND frames — so captions and cues can be placed exactly instead of eyeballed ' +
       '(inter-sentence pacing becomes sentenceGapSeconds rather than the vendor\'s own; the vendor\'s per-clip ' +
       'trailing silence is zeroed so the gap replaces, never stacks on, its pacing). ' +
-      'deterministic=true (Piper only) pins phoneme durations (--noise-scale 0 --noise-w 0) so identical input ' +
-      'yields identical timing across runs — use it whenever cue frames are computed from the clip. ' +
+      'deterministic=true (piper and elevenlabs only) pins the output so identical input yields identical timing ' +
+      'across runs (Piper: --noise-scale 0 --noise-w 0; ElevenLabs: a fixed seed) — use it whenever cue frames ' +
+      'are computed from the clip. ' +
       'mode="attach" (default) also appends the clip to the ' +
       'project\'s audio tracks so the next render mixes it in automatically; mode="asset-only" just writes the ' +
       'WAV and reports its duration, leaving you to wire it later with update_project_config. ' +
       'List available voices first with list_voices. Narration text is passed safely (UTF-8 file for the exe, ' +
-      'escaped SSML for Azure), so quotes / newlines / unicode are safe.',
+      'escaped SSML for Azure, JSON bodies for the other cloud vendors), so quotes / newlines / unicode are safe.',
     inputSchema: {
       projectId: z.string(),
       text: z.string().min(1).describe('Narration text (UTF-8)'),
@@ -853,7 +915,7 @@ server.registerTool(
       rate: z.number().int().min(-10).max(10).optional().describe('Speaking rate (engine scale, e.g. -10..10)'),
       volume: z.number().int().min(0).max(100).optional().describe('Volume 0..100'),
       style: z.string().optional()
-        .describe('Azure only: expressive style for the voice, e.g. "newscast", "cheerful" (see list_voices styles)'),
+        .describe('azure/openai: expressive style, e.g. "newscast", "cheerful" — azure needs the voice to support it (see list_voices styles); openai turns it into a spoken-style instruction (gpt-4o-mini-tts only)'),
       mode: z.enum(['attach', 'asset-only']).default('attach')
         .describe('attach = also add an audio track; asset-only = just synthesize + report'),
       assetPath: z.string().optional()
@@ -865,7 +927,7 @@ server.registerTool(
       sentenceGapSeconds: z.number().min(0).max(5).default(0.3)
         .describe('sentenceTimings only: silence inserted between sentences'),
       deterministic: z.boolean().optional()
-        .describe('Piper only: pin phoneme durations so identical input yields identical timing across runs (slightly flatter prosody)'),
+        .describe('piper/elevenlabs: pin the output so identical input yields identical timing across runs (piper: slightly flatter prosody; elevenlabs: fixed seed)'),
     },
   },
   wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds, deterministic }) => {
@@ -1028,7 +1090,10 @@ server.registerTool(
       'voices installed on this Windows machine; the azure vendor returns several hundred cloud neural voices, so ' +
       'filter with "locale" (e.g. "en-US") or "search" — results are capped at "limit" (default 50) and the ' +
       'response reports the true "total"; the piper vendor returns the voice files the user has downloaded ' +
-      '(names like en_US-lessac-medium). Each voice carries any expressive "styles" it supports (azure only). ' +
+      '(names like en_US-lessac-medium); the elevenlabs vendor returns the voices in the user\'s ElevenLabs ' +
+      'library (pass the voice_id, or a display name that is unique); the openai and deepgram vendors have fixed ' +
+      'catalogues (openai names like "marin", deepgram names like "aura-2-thalia-en"). ' +
+      'Each voice carries any expressive "styles" it supports (azure only). ' +
       'Fails with tts_unavailable when the vendor is not configured.',
     inputSchema: {
       vendor: z.enum(TTS_VENDORS).optional().describe('Speech vendor; omit for the configured default'),
@@ -1146,7 +1211,14 @@ server.registerTool(
       'startInFrames/gainDb to place and balance the bed against narration. ' +
       'Spec: bpm, plus tracks of notes. program = General MIDI instrument 0..127 (0 piano, 24 nylon guitar, 32 acoustic ' +
       'bass, 40 violin, 48 strings, 56 trumpet, 73 flute…). drums:true routes the track to GM percussion. ' +
-      'Each note: pitch 0..127 (60 = middle C), start & duration in beats (quarter notes), velocity 1..127.',
+      'Each note: pitch 0..127 (60 = middle C), start & duration in beats (quarter notes), velocity 1..127. ' +
+      'OR (v0.20) skip note-writing: pass a chord progression + style and the server compiles the notes — e.g. ' +
+      "spec: { bpm: 96, progression: ['D','A','Bm','G'], style: 'pad-ballad', bars: 8 }. Chords are letters " +
+      '(C, F#m, Bb7, Dmaj7, Esus4, C/E) or roman numerals (I, vi, V7, bVII) with `key`; styles: ' +
+      `${THEORY_STYLE_NAMES.join(', ')}. Optional bars (progression cycles one chord per bar; +1 held closing bar), ` +
+      'beatsPerBar (4), layers (subset of the style\'s named layers), seed (deterministic variation). The compiled ' +
+      'take is voice-led with mix headroom built in, and the response adds compiled: {style, bars, chords, notes}. ' +
+      'Exactly one of tracks | progression.',
     inputSchema: {
       projectId: z.string(),
       spec: z.object({
@@ -1160,8 +1232,22 @@ server.registerTool(
             duration: z.number().min(0).describe('Length in beats'),
             velocity: z.number().int().min(1).max(127).optional(),
           })).min(1),
-        })).min(1),
-      }).describe('The piece to compose'),
+        })).min(1).optional().describe('Note form: the piece written out note by note'),
+        progression: z.array(z.string()).min(1).optional()
+          .describe("Compiled form (v0.20): chord symbols — letters ('D', 'Bm7', 'C/E') or roman numerals ('I', 'vi') with key"),
+        style: z.enum(THEORY_STYLE_NAMES).optional()
+          .describe('Compiled form: arrangement style (default "pad")'),
+        bars: z.number().int().min(1).max(128).optional()
+          .describe('Compiled form: bars to fill, cycling the progression (default: one bar per chord, once through)'),
+        beatsPerBar: z.number().int().min(2).max(12).optional().describe('Compiled form: beats per bar (default 4)'),
+        key: z.string().optional()
+          .describe("Compiled form: key for roman numerals and the closing tonic, e.g. 'D' or 'F#m'"),
+        layers: z.array(z.string()).min(1).optional()
+          .describe("Compiled form: subset of the style's layers to render (e.g. ['pad','bass'])"),
+        seed: z.number().int().optional().describe('Compiled form: deterministic-variation seed (default 1)'),
+      }).refine((s) => (s.tracks === undefined) !== (s.progression === undefined), {
+        message: 'spec takes exactly one of `tracks` (note form) or `progression` (compiled form)',
+      }).describe('The piece to compose — written-out notes, or a progression + style to compile'),
       vendor: z.enum(MUSIC_VENDORS).optional()
         .describe('Music vendor; omit to use the configured default (see list_vendors)'),
       mode: z.enum(['attach', 'asset-only']).default('attach'),
@@ -1172,6 +1258,15 @@ server.registerTool(
     },
   },
   wrap(async ({ projectId, spec, vendor, mode, assetPath, startInFrames, gainDb, duck }) => {
+    // Progression form (v0.20): compile chords + style down to the note spec
+    // first — it is pure and touches nothing, so a bad chord or style fails
+    // before any vendor probe, identically whichever vendor would render it.
+    let compiled = null;
+    if (spec.progression !== undefined) {
+      const theory = compileTheorySpec(spec);
+      compiled = { style: theory.meta.style, bars: theory.meta.bars, chords: theory.meta.chords, notes: theory.meta.notes };
+      spec = { bpm: theory.bpm, tracks: theory.tracks };
+    }
     // Resolve + probe before touching the project, so an unconfigured vendor
     // fails without leaving a half-written asset behind. `probe: true` also
     // walks a configured preference chain to the first available vendor (v0.19).
@@ -1222,6 +1317,7 @@ server.registerTool(
       vendorSource: result.vendorSource,
       ...(resolved.chain.length > 1 ? { vendorChain: resolved.chain } : {}),
       ...(await vendorNoteFor('music', resolved)),
+      ...(compiled ? { compiled } : {}),
       bpm: result.bpm,
       tracks: result.tracks,
       notes: result.notes,

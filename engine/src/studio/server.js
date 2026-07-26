@@ -64,6 +64,7 @@ import {
 } from '../core/settings.js';
 import {
   speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
+  ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS, OPENAI_ENV, DEEPGRAM_ENV,
 } from '../core/tts-vendors.js';
 import {
   musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
@@ -310,11 +311,17 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
                 // Vendor credentials are reported as "set, ending in …" and
                 // never in full: this endpoint feeds a browser page, and a key
                 // that reaches the DOM is a key in every screenshot.
-                ...Object.fromEntries(AZURE_ENV.key.map((k) => [k, maskKey(process.env[k]?.trim())])),
+                ...Object.fromEntries(
+                  [...AZURE_ENV.key, ...ELEVENLABS_ENV.key, ...OPENAI_ENV.key, ...DEEPGRAM_ENV.key]
+                    .map((k) => [k, maskKey(process.env[k]?.trim())]),
+                ),
                 ...Object.fromEntries(
                   [
                     ...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice,
                     ...PIPER_ENV.exe, ...PIPER_ENV.python, ...PIPER_ENV.voices,
+                    ...ELEVENLABS_ENV.endpoint, ...ELEVENLABS_ENV.voice,
+                    ...OPENAI_ENV.endpoint, ...OPENAI_ENV.voice,
+                    ...DEEPGRAM_ENV.endpoint, ...DEEPGRAM_ENV.voice,
                     'MOTION_STUDIO_TTS_VENDOR', 'MOTION_STUDIO_MUSIC_VENDOR',
                   ].map((k) => [k, process.env[k] ?? null]),
                 ),
@@ -347,6 +354,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             speech,
             music,
             azure: { outputFormats: AZURE_WAV_FORMATS, env: AZURE_ENV },
+            elevenlabs: { outputFormats: ELEVENLABS_WAV_FORMATS, env: ELEVENLABS_ENV },
             gmPrograms: GM_PROGRAMS,
           });
         }

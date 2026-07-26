@@ -182,6 +182,80 @@ options. Times are in **beats** (quarter notes), so they're tempo-independent:
 
 ---
 
+## Composing without writing notes (v0.20)
+
+Hand-writing the note form works, but a 30-second bed is ~100 raw MIDI notes —
+and hand-voiced triads tend to get the craft details (voice leading, register,
+headroom) wrong. Since v0.20 `spec` alternatively takes a **progression form**
+that the engine compiles into the exact same note spec before either vendor
+sees it (`engine/src/core/music-theory.js` — the renderers are untouched):
+
+```json
+{ "bpm": 96, "progression": ["D", "A", "Bm", "G"], "style": "pad-ballad", "bars": 8, "key": "D" }
+```
+
+Chords are **letters** (`C`, `F#m`, `Bb7`, `Am7`, `Dmaj7`, `Esus4`, `Gdim`,
+slash bass `C/E`) or **roman numerals** resolved against `key` (`I`, `ii`,
+`V7`, `bVII` — lowercase = minor; minor keys like `Am` use natural-minor
+degrees). A chord the parser does not know fails as `invalid_music_spec`
+**naming the chord** and listing the valid forms.
+
+The progression fills `bars` bars, one chord per bar, cycling (default:
+one bar per chord, once through; `beatsPerBar` defaults to 4), then **one
+extra held bar closes the piece** on the key's tonic — or the opening chord
+when no key is given — so a bed never stops mid-phrase. Chords are voice-led
+(each takes the inversion that moves least from the previous one), registers
+are fixed per role (bass 36..50, pads ~52..81, arps 60..84), and velocities
+sit around 45..65 so the bed arrives with mix headroom built in.
+
+Styles, each a set of named **layers** (= one track each, in this order):
+
+| style | layers (GM program) | character |
+|---|---|---|
+| `pad` | pad (89) | sustained close-voiced chords — minimal ambient bed |
+| `pad-ballad` | pad (89), bass (32), piano (0) | warm pad + root–fifth bass + soft piano arpeggios |
+| `arp` | arp (0), bass (32) | eighth-note arpeggios over held bass roots |
+| `drive` | pad (90), bass (33), drums | rhythmic eighths pad + walking bass + light kick/snare/hats |
+| `lullaby` | music-box (10), strings (48), bass (32) | slow broken chords over soft strings |
+
+### Worked example 1 — the progression form, and what it compiles to
+
+```json
+{ "bpm": 96, "progression": ["D", "A", "Bm", "G"], "style": "pad-ballad", "bars": 8, "key": "D" }
+```
+
+compiles to a normal 3-track note spec: a **pad** (program 89) holding
+voice-led triads one whole bar each — D:`62,66,69` → A:`61,64,69` (only two
+voices move, one semitone and one whole tone) — a **bass** (program 32)
+playing root for two beats then fifth for two, down in `38..50`, and a
+**piano** (program 0) arpeggiating chord tones in quarter notes above. Eight
+bars of D–A–Bm–G, then bar 9 holds a D chord across every layer. ~80 notes,
+36 beats = 22.5 s at 96 bpm — from one line. The tool response reports
+`compiled: { style, bars, chords, notes }` next to the usual fields; `chords`
+counts the held close, which is why it reads 9 for `bars: 8`.
+
+### Worked example 2 — roman numerals, layer selection, seeded variation
+
+```json
+{ "bpm": 72, "key": "F", "progression": ["I", "vi", "IV", "V7"], "style": "lullaby",
+  "bars": 8, "layers": ["music-box", "strings"], "seed": 7 }
+```
+
+Roman numerals resolve against `key: "F"` → F, Dm, Bb, C7. `layers` renders
+only the named subset of the style's layers (here: no bass — the track order
+stays the style's own). `seed` drives the only "randomness" there is —
+velocity humanization and arp/broken-chord contour — through a local
+deterministic PRNG (the same mulberry32 the Frame API's `random()` uses):
+**identical input always compiles to identical notes**, and with the `node`
+vendor that means byte-identical WAVs; change `seed` to get a different take
+of the same arrangement.
+
+Exactly **one** of `tracks` | `progression` must be present. Everything
+downstream is unchanged: the compiled spec passes the same validator, renders
+through whichever vendor is active, and mixes like any other bed.
+
+---
+
 ## The MIDI CLI contract (fluidsynth vendor)
 
 The engine (`engine/src/core/music.js`) and the MIDI exe communicate over a

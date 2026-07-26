@@ -1181,7 +1181,97 @@ const vendorState = {
 };
 
 /** The card ids belonging to a capability, in the DOM order they appear. */
-const CAP_VENDORS = { speech: ['system', 'azure', 'piper'], music: ['node', 'fluidsynth'] };
+const CAP_VENDORS = {
+  speech: ['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram'],
+  music: ['node', 'fluidsynth'],
+};
+
+/**
+ * The v0.20 cloud vendors all share one card shape — env-only key, a voice
+ * pick, at most a couple of text knobs — so their cards are GENERATED from
+ * this table instead of hand-written in index.html. Adding vendor #7 should
+ * be a row here plus its settings knobs, not another 50 lines of markup.
+ * (system/azure/piper keep their bespoke cards: exe paths, locale filters and
+ * style selects don't fit the shared grammar.)
+ */
+const CLOUD_VENDOR_CARDS = [
+  {
+    id: 'elevenlabs',
+    title: 'elevenlabs',
+    summary: 'ElevenLabs cloud voices — the strongest voice quality of the cloud vendors. ' +
+      'Free tier: 10,000 credits/month with API access (attribution required, no commercial license).',
+    keyNote: 'Set the key with <code>setx ELEVENLABS_API_KEY "&lt;key&gt;"</code> (get one at elevenlabs.io → profile), then restart the Studio.',
+    knobs: [
+      { key: 'model', label: 'model', placeholder: 'eleven_multilingual_v2' },
+      { key: 'outputFormat', label: 'output format', select: 'elevenlabs-formats' },
+    ],
+    voiceNone: '(first premade voice)',
+  },
+  {
+    id: 'openai',
+    title: 'openai tts',
+    summary: 'OpenAI\'s gpt-4o-mini-tts — 13 voices, steerable with free-form style instructions. ' +
+      'No free tier; roughly $0.015 per minute of audio.',
+    keyNote: 'Set the key with <code>setx OPENAI_API_KEY "&lt;key&gt;"</code> (platform.openai.com → API keys), then restart the Studio.',
+    knobs: [
+      { key: 'model', label: 'model', placeholder: 'gpt-4o-mini-tts' },
+      { key: 'instructions', label: 'style instructions', placeholder: 'Speak warmly, medium pace', wide: true },
+    ],
+    voiceNone: '(marin)',
+  },
+  {
+    id: 'deepgram',
+    title: 'deepgram aura',
+    summary: 'Deepgram\'s Aura-2 voices — the most generous free cloud tier: $200 signup credit ' +
+      '(≈6.6M characters), no card, no expiry.',
+    keyNote: 'Set the key with <code>setx DEEPGRAM_API_KEY "&lt;key&gt;"</code> (console.deepgram.com), then restart the Studio.',
+    knobs: [],
+    voiceNone: '(aura-2-thalia-en)',
+  },
+];
+
+/** Build the generated cloud cards once, after the piper card. Idempotent. */
+function buildCloudVendorCards() {
+  const piperCard = $('.vendor-card[data-vendor="piper"]');
+  if (!piperCard || $('.vendor-card[data-vendor="elevenlabs"]')) return;
+  for (const d of CLOUD_VENDOR_CARDS) {
+    const card = document.createElement('article');
+    card.className = 'vendor-card';
+    card.dataset.vendor = d.id;
+    const knobs = d.knobs.map((k) => k.select
+      ? `<label${k.wide ? ' class="wide"' : ''}>${k.label}<select id="cv-${d.id}-${k.key}" data-fill="${k.select}"></select></label>`
+      : `<label${k.wide ? ' class="wide"' : ''}>${k.label}<input id="cv-${d.id}-${k.key}" placeholder="${k.placeholder}" spellcheck="false"></label>`,
+    ).join('\n');
+    card.innerHTML = `
+      <header class="vendor-head">
+        <label class="radio">
+          <input type="checkbox" name="speech-vendor" value="${d.id}">
+          <span class="v-title">${d.title}</span>
+        </label>
+        <span class="rank mono hidden" data-rank="${d.id}"></span>
+        <button class="ghost tiny" data-up="${d.id}" title="higher priority">▲</button>
+        <button class="ghost tiny" data-down="${d.id}" title="lower priority">▼</button>
+        <span class="pill" data-status="${d.id}">probing…</span>
+      </header>
+      <p class="dim v-summary">${d.summary}</p>
+      <dl class="env-list mono" data-facts="${d.id}"></dl>
+      <p class="v-error err-line hidden" data-error="${d.id}"></p>
+      <div class="config-grid vendor-grid">
+        <label class="wide">default voice<select data-voice="${d.id}"></select></label>
+        ${knobs}
+      </div>
+      <div class="fieldrow vendor-test">
+        <label class="grow">test line
+          <input data-test-text="${d.id}" value="Motion Studio. Scene one, take one." maxlength="400">
+        </label>
+        <button class="ghost test-btn" data-test="${d.id}">▶ test</button>
+        <span class="dim mono" data-test-msg="${d.id}"></span>
+      </div>
+      <p class="dim note">${d.keyNote}</p>`;
+    // piper is the last static speech card, so appending keeps table order.
+    piperCard.parentElement.appendChild(card);
+  }
+}
 const capOf = (vendor) => (CAP_VENDORS.music.includes(vendor) ? 'music' : 'speech');
 const capReport = (cap) => (cap === 'music' ? vendorState.music : vendorState.report);
 
@@ -1195,6 +1285,11 @@ const vendorEl = {
   testMsg: (v) => $(`[data-test-msg="${v}"]`),
   card: (v) => $(`.vendor-card[data-vendor="${v}"]`),
 };
+
+// Generated cards must exist BEFORE the module-scope binding loops below
+// (checkboxes, ▲▼, test buttons all bind via querySelectorAll at load), so the
+// shared handlers pick them up exactly like the hand-written cards.
+buildCloudVendorCards();
 
 function defList(dl, rows) {
   dl.innerHTML = '';
@@ -1401,6 +1496,19 @@ async function loadVendors({ force = false } = {}) {
   const azureCfg = data.speech.settings.azure ?? {};
   $('#az-format').value = azureCfg.outputFormat ?? data.azure.outputFormats[0];
 
+  // ElevenLabs' generated card has the only <select data-fill> today; filled
+  // here (not in the builder) because the format list comes from the server.
+  const elFormat = $('[data-fill="elevenlabs-formats"]');
+  if (elFormat && !elFormat.options.length && data.elevenlabs?.outputFormats) {
+    for (const f of data.elevenlabs.outputFormats) {
+      const o = document.createElement('option');
+      o.value = f;
+      o.textContent = f;
+      elFormat.appendChild(o);
+    }
+    elFormat.value = data.speech.settings.elevenlabs?.outputFormat ?? 'wav_24000';
+  }
+
   for (const v of data.speech.vendors) paintVendor(v, data.speech);
   paintMusic(data.music);
   paintChain('speech');
@@ -1411,7 +1519,7 @@ async function loadVendors({ force = false } = {}) {
   // if they belonged to whatever section they happened to land under.
   const { environment } = await api('/api/settings');
   const envRows = (re) => Object.keys(environment.env).filter((k) => re.test(k)).map((k) => [k, environment.env[k]]);
-  defList($('#speech-env'), envRows(/SPEECH|TTS_VENDOR|TTS_EXE|PIPER/));
+  defList($('#speech-env'), envRows(/SPEECH|TTS_VENDOR|TTS_EXE|PIPER|ELEVENLABS|XI_API|OPENAI|DEEPGRAM/));
   defList($('#music-env'), envRows(/MUSIC_VENDOR|SOUNDFONT|FLUIDSYNTH|MIDI_EXE/));
 
   await Promise.all(data.speech.vendors
@@ -1431,6 +1539,22 @@ function paintVendor(v, report) {
   err.textContent = v.error ?? '';
 
   const c = v.config ?? {};
+  const cloudCard = CLOUD_VENDOR_CARDS.find((d) => d.id === v.id);
+  if (cloudCard) {
+    // Generated cards share one fact grammar: where the key came from (masked),
+    // any endpoint override, and the live catalogue size.
+    defList(vendorEl.facts(v.id), [
+      ['api key', c.keyConfigured ? `${c.keyMasked}  ← ${c.keySource}` : null],
+      ['endpoint', c.endpointSource && c.endpointSource !== 'default' ? withSource(c.endpoint, c.endpointSource) : null],
+      ['voices', v.available ? String(v.voiceCount) : null],
+    ]);
+    const stored = report.settings?.[v.id] ?? {};
+    for (const knob of cloudCard.knobs) {
+      const input = $(`#cv-${v.id}-${knob.key}`);
+      if (input && !input.matches(':focus')) input.value = stored[knob.key] ?? '';
+    }
+    return;
+  }
   if (v.id === 'system') {
     defList(vendorEl.facts(v.id), [
       ['executable', withSource(c.exePath, c.exeSource)],
@@ -1538,6 +1662,7 @@ async function loadVendorVoices(vendor) {
   none.textContent = {
     azure: '(auto — first neural en-US voice)',
     piper: '(first voice in the folder)',
+    ...Object.fromEntries(CLOUD_VENDOR_CARDS.map((d) => [d.id, d.voiceNone])),
   }[vendor] ?? '(first installed voice)';
   sel.appendChild(none);
   for (const v of data.voices) {
@@ -1657,6 +1782,18 @@ $('#btn-vendors-save').addEventListener('click', async () => {
             voicesDir: $('#pi-voices').value.trim() || null,
             voice: vendorEl.voice('piper').value || null,
           },
+          // Generated cloud cards: voice select + whatever knobs the card
+          // descriptor declares, read back by the same ids the builder minted.
+          ...Object.fromEntries(CLOUD_VENDOR_CARDS.map((d) => [d.id, {
+            voice: vendorEl.voice(d.id)?.value || null,
+            ...Object.fromEntries(d.knobs.map((k) => {
+              const el = $(`#cv-${d.id}-${k.key}`);
+              const raw = (el?.value ?? '').trim();
+              // outputFormat keeps its stored default rather than null-ing.
+              if (k.key === 'outputFormat') return [k.key, raw || 'wav_24000'];
+              return [k.key, raw || null];
+            })),
+          }])),
         },
       };
     }
@@ -1746,7 +1883,7 @@ async function testVendor(kind) {
     btn.disabled = false;
   }
 }
-for (const kind of ['system', 'azure', 'piper', 'music']) {
+for (const kind of [...CAP_VENDORS.speech, 'music']) {
   const btn = vendorEl.testBtn(kind);
   btn.dataset.idleLabel = btn.textContent; // "▶ test" / "▶ listen"
   btn.addEventListener('click', () => testVendor(kind));
