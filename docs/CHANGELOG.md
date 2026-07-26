@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### Sentence timings no longer change the narration's pacing
+
+`sentenceTimings: true` existed to *measure* a clip, but it was also silently
+*lengthening* it: each per-sentence Piper run kept Piper's own ~0.2 s trailing
+`--sentence-silence`, and `sentenceGapSeconds` was stacked on top — so the same
+text came out ~(N−1)×0.2 s longer with timings than without, and cue frames
+computed against one didn't fit the other. Root cause: `synthesizePiperSpeech`
+already accepted `sentenceSilence`, but the vendor dispatcher never forwarded
+it. The dispatcher now forwards it and the timings path passes
+`sentenceSilence: 0`, so the engine-placed gap *replaces* the vendor's pacing,
+which is what the docs always claimed.
+
+Two adjacent fixes in the same handler:
+
+- **`reportedDurationSeconds` was the last sentence's duration** in the
+  timings path (`result` leaked out of the per-sentence loop) — a 28 s clip
+  could report "1.17 s". It is now the vendor's summed self-report (sentences
+  + gaps), kept distinct from the authoritative header-measured
+  `durationSeconds`.
+- **`deterministic: true` (Piper)** pins phoneme durations with
+  `--noise-scale 0 --noise-w 0`. Piper's stochastic duration predictor moves
+  clip length ±2% between identical runs — harmless for one-shot narration,
+  poison for anything that computes cue frames from the clip and synthesizes
+  again. Piper has no seed flag; zeroing both noise sources is its only
+  determinism lever. Other vendors report the flag in `warnings` rather than
+  silently dropping it, following the Azure-only options precedent.
+
+### Studio: readable errors, honest statuses
+
+- **`alert()` is gone.** Every error in the Studio UI now lands as a
+  bottom-right toast: non-blocking, error code as a badge, and the full
+  engine message — which already carries the fix and the available
+  alternative vendors — stays until dismissed instead of being flattened
+  into a modal one-liner. Info toasts fade on their own.
+- **The music vendor codes joined `STATUS_FOR_CODE`.** A music preview
+  against an unconfigured vendor returned a generic 500 where the identical
+  speech case returned 503; `music_unavailable`/`invalid_music_spec`/
+  `music_failed` now map like their speech twins, and
+  `render_already_in_progress` / `project_already_exists` map to 409 so the
+  UI can distinguish "try again later" from "pick another name".
+- **Parallel renders honour the injected browser factory.** The Studio's
+  `renderFn` handed `browserFactory` only to serial renders; a fake-browser
+  test asking for `workers > 1` would have reached for real Chromium in the
+  parent's preflight page. Same rule as the MCP server's
+  `renderParallelInjected` now.
+
+### Hygiene: one version, one license, no drift
+
+- The MCP server advertised `0.15.0` while the engine was `0.19.0`; it now
+  reads `package.json` at startup. The Frame API resource title said v1.1
+  while the runtime was v1.3; the runtime file's own header said v1.2. All
+  say v1.3, including `docs/frame-api.md` and both examples (whose bundled
+  `frame-api.js` copies were two revisions stale and lacked `particles()`).
+- `engine/package.json` said MIT while `LICENSE.txt` is the Unlicense; the
+  package now agrees with the license file.
+- The speech/music/addon enums in the MCP tool schemas are derived from
+  `TTS_VENDORS` / `MUSIC_VENDORS` / `ADDON_IDS` instead of hand-copied
+  string lists (`ADDON_IDS` existed "for tool schemas" and was never wired).
+  Dead export `VENDOR_ENV` removed.
+- README no longer promises committed example renders (`out/` has always
+  been git-ignored) and no longer points at the nonexistent
+  `docs/references/` path.
+
 ### The mixer no longer eats the end of the film
 
 Three audio-mux bugs, one root pattern: the filter graph trusted ffmpeg's

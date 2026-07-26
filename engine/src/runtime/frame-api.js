@@ -1,5 +1,5 @@
 /*!
- * Motion Studio Frame API runtime — v1.2
+ * Motion Studio Frame API runtime — v1.3
  *
  * Loaded as a classic <script> before composition code. Provides the four
  * primitives of the frame-driven contract (docs/frame-api.md):

@@ -215,6 +215,33 @@ test('synthesizePiperSpeech maps rate onto --length-scale and volume onto --volu
   assert.equal(args[args.indexOf('--volume') + 1], '0.8');
 });
 
+test('synthesizePiperSpeech maps deterministic onto both noise flags', async () => {
+  const out = path.join(tmp, 'det.wav');
+  await synthesizePiperSpeech({ text: 'pin me', outPath: out, deterministic: true, ...withStub() });
+  const args = await argsFor(out);
+  // Both noise sources must go: noise_w alone moves phoneme durations ±2%
+  // between runs, which invalidates cue frames computed from a prior clip.
+  assert.equal(args[args.indexOf('--noise-scale') + 1], '0');
+  assert.equal(args[args.indexOf('--noise-w') + 1], '0');
+});
+
+test('synthesizePiperSpeech omits the noise flags unless asked', async () => {
+  const out = path.join(tmp, 'ndet.wav');
+  await synthesizePiperSpeech({ text: 'natural take', outPath: out, ...withStub() });
+  const args = await argsFor(out);
+  assert.ok(!args.includes('--noise-scale'), 'stochastic prosody is the default');
+  assert.ok(!args.includes('--noise-w'));
+});
+
+test('synthesizePiperSpeech forwards sentenceSilence as --sentence-silence', async () => {
+  const out = path.join(tmp, 'ss.wav');
+  await synthesizePiperSpeech({ text: 'no trailing pad', outPath: out, sentenceSilence: 0, ...withStub() });
+  const args = await argsFor(out);
+  // sentenceSilence: 0 must survive the falsy-value trap — the timings path
+  // depends on it reaching argv so the engine's gap REPLACES Piper's pacing.
+  assert.equal(args[args.indexOf('--sentence-silence') + 1], '0');
+});
+
 test('synthesizePiperSpeech sends the text as a file, never as an argument', async () => {
   const out = path.join(tmp, 'd.wav');
   const text = 'Quotes "like this", newlines\nand — dashes.';

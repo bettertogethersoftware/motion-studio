@@ -1,4 +1,4 @@
-# Motion Studio Frame API Reference (v1.2)
+# Motion Studio Frame API Reference (v1.3)
 
 This is the animation contract every Motion Studio composition must follow. It exists so the render engine can call your composition once per frame, in any order, possibly split across parallel worker processes — nothing in your composition may depend on wall-clock time or call order.
 

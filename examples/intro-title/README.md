@@ -4,11 +4,12 @@ A 1080p, 8-second title sequence (240 frames @ 30 fps → `mp4`). Demonstrates
 the full Frame API: the `registerComposition` harness, multi-segment
 `interpolate` with named easings, overlapping `Sequence` blocks (title →
 subtitle crossfade → outro), a deterministic particle field via
-`MotionStudio.random`, and the v1.1 primitives — `spring()` for the title
-pop and `interpolateColors()` for the accent bar's warm→hot drift.
+`MotionStudio.random`, and the newer primitives — `spring()` for the title
+pop and `interpolateColors()` for the accent bar's warm→hot drift. The
+bundled `frame-api.js` is the engine's current v1.3 runtime.
 
-`out/intro-title.mp4` and `out/still-90.png` are **real rendered outputs**
-(headless Chromium + FFmpeg, 3 parallel workers). Re-render with:
+Rendered output is not committed (`out/` is git-ignored). Render
+`out/intro-title.mp4` yourself with:
 
 ```bash
 cd ../../engine

@@ -33,7 +33,7 @@ import {
 import { checkPiperTts, synthesizePiperSpeech, PIPER_ENV } from './tts-piper.js';
 import { readSettings, readStoredSettings, TTS_VENDORS } from './settings.js';
 import {
-  resolveVendorFrom, walkVendorChain, unavailableError, buildReport, CAPABILITY_META,
+  resolveVendorFrom, walkVendorChain, unavailableError, buildReport,
 } from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir } from './project.js';
@@ -42,7 +42,6 @@ export { TTS_VENDORS, AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT, AZURE_ENV };
 
 export const SPEECH_VENDORS = TTS_VENDORS;
 export const DEFAULT_SPEECH_VENDOR = 'system';
-export const VENDOR_ENV = CAPABILITY_META.speech.env;
 
 export const VENDOR_INFO = Object.freeze({
   system: Object.freeze({
@@ -319,6 +318,7 @@ export async function unavailableWithAlternatives(vendor, status, opts = {}) {
  */
 export async function synthesizeWithVendor({
   vendor, text, outPath, voice, rate, volume, pitch, style, styleDegree, role,
+  sentenceSilence, deterministic,
   dataDir, settings, timeoutMs, resolved: preResolved,
 }) {
   const resolved = preResolved ?? await resolveSpeechVendor({ vendor, dataDir, settings, probe: true });
@@ -333,17 +333,28 @@ export async function synthesizeWithVendor({
     }
   };
 
+  /** Options only the Piper vendor implements. `sentenceSilence` is engine
+   *  plumbing (the sentence-timings path zeroes Piper's own pacing), so only
+   *  the user-facing `deterministic` warrants a warning elsewhere. */
+  const warnPiperOnly = (vendorName) => {
+    if (deterministic) {
+      warnings.push(`"deterministic" is a Piper-only option and was ignored by the ${vendorName} vendor`);
+    }
+  };
+
   if (resolved.vendor === 'piper') {
     warnAzureOnly('piper');
     const tts = await ttsSettings(dataDir, settings);
     const result = await synthesizePiperSpeech({
-      text, outPath, voice, rate, volume, piper: tts.piper ?? {}, ...(timeoutMs ? { timeoutMs } : {}),
+      text, outPath, voice, rate, volume, sentenceSilence, deterministic,
+      piper: tts.piper ?? {}, ...(timeoutMs ? { timeoutMs } : {}),
     });
     return { ...result, vendorSource: resolved.source, warnings };
   }
 
   if (resolved.vendor === 'system') {
     warnAzureOnly('system');
+    warnPiperOnly('system');
     // No probe first: synthesizeSpeech already maps a missing/unstartable exe
     // to tts_unavailable, and probing here would spawn the exe twice on every
     // narration call (the MCP tool probes once, before it touches the project).
@@ -353,6 +364,7 @@ export async function synthesizeWithVendor({
     return { ...result, vendor: 'system', vendorSource: resolved.source, warnings };
   }
 
+  warnPiperOnly('azure');
   const tts = await ttsSettings(dataDir, settings);
   const result = await synthesizeAzureSpeech({
     text, outPath, voice, rate, volume, pitch, style, styleDegree, role,

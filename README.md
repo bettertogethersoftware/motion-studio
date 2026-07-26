@@ -82,7 +82,8 @@ Point any MCP client at the stdio server — for Claude Desktop:
 
 Full walkthrough and tool reference: [docs/mcp-setup.md](docs/mcp-setup.md).
 A ready-to-use agent skill is in [docs/SKILL.md](docs/SKILL.md) (pair it
-with `docs/references/frame-api.md`).
+with `docs/frame-api.md`, which the skill expects as `references/frame-api.md`
+when installed).
 
 ## Repository layout
 
@@ -119,18 +120,17 @@ motion-studio/
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: projects/assets/settings/render/jobs/SSE
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
-│   ├── src/runtime/frame-api.js   in-page helper library v1.1 (copied into projects)
+│   ├── src/runtime/frame-api.js   in-page helper library v1.3 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      374 tests across 21 suites (see below)
+│   └── test/                      412 tests across 21 suites (see below)
 ├── examples/
-│   ├── intro-title/               1080p title sequence (mp4) — REAL rendered output in out/
+│   ├── intro-title/               1080p title sequence (mp4)
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
-│                                  — real alpha render + proof composite in out/
 └── docs/
     ├── CHANGELOG.md               v0.2 → v0.19 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
     ├── user-guide.md              Studio UI, projects, assets, audio, settings, CLI
-    ├── frame-api.md               the authoring contract (v1.1)
+    ├── frame-api.md               the authoring contract (v1.3)
     ├── mcp-setup.md               agent setup + full tool reference
     ├── knowledge-base.md          field notes: failure modes seen in real productions
     ├── tts-setup.md               speech vendors: Piper (v0.18), Azure (v0.17), exe contract (v0.6)
@@ -167,7 +167,7 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-374 tests across 21 suites: core units, pipeline integration (real FFmpeg,
+412 tests across 21 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure REST
@@ -191,8 +191,9 @@ real-Chromium suite where no browser is resolvable, and — on Windows only —
 signal mechanism (`TerminateProcess` kills before any handler runs).
 Cancellation itself is covered on every platform through `JobManager.cancel`.
 
-The shipped example outputs under `examples/*/out/` were rendered with real
-headless Chromium + FFmpeg through the parallel path.
+Rendered example output is not committed (`out/` is git-ignored); re-render an
+example locally with the CLI one-liner in "Quick start" — it runs the real
+headless-Chromium + FFmpeg parallel path.
 
 ## License
 

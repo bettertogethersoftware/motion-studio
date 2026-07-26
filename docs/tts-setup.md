@@ -267,14 +267,18 @@ Piper's own tool, run by you.
   the truth.
 - Azure-only options (`style`, `pitch`, `role`) are reported in `warnings`
   rather than silently dropped.
-- Narration text is passed with `--input-file` — a UTF-8 file, never argv —
+- Narration text is passed with `-i` — a UTF-8 file, never argv —
   so quotes, newlines and unicode in a script are safe. Same rule as the exe
   vendor.
 - **Output is not bit-identical between runs.** Piper's inference is stochastic
   (`noise_scale`/`noise_w`), so re-synthesizing the same line gives a slightly
-  different take. That is fine for narration — audio is generated once and
-  thereafter read as a file — but it is not the determinism the frame renderer
-  guarantees.
+  different take — and a slightly different *length* (±2%), which matters the
+  moment cue frames are computed from a clip. Pass `deterministic: true` to
+  `synthesize_speech` to pin it: the engine adds `--noise-scale 0 --noise-w 0`,
+  so identical input yields identical timing across runs (Piper has no seed
+  flag; this is its only determinism lever). The cost is slightly flatter
+  prosody — leave it off for one-shot narration, turn it on when a composition's
+  timings depend on the clip.
 
 Expect roughly 1–2 seconds per line on CPU, most of it model loading; the
 `--cuda` path is not wired up.
@@ -385,8 +389,16 @@ and returns `timings`:
 Offsets are exact because the engine placed the clips itself, so captions and
 cues can be timed to the frame instead of eyeballed. Trade-offs to know:
 inter-sentence pacing becomes `sentenceGapSeconds` rather than the vendor's
-own prosody, and abbreviations like "Mr." split (pre-split yourself if that
-matters). **Word-level timing is not available**: Piper's CLI cannot emit
+own prosody — the engine zeroes Piper's per-clip trailing silence
+(`--sentence-silence 0`) so the gap *replaces* the vendor's pacing (before
+v0.20 the two stacked, and a timings clip came out ~(N−1)×0.2 s longer than a
+plain rendering of the same text) — and abbreviations like "Mr." split
+(pre-split yourself if that matters). Each sentence is a separate stochastic
+Piper run, so run-to-run drift compounds across sentences; combine with
+`deterministic: true` when you need the whole clip reproducible.
+`reportedDurationSeconds` is the vendor's summed self-report (sentences +
+gaps); `durationSeconds` — measured from the written WAV — is the authoritative
+number. **Word-level timing is not available**: Piper's CLI cannot emit
 alignment data, and Azure word-boundary events require the websocket Speech
 SDK — a heavy dependency this repo deliberately keeps out (see
 "External tool integration style" in the repo conventions).

@@ -54,6 +54,56 @@ function flashButton(btn, label = '✓') {
   setTimeout(() => { btn.textContent = orig; }, 1200);
 }
 
+/* ------------------------------- toasts -------------------------------- */
+
+/* Errors used to go through alert(): blocking, and it flattened the engine's
+ * structured EngineError (code + a message that already contains the fix and
+ * the available alternatives) down to one modal line. Toasts keep the page
+ * usable, show the error code as a badge, and stay up long enough to read a
+ * multi-sentence fix. Errors persist until dismissed; info fades. */
+function toastContainer() {
+  let el = $('#toasts');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toasts';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function toast(input, { kind = 'error', timeoutMs = null } = {}) {
+  const err = input instanceof Error ? input : null;
+  const message = err ? err.message : String(input);
+  const code = err?.data?.code ?? null;
+
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  if (code) {
+    const badge = document.createElement('span');
+    badge.className = 'toast-code mono';
+    badge.textContent = code;
+    el.appendChild(badge);
+  }
+  const body = document.createElement('span');
+  body.className = 'toast-body';
+  body.textContent = message;
+  el.appendChild(body);
+
+  const close = document.createElement('button');
+  close.className = 'toast-close';
+  close.textContent = '✕';
+  close.title = 'dismiss';
+  close.addEventListener('click', () => el.remove());
+  el.appendChild(close);
+
+  toastContainer().appendChild(el);
+  const ttl = timeoutMs ?? (kind === 'error' ? null : 5000);
+  if (ttl) setTimeout(() => el.remove(), ttl);
+  return el;
+}
+
+const toastError = (err) => toast(err, { kind: 'error' });
+
 /* ------------------------------ prereqs ------------------------------- */
 
 /**
@@ -436,7 +486,7 @@ $('#btn-render').addEventListener('click', async () => {
     const job = await api(`/api/projects/${state.projectId}/render`, { method: 'POST', body });
     trackJob(job.jobId);
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 
@@ -450,7 +500,7 @@ $('#btn-still').addEventListener('click', async () => {
     a.textContent = `⤓ ${res.outputPath.split(/[\\/]/).pop()} (frame ${res.frame})`;
     a.href = `/api/projects/${state.projectId}/output?file=${encodeURIComponent(res.outputPath.split(/[\\/]/).pop())}&download=1`;
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 
@@ -835,7 +885,7 @@ async function loadAssets() {
             body: { from: f.path, to, updateAudio },
           });
           await afterAssetMutation(res);
-        } catch (err) { alert(err.message); }
+        } catch (err) { toastError(err); }
       }),
       mkBtn('delete', 'delete this asset', () => openAssetDeleteDialog(f)),
     );
@@ -903,7 +953,7 @@ $('#asset-delete-form').addEventListener('submit', async (e) => {
     dlg.close();
     await afterAssetMutation(res);
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 
@@ -924,7 +974,7 @@ async function uploadAssets(fileList) {
     }
   }
   loadAssets().catch(() => {});
-  if (errors.length) alert('Some uploads failed:\n' + errors.join('\n'));
+  if (errors.length) toast('Some uploads failed:\n' + errors.join('\n'), { kind: 'error' });
 }
 
 $('#btn-upload').addEventListener('click', () => $('#asset-file-input').click());
@@ -977,7 +1027,7 @@ $('#delete-form').addEventListener('submit', async (e) => {
     $('#empty-state').classList.remove('hidden');
     await loadProjects();
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 
@@ -1055,7 +1105,7 @@ $('#btn-settings').addEventListener('click', async () => {
     for (const [k, v] of Object.entries(environment.env)) row(k, v);
     $('#settings-dialog').showModal();
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 $('#btn-settings-close').addEventListener('click', () => $('#settings-dialog').close());
@@ -1751,7 +1801,7 @@ $('#new-form').addEventListener('submit', async (e) => {
     await loadProjects();
     selectProject(proj.id);
   } catch (err) {
-    alert(err.message);
+    toastError(err);
   }
 });
 

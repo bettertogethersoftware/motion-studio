@@ -32,9 +32,11 @@
  *     0 dBFS every time would make every balance decision a fiction. We always
  *     pass --no-normalize and let the measured level be the truth.
  *   - Its inference is stochastic (noise_scale / noise_w), so the same text does
- *     *not* render byte-identically twice. That is fine for narration — audio is
- *     generated once and thereafter read as a file — but it is not the
- *     determinism the frame renderer guarantees.
+ *     *not* render byte-identically twice — and clip DURATION drifts ±2%
+ *     run-to-run, which silently invalidates cue frames computed from a prior
+ *     synthesis. That is why `deterministic: true` exists: it passes
+ *     --noise-scale 0 --noise-w 0, pinning durations (Piper has no seed flag).
+ *     The cost is slightly flatter prosody; the default remains stochastic.
  */
 
 import { spawn } from 'node:child_process';
@@ -368,7 +370,7 @@ export async function checkPiperTts({ timeoutMs = 20_000, ...opts } = {}) {
  * @throws EngineError TTS_UNAVAILABLE / UNSUPPORTED_VOICE / TTS_FAILED
  */
 export async function synthesizePiperSpeech({
-  text, outPath, voice, rate, volume, speaker, sentenceSilence,
+  text, outPath, voice, rate, volume, speaker, sentenceSilence, deterministic,
   exe, python, voicesDir, piper = {}, env, timeoutMs = 120_000,
 }) {
   const resolved = resolvePiper({ exe, python, voicesDir, piper, env });
@@ -396,6 +398,14 @@ export async function synthesizePiperSpeech({
     if (speaker !== undefined && speaker !== null) args.push('-s', String(speaker));
     if (sentenceSilence !== undefined && sentenceSilence !== null) {
       args.push('--sentence-silence', String(sentenceSilence));
+    }
+    if (deterministic) {
+      // VITS samples fresh noise per run (see the module header), which moves
+      // phoneme durations ±2% between otherwise identical invocations. Zeroing
+      // both noise sources pins the output so cue frames computed from one
+      // synthesis stay valid for the next. Piper has no seed flag; this is the
+      // only determinism lever its CLI offers. Slightly flatter prosody.
+      args.push('--noise-scale', '0', '--noise-w', '0');
     }
 
     const { code, stderr } = await execPiper(resolved, args, { timeoutMs });

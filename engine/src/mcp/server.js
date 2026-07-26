@@ -47,6 +47,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import fsp from 'node:fs/promises';
 
 import { ProjectStore } from '../core/project.js';
@@ -61,6 +62,7 @@ import {
 } from '../core/settings.js';
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
+import { ADDON_IDS } from '../core/libraries.js';
 import { resolveInProject } from '../core/sandbox.js';
 import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
@@ -222,7 +224,13 @@ const renderCompositionInjected = (o) => renderComposition({ ...o, browserFactor
 // the factory handed to it explicitly.
 const renderParallelInjected = (o) => renderParallel({ ...o, browserFactory: injectedBrowserFactory });
 
-const server = new McpServer({ name: 'motion-studio', version: '0.15.0' });
+// The engine's one version lives in package.json; advertising a hardcoded copy
+// here drifted once (0.15.0 while the engine was at 0.19.0) and never again.
+const enginePkg = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
+);
+
+const server = new McpServer({ name: 'motion-studio', version: enginePkg.version });
 
 server.registerTool(
   'list_projects',
@@ -827,7 +835,10 @@ server.registerTool(
       'a music bed\'s gainDb relative to the narration without rendering first. ' +
       'sentenceTimings=true additionally synthesizes per sentence and returns `timings` — each sentence\'s ' +
       'start/duration in seconds AND frames — so captions and cues can be placed exactly instead of eyeballed ' +
-      '(inter-sentence pacing becomes sentenceGapSeconds rather than the vendor\'s own). ' +
+      '(inter-sentence pacing becomes sentenceGapSeconds rather than the vendor\'s own; the vendor\'s per-clip ' +
+      'trailing silence is zeroed so the gap replaces, never stacks on, its pacing). ' +
+      'deterministic=true (Piper only) pins phoneme durations (--noise-scale 0 --noise-w 0) so identical input ' +
+      'yields identical timing across runs — use it whenever cue frames are computed from the clip. ' +
       'mode="attach" (default) also appends the clip to the ' +
       'project\'s audio tracks so the next render mixes it in automatically; mode="asset-only" just writes the ' +
       'WAV and reports its duration, leaving you to wire it later with update_project_config. ' +
@@ -836,7 +847,7 @@ server.registerTool(
     inputSchema: {
       projectId: z.string(),
       text: z.string().min(1).describe('Narration text (UTF-8)'),
-      vendor: z.enum(['system', 'azure', 'piper']).optional()
+      vendor: z.enum(TTS_VENDORS).optional()
         .describe('Speech vendor; omit to use the configured default (see list_vendors)'),
       voice: z.string().optional().describe('Voice name from list_voices; omit for the vendor default'),
       rate: z.number().int().min(-10).max(10).optional().describe('Speaking rate (engine scale, e.g. -10..10)'),
@@ -853,9 +864,11 @@ server.registerTool(
         .describe('Synthesize per sentence and report each sentence\'s start/duration in the clip — for caption sync, cue placement, lip-sync (v0.19)'),
       sentenceGapSeconds: z.number().min(0).max(5).default(0.3)
         .describe('sentenceTimings only: silence inserted between sentences'),
+      deterministic: z.boolean().optional()
+        .describe('Piper only: pin phoneme durations so identical input yields identical timing across runs (slightly flatter prosody)'),
     },
   },
-  wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds }) => {
+  wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds, deterministic }) => {
     // Probe before touching the project: an unconfigured vendor should fail
     // without leaving a half-written asset behind. `probe: true` also walks a
     // configured preference chain to the first available vendor (v0.19) and
@@ -888,23 +901,32 @@ server.registerTool(
     // guarded the write and the synthesis that follows it must agree.
     let result;
     let timings = null;
+    let vendorReportedSeconds = null;
     const sentences = sentenceTimings ? splitSentences(text) : null;
     if (sentences && sentences.length > 1) {
       // Per-sentence synthesis + local concat: the only vendor-agnostic way to
       // get alignment data out of CLIs that cannot emit any (v0.19). Offsets
       // are exact because we place the clips ourselves; the trade-off is that
       // inter-sentence pacing is sentenceGapSeconds, not the vendor's own.
+      // sentenceSilence: 0 zeroes Piper's own trailing pad per clip — without
+      // it the gap STACKS on the vendor's pacing and the timings clip comes out
+      // ~(N-1)×0.2s longer than the plain rendering of the same text.
       const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-timings-'));
       try {
         const clips = [];
+        vendorReportedSeconds = 0;
         for (let i = 0; i < sentences.length; i++) {
           const clipPath = path.join(tmpDir, `sentence-${i}.wav`);
           result = await synthesizeWithVendor({
             vendor, text: sentences[i], outPath: clipPath, voice, rate, volume, style,
+            sentenceSilence: 0, deterministic,
             dataDir: store.dataDir, resolved,
           });
+          vendorReportedSeconds += result.durationSeconds ?? 0;
           clips.push(await fsp.readFile(clipPath));
         }
+        // The vendor synthesized the sentences; the engine placed the gaps.
+        vendorReportedSeconds += (sentences.length - 1) * sentenceGapSeconds;
         const joined = concatWavBuffers(clips, { gapSeconds: sentenceGapSeconds });
         await fsp.writeFile(abs, joined.buffer);
         timings = joined.segments.map((seg, i) => ({
@@ -919,8 +941,10 @@ server.registerTool(
       }
     } else {
       result = await synthesizeWithVendor({
-        vendor, text, outPath: abs, voice, rate, volume, style, dataDir: store.dataDir, resolved,
+        vendor, text, outPath: abs, voice, rate, volume, style, deterministic,
+        dataDir: store.dataDir, resolved,
       });
+      vendorReportedSeconds = result.durationSeconds ?? null;
       if (sentences) {
         timings = null; // single sentence: filled in below once the duration is measured
       }
@@ -980,7 +1004,12 @@ server.registerTool(
       peakDb: levels.peakDb,
       meanDb: levels.meanDb,
       ...(timings ? { timings } : {}),
-      reportedDurationSeconds: result.durationSeconds,
+      // The vendor's own duration claim (summed + gaps in the per-sentence
+      // path), vs the header-measured durationSeconds above. Before v0.20 this
+      // leaked the LAST sentence's duration in the timings path.
+      reportedDurationSeconds: vendorReportedSeconds != null
+        ? Number(vendorReportedSeconds.toFixed(4))
+        : result.durationSeconds,
       attached,
       ...(attached
         ? { audioTrackIndex, audio }
@@ -1002,7 +1031,7 @@ server.registerTool(
       '(names like en_US-lessac-medium). Each voice carries any expressive "styles" it supports (azure only). ' +
       'Fails with tts_unavailable when the vendor is not configured.',
     inputSchema: {
-      vendor: z.enum(['system', 'azure', 'piper']).optional().describe('Speech vendor; omit for the configured default'),
+      vendor: z.enum(TTS_VENDORS).optional().describe('Speech vendor; omit for the configured default'),
       locale: z.string().optional().describe('Filter by locale prefix, e.g. "en" or "en-GB" (azure)'),
       search: z.string().optional().describe('Filter by substring of the name / locale name / gender'),
       limit: z.number().int().min(1).max(500).default(50).describe('Max voices to return'),
@@ -1133,7 +1162,7 @@ server.registerTool(
           })).min(1),
         })).min(1),
       }).describe('The piece to compose'),
-      vendor: z.enum(['node', 'fluidsynth']).optional()
+      vendor: z.enum(MUSIC_VENDORS).optional()
         .describe('Music vendor; omit to use the configured default (see list_vendors)'),
       mode: z.enum(['attach', 'asset-only']).default('attach'),
       assetPath: z.string().optional().describe('Project-relative .wav under assets/ (default assets/music-<n>.wav)'),
@@ -1349,7 +1378,7 @@ server.registerTool(
       projectId: z.string(),
       library: z.enum(['three', 'babylon']),
       scaffold: z.boolean().default(true).describe('Replace composition.html/js/css with the library starter'),
-      addons: z.array(z.enum(['geometries', 'loaders', 'postprocessing'])).optional()
+      addons: z.array(z.enum(ADDON_IDS)).optional()
         .describe('Optional addons — three: geometries/loaders/postprocessing; babylon: loaders'),
     },
   },
@@ -1465,7 +1494,7 @@ server.registerResource(
   'frame-api-reference',
   'motion-studio://reference/frame-api',
   {
-    title: 'Motion Studio Frame API v1.1',
+    title: 'Motion Studio Frame API v1.3',
     description: 'The setFrame/interpolate/Sequence/frameReady contract every composition must follow.',
     mimeType: 'text/markdown',
   },

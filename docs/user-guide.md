@@ -159,6 +159,13 @@ an async function; `browser_launch_failed` usually means `npm install`
 never completed its Chromium download (or set `PUPPETEER_EXECUTABLE_PATH`);
 `ffmpeg_failed` includes the tail of FFmpeg's stderr.
 
+Errors surface as **toasts** in the bottom-right corner (v0.20), not
+blocking dialogs: the error code appears as a badge, the message — which
+already contains the fix and any available alternative vendors — stays until
+you dismiss it, and the page remains usable underneath. An unconfigured
+music vendor now reports "not configured" (503) on the vendors page the
+same way speech vendors always did, instead of a generic server error.
+
 ## Output formats (v0.5)
 
 The **config** tab (or `project.json`'s `output` block) selects the

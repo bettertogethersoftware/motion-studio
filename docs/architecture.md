@@ -141,13 +141,22 @@ al.), classified so it stops masquerading as `composition_error`/
 in place, and it only surfaces after the per-render relaunch budget (3) is
 spent. New in v0.19: `no_audio_tracks` — `preview_audio` on a project whose
 `config.audio` is empty.
+The generated-audio and library features carry their own codes: v0.6–v0.7
+`tts_unavailable`, `tts_failed`, `unsupported_voice`, `library_unavailable`;
+v0.8 `music_unavailable`, `music_failed`, `invalid_music_spec`; v0.9
+`inconsistent_scenes`, `scene_not_rendered`, `film_failed`; v0.12
+`invalid_sfx_spec`. The `*_unavailable` pair means "not configured on this
+machine — a setup problem, do not retry"; the `*_failed` pair means the
+configured tool itself failed. (There is deliberately no `sfx_unavailable`:
+sfx is pure JS with nothing to configure.)
 `render_already_in_progress` was retired from the render path in v0.5 and held
 reserved; **v0.11 raises it again for a different condition** — not
 in-process concurrency, which still queues, but a *second OS process* holding
 the project's render lock (§7.1). MCP tools return them as `isError` results with the JSON
 body; the CLI emits them as protocol `error` lines; the Studio server maps
 them to HTTP statuses (403 sandbox, 404 not-found, 400 invalid, 413
-asset-too-large, 429 queue-full, 503 prereqs). `write_composition_file`
+asset-too-large, 429 queue-full, 409 lock-held / name-taken, 502 vendor
+failed, 503 prereqs or vendor unconfigured). `write_composition_file`
 compile-checks `.js` content (`vm.Script`) and rejects with `syntax_error`
 *before touching disk*; writes are atomic (temp file + rename) so a rejected
 write never corrupts the previous version.

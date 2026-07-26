@@ -125,6 +125,15 @@ const STATUS_FOR_CODE = {
   [ErrorCodes.TTS_UNAVAILABLE]: 503,
   [ErrorCodes.UNSUPPORTED_VOICE]: 400,
   [ErrorCodes.TTS_FAILED]: 502,
+  // Music vendors: same taxonomy as speech, so the vendors page reports "not
+  // configured" (503) instead of a generic 500 when a preview fails.
+  [ErrorCodes.MUSIC_UNAVAILABLE]: 503,
+  [ErrorCodes.INVALID_MUSIC_SPEC]: 400,
+  [ErrorCodes.MUSIC_FAILED]: 502,
+  // Two states the UI can act on: another render owns the lock (retry later),
+  // and a project name that already exists (pick another).
+  [ErrorCodes.RENDER_ALREADY_IN_PROGRESS]: 409,
+  [ErrorCodes.PROJECT_ALREADY_EXISTS]: 409,
 };
 
 /** Preview clips are for auditioning a voice, not for rendering a script. */
@@ -219,8 +228,14 @@ async function streamFile(res, absPath, { download = false } = {}) {
  * @param {Function}    [opts.browserFactory]  DI for tests (fake Chromium)
  */
 export function createStudioServer({ store = new ProjectStore(), jobs = new JobManager(), browserFactory = null } = {}) {
+  // Parallel renders need the factory too: workers inherit the env hook, but
+  // the parent's preflight page does not — without it a fake-browser test that
+  // asks for workers > 1 would reach for real Chromium (same rule as the MCP
+  // server's renderParallelInjected).
   const renderFn = browserFactory
-    ? (o) => (o.workers > 1 ? renderParallel(o) : renderComposition({ ...o, browserFactory }))
+    ? (o) => (o.workers > 1
+      ? renderParallel({ ...o, browserFactory })
+      : renderComposition({ ...o, browserFactory }))
     : null;
 
   const server = http.createServer(async (req, res) => {

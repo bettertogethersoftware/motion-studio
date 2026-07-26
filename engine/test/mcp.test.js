@@ -100,10 +100,16 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'sync_shared_files',
     // new in v0.12 (sound effects)
     'synthesize_sfx',
+    // new in v0.10 (batched preview)
+    'capture_preview_frames',
+    // new in v0.14 (blocking wait)
+    'wait_for_render',
     // new in v0.15 (asset management)
     'list_assets', 'delete_asset', 'rename_asset',
     // new in v0.17 (speech + music vendors)
     'list_vendors',
+    // new in v0.19 (audio-only mixdown)
+    'preview_audio',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -412,6 +418,40 @@ test('mcp: synthesize_speech asset-only mode writes a WAV but leaves config.audi
   const proj = await callJson('get_project', { projectId });
   assert.ok(fs.existsSync(path.join(proj.data.path, ...res.data.assetPath.split('/'))));
   assert.equal((proj.data.config.audio ?? []).length, beforeCount);
+});
+
+test('mcp: sentenceTimings gap replaces vendor pacing and duration math adds up', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // Stub clips are exactly 1.0s each. Three sentences + two 0.5s gaps must
+  // measure 4.0s — if the vendor's own trailing pad leaked in (the pre-v0.20
+  // additive-gap bug), the clip would come out longer than clips + gaps.
+  const res = await callJson('synthesize_speech', {
+    projectId, text: 'One. Two. Three.', voice: 'Microsoft David Desktop',
+    mode: 'asset-only', sentenceTimings: true, sentenceGapSeconds: 0.5,
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.timings.length, 3);
+  assert.deepEqual(res.data.timings.map((s) => s.text), ['One.', 'Two.', 'Three.']);
+  assert.ok(Math.abs(res.data.durationSeconds - 4.0) < 0.05, `duration ${res.data.durationSeconds}`);
+  assert.ok(Math.abs(res.data.timings[1].startSeconds - 1.5) < 0.05, JSON.stringify(res.data.timings[1]));
+  assert.ok(Math.abs(res.data.timings[2].startSeconds - 3.0) < 0.05, JSON.stringify(res.data.timings[2]));
+  // reportedDurationSeconds is the vendor's summed self-report + gaps — before
+  // v0.20 it leaked the LAST sentence's duration (would be ~1.0 here).
+  assert.ok(Math.abs(res.data.reportedDurationSeconds - 4.0) < 0.05,
+    `reportedDurationSeconds ${res.data.reportedDurationSeconds}`);
+});
+
+test('mcp: deterministic flag is warned about, not dropped, on a non-piper vendor', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('synthesize_speech', {
+    projectId, text: 'Pinned take.', voice: 'Microsoft David Desktop',
+    mode: 'asset-only', deterministic: true,
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.ok(
+    (res.data.warnings ?? []).some((w) => /deterministic.*Piper-only/i.test(w)),
+    JSON.stringify(res.data.warnings),
+  );
 });
 
 test('mcp: synthesize_speech rejects an assetPath outside assets/', async (t) => {
