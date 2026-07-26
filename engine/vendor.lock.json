@@ -1,5 +1,5 @@
 {
-  "comment": "Content hashes for the git-ignored engine/vendor/libs builds. Run \"node scripts/fetch-libs.mjs --update\" to change.",
+  "comment": "Upstream origin of the committed engine/vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run \"node scripts/fetch-libs.mjs --update\" to change.",
   "lockfileVersion": 1,
   "files": {
     "babylon/babylon.js": {
@@ -13,6 +13,66 @@
       "sha256": "c70ebed08e11260c17f6ebc204655e7fa2eae6153b3f9602271e64159977dcb9",
       "bytes": 523396,
       "url": "https://cdn.babylonjs.com/v9.18.0/loaders/babylonjs.loaders.min.js"
+    },
+    "three/examples/CopyShader.js": {
+      "version": null,
+      "sha256": "6b5da4fe3b410286974590885f82fe4a446f25c728f7d6c888e2a2a331333949",
+      "bytes": 606,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/shaders/CopyShader.js"
+    },
+    "three/examples/EffectComposer.js": {
+      "version": null,
+      "sha256": "a3c6500e7fe75bda1eeaef587ff7b01c9cd8ffbeaf227c6ec6d47e82a06522dd",
+      "bytes": 6269,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/EffectComposer.js"
+    },
+    "three/examples/GLTFLoader.js": {
+      "version": null,
+      "sha256": "c394264dab5b8dd6cfdd1b4cc3b95261f165454a2e0e67c81dffe8c6648d5a6b",
+      "bytes": 103493,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/loaders/GLTFLoader.js"
+    },
+    "three/examples/LuminosityHighPassShader.js": {
+      "version": null,
+      "sha256": "00ed0682e61ca207d9c62298269472d6d4eedd9d33528400e7cbc633da8544da",
+      "bytes": 1228,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/shaders/LuminosityHighPassShader.js"
+    },
+    "three/examples/MaskPass.js": {
+      "version": null,
+      "sha256": "32a23fb5a0786e14a82de9de5cd6c6405928e98568e286d38631f26e3172ef03",
+      "bytes": 2193,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/MaskPass.js"
+    },
+    "three/examples/Pass.js": {
+      "version": null,
+      "sha256": "be303ce7b919919bc9baac93f3635d110e6b37cded11c990b8cc346b36259f37",
+      "bytes": 1497,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/Pass.js"
+    },
+    "three/examples/RenderPass.js": {
+      "version": null,
+      "sha256": "57a549b2d6a947cddf0385a804dc70c3b2d155663d908e99e35d42274b3878be",
+      "bytes": 1746,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/RenderPass.js"
+    },
+    "three/examples/ShaderPass.js": {
+      "version": null,
+      "sha256": "2e64890b8e4c4dafcfd796d5c84877f2ad36a101c83263211c500ec40eaf1240",
+      "bytes": 1416,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/ShaderPass.js"
+    },
+    "three/examples/TeapotGeometry.js": {
+      "version": null,
+      "sha256": "af64997fd3f277e8d7d35ca5f45e8106fbeb8d4e3b55d8ab4dd8189f4e42678a",
+      "bytes": 18667,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/geometries/TeapotGeometry.js"
+    },
+    "three/examples/UnrealBloomPass.js": {
+      "version": null,
+      "sha256": "1ed342b273e9b077a3e92e5caeecd45043f03071306c696564d5b53f0562dced",
+      "bytes": 12612,
+      "url": "https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/postprocessing/UnrealBloomPass.js"
     },
     "three/three.min.js": {
       "version": null,

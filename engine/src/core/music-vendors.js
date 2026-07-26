@@ -20,7 +20,7 @@
 import fsp from 'node:fs/promises';
 import { readStoredSettings, readSettings, MUSIC_VENDORS } from './settings.js';
 import { defaultDataDir } from './project.js';
-import { resolveVendorFrom, unavailableError, buildReport } from './vendors.js';
+import { resolveVendorFrom, walkVendorChain, unavailableError, buildReport } from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
 import { parseWavHeader } from './tts.js'; // the engine's one WAV header reader
 import {
@@ -110,18 +110,26 @@ async function musicSettings(dataDir, settings) {
 
 /**
  * Which vendor renders music, and why.
- * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default'}>}
+ *
+ * `probe: true` walks a multi-entry preference chain to the first available
+ * vendor (see core/vendors.js); a single-vendor configuration probes nothing.
+ *
+ * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default',
+ *                    chain: string[], status?: object|null, skipped?: object[], exhausted?: true}>}
  */
-export async function resolveMusicVendor({ vendor, dataDir, settings } = {}) {
+export async function resolveMusicVendor({ vendor, dataDir, settings, probe = false } = {}) {
   const stored = settings
-    ? settings.music?.vendor
-    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.music?.vendor;
-  return resolveVendorFrom('music', {
+    ? settings.music
+    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.music;
+  const resolved = resolveVendorFrom('music', {
     vendor,
-    storedVendor: stored,
+    storedVendor: stored?.vendor,
+    storedVendors: stored?.vendors,
     allowed: MUSIC_VENDORS,
     fallback: DEFAULT_MUSIC_VENDOR,
   });
+  if (!probe) return resolved;
+  return walkVendorChain(resolved, (id) => checkMusicVendor(id, { dataDir, settings }));
 }
 
 /**
@@ -178,7 +186,7 @@ async function availableAlternatives(failing, opts) {
 
 function fixFor(vendor) {
   return vendor === 'node'
-    ? 'Point MOTION_STUDIO_SOUNDFONT at a General MIDI .sf2/.sf3 file (or set it on the Studio\'s vendors page), and make sure `npm install` has run in engine/.'
+    ? 'Point MOTION_STUDIO_SOUNDFONT at a General MIDI .sf2/.sf3 file (or set it on the Studio\'s music page), and make sure `npm install` has run in engine/.'
     : 'Build MotionStudioMidi.exe and install fluidsynth.exe + a SoundFont (see docs/music-setup.md), or switch the music vendor to "node".';
 }
 
@@ -195,27 +203,35 @@ export async function musicUnavailableWithAlternatives(vendor, status, opts = {}
 /** Full status of every music vendor — backs the Studio page and list_vendors. */
 export async function musicVendorReport({ dataDir, settings, probe = true } = {}) {
   const music = await musicSettings(dataDir, settings);
-  const active = await resolveMusicVendor({ dataDir, settings });
+  // No probe here: every vendor is probed below for its card, and the chain walk
+  // is done from those results rather than paying for a second round.
+  const resolved = await resolveMusicVendor({ dataDir, settings });
+  const chain = resolved.chain;
   const vendors = [];
   for (const id of MUSIC_VENDORS) {
     const info = MUSIC_VENDOR_INFO[id];
+    const priority = chain.includes(id) ? chain.indexOf(id) + 1 : null;
     if (!probe) {
-      vendors.push({ ...info, active: id === active.vendor, available: null });
+      vendors.push({ ...info, active: id === resolved.vendor, priority, available: null });
       continue;
     }
     const status = await checkMusicVendor(id, { dataDir, settings });
     vendors.push({
       ...info,
-      active: id === active.vendor,
+      priority,
       available: status.available,
       error: status.error ?? null,
       config: status.config,
     });
   }
+  const usable = probe ? chain.find((id) => vendors.find((v) => v.id === id)?.available) : null;
+  const active = usable ?? resolved.vendor;
+  for (const v of vendors) v.active = v.id === active;
   return buildReport({
     capability: 'music',
-    active: active.vendor,
-    activeSource: active.source,
+    active,
+    activeSource: resolved.source,
+    chain,
     settings: music,
     vendors,
   });
@@ -276,15 +292,21 @@ export async function conformWavLevel(file, targetPeakDb) {
  * Render `spec` through whichever vendor is active (or the one named).
  * Returns the provider's metadata plus `vendor`/`vendorSource` and the measured
  * level, so a caller can see what it actually got rather than what it asked for.
+ *
+ * `resolved` lets a caller hand in a decision it already made (and probed).
+ * With preference chains that is a correctness point, not just a saved probe:
+ * resolving twice consults live availability twice and could reach two different
+ * vendors. See core/tts-vendors.js synthesizeWithVendor for the same argument.
  */
 export async function synthesizeMusicWithVendor({
   vendor, spec, outPath, dataDir, settings, sampleRate, gain, targetPeakDb, timeoutMs,
+  resolved: preResolved,
 }) {
-  const resolved = await resolveMusicVendor({ vendor, dataDir, settings });
+  const resolved = preResolved ?? await resolveMusicVendor({ vendor, dataDir, settings, probe: true });
   const music = await musicSettings(dataDir, settings);
   const target = targetPeakDb === undefined ? (music.targetPeakDb ?? null) : targetPeakDb;
 
-  const status = await checkMusicVendor(resolved.vendor, { dataDir, settings });
+  const status = resolved.status ?? await checkMusicVendor(resolved.vendor, { dataDir, settings });
   if (!status.available) throw await musicUnavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
 
   if (resolved.vendor === 'node') {

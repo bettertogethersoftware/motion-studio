@@ -15,7 +15,7 @@ const win = {};
 win.window = win; // self-referential, browser-style
 vm.createContext(win);
 vm.runInContext(runtimeSrc, win, { filename: 'frame-api.js' });
-const { interpolate, Sequence, random, easings, registerComposition, spring, interpolateColors, Loop } = win.MotionStudio;
+const { interpolate, Sequence, random, easings, registerComposition, spring, interpolateColors, Loop, particles } = win.MotionStudio;
 
 test('interpolate: linear two-point mapping', () => {
   assert.equal(interpolate(0, [0, 10], [0, 100]), 0);
@@ -180,4 +180,40 @@ test('Loop: repeats against the active frame context with cycle index', async ()
   await win.setFrame(45);
   assert.deepEqual(seen, [5, 2]);
   assert.throws(() => Loop(0, () => {}), /durationInFrames must be > 0/);
+});
+
+// particles() returns arrays built inside the vm realm; deepStrictEqual would
+// fail on the foreign Array prototype, so compare JSON-normalized copies.
+const J = (x) => JSON.parse(JSON.stringify(x));
+
+test('particles: pure function of frame — identical output for identical frames (v1.3)', () => {
+  const a = particles(42, { count: 8, lifeFrames: 60, seed: 7 });
+  const b = particles(42, { count: 8, lifeFrames: 60, seed: 7 });
+  assert.deepEqual(J(a), J(b));
+  assert.equal(a.length, 8);
+  for (const p of a) {
+    assert.ok(p.phase >= 0 && p.phase < 1, `phase ${p.phase}`);
+    assert.equal(p.u.length, 4);
+    for (const u of p.u) assert.ok(u >= 0 && u < 1);
+  }
+});
+
+test('particles: staggered phases, per-cycle random re-roll, seed independence', () => {
+  const frame0 = particles(0, { count: 4, lifeFrames: 40, seed: 1 });
+  // uniform stagger: phases 0, .25, .5, .75 at frame 0
+  assert.deepEqual(Array.from(frame0, (p) => p.phase), [0, 0.25, 0.5, 0.75]);
+  // same particle, same cycle → same randoms across frames
+  const f1 = particles(1, { count: 4, lifeFrames: 40, seed: 1 });
+  assert.deepEqual(J(frame0[0].u), J(f1[0].u));
+  // next cycle → new randoms
+  const f40 = particles(40, { count: 4, lifeFrames: 40, seed: 1 });
+  assert.equal(f40[0].cycle, 1);
+  assert.notDeepEqual(J(frame0[0].u), J(f40[0].u));
+  // a different seed is a different emitter
+  assert.notDeepEqual(J(frame0[0].u), J(particles(0, { count: 4, lifeFrames: 40, seed: 2 })[0].u));
+});
+
+test('particles: validates count and lifeFrames', () => {
+  assert.throws(() => particles(0, { count: 0 }), /count must be > 0/);
+  assert.throws(() => particles(0, { lifeFrames: 0 }), /lifeFrames must be > 0/);
 });

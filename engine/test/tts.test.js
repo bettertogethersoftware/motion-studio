@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Unit tests for the TTS core module (no external exe, no ffmpeg): WAV header
  * parsing, duration→frames, and the spawn/contract mapping against the Node
  * stub injected via the ttsExe argument (helpers/fake-tts.mjs).
@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   wavDurationSeconds, parseWavHeader, framesForDuration, synthesizeSpeech, checkTts,
+  measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
 } from '../src/core/tts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -132,6 +133,88 @@ test('synthesizeSpeech maps an unknown voice to unsupported_voice', async () => 
       (e) => e.code === 'unsupported_voice',
     );
   });
+});
+
+/* --------------------- levels / sentences / concat (v0.19) --------------------- */
+
+/** 16-bit mono WAV holding literal samples (−1..1). */
+function pcmWav16(samples, sampleRate = 22050) {
+  const wav = pcmWav({ sampleRate, channels: 1, bitsPerSample: 16, dataSize: samples.length * 2 });
+  const { dataOffset } = parseWavHeader(wav);
+  samples.forEach((s, i) => wav.writeInt16LE(Math.round(s * 32767), dataOffset + i * 2));
+  return wav;
+}
+
+test('measureWavLevels reports peak and RMS in dBFS', async () => {
+  await withTmp(async (dir) => {
+    const f = path.join(dir, 'half.wav');
+    // constant 0.5 amplitude → peak = RMS = 20·log10(0.5·32767/32768) ≈ −6.02
+    await fsp.writeFile(f, pcmWav16(new Array(2205).fill(0.5)));
+    const { peakDb, meanDb } = await measureWavLevels(f);
+    assert.ok(Math.abs(peakDb - -6.02) < 0.05, `peakDb=${peakDb}`);
+    assert.ok(Math.abs(meanDb - -6.02) < 0.05, `meanDb=${meanDb}`);
+  });
+});
+
+test('measureWavLevels reports nulls for silence instead of -Infinity', async () => {
+  await withTmp(async (dir) => {
+    const f = path.join(dir, 'silence.wav');
+    await fsp.writeFile(f, pcmWav({ dataSize: 4410 }));
+    assert.deepEqual(await measureWavLevels(f), { peakDb: null, meanDb: null });
+  });
+});
+
+test('measureWavEnvelope reports per-second RMS and flags a dead tail', async () => {
+  await withTmp(async (dir) => {
+    const f = path.join(dir, 'tail.wav');
+    // 2 s of 0.5-amplitude tone, then 2 s of digital silence at 22050 Hz.
+    const samples = [...new Array(44100).fill(0.5), ...new Array(44100).fill(0)];
+    await fsp.writeFile(f, pcmWav16(samples));
+    const { envelopeDb, silentTailSeconds } = await measureWavEnvelope(f);
+    assert.equal(envelopeDb.length, 4);
+    assert.ok(Math.abs(envelopeDb[0] - -6.0) < 0.1, `envelopeDb[0]=${envelopeDb[0]}`);
+    assert.ok(Math.abs(envelopeDb[1] - -6.0) < 0.1);
+    assert.equal(envelopeDb[2], null);   // digital silence, not -Infinity
+    assert.equal(envelopeDb[3], null);
+    assert.equal(silentTailSeconds, 2);
+  });
+});
+
+test('measureWavEnvelope reports zero silent tail when audio runs to the end', async () => {
+  await withTmp(async (dir) => {
+    const f = path.join(dir, 'full.wav');
+    await fsp.writeFile(f, pcmWav16(new Array(44100).fill(0.25)));
+    const { envelopeDb, silentTailSeconds } = await measureWavEnvelope(f);
+    assert.equal(envelopeDb.length, 2);
+    assert.equal(silentTailSeconds, 0);
+  });
+});
+
+test('splitSentences splits on terminators and never returns empty', () => {
+  assert.deepEqual(splitSentences('One. Two! Three?'), ['One.', 'Two!', 'Three?']);
+  assert.deepEqual(splitSentences('No terminator here'), ['No terminator here']);
+  assert.deepEqual(splitSentences('這是茶壺。它很燙!'), ['這是茶壺。它很燙!']); // no space after CJK stop: one unit
+  assert.deepEqual(splitSentences('這是茶壺。 它很燙!'), ['這是茶壺。', '它很燙!']);
+});
+
+test('concatWavBuffers places segments exactly, with the gap between them', () => {
+  const a = pcmWav16(new Array(22050).fill(0.25)); // 1.0s
+  const b = pcmWav16(new Array(11025).fill(0.25)); // 0.5s
+  const { buffer, segments, sampleRate } = concatWavBuffers([a, b], { gapSeconds: 0.5 });
+  assert.equal(sampleRate, 22050);
+  assert.deepEqual(segments, [
+    { startSeconds: 0, durationSeconds: 1 },
+    { startSeconds: 1.5, durationSeconds: 0.5 },
+  ]);
+  // The result is itself a valid WAV totalling 2.0s of audio.
+  const info = parseWavHeader(buffer);
+  assert.equal(info.dataSize / info.byteRate, 2);
+});
+
+test('concatWavBuffers refuses mismatched formats', () => {
+  const a = pcmWav16(new Array(100).fill(0.1), 22050);
+  const b = pcmWav16(new Array(100).fill(0.1), 16000);
+  assert.throws(() => concatWavBuffers([a, b]), (e) => /format mismatch/.test(e.message));
 });
 
 test('synthesizeSpeech maps a generic engine failure to tts_failed', async () => {

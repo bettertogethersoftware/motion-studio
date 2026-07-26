@@ -30,8 +30,11 @@ import {
   checkAzureTts, synthesizeAzureSpeech, resolveAzureConfig, azureSetupHint,
   AZURE_ENV, AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT,
 } from './tts-azure.js';
+import { checkPiperTts, synthesizePiperSpeech, PIPER_ENV } from './tts-piper.js';
 import { readSettings, readStoredSettings, TTS_VENDORS } from './settings.js';
-import { resolveVendorFrom, unavailableError, buildReport, CAPABILITY_META } from './vendors.js';
+import {
+  resolveVendorFrom, walkVendorChain, unavailableError, buildReport, CAPABILITY_META,
+} from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir } from './project.js';
 
@@ -56,6 +59,13 @@ export const VENDOR_INFO = Object.freeze({
     requires: `${AZURE_ENV.key[1]} + ${AZURE_ENV.region[1]} in the environment`,
     offline: false,
   }),
+  piper: Object.freeze({
+    id: 'piper',
+    label: 'Piper (local neural)',
+    summary: 'Neural voices running entirely on this machine — no account, no per-character billing, no network. Cross-platform. GPLv3, installed separately (pip install piper-tts) with voices you download.',
+    requires: `${PIPER_ENV.exe[0]} (or piper / python -m piper on PATH) + voices in ${PIPER_ENV.voices[0]}`,
+    offline: true,
+  }),
 });
 
 const isVendor = (v) => TTS_VENDORS.includes(v);
@@ -69,20 +79,31 @@ async function ttsSettings(dataDir, settings) {
 
 /**
  * Which vendor speaks, and why.
- * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default'}>}
+ *
+ * `probe: true` additionally walks a multi-entry preference chain and returns
+ * the first vendor that is actually available, along with the `status` it got
+ * (so the caller need not probe again) and the `skipped` entries it passed. A
+ * single-vendor configuration — the default — probes nothing and behaves exactly
+ * as it did before chains existed. See core/vendors.js for the guarantees.
+ *
+ * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default',
+ *                    chain: string[], status?: object|null, skipped?: object[], exhausted?: true}>}
  */
-export async function resolveSpeechVendor({ vendor, dataDir, settings } = {}) {
+export async function resolveSpeechVendor({ vendor, dataDir, settings, probe = false, timeoutMs, force = false } = {}) {
   // Read the file as stored, not as merged: "system" from a settings.json that
   // never mentions a vendor is the built-in default, and the Studio says so.
   const stored = settings
-    ? settings.tts?.vendor
-    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.tts?.vendor;
-  return resolveVendorFrom('speech', {
+    ? settings.tts
+    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.tts;
+  const resolved = resolveVendorFrom('speech', {
     vendor,
-    storedVendor: stored,
+    storedVendor: stored?.vendor,
+    storedVendors: stored?.vendors,
     allowed: SPEECH_VENDORS,
     fallback: DEFAULT_SPEECH_VENDOR,
   });
+  if (!probe) return resolved;
+  return walkVendorChain(resolved, (id) => checkSpeechVendor(id, { dataDir, settings, timeoutMs, force }));
 }
 
 /**
@@ -110,6 +131,19 @@ export async function checkSpeechVendor(vendor, { dataDir, settings, timeoutMs, 
       voiceDetails: (probe.voices ?? []).map((name) => ({ name, displayName: name, locale: null, gender: null, styles: [] })),
       error: probe.error,
       config: { exePath: exe.path, exeSource: exe.source },
+    };
+  }
+
+  if (vendor === 'piper') {
+    const piper = (await ttsSettings(dataDir, settings)).piper ?? {};
+    const probe = await checkPiperTts({ piper, ...(timeoutMs ? { timeoutMs } : {}) });
+    return {
+      vendor,
+      available: probe.available,
+      voices: probe.voices ?? [],
+      voiceDetails: probe.voiceDetails ?? [],
+      error: probe.error,
+      config: probe.config,
     };
   }
 
@@ -152,18 +186,23 @@ export async function checkSpeechVendor(vendor, { dataDir, settings, timeoutMs, 
  */
 export async function speechVendorReport({ dataDir, settings, probe = true, timeoutMs, force = false } = {}) {
   const tts = await ttsSettings(dataDir, settings);
-  const active = await resolveSpeechVendor({ dataDir, settings });
+  // Resolve without probing: this function is about to probe every vendor for
+  // its cards anyway, so the chain walk is done below from those results rather
+  // than paying for a second round of exe spawns.
+  const resolved = await resolveSpeechVendor({ dataDir, settings });
+  const chain = resolved.chain;
   const vendors = [];
   for (const id of TTS_VENDORS) {
     const info = VENDOR_INFO[id];
+    const priority = chain.includes(id) ? chain.indexOf(id) + 1 : null;
     if (!probe) {
-      vendors.push({ ...info, active: id === active.vendor, available: null, voiceCount: null });
+      vendors.push({ ...info, active: id === resolved.vendor, priority, available: null, voiceCount: null });
       continue;
     }
     const status = await checkSpeechVendor(id, { dataDir, settings, timeoutMs, force });
     vendors.push({
       ...info,
-      active: id === active.vendor,
+      priority,
       available: status.available,
       error: status.error ?? null,
       voiceCount: status.voices.length,
@@ -173,10 +212,17 @@ export async function speechVendorReport({ dataDir, settings, probe = true, time
       locales: [...new Set(status.voiceDetails.map((v) => v.locale).filter(Boolean))].sort(),
     });
   }
+  // The effective vendor: first in the chain that probed available. Unprobed (or
+  // nothing usable) falls back to the head, which is also what a caller asking
+  // to synthesize would hit — and then fail on, with a message naming the fix.
+  const usable = probe ? chain.find((id) => vendors.find((v) => v.id === id)?.available) : null;
+  const active = usable ?? resolved.vendor;
+  for (const v of vendors) v.active = v.id === active;
   return buildReport({
     capability: 'speech',
-    active: active.vendor,
-    activeSource: active.source,
+    active,
+    activeSource: resolved.source,
+    chain,
     settings: tts,
     vendors,
   });
@@ -206,8 +252,8 @@ export function filterVoices(voices, { locale, search, limit = 0, offset = 0 } =
 export async function listSpeechVoices({
   vendor, locale, search, limit = 0, offset = 0, dataDir, settings, timeoutMs, force = false,
 } = {}) {
-  const resolved = await resolveSpeechVendor({ vendor, dataDir, settings });
-  const status = await checkSpeechVendor(resolved.vendor, { dataDir, settings, timeoutMs, force });
+  const resolved = await resolveSpeechVendor({ vendor, dataDir, settings, probe: true, timeoutMs, force });
+  const status = resolved.status ?? await checkSpeechVendor(resolved.vendor, { dataDir, settings, timeoutMs, force });
   if (!status.available) throw await unavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
   const page = filterVoices(status.voiceDetails, { locale, search, limit, offset });
   return {
@@ -221,11 +267,17 @@ export async function listSpeechVoices({
 
 /** How to fix each speech vendor, in one sentence. */
 function fixFor(vendor) {
-  return vendor === 'azure'
-    ? (status) => status?.config?.setupHint ||
-      `Check ${AZURE_ENV.key[1]} / ${AZURE_ENV.region[1]} in the environment, or the Studio's vendors page.`
-    : () => 'Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE to its path (Windows only), or switch the ' +
-      'speech vendor to "azure" on the Studio\'s vendors page.';
+  if (vendor === 'azure') {
+    return (status) => status?.config?.setupHint ||
+      `Check ${AZURE_ENV.key[1]} / ${AZURE_ENV.region[1]} in the environment, or the Studio's tts page.`;
+  }
+  if (vendor === 'piper') {
+    return () => 'Install Piper (`pip install piper-tts`), point ' + PIPER_ENV.exe[0] + ' at its executable, and put ' +
+      'at least one voice (.onnx + .onnx.json from huggingface.co/rhasspy/piper-voices) in the folder named by ' +
+      PIPER_ENV.voices[0] + '.';
+  }
+  return () => 'Build MotionStudioTts.exe and set MOTION_STUDIO_TTS_EXE to its path (Windows only), or switch to ' +
+    'another speech vendor on the Studio\'s tts page.';
 }
 
 /** The speech vendors that *are* usable, so a failure can point somewhere useful. */
@@ -258,20 +310,40 @@ export async function unavailableWithAlternatives(vendor, status, opts = {}) {
  * Synthesize through whichever vendor is active (or the one named).
  * The payload is the provider's, plus `vendor`/`vendorSource` and any warnings
  * about options the chosen vendor ignored.
+ *
+ * `resolved` lets a caller that has *already* resolved (and probed) hand the
+ * decision in rather than have it recomputed. With preference chains that
+ * matters for more than speed: resolution now consults live availability, so
+ * resolving twice could legitimately reach two different vendors — the caller's
+ * check and the actual synthesis must agree on one.
  */
 export async function synthesizeWithVendor({
   vendor, text, outPath, voice, rate, volume, pitch, style, styleDegree, role,
-  dataDir, settings, timeoutMs,
+  dataDir, settings, timeoutMs, resolved: preResolved,
 }) {
-  const resolved = await resolveSpeechVendor({ vendor, dataDir, settings });
+  const resolved = preResolved ?? await resolveSpeechVendor({ vendor, dataDir, settings, probe: true });
   const warnings = [];
 
-  if (resolved.vendor === 'system') {
+  /** Options only the Azure vendor implements — reported, never silently dropped. */
+  const warnAzureOnly = (vendorName) => {
     for (const [name, value] of Object.entries({ style, styleDegree, role, pitch })) {
       if (value !== undefined && value !== null) {
-        warnings.push(`"${name}" is an Azure-only option and was ignored by the system vendor`);
+        warnings.push(`"${name}" is an Azure-only option and was ignored by the ${vendorName} vendor`);
       }
     }
+  };
+
+  if (resolved.vendor === 'piper') {
+    warnAzureOnly('piper');
+    const tts = await ttsSettings(dataDir, settings);
+    const result = await synthesizePiperSpeech({
+      text, outPath, voice, rate, volume, piper: tts.piper ?? {}, ...(timeoutMs ? { timeoutMs } : {}),
+    });
+    return { ...result, vendorSource: resolved.source, warnings };
+  }
+
+  if (resolved.vendor === 'system') {
+    warnAzureOnly('system');
     // No probe first: synthesizeSpeech already maps a missing/unstartable exe
     // to tts_unavailable, and probing here would spawn the exe twice on every
     // narration call (the MCP tool probes once, before it touches the project).

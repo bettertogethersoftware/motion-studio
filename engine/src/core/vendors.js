@@ -20,10 +20,36 @@
  *
  *   argument  >  MOTION_STUDIO_<CAP>_VENDOR  >  settings.json  >  built-in default
  *
- * and there is no "try the other one if this fails" anywhere. A machine that
- * quietly swapped synthesizers mid-film would produce a soundtrack that changes
- * character between scenes, which is far worse than a clear failure naming what
- * to install.
+ * ## Preference chains (v0.19)
+ *
+ * A settings file may name an ordered *chain* (`tts.vendors` / `music.vendors`)
+ * instead of a single vendor, and the env var accepts a comma-separated list for
+ * the same purpose. Resolution then walks the chain and uses the first entry
+ * that is actually **configured and available**.
+ *
+ * Until v0.19 this module said there was no "try the other one" anywhere, on the
+ * grounds that a machine quietly swapping synthesizers mid-film would produce a
+ * soundtrack that changes character between scenes. That reasoning still holds,
+ * so the fallback is deliberately narrow and the guarantees it keeps are:
+ *
+ *   - **A named vendor is never redirected.** An `argument` or a single-valued
+ *     env var resolves to a one-entry chain, so an explicit request either runs
+ *     on that vendor or fails saying why. Agents asking for `azure` never get
+ *     `piper` instead.
+ *   - **Only *unavailability* is fallen back past, never failure.** The walk
+ *     skips a vendor whose probe says it is not set up (no key, no exe, no
+ *     voices). A vendor that probes fine and then fails during synthesis is
+ *     still a hard error — the mix is not silently finished by someone else.
+ *   - **A one-entry chain probes nothing.** The default settings are exactly
+ *     that, so single-vendor machines keep the old behaviour and the old cost:
+ *     no extra exe spawns or network round-trips at resolution time.
+ *   - **Falling back is reported, never silent** (`skipped` here, `vendorNote`
+ *     over MCP, the chain badges on the Studio's vendor pages).
+ *
+ * The honest caveat: with a chain of two or more, the choice is made per call,
+ * so a vendor that becomes unavailable *between* two narration calls in one film
+ * will change the voice of everything after it. That is the price of the
+ * feature; a one-entry chain declines to pay it.
  */
 
 import { EngineError, ErrorCodes } from './errors.js';
@@ -69,27 +95,107 @@ export function badVendor(capability, vendor, allowed) {
 }
 
 /**
+ * Clean a raw preference list into a usable chain: known vendors only, in the
+ * order given, first occurrence of each kept. Returns null for anything that is
+ * not a usable chain, so callers can treat "no chain" and "empty chain"
+ * identically and fall through to the scalar setting.
+ *
+ * Unknown ids are dropped rather than thrown on, because this also runs over the
+ * settings file *as stored* — which may have been hand-edited or written by a
+ * newer build that knows a vendor this one doesn't. validateSettings() is where
+ * a bad chain is refused loudly; here the job is to keep working.
+ */
+export function normalizeVendorChain(value, allowed) {
+  if (!Array.isArray(value)) return null;
+  const chain = [];
+  for (const raw of value) {
+    if (typeof raw !== 'string') continue;
+    const id = raw.trim();
+    if (allowed.includes(id) && !chain.includes(id)) chain.push(id);
+  }
+  return chain.length ? chain : null;
+}
+
+/**
  * Resolve which vendor a capability uses, and why.
  *
- * `storedVendor` must come from the settings file **as written** rather than
- * from the merged defaults, so the Studio can tell "the user picked this" from
- * "this is what ships" — the two read identically once defaults are applied.
+ * `storedVendor`/`storedVendors` must come from the settings file **as written**
+ * rather than from the merged defaults, so the Studio can tell "the user picked
+ * this" from "this is what ships" — the two read identically once defaults are
+ * applied.
  *
- * @returns {{vendor: string, source: 'argument'|'env'|'settings'|'default'}}
+ * `chain` is the ordered candidate list, and `vendor` is its head: the answer
+ * for every caller that does not care about fallback. A chain longer than one
+ * entry only ever comes from a settings array or a comma-separated env var —
+ * an explicitly named vendor always yields a chain of exactly itself.
+ *
+ * @returns {{vendor: string, source: 'argument'|'env'|'settings'|'default', chain: string[]}}
  */
-export function resolveVendorFrom(capability, { vendor, storedVendor, allowed, fallback }) {
+export function resolveVendorFrom(capability, { vendor, storedVendor, storedVendors, allowed, fallback }) {
   const meta = requireCapability(capability);
   if (vendor) {
     if (!allowed.includes(vendor)) throw badVendor(capability, vendor, allowed);
-    return { vendor, source: 'argument' };
+    return { vendor, source: 'argument', chain: [vendor] };
   }
   const env = process.env[meta.env]?.trim();
   if (env) {
-    if (!allowed.includes(env)) throw badVendor(capability, env, allowed);
-    return { vendor: env, source: 'env' };
+    // "piper,system" is a preference chain; "piper" is a chain of one. Unknown
+    // ids throw here (unlike the stored chain): someone typed this by hand just
+    // now, and a typo they can still see is worth failing on.
+    const ids = env.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const id of ids) if (!allowed.includes(id)) throw badVendor(capability, id, allowed);
+    const chain = normalizeVendorChain(ids, allowed);
+    if (chain) return { vendor: chain[0], source: 'env', chain };
   }
-  if (storedVendor && allowed.includes(storedVendor)) return { vendor: storedVendor, source: 'settings' };
-  return { vendor: fallback, source: 'default' };
+  const stored = normalizeVendorChain(storedVendors, allowed);
+  if (stored) return { vendor: stored[0], source: 'settings', chain: stored };
+  if (storedVendor && allowed.includes(storedVendor)) {
+    return { vendor: storedVendor, source: 'settings', chain: [storedVendor] };
+  }
+  return { vendor: fallback, source: 'default', chain: [fallback] };
+}
+
+/**
+ * Walk a resolved chain and pick the first vendor that is actually usable.
+ *
+ * A one-entry chain returns immediately **without probing** — that is the
+ * default configuration, and resolution has never cost an exe spawn before; the
+ * caller probes it as it always has. Only a real chain pays for the walk.
+ *
+ * When nothing in the chain is usable, this reports the *head* of the chain (the
+ * user's first preference) along with its status, so the caller's existing
+ * "unavailable" path fires on the vendor they actually asked for rather than on
+ * whichever one happened to be last.
+ *
+ * @param {object} resolved  the {vendor, source, chain} from resolveVendorFrom
+ * @param {(id: string) => Promise<{available: boolean, error?: string}>} probe
+ * @returns {Promise<{vendor, source, chain, status: object|null,
+ *                    skipped: Array<{vendor: string, error: string}>, exhausted?: true}>}
+ */
+export async function walkVendorChain({ vendor, source, chain }, probe) {
+  if (!chain || chain.length <= 1) return { vendor, source, chain: chain ?? [vendor], status: null, skipped: [] };
+  const skipped = [];
+  let headStatus = null;
+  for (const id of chain) {
+    const status = await probe(id);
+    if (headStatus === null) headStatus = status;
+    if (status?.available) return { vendor: id, source, chain, status, skipped };
+    skipped.push({ vendor: id, error: status?.error ?? 'unavailable' });
+  }
+  return { vendor: chain[0], source, chain, status: headStatus, skipped, exhausted: true };
+}
+
+/**
+ * One sentence describing a fallback that happened, or null when the resolution
+ * ran on the caller's first choice. Shared so the MCP tools and the Studio say
+ * the same thing — a fallback the user cannot see is the failure mode this
+ * feature has to avoid.
+ */
+export function chainFallbackNote(capability, resolved) {
+  if (!resolved?.skipped?.length || resolved.exhausted) return null;
+  const past = resolved.skipped.map((s) => `"${s.vendor}"`).join(', ');
+  return `Used the ${capability} vendor "${resolved.vendor}": ${past} ${resolved.skipped.length > 1 ? 'are' : 'is'} ` +
+    `higher priority but not available on this machine (chain: ${resolved.chain.join(' → ')}).`;
 }
 
 /**
@@ -122,12 +228,22 @@ export function unavailableError(capability, vendor, status, { fix, alternatives
  * speech and music pages of the Studio are fed by identical shapes and the UI
  * can render either with one code path.
  */
-export function buildReport({ capability, active, activeSource, settings, vendors }) {
+export function buildReport({ capability, active, activeSource, settings, vendors, chain }) {
   const meta = requireCapability(capability);
+  const order = chain ?? [active];
   return {
     capability,
+    // What will actually be used. With a chain this is the effective vendor —
+    // the first available one — not merely the top preference, because "active"
+    // has always meant "the one that runs" and a chain must not quietly change
+    // that to "the one we hoped would run".
     active,
     activeSource,
+    // The preference order itself (v0.19), plus its head, so a UI can show
+    // ranking and mark the case where the top choice is being skipped.
+    chain: order,
+    preferred: order[0],
+    fellBack: active !== order[0],
     settings,
     vendorEnv: meta.env,
     vendors,

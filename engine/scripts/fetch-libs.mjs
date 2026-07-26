@@ -24,7 +24,7 @@
  */
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { LIBRARIES, libsVendorDir } from '../src/core/libraries.js';
+import { LIBRARIES, libsVendorDir, addonFiles } from '../src/core/libraries.js';
 import {
   readLock, writeLock, describe, verifyVendoredLibraries, vendorLockPath,
 } from '../src/core/vendor-lock.js';
@@ -68,7 +68,7 @@ let added = 0, confirmed = 0;
 
 for (const [id, spec] of Object.entries(LIBRARIES)) {
   if (only.length && !only.includes(id)) continue;
-  const files = [...spec.files, ...Object.values(spec.addons || {})];
+  const files = [...spec.files, ...Object.values(spec.addons || {}).flatMap(addonFiles)];
   for (const f of files) {
     const dest = path.join(root, f.vendor);
     out(`↓ ${spec.name} ${spec.version}: ${f.url}\n`);

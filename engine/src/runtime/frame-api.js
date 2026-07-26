@@ -19,6 +19,12 @@
  * range often throws only at the frame that first reaches the call, so the
  * message has to carry enough context to identify the call site on its own.
  *
+ * v1.3: MotionStudio.particles(frame, options?) — deterministic looping
+ * particle emitter. Real particle systems (THREE.Points animations, Babylon
+ * ParticleSystem, requestAnimationFrame loops) are wall-clock based and banned
+ * by the frame contract, so every composition was hand-rolling the same
+ * seeded loop; this is that loop, done once.
+ *
  * Also exported as bare globals (interpolate, Sequence, ...) for terse
  * composition code. Runs in both the render Chromium (Puppeteer) and the
  * WebView2 human preview — it has no environment-specific dependencies.
@@ -253,6 +259,58 @@
     fn(frame % durationInFrames, Math.floor(frame / durationInFrames));
   }
 
+  /* ------------------------------ particles ----------------------------- */
+
+  /**
+   * Deterministic looping particle emitter (v1.3): a pure function of frame,
+   * safe under parallel and out-of-order rendering. Returns one state per
+   * particle; the composition maps states onto DOM nodes / canvas / 3D meshes.
+   *
+   *   phase  0..1 through the particle's life (uniformly staggered by index)
+   *   cycle  which rebirth this is — the per-particle randoms re-roll each cycle
+   *   u      four stable random values for this (particle, cycle): use them for
+   *          spawn jitter, size, drift, hue — anything that must not flicker
+   *          between frames
+   *
+   *   // steam rising from a spout:
+   *   particles(frame, { count: 14, lifeFrames: 90, seed: 7 }).forEach(p => {
+   *     const m = puffs[p.index];
+   *     m.position.set(x0 + (p.u[0] - 0.5) * 0.6 * p.phase, y0 + p.phase * 2.3,
+   *                    (p.u[1] - 0.5) * 0.4 * p.phase);
+   *     m.material.opacity = 0.3 * Math.sin(p.phase * Math.PI);
+   *     const s = 0.6 + p.phase * (1 + p.u[2]);
+   *     m.scale.set(s, s, s);
+   *   });
+   *
+   * @param {number} frame
+   * @param {object} [options]
+   * @param {number} [options.count=20]      particles alive at any moment
+   * @param {number} [options.lifeFrames=60] frames from birth to death
+   * @param {number} [options.seed=1]        vary for independent emitters
+   * @param {number} [options.speed=1]       time multiplier
+   * @returns {Array<{index: number, phase: number, cycle: number, u: number[]}>}
+   */
+  function particles(frame, options) {
+    options = options || {};
+    var count = options.count != null ? options.count : 20;
+    var lifeFrames = options.lifeFrames != null ? options.lifeFrames : 60;
+    var seed = options.seed != null ? options.seed : 1;
+    var speed = options.speed != null ? options.speed : 1;
+    if (!(count > 0)) throw new RangeError('particles: count must be > 0 (got ' + count + ')');
+    if (!(lifeFrames > 0)) throw new RangeError('particles: lifeFrames must be > 0 (got ' + lifeFrames + ')');
+    var out = [];
+    for (var i = 0; i < count; i++) {
+      var progress = (frame * speed) / lifeFrames + i / count;
+      var phase = progress - Math.floor(progress);
+      var cycle = Math.floor(progress);
+      // Large odd primes keep the streams of neighbouring particles/cycles
+      // uncorrelated; mulberry32 does the rest.
+      var rng = random(((seed * 1000003 + i * 7919 + cycle * 104729) >>> 0) || 1);
+      out.push({ index: i, phase: phase, cycle: cycle, u: [rng(), rng(), rng(), rng()] });
+    }
+    return out;
+  }
+
   /* ------------------------- composition harness ----------------------- */
 
   /**
@@ -296,8 +354,8 @@
   /* ------------------------------- export ------------------------------ */
 
   const api = {
-    interpolate, Sequence, Loop, spring, interpolateColors, random, easings,
-    registerComposition, version: 1.2,
+    interpolate, Sequence, Loop, spring, interpolateColors, random, particles, easings,
+    registerComposition, version: 1.3,
   };
   global.MotionStudio = api;
   // Bare-name conveniences for terse composition code.
@@ -306,6 +364,7 @@
   global.Loop = Loop;
   global.spring = spring;
   global.interpolateColors = interpolateColors;
+  global.particles = particles;
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api; // for engine unit tests
 })(typeof window !== 'undefined' ? window : globalThis);

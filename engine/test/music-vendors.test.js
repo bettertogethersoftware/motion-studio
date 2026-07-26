@@ -208,16 +208,18 @@ test('conformWavLevel: a null target measures without touching the file', async 
 
 test('music vendors: "node" is the default — the cross-platform one wins', async () => {
   const resolved = await resolveMusicVendor({ dataDir: home });
-  assert.deepEqual(resolved, { vendor: 'node', source: 'default' });
+  assert.deepEqual(resolved, { vendor: 'node', source: 'default', chain: ['node'] });
 });
 
 test('music vendors: env overrides settings, an argument overrides both', async () => {
   await updateSettings({ music: { vendor: 'node' } }, home);
-  assert.deepEqual(await resolveMusicVendor({ dataDir: home }), { vendor: 'node', source: 'settings' });
+  assert.deepEqual(await resolveMusicVendor({ dataDir: home }), { vendor: 'node', source: 'settings', chain: ['node'] });
   process.env.MOTION_STUDIO_MUSIC_VENDOR = 'fluidsynth';
   try {
-    assert.deepEqual(await resolveMusicVendor({ dataDir: home }), { vendor: 'fluidsynth', source: 'env' });
-    assert.deepEqual(await resolveMusicVendor({ vendor: 'node', dataDir: home }), { vendor: 'node', source: 'argument' });
+    assert.deepEqual(await resolveMusicVendor({ dataDir: home }),
+      { vendor: 'fluidsynth', source: 'env', chain: ['fluidsynth'] });
+    assert.deepEqual(await resolveMusicVendor({ vendor: 'node', dataDir: home }),
+      { vendor: 'node', source: 'argument', chain: ['node'] });
   } finally {
     delete process.env.MOTION_STUDIO_MUSIC_VENDOR;
   }

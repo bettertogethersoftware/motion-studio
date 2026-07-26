@@ -160,7 +160,7 @@ export function azureSetupHint(cfg) {
     parts.push(`set ${AZURE_ENV.key[1]} to your Azure Speech resource key`);
   }
   if (cfg.missing.includes('region')) {
-    parts.push(`set ${AZURE_ENV.region[1]} to its region (e.g. eastus), or fill in the region on the Studio's vendors page`);
+    parts.push(`set ${AZURE_ENV.region[1]} to its region (e.g. eastus), or fill in the region on the Studio's tts page`);
   }
   return parts.length
     ? `Azure Speech is not configured: ${parts.join(', and ')}. On Windows: setx ${AZURE_ENV.key[1]} "<key>" (open a new terminal afterwards).`

@@ -69,6 +69,7 @@ import {
   musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
 } from '../core/music-vendors.js';
 import { maskKey } from '../core/tts-azure.js';
+import { PIPER_ENV } from '../core/tts-piper.js';
 import { parseWavHeader } from '../core/tts.js';
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
@@ -296,8 +297,11 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
                 // that reaches the DOM is a key in every screenshot.
                 ...Object.fromEntries(AZURE_ENV.key.map((k) => [k, maskKey(process.env[k]?.trim())])),
                 ...Object.fromEntries(
-                  [...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice, 'MOTION_STUDIO_TTS_VENDOR']
-                    .map((k) => [k, process.env[k] ?? null]),
+                  [
+                    ...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice,
+                    ...PIPER_ENV.exe, ...PIPER_ENV.python, ...PIPER_ENV.voices,
+                    'MOTION_STUDIO_TTS_VENDOR', 'MOTION_STUDIO_MUSIC_VENDOR',
+                  ].map((k) => [k, process.env[k] ?? null]),
                 ),
               },
             },

@@ -1,4 +1,4 @@
-import { test, beforeEach, afterEach } from 'node:test';
+﻿import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -279,8 +279,17 @@ test('prereqs: version parsers handle real-world strings', () => {
 
 test('encoder: buildAudioFilter single track uses anull, honors delay/gain', () => {
   const f = buildAudioFilter([{ src: 'a.mp3', startInFrames: 30, gainDb: -6 }], 30, { limiter: false });
-  assert.match(f, /\[1:a\]adelay=1000\|1000,volume=-6dB\[a0\]/);
+  assert.match(f, /\[1:a\]adelay=1000\|1000,volume=-6dB,aformat=sample_rates=44100:channel_layouts=stereo\[a0\]/);
   assert.match(f, /\[a0\]anull\[aout\]/);
+});
+
+test('encoder: every track chain pins the mix format (44.1 kHz stereo)', () => {
+  // Without a per-track aformat, ffmpeg negotiates a common format across the
+  // mix inputs and a 16 kHz mono narration WAV (Piper) drags the whole mix —
+  // music bed included — down to 16 kHz.
+  const f = buildAudioFilter([{ src: 'a.mp3' }, { src: 'b.wav' }], 30, { limiter: false });
+  const hits = f.match(/aformat=sample_rates=44100:channel_layouts=stereo/g) ?? [];
+  assert.equal(hits.length, 2);
 });
 
 test('encoder: buildAudioFilter mixes multiple tracks without normalizing', () => {
@@ -307,6 +316,80 @@ test('encoder: limiter disables alimiter auto-levelling', () => {
 test('encoder: single track still gets the limiter, ending in [aout]', () => {
   const f = buildAudioFilter([{ src: 'a.mp3' }], 30);
   assert.match(f, /\[a0\]anull\[amix\]/);
+  assert.ok(f.endsWith('[aout]'));
+});
+
+/* ---------------------- audio trim / fades / duck (v0.19) ---------------------- */
+
+test('encoder: trimEndInFrames caps the clip before placement', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', trimEndInFrames: 90, startInFrames: 30 }], 30, { limiter: false });
+  // clip-relative: trim first, THEN adelay
+  assert.match(f, /\[1:a\]atrim=0:3\.000,adelay=1000\|1000,volume=0dB,aformat=/);
+});
+
+test('encoder: fadeInFrames fades up from the clip start', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', fadeInFrames: 15 }], 30, { limiter: false });
+  assert.match(f, /afade=t=in:st=0:d=0\.500/);
+});
+
+test('encoder: fadeOutFrames ends at trimEndInFrames when set', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', trimEndInFrames: 90, fadeOutFrames: 30 }], 30, { limiter: false });
+  // 90f = 3s trim, 30f = 1s fade → fade starts at 2s
+  assert.match(f, /afade=t=out:st=2\.000:d=1\.000/);
+});
+
+test('encoder: fadeOutFrames falls back to the composition end minus the track start', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', startInFrames: 30, fadeOutFrames: 30 }], 30,
+    { limiter: false, videoDurationSec: 5 });
+  // clip plays from 1s → composition ends at clip-time 4s; 1s fade starts at 3s
+  assert.match(f, /afade=t=out:st=3\.000:d=1\.000/);
+});
+
+test('encoder: fadeOutFrames with no bound available is skipped, not garbage', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', fadeOutFrames: 30 }], 30, { limiter: false });
+  assert.doesNotMatch(f, /afade=t=out/);
+});
+
+test('encoder: duck:true splits the graph into fg/bed and sidechains the bed', () => {
+  const f = buildAudioFilter(
+    [{ src: 'voice.wav' }, { src: 'music.wav', duck: true }], 30, { limiter: false });
+  assert.match(f, /\[a0\]anull\[fgraw\]/);
+  assert.match(f, /\[a1\]anull\[bed0\]/);
+  assert.match(f, /\[fgraw\]asplit=2\[fgmix\]\[sc0\]/);
+  assert.match(f, /\[bed\]\[sc\]sidechaincompress=/);
+  assert.match(f, /\[fgmix\]\[bedduck\]amix=inputs=2:normalize=0\[aout\]/);
+});
+
+test('encoder: ducking pads bed AND sidechain to the composition length', () => {
+  // sidechaincompress is asymmetric about EOF: sidechain-first EOF silences
+  // the bed for the rest of the mix; bed-first EOF stalls the graph forever.
+  // Padding both branches to the same bound makes them EOF together.
+  const f = buildAudioFilter(
+    [{ src: 'voice.wav' }, { src: 'music.wav', duck: true }], 30,
+    { limiter: false, videoDurationSec: 15 });
+  assert.match(f, /\[bed0\]apad=whole_dur=15\.000\[bed\]/);
+  assert.match(f, /\[sc0\]apad=whole_dur=15\.000\[sc\]/);
+});
+
+test('encoder: ducking without a composition length skips the pads', () => {
+  const f = buildAudioFilter(
+    [{ src: 'voice.wav' }, { src: 'music.wav', duck: true }], 30, { limiter: false });
+  assert.doesNotMatch(f, /apad/);
+  assert.match(f, /\[bed0\]anull\[bed\]/);
+  assert.match(f, /\[sc0\]anull\[sc\]/);
+});
+
+test('encoder: ducking needs both sides — all-ducked or none-ducked mixes normally', () => {
+  const all = buildAudioFilter([{ src: 'a.wav', duck: true }, { src: 'b.wav', duck: true }], 30, { limiter: false });
+  assert.doesNotMatch(all, /sidechaincompress/);
+  assert.match(all, /amix=inputs=2:normalize=0\[aout\]/);
+  const none = buildAudioFilter([{ src: 'a.wav' }, { src: 'b.wav' }], 30, { limiter: false });
+  assert.doesNotMatch(none, /sidechaincompress/);
+});
+
+test('encoder: ducking still ends in the limiter by default', () => {
+  const f = buildAudioFilter([{ src: 'voice.wav' }, { src: 'music.wav', duck: true }], 30);
+  assert.match(f, /\[fgmix\]\[bedduck\]amix=inputs=2:normalize=0\[amix\]/);
   assert.ok(f.endsWith('[aout]'));
 });
 

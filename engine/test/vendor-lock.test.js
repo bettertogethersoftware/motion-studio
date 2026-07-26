@@ -18,7 +18,7 @@ import {
   verifyOne, verifyVendoredLibraries, vendorLockPath,
 } from '../src/core/vendor-lock.js';
 import { ProjectStore } from '../src/core/project.js';
-import { LIBRARIES } from '../src/core/libraries.js';
+import { LIBRARIES, addonFiles } from '../src/core/libraries.js';
 
 async function tmpDir(tag) {
   return fsp.mkdtemp(path.join(os.tmpdir(), `ms-vlock-${tag}-`));
@@ -109,7 +109,7 @@ test('verifyVendoredLibraries: reports every registry file and flags problems', 
     const lock = {};
     // Vendor every file the registry expects, with correct hashes...
     for (const spec of Object.values(LIBRARIES)) {
-      for (const f of [...spec.files, ...Object.values(spec.addons || {})]) {
+      for (const f of [...spec.files, ...Object.values(spec.addons || {}).flatMap(addonFiles)]) {
         const abs = path.join(libs, f.vendor);
         await fsp.mkdir(path.dirname(abs), { recursive: true });
         const body = Buffer.from(`stub:${f.vendor}`);
@@ -141,7 +141,7 @@ test('verify: an unlocked-but-present file is not reported as a failure', async 
   await sandbox('unlocked', async (dir) => {
     const libs = path.join(dir, 'libs');
     for (const spec of Object.values(LIBRARIES)) {
-      for (const f of [...spec.files, ...Object.values(spec.addons || {})]) {
+      for (const f of [...spec.files, ...Object.values(spec.addons || {}).flatMap(addonFiles)]) {
         const abs = path.join(libs, f.vendor);
         await fsp.mkdir(path.dirname(abs), { recursive: true });
         await fsp.writeFile(abs, 'stub');

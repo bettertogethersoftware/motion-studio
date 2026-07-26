@@ -49,7 +49,7 @@ export const FFMPEG_PRESETS = Object.freeze([
  * modules already read settings — putting the lists there would make the
  * import a cycle. The vendor modules re-export them.
  */
-export const TTS_VENDORS = Object.freeze(['system', 'azure']);
+export const TTS_VENDORS = Object.freeze(['system', 'azure', 'piper']);
 export const MUSIC_VENDORS = Object.freeze(['node', 'fluidsynth']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -67,7 +67,16 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // copy, or paste into a bug report. See core/tts-vendors.js.
   tts: Object.freeze({
     vendor: 'system',
+    // Ordered preference chain (v0.19). null = "no chain configured", and the
+    // scalar `vendor` above is the whole story — which is what every settings
+    // file written before v0.19 says. A chain of one behaves identically to the
+    // scalar; only a chain of two or more introduces fallback, and then only
+    // past a vendor that is *not configured*. See core/vendors.js.
+    vendors: null,
     azure: Object.freeze({ region: null, voice: null, outputFormat: AZURE_DEFAULT_FORMAT, style: null }),
+    // Piper (v0.18): where the CLI and the downloaded .onnx voices live, and
+    // which voice to use when a call doesn't name one. All paths, no secrets.
+    piper: Object.freeze({ exe: null, python: null, voicesDir: null, voice: null }),
   }),
   // Which music vendor renders a note spec (v0.17). "node" is the default
   // because it is the only one that works off Windows and needs no binaries a
@@ -75,6 +84,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // ever attenuates, so swapping vendors cannot re-balance a film's mix.
   music: Object.freeze({
     vendor: 'node',
+    vendors: null,          // ordered preference chain (v0.19) — see tts.vendors
     targetPeakDb: -3,
     node: Object.freeze({ soundfont: null, sampleRate: 44100, gain: 1.575 }),
   }),
@@ -84,6 +94,22 @@ export function validateSettings(s) {
   const problems = [];
   const isPosInt = (v) => Number.isInteger(v) && v > 0;
   const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+  /**
+   * A vendor preference chain (v0.19): null/absent, or a non-empty ordered
+   * array of distinct known vendors. Duplicates are refused rather than
+   * de-duplicated, because a chain listing the same vendor twice means the
+   * author misunderstood what the list is, and silently "fixing" it hides that.
+   */
+  const vendorChain = (value, key, allowed) => {
+    if (value === null || value === undefined) return;
+    if (!Array.isArray(value) || value.length === 0) {
+      problems.push(`${key}: non-empty array of ${allowed.join(', ')} (in preference order) or null required`);
+      return;
+    }
+    const unknown = value.filter((v) => !allowed.includes(v));
+    if (unknown.length) problems.push(`${key}: unknown vendor(s) ${unknown.join(', ')} — allowed: ${allowed.join(', ')}`);
+    if (new Set(value).size !== value.length) problems.push(`${key}: duplicate entries are not allowed`);
+  };
   if (!s || typeof s !== 'object') problems.push('settings must be an object');
   else {
     const d = s.newProjectDefaults;
@@ -110,6 +136,7 @@ export function validateSettings(s) {
     if (!t || typeof t !== 'object') problems.push('tts: object required');
     else {
       if (!TTS_VENDORS.includes(t.vendor)) problems.push(`tts.vendor: one of ${TTS_VENDORS.join(', ')}`);
+      vendorChain(t.vendors, 'tts.vendors', TTS_VENDORS);
       const a = t.azure;
       if (!a || typeof a !== 'object') problems.push('tts.azure: object required');
       else {
@@ -132,11 +159,21 @@ export function validateSettings(s) {
           problems.push('tts.azure.key: the Azure Speech key is read from the environment only and is never stored in settings.json');
         }
       }
+      const p = t.piper;
+      if (!p || typeof p !== 'object') problems.push('tts.piper: object required');
+      else {
+        for (const k of ['exe', 'python', 'voicesDir', 'voice']) {
+          if (p[k] !== null && (typeof p[k] !== 'string' || !p[k].trim())) {
+            problems.push(`tts.piper.${k}: non-empty string or null required`);
+          }
+        }
+      }
     }
     const mu = s.music;
     if (!mu || typeof mu !== 'object') problems.push('music: object required');
     else {
       if (!MUSIC_VENDORS.includes(mu.vendor)) problems.push(`music.vendor: one of ${MUSIC_VENDORS.join(', ')}`);
+      vendorChain(mu.vendors, 'music.vendors', MUSIC_VENDORS);
       // null = leave levels exactly as rendered. A positive value would mean
       // "boost to here", which this setting deliberately cannot do.
       if (mu.targetPeakDb !== null && (!isNum(mu.targetPeakDb) || mu.targetPeakDb > 0 || mu.targetPeakDb < -60)) {
@@ -259,12 +296,13 @@ export async function readSettings(dataDir = defaultDataDir()) {
     // reaches the vendor, which reads the environment.
     tts: {
       ...DEFAULT_SETTINGS.tts,
-      ...pick(raw.tts, ['vendor']),
+      ...pick(raw.tts, ['vendor', 'vendors']),
       azure: { ...DEFAULT_SETTINGS.tts.azure, ...pick(raw.tts?.azure, ['region', 'voice', 'outputFormat', 'style']) },
+      piper: { ...DEFAULT_SETTINGS.tts.piper, ...pick(raw.tts?.piper, ['exe', 'python', 'voicesDir', 'voice']) },
     },
     music: {
       ...DEFAULT_SETTINGS.music,
-      ...pick(raw.music, ['vendor', 'targetPeakDb']),
+      ...pick(raw.music, ['vendor', 'vendors', 'targetPeakDb']),
       node: { ...DEFAULT_SETTINGS.music.node, ...pick(raw.music?.node, ['soundfont', 'sampleRate', 'gain']) },
     },
   };
@@ -298,6 +336,7 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
       ...cur.tts,
       ...(patch.tts ?? {}),
       azure: { ...cur.tts.azure, ...(patch.tts?.azure ?? {}) },
+      piper: { ...cur.tts.piper, ...(patch.tts?.piper ?? {}) },
     },
     music: {
       ...cur.music,

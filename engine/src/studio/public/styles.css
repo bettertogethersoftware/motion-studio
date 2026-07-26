@@ -59,6 +59,11 @@ body {
 }
 .version { font: 10px/1.6 var(--mono); color: var(--dim); letter-spacing: 0.04em; }
 
+/* Engine status lives up here (v0.18) — the footer belongs to the page buttons. */
+.rail-status { display: block; margin-top: 4px; font: 10px/1.5 var(--mono); color: var(--dim); letter-spacing: 0.04em; }
+.rail-status .ok { color: var(--ok); }
+.rail-status .err { color: var(--err); }
+
 .rail-section { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 0; }
 .rail-head {
   display: flex; justify-content: space-between; align-items: baseline;
@@ -102,11 +107,11 @@ body {
 .rail-collapsed .brand { padding: 14px 8px; justify-content: center; }
 .rail-collapsed .brand-text,
 .rail-collapsed .brand-mark,
-.rail-collapsed .rail-section,
-.rail-collapsed .rail-foot #engine-status { display: none; }
+.rail-collapsed .rail-section { display: none; }
 .rail-collapsed .collapse-btn { margin: 0; }
-.rail-collapsed .rail-foot { padding: 10px 8px; justify-content: center; }
-.rail-collapsed .foot-btn { margin: 0; }
+/* 46px of rail cannot hold three buttons side by side — stack them. */
+.rail-collapsed .rail-foot { padding: 10px 6px; flex-direction: column; gap: 6px; }
+.rail-collapsed .foot-btn { margin: 0; width: 100%; flex: none; }
 .rail-collapsed .foot-label { display: none; }
 
 /* settings dialog extras */
@@ -116,8 +121,6 @@ label.grow input { width: 100%; }
 .probe .ok { color: var(--ok); }
 .probe .err { color: var(--err); }
 dialog .note { font-size: 11px; max-width: 420px; margin: 6px 0 0; }
-.rail-foot .ok { color: var(--ok); }
-.rail-foot .err { color: var(--err); }
 
 /* ------------------------------- stage -------------------------------- */
 
@@ -429,8 +432,10 @@ dialog .fieldrow { margin-bottom: 10px; }
 
 /* ------------------------------ settings ------------------------------- */
 
-.foot-btn { margin-left: auto; padding: 2px 8px; font-size: 10px; }
-.rail-foot { display: flex; align-items: center; gap: 8px; }
+/* Three page buttons share the footer width; the open page's button glows. */
+.foot-btn { flex: 1; padding: 3px 6px; font-size: 10px; }
+.foot-btn.active { color: var(--accent); border-color: var(--accent); }
+.rail-foot { display: flex; align-items: center; gap: 6px; }
 #settings-dialog { min-width: 460px; max-width: 620px; }
 .section-label {
   margin: 12px 0 8px;
@@ -483,8 +488,6 @@ dialog .fieldrow { margin-bottom: 10px; }
 .vendors-intro { max-width: 760px; margin: 12px 0 16px; }
 .vendors-page code { font: 11px var(--mono); color: var(--text); }
 
-.capability-label { margin-top: 22px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-.capability-label:first-of-type { margin-top: 4px; }
 .vendor-cards { display: flex; flex-direction: column; gap: 16px; }
 .music-test { margin-top: 14px; }
 .music-test select { max-width: 340px; }
@@ -496,8 +499,25 @@ dialog .fieldrow { margin-bottom: 10px; }
   padding: 14px 16px 16px;
 }
 .vendor-card.active { border-left-color: var(--accent); background: var(--ink-3); }
+/* In the preference chain but not the one that will run (a higher-ranked vendor
+   won, or this one is unavailable): enrolled, not in charge. */
+.vendor-card.enrolled { border-left-color: var(--line-2, var(--line)); }
 .vendor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .vendor-head .pill { margin-left: auto; }
+/* Priority badge + ▲▼ reorder controls (v0.19). */
+.rank {
+  font: 600 10px var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 2px;
+  padding: 1px 5px; white-space: nowrap;
+}
+.vendor-card:not(.active) .rank { color: var(--dim); border-color: var(--line); }
+button.ghost.tiny {
+  font-size: 10px; line-height: 1; padding: 3px 5px; min-width: 0;
+}
+button.ghost.tiny:disabled { opacity: 0.25; cursor: default; }
+.chain-note { font-size: 11px; color: var(--dim); margin: 0 0 14px; }
+.chain-note.warn { color: var(--warn, var(--err)); }
+.chain-note:empty { display: none; }
 label.radio {
   flex-direction: row; align-items: center; gap: 8px;
   text-transform: none; letter-spacing: 0.04em; cursor: pointer; margin: 0;

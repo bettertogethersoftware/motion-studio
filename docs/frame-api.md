@@ -136,7 +136,37 @@ Sequence(0, 300, () => {
 });
 ```
 
-## 9. Per-frame async work (images, fonts)
+## 9. `particles(frame, options?)` (v1.3)
+
+Deterministic looping particle emitter — the frame-contract replacement for
+the wall-clock particle systems the 3D libraries ship (all banned: see
+docs/3d-libraries.md). Returns one state per particle, a pure function of
+`frame`:
+
+- `phase` — 0..1 through the particle's life, uniformly staggered by index
+- `cycle` — which rebirth this is
+- `u` — four random values in 0..1, **stable per (particle, cycle)**: use them
+  for spawn jitter, size, drift, hue — anything that must not flicker between
+  frames; they re-roll each time the particle is reborn
+
+```js
+// steam rising from a teapot spout (puffs = 14 pre-made meshes/divs):
+particles(frame, { count: 14, lifeFrames: 90, seed: 7 }).forEach((p) => {
+  const m = puffs[p.index];
+  m.position.set(x0 + (p.u[0] - 0.5) * 0.6 * p.phase,   // stable drift
+                 y0 + p.phase * 2.3,                     // rise
+                 (p.u[1] - 0.5) * 0.4 * p.phase);
+  m.material.opacity = 0.3 * Math.sin(p.phase * Math.PI); // fade in+out
+  const s = 0.6 + p.phase * (1 + p.u[2]);
+  m.scale.set(s, s, s);
+});
+```
+
+Options: `count` (default 20), `lifeFrames` (default 60), `seed` (default 1 —
+vary for independent emitters), `speed` (default 1). Create the DOM nodes /
+meshes once at setup; `particles()` only computes states.
+
+## 10. Per-frame async work (images, fonts)
 
 Anything the frame's pixels depend on must resolve before the screenshot. With `registerComposition`, just make your function `async` and await it:
 
@@ -148,7 +178,7 @@ MotionStudio.registerComposition(async (frame) => {
 });
 ```
 
-## 10. Practical checklist before rendering
+## 11. Practical checklist before rendering
 
 - [ ] No `Date.now()`, `setTimeout`, `setInterval`, `Math.random()`, or real-time CSS transitions/animations anywhere
 - [ ] Composition registered via `MotionStudio.registerComposition` (or a correct manual `setFrame`)
@@ -156,6 +186,7 @@ MotionStudio.registerComposition(async (frame) => {
 - [ ] All per-frame async work (font/image loading) is awaited inside the frame function
 - [ ] Multi-element timing uses `Sequence` rather than frame-offset arithmetic scattered through the code
 - [ ] Springy/looping motion uses `spring()` / `Loop()` (pure functions of frame) — never incremental per-frame physics or accumulated state
+- [ ] Particle-style effects (steam, dust, sparks, rain) use `particles()` — never a library particle system or per-frame velocity accumulation
 - [ ] `frame-api.js` is included via `<script>` **before** `composition.js`
 - [ ] Spot-checked with `capture_preview_frames` at the start, a midpoint, the end, and every `Sequence` boundary before running a full render (one call, not one per frame)
 - [ ] `write_composition_file` returned no determinism `warnings` — or each one is understood and deliberate

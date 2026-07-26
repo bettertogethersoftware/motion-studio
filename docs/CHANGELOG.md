@@ -2,12 +2,239 @@
 
 ## Unreleased
 
+### The mixer no longer eats the end of the film
+
+Three audio-mux bugs, one root pattern: the filter graph trusted ffmpeg's
+defaults across streams of different lengths and formats.
+
+- **`duck: true` silenced the bed from the last narration clip onward.**
+  `sidechaincompress` stops producing output at its *first* input EOF, so the
+  moment the (short) narration sidechain ended, the (long) music bed went with
+  it — every ducked mix lost its tail, and any configured `fadeOutFrames` on
+  the bed looked broken when it was actually never reached. Both compressor
+  inputs are now silence-padded (`apad=whole_dur`) to the composition length
+  so they reach EOF together. The asymmetric twin — a bed ending *before* the
+  sidechain stalls the graph forever, burning CPU with no progress — is
+  unreachable for the same reason. Repro'd with synthetic tones, fixed,
+  and regression-tested at the graph level.
+- **One 16 kHz mono narration WAV downsampled the whole mix to 16 kHz.**
+  ffmpeg negotiates a common format across `amix` inputs, and Piper's native
+  16 kHz output won that negotiation — the music bed lost everything above
+  8 kHz. Every track chain now ends in `aformat` pinning 44.1 kHz stereo, so
+  the negotiated format is fixed no matter what the sources are.
+- **The muxer's trailing `apad` is now bounded (`whole_dur`).** With the duck
+  branches ending at exactly the composition length, an unbounded pad feeding
+  `atrim` busy-spins forever on some builds. No infinite generators anywhere
+  in the graph: it terminates by construction.
+- **`preview_audio` reports `mix.envelopeDb` + `mix.silentTailSeconds`** —
+  per-second RMS of the mixdown (`null` = digital silence) and the length of
+  the dead tail. Whole-file peak/mean reported healthy numbers on a mix whose
+  last three seconds were silence, which is how the duck bug survived its own
+  preview; the envelope makes that class of failure visible in the tool
+  result. Backed by `measureWavEnvelope` in `core/tts.js`.
+
+### Vendor preference chains — the tts/music pages take checkboxes, not radios
+
+Both vendor pages picked exactly one vendor, and `core/vendors.js` argued against
+ever trying another: a machine that quietly swapped synthesizers mid-film would
+produce a soundtrack that changes character between scenes. That reasoning is
+intact — what changed is that "one vendor" and "never fall back" turned out to be
+separable. A capability can now hold an **ordered preference chain** and use the
+highest-ranked vendor that is actually *set up*, which is the case the old rule
+was over-serving: a missing Azure key is not a mid-film event.
+
+- **`tts.vendors` / `music.vendors`** (settings): an ordered array of distinct
+  vendors, or `null` for "just use the scalar `vendor`" — which is what every
+  file written before now says, so nothing changes on upgrade. The scalar is
+  still written as the chain's head, so anything reading it sees a coherent
+  single choice.
+- **`MOTION_STUDIO_TTS_VENDOR` / `..._MUSIC_VENDOR` accept a comma-separated
+  list** (`piper,system`) for the same purpose. A single value is a chain of one.
+- **The guarantees the narrow design keeps**, all tested:
+  - *A named vendor is never redirected.* An explicit argument or single-valued
+    env var resolves to a chain of exactly itself, so an agent asking for `azure`
+    either gets Azure or gets `tts_unavailable` — never Piper instead.
+  - *Only unavailability is fallen back past, never failure.* The walk skips a
+    vendor whose probe says it is not configured. One that probes fine and then
+    fails during synthesis is still a hard error.
+  - *A one-entry chain probes nothing*, so single-vendor machines keep the old
+    behaviour **and the old cost** — no extra exe spawns at resolution time.
+  - *Falling back is always reported* — `skipped` in the engine, `vendorNote` +
+    `vendorChain` on the MCP results, a warning line on the vendor pages.
+  - *An exhausted chain reports its head*, so the error names the vendor the user
+    actually asked for rather than whichever came last.
+- **The honest caveat, stated in the module and the docs:** with a chain of two or
+  more the choice is made per call, so a vendor that becomes unavailable *between*
+  two narration calls in one film changes the voice of everything after it. A
+  one-entry chain declines to pay that price, and is still the default.
+- **`list_vendors` reports** `chain`, `preferred` (its head), `fellBack`, and a
+  1-based `priority` per vendor. `active` keeps meaning *the vendor that will
+  run* — with a chain that is the effective one, not merely the top preference.
+- **Studio pages**: each card's radio became a checkbox with a `#1/#2/#3` rank
+  badge and ▲▼ reorder buttons (hidden entirely for a chain of one), plus a
+  summary line naming the vendor that will actually be used, what was skipped,
+  and — new — whether an env var is overriding the page. Saving an empty chain is
+  refused rather than silently defaulted.
+- **Removed** the per-card `in use: yes (from settings)` fact row. It was painted
+  from the server's report, so it contradicted the card highlight the moment a box
+  was ticked; the rank badge, highlight, and summary line all follow the edit, and
+  the "from settings/env" provenance moved to the summary, where it belongs — it
+  is a property of the chain, not of each vendor.
+- Internals: `resolveVendorFrom` returns the candidate `chain`;
+  `walkVendorChain` + `chainFallbackNote` + `normalizeVendorChain` are new in
+  `core/vendors.js`; `synthesizeWithVendor` / `synthesizeMusicWithVendor` accept a
+  pre-resolved decision so the vendor that was probed is the vendor that runs
+  (with live availability in play, resolving twice could legitimately disagree).
+
+## v0.19 (2026-07-26)
+
+Hear the mix before you render, know when narration lands, and stop hand-rolling
+the same three things in every 3D composition.
+
+### Audio you can check without rendering
+
+- **`synthesize_speech` measures what it wrote.** The response now carries
+  `peakDb`/`meanDb` of the narration clip (direct PCM read, no ffmpeg pass) —
+  the same level report `synthesize_music` and `synthesize_sfx` already gave.
+  Balancing a bed against narration no longer requires a full render to learn
+  the mix was wrong.
+- **`preview_audio` (new tool).** Mixes the project's `config.audio` timeline to
+  a standalone WAV in `out/` using the *exact* filter graph the final render
+  will use (delay, gain, trim/fades, ducking, limiter) minus the video. Returns
+  mixed `peakDb`/`meanDb`, a `clipping` flag, and each source clip's own level
+  so a bad balance points at the track that caused it. Fails with the new
+  `no_audio_tracks` code on a project with no audio.
+
+### Audio tracks grew edit controls (`config.audio`)
+
+- **`trimEndInFrames` / `fadeInFrames` / `fadeOutFrames`** — all clip-relative,
+  all in frames. `fadeOutFrames` ends at `trimEndInFrames` when set, otherwise
+  at the composition end: the "7.5 s music bed under a 5 s video" case now
+  resolves musically instead of hard-cutting at the last frame.
+- **`duck: true`** — sidechain auto-ducking. A track marked `duck` is
+  compressed by the mix of all non-ducked tracks (threshold ≈ −34 dBFS, ratio
+  8, 50/400 ms), so the bed dips under narration and recovers in the gaps.
+  Engages only when ducked and non-ducked tracks both exist. Also settable at
+  attach time via `synthesize_music { duck: true }`.
+
+### Narration timings (`synthesize_speech { sentenceTimings: true }`)
+
+- Synthesizes per sentence, concatenates the clips locally
+  (`sentenceGapSeconds` of silence between them, default 0.3), and returns
+  `timings`: each sentence's start/duration in seconds AND frames. Captions and
+  cues can be placed exactly instead of eyeballed. Works with every vendor —
+  it needs no alignment support from the engine, which is also its honest
+  limitation: word-level timing is NOT available (Piper's CLI cannot emit it,
+  and Azure word boundaries would require the websocket Speech SDK, a heavy
+  dependency this repo deliberately avoids).
+
+### Three.js addons (`add_library`)
+
+- **`geometries`** (THREE.TeapotGeometry), **`loaders`** (THREE.GLTFLoader),
+  and **`postprocessing`** (EffectComposer / RenderPass / UnrealBloomPass /
+  ShaderPass + their shader dependencies, vendored in load order) — from
+  three's `examples/js` UMD builds at the pinned 0.134.0. The registry now
+  supports multi-file addons; `lib-three`'s template gained the same
+  `<!--__ADDONS__-->` injection point `lib-babylon` had. Why the core stays
+  ≤0.147: r148 removed `examples/js` and r160 removed the UMD build, and
+  compositions are plain `<script>` tags by design.
+
+### Frame API v1.3
+
+- **`MotionStudio.particles(frame, {count, lifeFrames, seed, speed})`** — a
+  deterministic looping particle emitter (also exported bare as `particles`).
+  Returns per-particle `{phase, cycle, u[4]}` states that are pure functions of
+  frame; the four `u` randoms are stable per particle per cycle, so spawn
+  jitter/size/drift never flicker between frames. Real particle systems are
+  wall-clock based and banned by the frame contract; every composition was
+  hand-rolling this exact loop.
+
+### Smaller
+
+- **`vendorNote` on explicit vendor overrides.** When `synthesize_speech` /
+  `synthesize_music` is called with an explicit `vendor` that differs from the
+  machine's configured default, the response says so — no more silently
+  discovering that vendor-less calls use something else.
 - **Docs/guidance: films get a dedicated output project.** `build_film`'s
   `outputProjectId` default (the first scene) meant agents assembling
   multi-scene films dumped the film and its master-audio assets into scene 1's
   folder. The tool description, `docs/SKILL.md`, and `docs/film-setup.md` now
   instruct agents to create a dedicated film project and pass it as
   `outputProjectId`. Code behavior is unchanged.
+
+### Deferred
+
+- **Proxy/motion preview** (cheap low-res or frame-skip render for checking
+  motion before committing) — needs capture-loop and viewport work in the
+  renderer; tracked for a future release.
+
+## v0.18 (2026-07-26)
+
+A third speech vendor, and the vendors page stops mixing the two capabilities up.
+
+### `piper` — local neural narration (`core/tts-piper.js`)
+
+[Piper](https://github.com/OHF-Voice/piper1-gpl) sits exactly where the other
+two vendors left a gap: neural voice quality like Azure, running on your own
+machine like the Windows exe. No account, no per-character billing, no network,
+and it works on any OS.
+
+- **Spawned, never bundled.** Piper is GPLv3; Motion Studio runs it as a
+  separate program behind `MOTION_STUDIO_PIPER_EXE` (or
+  `MOTION_STUDIO_PIPER_PYTHON` for the `python -m piper` form, or `piper` on
+  PATH) — the same arm's-length arrangement it already has with FFmpeg and
+  FluidSynth. It ships as a Python wheel rather than a standalone binary, so
+  `pip install piper-tts` is the setup step, and the engine does not do it for
+  you.
+- **A bare `pip install piper-tts` works with zero configuration.** pip on
+  Windows usually drops `piper.exe` into a Scripts folder that is not on PATH
+  (it prints a warning saying so, and everyone ignores it). When nothing is
+  configured and `piper` cannot be found, the engine falls back to
+  `python -m piper`, then `py -m piper`; the probe reports which command
+  actually answered. An explicitly configured path never falls back — a user
+  who named a binary meant it.
+- **Voices are files you download** — an `.onnx` and its `.onnx.json`, from
+  huggingface.co/rhasspy/piper-voices, dropped in `MOTION_STUDIO_PIPER_VOICES`.
+  Every model with its config becomes a voice; a model whose config is missing
+  is skipped rather than offered, because Piper cannot load it. The
+  `{locale}-{speaker}-{quality}` naming gives the catalogue its locale and
+  quality without inventing metadata. Nothing is auto-downloaded: the engine
+  has never fetched from the internet and this was not the place to start.
+- **`--no-normalize` is always passed.** Piper otherwise normalizes every clip
+  to full scale — the same trap `audioToWav` set on the music side — which
+  would quietly overwrite the balance between narration and music. Verified
+  against the real CLI: default output peaks at −0.0 dBFS, `--no-normalize` at
+  −3 to −4.
+- **`rate` maps to `--length-scale`** on the same scale the Azure vendor uses
+  (each step is 10% of default speed), clamped to 0.4–3×, so switching vendors
+  does not mean re-timing every line. `volume` becomes Piper's multiplier;
+  Azure-only options are reported in `warnings` rather than dropped. Narration
+  text goes through `--input-file`, never argv.
+- Unlike the other generators, Piper's inference is stochastic — the same line
+  does not render byte-identically twice. Documented rather than papered over;
+  audio is generated once and thereafter read as a file.
+
+### The Studio separates tts from music, and the status moves up
+
+One 🗣 vendors page held both capabilities, with a single shared environment
+block at the foot of it — so the speech variables (`MOTION_STUDIO_TTS_EXE`,
+`AZURE_SPEECH_KEY`, …) rendered underneath the *music* cards and read as if
+they belonged to them. There are now two pages, **🗣 tts** and **♫ music**,
+each behind its own footer button, each holding only its own vendor cards,
+audition controls and environment block (the Piper variables joined the speech
+one; `MOTION_STUDIO_MUSIC_VENDOR` was missing from the environment report
+entirely and is now included). **Saving a page writes only that page's
+settings** — the tts page cannot rewrite music config it is not showing, and
+vice versa. The engine status that shared the footer with the buttons moved to
+the top of the sidebar, under the brand, so the footer is purely navigation:
+🗣 tts · ♫ music · ⚙ settings.
+
+### Tests
+
+`test/helpers/fake-piper.mjs` honours the real CLI (verified against piper
+1.6.0) and records the argv it was handed, so the tests can assert the two
+things that are invisible afterwards: that `--no-normalize` is always sent, and
+that `rate` arrives as a length scale. 17 new tests (374 total, 0 failures).
 
 ## v0.17 (2026-07-26)
 

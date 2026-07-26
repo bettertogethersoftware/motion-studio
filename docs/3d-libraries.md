@@ -36,6 +36,27 @@ Builds are **committed** under `engine/vendor/libs/` (~9 MB, MIT / Apache-2.0), 
 is an upgrade/repair tool, not a prerequisite. Starters live in
 `engine/templates/lib-*`.
 
+### Three.js addons (v0.19)
+
+`add_library { library: "three", addons: [...] }` can vendor optional pieces
+from three's `examples/js` UMD builds (the global-script twins of
+`examples/jsm`, matched to the pinned r134):
+
+| addon | vendors | gives you |
+|---|---|---|
+| `geometries` | `three.TeapotGeometry.js` | `THREE.TeapotGeometry(size, segments)` — the canonical Utah teapot |
+| `loaders` | `three.GLTFLoader.js` | `new THREE.GLTFLoader()` — glTF/GLB import (needs `MOTION_STUDIO_ALLOW_LOCAL_FETCH=1`, §2) |
+| `postprocessing` | `three.EffectComposer.js` + RenderPass, UnrealBloomPass, ShaderPass, MaskPass, Pass, CopyShader, LuminosityHighPassShader — injected in dependency order | `composer.render()` in `setFrame` instead of `renderer.render()`; bloom via `THREE.UnrealBloomPass` |
+
+An addon can be multi-file (v0.19); its `<script>` tags land between the core
+library and `frame-api.js` in the declared load order. Keep any animated bloom
+parameter frame-driven, like everything else.
+
+**Why the core stays on an old three:** r148 removed `examples/js` and r160
+removed the UMD `three.min.js` build entirely — modern three is ESM-only.
+Motion Studio compositions are plain `<script>` tags by design (hermetic,
+no bundler at render time), so the ceiling for this architecture is r147.
+
 ### Determinism contract (returned as `notes`, baked into the starters)
 
 The frame-driven render calls your `setFrame` once per frame, in any order,
@@ -73,8 +94,9 @@ function draw the 3D scene first (`renderer.render` + `gl.finish()`), then the
 HUD. The capture screenshots the *page*, so the browser composites the layers
 for free. This keeps HUD text crisp (no WebGL text rasterization), lets the HUD
 read composition state directly (e.g. a distance counter derived from the same
-`characterZ(frame)` that places the character), and costs nothing at r134 where
-postprocessing add-ons aren't bundled.
+`characterZ(frame)` that places the character), and costs nothing. (Since
+v0.19 the `postprocessing` addon exists for true render-target effects like
+bloom; the 2D-canvas overlay remains the right tool for HUD text and chrome.)
 
 Two smaller tricks from the same production:
 

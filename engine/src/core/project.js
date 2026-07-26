@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Project management: config schema, validation, registry, scaffolding, and
  * syntax-checked composition file writes.
  *
@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { EngineError, ErrorCodes } from './errors.js';
 import { resolveInProject, ASSET_EXTENSIONS } from './sandbox.js';
 import { FORMATS, getFormat, normalizeOutputFilename } from './formats.js';
-import { getLibrary, libsVendorDir, LIBRARY_IDS } from './libraries.js';
+import { getLibrary, libsVendorDir, LIBRARY_IDS, addonFiles } from './libraries.js';
 import { detectVersion, sha256 } from './vendor-lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +80,15 @@ export function validateConfig(cfg) {
         if (t.startInFrames !== undefined && (!Number.isInteger(t.startInFrames) || t.startInFrames < 0))
           problems.push(`audio[${i}].startInFrames: non-negative integer`);
         if (t.gainDb !== undefined && typeof t.gainDb !== 'number') problems.push(`audio[${i}].gainDb: number`);
+        // v0.19: clip-relative trim + fades (frames, like everything else here)
+        for (const key of ['trimEndInFrames', 'fadeInFrames', 'fadeOutFrames']) {
+          if (t[key] !== undefined && (!Number.isInteger(t[key]) || t[key] < 0))
+            problems.push(`audio[${i}].${key}: non-negative integer`);
+        }
+        if (t.trimEndInFrames !== undefined && t.trimEndInFrames === 0)
+          problems.push(`audio[${i}].trimEndInFrames: must be >= 1 (0 would silence the track)`);
+        if (t.duck !== undefined && typeof t.duck !== 'boolean')
+          problems.push(`audio[${i}].duck: boolean`);
       });
     }
     if (cfg.libraries !== undefined) {
@@ -579,7 +588,7 @@ export class ProjectStore {
     // 1) copy the vendored library + addon build(s) into the project
     const copied = [];
     const builds = {};
-    for (const f of [...spec.files, ...addonSpecs]) {
+    for (const f of [...spec.files, ...addonSpecs.flatMap(addonFiles)]) {
       const srcAbs = path.join(vendorDir, f.vendor);
       if (!fs.existsSync(srcAbs)) {
         throw new EngineError(
@@ -604,8 +613,13 @@ export class ProjectStore {
       copied.push({ path: f.dest, bytes: bytes.length, sha256: builds[f.dest].sha256 });
     }
 
-    // Addon <script> tags injected into the scaffolded HTML (after the core lib).
-    const addonScripts = addonSpecs.map((a) => `<script src="${a.dest}"></script>`).join('\n  ');
+    // Addon <script> tags injected into the scaffolded HTML (after the core
+    // lib), in each addon's declared load order — postprocessing's shader files
+    // must precede the passes that reference them.
+    const addonScripts = addonSpecs
+      .flatMap(addonFiles)
+      .map((f) => `<script src="${f.dest}"></script>`)
+      .join('\n  ');
 
     // 2) scaffold the starter composition (placeholder substitution) unless opted out
     const scaffolded = [];

@@ -216,7 +216,7 @@ export async function checkNodeMusic({ soundfont } = {}) {
     return {
       available: false,
       error: `SoundFont not found: ${sf}. Set MOTION_STUDIO_SOUNDFONT (or the soundfont path on the Studio's ` +
-        'vendors page) to any General MIDI .sf2/.sf3 file.',
+        'music page) to any General MIDI .sf2/.sf3 file.',
       config,
     };
   }

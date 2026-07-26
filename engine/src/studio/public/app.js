@@ -148,7 +148,7 @@ async function selectProject(id) {
   stopPlayback();
   stopAudition(); // a clip from the previous project would keep playing with its stop button gone
   stopJobPolling();
-  if (!$('#vendors-page').classList.contains('hidden')) showVendorsPage(false); // picking a project leaves the vendors page
+  if (vendorState.openCapability) showVendorsPage(null); // picking a project leaves the vendor pages
   state.events?.close();
   state.projectId = id;
   const proj = await api(`/api/projects/${id}`);
@@ -1097,7 +1097,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
   setTimeout(() => { msg.textContent = ''; }, 4000);
 });
 
-/* ----------------------------- speech vendors --------------------------- */
+/* ------------------------------ vendor pages ----------------------------- */
 
 /* v0.17. Narration used to have exactly one source — the Windows speech exe —
  * so there was nothing to choose and nothing to show. With Azure AI Speech
@@ -1106,16 +1106,34 @@ $('#settings-form').addEventListener('submit', async (e) => {
  *
  * The page is data-driven from GET /api/vendors, but each card's *options* are
  * hand-written markup, because they genuinely differ — an exe path is not a
- * region, and only one of the two has 500 voices worth of filtering. */
+ * region, and only one of the vendors has 500 voices worth of filtering.
+ *
+ * v0.18: one capability per page. 🗣 tts and ♫ music in the footer each open
+ * their own view (#cap-speech / #cap-music), and the save button writes only
+ * the capability that is showing.
+ *
+ * v0.19: the per-card control is a checkbox, not a radio — a capability holds an
+ * ordered *preference chain* and uses the highest-ranked vendor that is actually
+ * available. The chain lives in `vendorState.chain` while the page is open and is
+ * written as `tts.vendors` / `music.vendors` on save; the DOM order of the cards
+ * never changes, so rank is shown as a badge rather than by moving anything. */
 
 const vendorState = {
   report: null,        // the speech report
   music: null,         // the music report
-  voices: { system: [], azure: [] },
+  openCapability: null, // which page is showing: 'speech' | 'music' | null
+  voices: { system: [], azure: [], piper: [] },
   preview: null,       // the <audio> auditioning a voice/instrument sample
   formatsFilled: false,
   programsFilled: false,
+  // Edited preference order per capability; seeded from each report's `chain`.
+  chain: { speech: [], music: [] },
 };
+
+/** The card ids belonging to a capability, in the DOM order they appear. */
+const CAP_VENDORS = { speech: ['system', 'azure', 'piper'], music: ['node', 'fluidsynth'] };
+const capOf = (vendor) => (CAP_VENDORS.music.includes(vendor) ? 'music' : 'speech');
+const capReport = (cap) => (cap === 'music' ? vendorState.music : vendorState.report);
 
 const vendorEl = {
   status: (v) => $(`[data-status="${v}"]`),
@@ -1146,27 +1164,143 @@ function defList(dl, rows) {
 /** "westeurope (from AZURE_SPEECH_REGION)" — a value is only useful with its origin. */
 const withSource = (value, source) => (value == null ? null : source && source !== 'settings' ? `${value}  ← ${source}` : value);
 
-function showVendorsPage(on) {
-  $('#vendors-page').classList.toggle('hidden', !on);
-  if (on) {
+/* ---------------------------- preference chain ---------------------------- */
+/* Each card used to carry an "in use: yes (from settings)" fact row. It is gone
+ * as of v0.19: the row was painted from the server's report, so the moment a box
+ * was ticked it contradicted the card highlight beside it. Rank badge + the
+ * "active" highlight + the summary line below now say the same thing and all
+ * three follow the edit. Where the choice *came from* moved to the summary too —
+ * it is a property of the chain, not of each vendor. */
+
+/**
+ * Which vendor a capability would actually use with the *currently edited*
+ * chain: the first entry that probed available. Null when the chain is empty or
+ * nothing in it is usable — the page says so rather than implying a winner.
+ */
+function effectiveVendor(cap) {
+  const report = capReport(cap);
+  const chain = vendorState.chain[cap];
+  return chain.find((id) => report?.vendors.find((v) => v.id === id)?.available) ?? null;
+}
+
+/** Repaint every rank badge, checkbox, ▲▼ state and the chain summary line. */
+function paintChain(cap) {
+  const chain = vendorState.chain[cap];
+  const report = capReport(cap);
+  const effective = effectiveVendor(cap);
+
+  for (const id of CAP_VENDORS[cap]) {
+    const card = vendorEl.card(id);
+    if (!card) continue;
+    const idx = chain.indexOf(id);
+    const enrolled = idx >= 0;
+    card.querySelector('input[type="checkbox"]').checked = enrolled;
+    // "active" keeps meaning what it always meant: the vendor that will run.
+    card.classList.toggle('active', id === effective);
+    card.classList.toggle('enrolled', enrolled && id !== effective);
+
+    const rank = $(`[data-rank="${id}"]`);
+    rank.classList.toggle('hidden', !enrolled || chain.length < 2);
+    rank.textContent = enrolled ? `#${idx + 1}` : '';
+
+    const up = $(`[data-up="${id}"]`);
+    const down = $(`[data-down="${id}"]`);
+    // Reordering is meaningless for a chain of one, and hiding rather than
+    // disabling would make the header jump as boxes are ticked.
+    for (const b of [up, down]) b.classList.toggle('hidden', chain.length < 2);
+    up.disabled = !enrolled || idx === 0;
+    down.disabled = !enrolled || idx === chain.length - 1;
+  }
+
+  const note = $(cap === 'music' ? '#music-chain-note' : '#speech-chain-note');
+  const label = cap === 'music' ? 'music' : 'narration';
+  // An env var outranks settings.json, so saving this page would change nothing
+  // — the one case where the page must admit it is not in charge.
+  const envOverride = report?.activeSource === 'env'
+    ? ` — ${report.vendorEnv} is set, which overrides this page until it is cleared`
+    : '';
+  const order = chain.length > 1 ? `chain: ${chain.join(' → ')} — ` : '';
+
+  let text, warn;
+  if (!chain.length) {
+    [text, warn] = [`no ${label} vendor ticked — tick at least one before saving`, true];
+  } else if (!report) {
+    [text, warn] = [`chain: ${chain.join(' → ')}`, false];
+  } else if (!effective) {
+    [text, warn] = [`chain: ${chain.join(' → ')} — none of these is set up on this machine, so ${label} will fail`, true];
+  } else if (effective !== chain[0]) {
+    const skipped = chain.slice(0, chain.indexOf(effective)).join(', ');
+    [text, warn] = [`${order}${label} will use "${effective}" (${skipped} unavailable)`, true];
+  } else {
+    [text, warn] = [`${order}${label} will use "${effective}"`, false];
+  }
+  note.textContent = text + envOverride;
+  note.classList.toggle('warn', warn || !!envOverride);
+}
+
+/** Tick/untick: a newly enrolled vendor joins at the end, as lowest priority. */
+function toggleChainVendor(vendor, enrolled) {
+  const cap = capOf(vendor);
+  const chain = vendorState.chain[cap];
+  const idx = chain.indexOf(vendor);
+  if (enrolled && idx < 0) chain.push(vendor);
+  else if (!enrolled && idx >= 0) chain.splice(idx, 1);
+  paintChain(cap);
+}
+
+/** Move one vendor up (-1) or down (+1) the priority order. */
+function moveChainVendor(vendor, delta) {
+  const cap = capOf(vendor);
+  const chain = vendorState.chain[cap];
+  const idx = chain.indexOf(vendor);
+  const to = idx + delta;
+  if (idx < 0 || to < 0 || to >= chain.length) return;
+  [chain[idx], chain[to]] = [chain[to], chain[idx]];
+  paintChain(cap);
+}
+
+/**
+ * Show one capability's vendor page ('speech' | 'music'), or close with null.
+ * v0.18: the page holds a single capability at a time — 🗣 tts and ♫ music in
+ * the footer each open their own view — so narration settings never render
+ * under a music heading, and saving one page cannot touch the other's config.
+ */
+function showVendorsPage(capability) {
+  vendorState.openCapability = capability ?? null;
+  const open = !!capability;
+  $('#vendors-page').classList.toggle('hidden', !open);
+  $('#cap-speech').classList.toggle('hidden', capability !== 'speech');
+  $('#cap-music').classList.toggle('hidden', capability !== 'music');
+  $('#btn-tts').classList.toggle('active', capability === 'speech');
+  $('#btn-music').classList.toggle('active', capability === 'music');
+  // Switching capability mid-clip would leave audio playing with its stop
+  // button hidden; opening fresh makes this a no-op.
+  stopVendorPreview();
+  if (open) {
+    $('#vendors-title').textContent = capability === 'music' ? 'music vendors' : 'tts vendors';
+    $('#vendors-subtitle').textContent = capability === 'music'
+      ? 'who renders a note spec — for the Studio and every connected agent'
+      : 'who narrates — for the Studio and every connected agent';
     stopAudition();
     $('#workbench').classList.add('hidden');
     $('#empty-state').classList.add('hidden');
     stopPlayback();
   } else {
-    stopVendorPreview();
     $('#empty-state').classList.toggle('hidden', !!state.projectId);
     $('#workbench').classList.toggle('hidden', !state.projectId);
     if (state.projectId) fitPreview();
   }
 }
 
-$('#btn-vendors').addEventListener('click', () => {
-  const opening = $('#vendors-page').classList.contains('hidden');
-  showVendorsPage(opening);
-  if (opening) loadVendors().catch((err) => setVendorMsg(err.message, true));
-});
-$('#btn-vendors-close').addEventListener('click', () => showVendorsPage(false));
+/** The open page's button toggles it closed; the other button switches capability. */
+function toggleVendorsPage(capability) {
+  const next = vendorState.openCapability === capability ? null : capability;
+  showVendorsPage(next);
+  if (next) loadVendors().catch((err) => setVendorMsg(err.message, true));
+}
+$('#btn-tts').addEventListener('click', () => toggleVendorsPage('speech'));
+$('#btn-music').addEventListener('click', () => toggleVendorsPage('music'));
+$('#btn-vendors-close').addEventListener('click', () => showVendorsPage(null));
 $('#btn-vendors-refresh').addEventListener('click', () => {
   setVendorMsg('re-probing…');
   loadVendors({ force: true }).then(() => setVendorMsg('')).catch((err) => setVendorMsg(err.message, true));
@@ -1183,6 +1317,11 @@ async function loadVendors({ force = false } = {}) {
   const data = await api(`/api/vendors${force ? '?force=1' : ''}`);
   vendorState.report = data.speech;
   vendorState.music = data.music;
+  // Re-seed the edited chains from the server's truth on every load, including
+  // after a save — an in-progress edit is not worth preserving across a reload
+  // the user asked for, and a stale chain would silently re-save the old order.
+  vendorState.chain.speech = [...(data.speech.chain ?? [data.speech.active])];
+  vendorState.chain.music = [...(data.music.chain ?? [data.music.active])];
 
   if (!vendorState.programsFilled) {
     const sel = $('#mu-program');
@@ -1214,12 +1353,16 @@ async function loadVendors({ force = false } = {}) {
 
   for (const v of data.speech.vendors) paintVendor(v, data.speech);
   paintMusic(data.music);
+  paintChain('speech');
+  paintChain('music');
 
-  // The environment block answers "why is it saying that" without a terminal.
+  // Each capability gets its own environment block, under its own cards —
+  // one shared list at the foot of the page meant the speech variables read as
+  // if they belonged to whatever section they happened to land under.
   const { environment } = await api('/api/settings');
-  const vendorKeys = Object.keys(environment.env)
-    .filter((k) => /SPEECH|TTS_VENDOR|TTS_EXE|MUSIC_VENDOR|SOUNDFONT|FLUIDSYNTH|MIDI_EXE/.test(k));
-  defList($('#vendors-env'), vendorKeys.map((k) => [k, environment.env[k]]));
+  const envRows = (re) => Object.keys(environment.env).filter((k) => re.test(k)).map((k) => [k, environment.env[k]]);
+  defList($('#speech-env'), envRows(/SPEECH|TTS_VENDOR|TTS_EXE|PIPER/));
+  defList($('#music-env'), envRows(/MUSIC_VENDOR|SOUNDFONT|FLUIDSYNTH|MIDI_EXE/));
 
   await Promise.all(data.speech.vendors
     .filter((v) => v.available)
@@ -1228,13 +1371,10 @@ async function loadVendors({ force = false } = {}) {
 
 function paintVendor(v, report) {
   const pill = vendorEl.status(v.id);
-  const active = report.active === v.id;
   pill.textContent = v.available ? `ready · ${v.voiceCount} voices` : 'unavailable';
   pill.className = `pill ${v.available ? 'done' : 'error'}`;
-
-  const radio = vendorEl.card(v.id).querySelector('input[name="active-vendor"]');
-  radio.checked = active;
-  vendorEl.card(v.id).classList.toggle('active', active);
+  // The checkbox, rank badge and card highlight are painted from the edited
+  // chain by paintChain(), which loadVendors() calls after this.
 
   const err = vendorEl.error(v.id);
   err.classList.toggle('hidden', !v.error);
@@ -1245,15 +1385,23 @@ function paintVendor(v, report) {
     defList(vendorEl.facts(v.id), [
       ['executable', withSource(c.exePath, c.exeSource)],
       ['voices', v.available ? String(v.voiceCount) : null],
-      ['active', active ? `yes (from ${report.activeSource})` : 'no'],
     ]);
+  } else if (v.id === 'piper') {
+    defList(vendorEl.facts(v.id), [
+      ['command', withSource(c.command, c.commandSource)],
+      ['voices folder', withSource(c.voicesDir, c.voicesSource)],
+      ['voices', v.available ? String(v.voiceCount) : null],
+    ]);
+    const s = report.settings.piper ?? {};
+    $('#pi-exe').value = s.exe ?? '';
+    $('#pi-python').value = s.python ?? '';
+    $('#pi-voices').value = s.voicesDir ?? '';
   } else {
     defList(vendorEl.facts(v.id), [
       ['api key', c.keyConfigured ? `${c.keyMasked}  ← ${c.keySource}` : null],
       ['region', withSource(c.region, c.regionSource)],
       ['endpoint', c.endpoint],
       ['voices', v.available ? `${v.voiceCount} · ${v.locales.length} locales` : null],
-      ['active', active ? `yes (from ${report.activeSource})` : 'no'],
     ]);
 
     // An env-supplied region wins over the field, so show it and lock the input
@@ -1285,13 +1433,9 @@ function paintVendor(v, report) {
 function paintMusic(report) {
   for (const v of report.vendors) {
     const pill = vendorEl.status(v.id);
-    const active = report.active === v.id;
     pill.textContent = v.available ? 'ready' : 'unavailable';
     pill.className = `pill ${v.available ? 'done' : 'error'}`;
-
-    const card = vendorEl.card(v.id);
-    card.querySelector('input[name="active-music-vendor"]').checked = active;
-    card.classList.toggle('active', active);
+    // Checkbox / rank / highlight come from paintChain(), as on the speech page.
 
     const err = vendorEl.error(v.id);
     err.classList.toggle('hidden', !v.error);
@@ -1303,15 +1447,13 @@ function paintMusic(report) {
         ['soundfont', c.soundfont],
         ['library', c.library],
         ['render', v.available ? `${c.sampleRate} Hz · gain ${c.gain}` : null],
-        ['active', active ? `yes (from ${report.activeSource})` : 'no'],
-      ]);
+        ]);
     } else {
       defList(vendorEl.facts(v.id), [
         ['midi exe', c.midiExe],
         ['fluidsynth', c.fluidsynth],
         ['soundfont', c.soundfont],
-        ['active', active ? `yes (from ${report.activeSource})` : 'no'],
-      ]);
+        ]);
     }
   }
 
@@ -1337,26 +1479,30 @@ async function loadVendorVoices(vendor) {
   vendorState.voices[vendor] = data.voices;
 
   const sel = vendorEl.voice(vendor);
-  // Only the Azure vendor has a stored default voice; the exe vendor's select
-  // is a scratch control for the test line.
-  const configured = vendor === 'azure' ? vendorState.report?.settings?.azure?.voice : null;
+  // Azure and Piper have a stored default voice; the exe vendor's select is a
+  // scratch control for the test line.
+  const configured = vendorState.report?.settings?.[vendor]?.voice ?? null;
   sel.innerHTML = '';
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = vendor === 'azure' ? '(auto — first neural en-US voice)' : '(first installed voice)';
+  none.textContent = {
+    azure: '(auto — first neural en-US voice)',
+    piper: '(first voice in the folder)',
+  }[vendor] ?? '(first installed voice)';
   sel.appendChild(none);
   for (const v of data.voices) {
     const o = document.createElement('option');
     o.value = v.name;
     o.textContent = v.locale
-      ? `${v.name}${v.gender ? ` · ${v.gender.toLowerCase()}` : ''}${v.styles?.length ? ` · ${v.styles.length} styles` : ''}`
+      ? `${v.name}${v.gender ? ` · ${v.gender.toLowerCase()}` : ''}${v.quality ? ` · ${v.quality}` : ''}` +
+        `${v.styles?.length ? ` · ${v.styles.length} styles` : ''}`
       : v.name;
     sel.appendChild(o);
   }
   if (configured && data.voices.some((v) => v.name === configured)) sel.value = configured;
-  else if (configured && vendor === 'azure') {
-    // Configured voice filtered out of view: keep it selectable so saving the
-    // page doesn't silently drop it.
+  else if (configured) {
+    // Configured voice filtered out of view (or its file has gone): keep it
+    // selectable so saving the page doesn't silently drop it.
     const o = document.createElement('option');
     o.value = configured;
     o.textContent = `${configured} (configured)`;
@@ -1397,46 +1543,73 @@ for (const id of ['#az-locale', '#az-search']) {
 }
 vendorEl.voice('azure').addEventListener('change', syncAzureStyles);
 
-// Each capability's cards highlight independently — one active speech vendor
-// and one active music vendor, not one active card on the page.
-for (const group of ['active-vendor', 'active-music-vendor']) {
-  for (const radio of document.querySelectorAll(`input[name="${group}"]`)) {
-    radio.addEventListener('change', () => {
-      for (const input of document.querySelectorAll(`input[name="${group}"]`)) {
-        input.closest('.vendor-card').classList.toggle('active', input.checked);
-      }
-    });
+// Each capability's chain is edited independently: ticking a speech vendor never
+// touches the music page, and the two pages save separately.
+for (const group of ['speech-vendor', 'music-vendor']) {
+  for (const box of document.querySelectorAll(`input[name="${group}"]`)) {
+    box.addEventListener('change', () => toggleChainVendor(box.value, box.checked));
   }
+}
+for (const btn of document.querySelectorAll('[data-up]')) {
+  btn.addEventListener('click', () => moveChainVendor(btn.dataset.up, -1));
+}
+for (const btn of document.querySelectorAll('[data-down]')) {
+  btn.addEventListener('click', () => moveChainVendor(btn.dataset.down, +1));
 }
 
 $('#btn-vendors-save').addEventListener('click', async () => {
+  const cap = vendorState.openCapability === 'music' ? 'music' : 'speech';
+  const chain = vendorState.chain[cap];
+  // An empty chain would leave the capability with nothing to resolve to, and
+  // silently substituting a default is exactly the kind of guess this page is
+  // supposed to make visible. Refuse, and say which page is wrong.
+  if (!chain.length) {
+    setVendorMsg(`tick at least one ${cap === 'music' ? 'music' : 'speech'} vendor before saving`, true);
+    return;
+  }
   setVendorMsg('saving…');
   try {
-    const vendor = document.querySelector('input[name="active-vendor"]:checked')?.value ?? 'system';
-    const musicVendor = document.querySelector('input[name="active-music-vendor"]:checked')?.value ?? 'node';
-    const regionInput = $('#az-region');
-    const patch = {
-      tts: {
-        vendor,
-        azure: {
-          // A disabled field is env-controlled: leave the stored value alone
-          // instead of writing the env value into settings.json.
-          ...(regionInput.disabled ? {} : { region: regionInput.value.trim() || null }),
-          voice: vendorEl.voice('azure').value || null,
-          outputFormat: $('#az-format').value,
-          style: $('#az-style').value || null,
+    // Each page saves only its own capability: the tts page cannot rewrite
+    // music settings it isn't showing, and vice versa.
+    let patch;
+    if (cap === 'music') {
+      patch = {
+        music: {
+          // `vendor` stays the chain head so an older engine (or anything
+          // reading the scalar) still sees a coherent single choice.
+          vendor: chain[0],
+          vendors: chain,
+          targetPeakDb: $('#mu-target').value === '' ? null : Number($('#mu-target').value),
+          node: {
+            soundfont: $('#mu-soundfont').value.trim() || null,
+            sampleRate: Number($('#mu-samplerate').value),
+            gain: Number($('#mu-gain').value),
+          },
         },
-      },
-      music: {
-        vendor: musicVendor,
-        targetPeakDb: $('#mu-target').value === '' ? null : Number($('#mu-target').value),
-        node: {
-          soundfont: $('#mu-soundfont').value.trim() || null,
-          sampleRate: Number($('#mu-samplerate').value),
-          gain: Number($('#mu-gain').value),
+      };
+    } else {
+      const regionInput = $('#az-region');
+      patch = {
+        tts: {
+          vendor: chain[0],   // chain head, for anything reading the scalar
+          vendors: chain,
+          azure: {
+            // A disabled field is env-controlled: leave the stored value alone
+            // instead of writing the env value into settings.json.
+            ...(regionInput.disabled ? {} : { region: regionInput.value.trim() || null }),
+            voice: vendorEl.voice('azure').value || null,
+            outputFormat: $('#az-format').value,
+            style: $('#az-style').value || null,
+          },
+          piper: {
+            exe: $('#pi-exe').value.trim() || null,
+            python: $('#pi-python').value.trim() || null,
+            voicesDir: $('#pi-voices').value.trim() || null,
+            voice: vendorEl.voice('piper').value || null,
+          },
         },
-      },
-    };
+      };
+    }
     const { settings } = await api('/api/settings', { method: 'PATCH', body: { patch } });
     state.settings = settings;
     setVendorMsg('saved ✓');
@@ -1473,8 +1646,11 @@ async function testVendor(kind) {
   stopAudition(); // never two clips at once
 
   const music = kind === 'music';
+  // The music page has one shared test button, so it auditions whichever vendor
+  // the *edited* chain would actually use — not the top-ranked one, which may be
+  // the very vendor that is unavailable. Speech buttons are per-card already.
   const vendor = music
-    ? (document.querySelector('input[name="active-music-vendor"]:checked')?.value ?? 'node')
+    ? (effectiveVendor('music') ?? vendorState.chain.music[0] ?? 'node')
     : kind;
   const idle = btn.dataset.idleLabel ?? btn.textContent;
   btn.dataset.idleLabel = idle;
@@ -1520,7 +1696,7 @@ async function testVendor(kind) {
     btn.disabled = false;
   }
 }
-for (const kind of ['system', 'azure', 'music']) {
+for (const kind of ['system', 'azure', 'piper', 'music']) {
   const btn = vendorEl.testBtn(kind);
   btn.dataset.idleLabel = btn.textContent; // "▶ test" / "▶ listen"
   btn.addEventListener('click', () => testVendor(kind));

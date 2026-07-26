@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Text-to-speech (narration) support — added in v0.6.
  *
  * Motion Studio does not synthesize speech itself: narration is produced by an
@@ -219,4 +219,175 @@ export function parseWavHeader(buf, filePath = '<buffer>') {
 /** Frames a clip of `seconds` occupies at `fps` (rounded up so audio is never clipped short). */
 export function framesForDuration(seconds, fps) {
   return Math.ceil(seconds * fps);
+}
+
+/**
+ * Split narration into sentences for per-sentence synthesis (v0.19). A simple
+ * terminator heuristic (. ! ? … and their CJK forms), deliberately not a full
+ * segmenter: timings are sentence-granular and a mis-split only shifts where
+ * one caption boundary lands. Abbreviations like "Mr." will split — callers
+ * who care can pre-split and pass one sentence per call.
+ */
+export function splitSentences(text) {
+  const parts = text
+    .split(/(?<=[.!?…。！？])\s+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length ? parts : [text.trim()];
+}
+
+/**
+ * Concatenate same-format 16-bit PCM WAV buffers with an optional silence gap
+ * between them, reporting where each segment landed (v0.19). This is how
+ * synthesize_speech produces sentence timings from vendors whose CLIs cannot
+ * emit alignment data: one clip per sentence, concatenated here, offsets known
+ * exactly because we placed them.
+ *
+ * @returns {{buffer: Buffer, sampleRate, channels,
+ *            segments: Array<{startSeconds: number, durationSeconds: number}>}}
+ */
+export function concatWavBuffers(buffers, { gapSeconds = 0 } = {}) {
+  if (!buffers.length) throw new EngineError(ErrorCodes.TTS_FAILED, 'concatWavBuffers: no clips');
+  const infos = buffers.map((b, i) => {
+    const info = parseWavHeader(b, `<clip ${i}>`);
+    if (info.bitsPerSample !== 16) {
+      throw new EngineError(ErrorCodes.TTS_FAILED, `concatWavBuffers: clip ${i} is not 16-bit PCM`);
+    }
+    return info;
+  });
+  const { sampleRate, channels, byteRate } = infos[0];
+  infos.forEach((info, i) => {
+    if (info.sampleRate !== sampleRate || info.channels !== channels) {
+      throw new EngineError(
+        ErrorCodes.TTS_FAILED,
+        `concatWavBuffers: clip ${i} format mismatch (${info.sampleRate}Hz/${info.channels}ch vs ${sampleRate}Hz/${channels}ch)`,
+      );
+    }
+  });
+
+  const blockAlign = channels * 2;
+  let gapBytes = Math.round(gapSeconds * sampleRate) * blockAlign;
+  const gap = Buffer.alloc(Math.max(0, gapBytes));
+  gapBytes = gap.length;
+
+  const segments = [];
+  const chunks = [];
+  let offsetBytes = 0;
+  infos.forEach((info, i) => {
+    if (i > 0 && gapBytes) {
+      chunks.push(gap);
+      offsetBytes += gapBytes;
+    }
+    segments.push({
+      startSeconds: Number((offsetBytes / byteRate).toFixed(4)),
+      durationSeconds: Number((info.dataSize / byteRate).toFixed(4)),
+    });
+    chunks.push(buffers[i].subarray(info.dataOffset, info.dataOffset + info.dataSize));
+    offsetBytes += info.dataSize;
+  });
+
+  const data = Buffer.concat(chunks);
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * blockAlign, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(data.length, 40);
+  return { buffer: Buffer.concat([header, data]), sampleRate, channels, segments };
+}
+
+/**
+ * Measure a 16-bit PCM WAV's peak and RMS level in dBFS (v0.19). Gives
+ * synthesize_speech the same level report music/sfx already return, so a caller
+ * can balance narration against a bed without rendering first. Reads the samples
+ * directly — no ffmpeg round-trip. Non-16-bit files report nulls ("unknown"),
+ * mirroring conformWavLevel's refusal to guess.
+ *
+ * @returns {Promise<{peakDb: number|null, meanDb: number|null}>}
+ */
+export async function measureWavLevels(filePath) {
+  const buf = await fsp.readFile(filePath);
+  const info = parseWavHeader(buf, filePath);
+  if (info.bitsPerSample !== 16 || info.dataOffset === undefined || info.dataSize === 0) {
+    return { peakDb: null, meanDb: null };
+  }
+  const start = info.dataOffset;
+  const end = start + info.dataSize - (info.dataSize % 2);
+
+  let peak = 0;
+  let sumSquares = 0;
+  let count = 0;
+  for (let i = start; i + 1 < end; i += 2) {
+    const v = buf.readInt16LE(i) / 32768;
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+    sumSquares += v * v;
+    count++;
+  }
+  if (count === 0 || peak === 0) return { peakDb: null, meanDb: null };
+  const toDb = (amp) => Number((20 * Math.log10(amp)).toFixed(2));
+  return { peakDb: toDb(peak), meanDb: toDb(Math.sqrt(sumSquares / count)) };
+}
+
+/**
+ * Per-second RMS envelope of a 16-bit PCM WAV (v0.19.x). Whole-file peak/mean
+ * can look perfectly healthy while the last seconds are digital silence — the
+ * exact failure mode of the duck/EOF mixer bug — so preview_audio reports this
+ * envelope alongside the summary. Buckets that are pure digital silence report
+ * null; anything else reports its RMS in dBFS.
+ *
+ * silentTailSeconds counts the trailing run of buckets that are digital
+ * silence or below -70 dBFS, so a mix that dies early is visible at a glance
+ * (an intended fade-out ends quiet but not dead — it contributes at most its
+ * final bucket).
+ *
+ * @returns {Promise<{envelopeDb: (number|null)[], silentTailSeconds: number}|null>}
+ *   null when the WAV is not 16-bit PCM (mirrors measureWavLevels).
+ */
+export async function measureWavEnvelope(filePath, { bucketSeconds = 1 } = {}) {
+  const buf = await fsp.readFile(filePath);
+  const info = parseWavHeader(buf, filePath);
+  if (info.bitsPerSample !== 16 || info.dataOffset === undefined || info.dataSize === 0) {
+    return null;
+  }
+  const channels = info.channels || 1;
+  const samplesPerBucket = Math.max(1, Math.round(info.sampleRate * bucketSeconds)) * channels;
+  const start = info.dataOffset;
+  const end = start + info.dataSize - (info.dataSize % 2);
+
+  const envelopeDb = [];
+  let sumSquares = 0;
+  let count = 0;
+  const flush = () => {
+    if (count === 0) return;
+    envelopeDb.push(sumSquares === 0
+      ? null
+      : Number((20 * Math.log10(Math.sqrt(sumSquares / count))).toFixed(1)));
+    sumSquares = 0;
+    count = 0;
+  };
+  for (let i = start; i + 1 < end; i += 2) {
+    const v = buf.readInt16LE(i) / 32768;
+    sumSquares += v * v;
+    if (++count >= samplesPerBucket) flush();
+  }
+  flush();
+
+  let silentBuckets = 0;
+  for (let i = envelopeDb.length - 1; i >= 0; i--) {
+    if (envelopeDb[i] !== null && envelopeDb[i] > -70) break;
+    silentBuckets++;
+  }
+  return {
+    envelopeDb,
+    silentTailSeconds: Number((silentBuckets * bucketSeconds).toFixed(1)),
+  };
 }

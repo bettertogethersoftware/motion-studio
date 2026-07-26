@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
+import { addonFiles } from './libraries.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -111,7 +112,7 @@ export async function verifyVendoredLibraries(LIBRARIES, libsDir) {
   const lock = await readLock();
   const results = [];
   for (const spec of Object.values(LIBRARIES)) {
-    for (const f of [...spec.files, ...Object.values(spec.addons || {})]) {
+    for (const f of [...spec.files, ...Object.values(spec.addons || {}).flatMap(addonFiles)]) {
       results.push({
         library: spec.id,
         file: f.vendor,

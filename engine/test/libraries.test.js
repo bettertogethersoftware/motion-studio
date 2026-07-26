@@ -1,4 +1,4 @@
-/**
+﻿/**
  * add_library / ProjectStore.addLibrary — vendoring an optional 3D library and
  * scaffolding its starter. Uses a fake vendor dir (MOTION_STUDIO_LIBS_DIR) so it
  * needs neither the real multi-MB builds nor ffmpeg/Chromium.
@@ -17,8 +17,16 @@ async function tmp() {
 }
 async function fakeThree(dir) {
   const libs = path.join(dir, 'libs', 'three');
-  await fsp.mkdir(libs, { recursive: true });
+  await fsp.mkdir(path.join(libs, 'examples'), { recursive: true });
   await fsp.writeFile(path.join(libs, 'three.min.js'), '/* fake */ window.THREE = {};');
+  // The v0.19 addons (geometries / loaders / postprocessing), so addon tests
+  // need neither the real builds nor the network.
+  for (const f of [
+    'TeapotGeometry.js', 'GLTFLoader.js', 'CopyShader.js', 'LuminosityHighPassShader.js',
+    'Pass.js', 'ShaderPass.js', 'MaskPass.js', 'EffectComposer.js', 'RenderPass.js', 'UnrealBloomPass.js',
+  ]) {
+    await fsp.writeFile(path.join(libs, 'examples', f), `/* fake ${f} */`);
+  }
   process.env.MOTION_STUDIO_LIBS_DIR = path.join(dir, 'libs');
 }
 async function fakeBabylon(dir) {
@@ -60,8 +68,33 @@ test('addLibrary rejects an unknown / unsupported addon', async () => {
   try {
     const b = await store.createProject({ name: 'Bad Addon', fps: 30, width: 320, height: 240, durationInFrames: 30 });
     await assert.rejects(store.addLibrary(b.id, { library: 'babylon', addons: ['nope'] }), (e) => e.code === 'invalid_config');
-    const t = await store.createProject({ name: 'Three No Addon', fps: 30, width: 320, height: 240, durationInFrames: 30 });
-    await assert.rejects(store.addLibrary(t.id, { library: 'three', addons: ['loaders'] }), (e) => e.code === 'invalid_config');
+    const t = await store.createProject({ name: 'Three Bad Addon', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+    await assert.rejects(store.addLibrary(t.id, { library: 'three', addons: ['nope'] }), (e) => e.code === 'invalid_config');
+  } finally {
+    delete process.env.MOTION_STUDIO_LIBS_DIR;
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('addLibrary three with a multi-file addon vendors every file in order (v0.19)', async () => {
+  const { dir, store } = await tmp();
+  await fakeThree(dir);
+  try {
+    const proj = await store.createProject({ name: 'Three PP', fps: 30, width: 640, height: 360, durationInFrames: 60 });
+    const res = await store.addLibrary(proj.id, { library: 'three', addons: ['postprocessing', 'geometries'] });
+    assert.deepEqual(res.addons, ['postprocessing', 'geometries']);
+    // every file of the multi-file addon lands in the project…
+    for (const f of ['three.EffectComposer.js', 'three.UnrealBloomPass.js', 'three.CopyShader.js', 'three.TeapotGeometry.js']) {
+      assert.ok(fs.existsSync(path.join(proj.path, f)), `missing ${f}`);
+      assert.ok(res.copied.some((c) => c.path === f), `not reported copied: ${f}`);
+    }
+    // …and the script tags preserve declared load order (shaders before passes).
+    const html = await fsp.readFile(path.join(proj.path, 'composition.html'), 'utf8');
+    const idx = (s) => html.indexOf(`src="${s}"`);
+    assert.ok(idx('three.CopyShader.js') >= 0 && idx('three.CopyShader.js') < idx('three.EffectComposer.js'),
+      'CopyShader must load before EffectComposer');
+    assert.ok(idx('three.EffectComposer.js') < idx('three.UnrealBloomPass.js'),
+      'EffectComposer must load before UnrealBloomPass');
   } finally {
     delete process.env.MOTION_STUDIO_LIBS_DIR;
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});

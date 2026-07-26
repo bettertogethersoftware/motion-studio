@@ -1,25 +1,31 @@
 # Motion Studio — Text-to-Speech (Narration) Setup
 
-Narration is optional, and since **v0.17** it comes from one of two **speech
+Narration is optional, and since **v0.17** it comes from one of several **speech
 vendors**:
 
 | vendor | what it is | needs | platform |
 |---|---|---|---|
 | `system` *(default)* | the local `MotionStudioTts.exe` driving the OS voices | `MOTION_STUDIO_TTS_EXE` | Windows only |
 | `azure` | Azure AI Speech neural voices over REST, in plain Node | `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | any |
+| `piper` *(v0.18)* | [Piper](https://github.com/OHF-Voice/piper1-gpl) neural voices, running locally | Piper installed + downloaded `.onnx` voices | any |
 
-Both write the same thing — a PCM WAV in the project's `assets/` — and both are
-driven by the same tools (`synthesize_speech`, `list_voices`) and the same
+The short version of choosing: `system` is free and offline but Windows-only
+and stuck with whatever voices Windows has; `azure` has the best voices and
+~140 locales but needs an account and bills per character; `piper` is neural
+*and* offline *and* free, at the cost of installing it and downloading voices
+yourself.
+
+They all write the same thing — a PCM WAV in the project's `assets/` — and all
+are driven by the same tools (`synthesize_speech`, `list_voices`) and the same
 Studio page. Nothing downstream knows which one spoke. If the selected vendor
 isn't configured, those tools return `tts_unavailable` and the rest of the
 engine is unaffected.
 
 ## Picking a vendor
 
-**In the Studio:** `npm run studio` → **🗣 vendors** in the sidebar footer. The
-page shows both vendors' live status, what each one is missing, the voice
-catalogue, and a ▶ test button that speaks a line so you can hear a voice
-before committing a render to it. Pick one, press **save**.
+**In the Studio:** `npm run studio` → **🗣 tts** in the sidebar footer. Each card shows that vendor's live status, what it is
+missing, its voice catalogue, and a ▶ test button that speaks a line so you can
+hear a voice before committing a render to it. Tick one, press **save**.
 
 **Everywhere else:** the choice is global — it lives in
 `~/.motion-studio/settings.json` as `tts.vendor` and applies to the Studio *and*
@@ -29,7 +35,7 @@ Studio:
 ```
 explicit argument (synthesize_speech { vendor })
   > MOTION_STUDIO_TTS_VENDOR
-  > settings.json tts.vendor
+  > settings.json tts.vendors (chain) or tts.vendor (single)
   > "system"
 ```
 
@@ -39,8 +45,48 @@ billing an existing project's narration to an Azure subscription.
 Agents can discover all of this with the **`list_vendors`** tool, which reports
 which vendor is active, why, whether each is available, and what a user must fix
 if not — for speech *and* for [music](music-setup.md), which has the same
-two-vendor arrangement and shares the selection machinery
-(`engine/src/core/vendors.js`).
+arrangement and shares the selection machinery (`engine/src/core/vendors.js`).
+
+### Preference chains — ticking more than one
+
+Tick **several** vendors and you get an ordered *preference chain*: narration
+runs on the highest-ranked vendor that is actually set up. Rank with the ▲▼
+buttons on each card; the badge shows `#1`, `#2`, … and a line above the cards
+says which vendor will really be used and what was skipped.
+
+Stored as an ordered array — the scalar `tts.vendor` is kept as the chain's head,
+so anything reading it still sees one coherent choice:
+
+```json
+"tts": { "vendor": "azure", "vendors": ["azure", "piper"] }
+```
+
+The env var takes a comma-separated list for the same thing:
+`MOTION_STUDIO_TTS_VENDOR=piper,system`.
+
+Useful for exactly one situation: *"use the good cloud voices when the key is
+there, otherwise keep working offline."* Azure key missing or revoked → narration
+silently continues on Piper instead of failing the render.
+
+What a chain deliberately does **not** do:
+
+- **It never redirects a vendor you named.** `synthesize_speech { vendor: "azure" }`
+  runs on Azure or fails with `tts_unavailable`. Same for a single-valued env var.
+  An agent that asked for a specific voice never gets a different one.
+- **It only falls back past a vendor that is *not configured*** — no key, no exe,
+  no voices. A vendor that probes fine and then fails mid-synthesis is still a
+  hard error; the clip is not quietly finished by someone else.
+- **A chain of one costs nothing.** That is the default, and resolution does not
+  probe anything, exactly as before chains existed.
+- **It never falls back silently.** `synthesize_speech` returns a `vendorNote`
+  saying what was skipped and why, plus `vendorChain`; the Studio shows a warning
+  line; `list_vendors` reports `preferred` vs `active` and `fellBack: true`.
+
+**The caveat worth knowing:** the choice is made per call. In a multi-scene film,
+a vendor that becomes unavailable *between* two `synthesize_speech` calls changes
+the voice of every line after it — which is the exact failure the single-vendor
+rule was written to prevent. If a film's narration must be one voice no matter
+what, tick one vendor and let it fail loudly instead.
 
 ---
 
@@ -134,6 +180,107 @@ characters, which is an audition, not a render.
 
 ---
 
+## Vendor: `piper` (local neural) — v0.18
+
+[Piper](https://github.com/OHF-Voice/piper1-gpl) is a fast neural TTS that runs
+entirely on the machine: no account, no per-character billing, no network, and
+it works on any OS. It is the middle ground between the other two — Azure-ish
+voice quality with `system`-ish independence.
+
+Two things to know before you start. Piper is **GPLv3**, so Motion Studio
+spawns it as a separate program and never bundles, links, or ships it — the
+same arm's-length arrangement it has with FFmpeg and FluidSynth. And Piper is
+distributed as a **Python wheel, not a standalone binary**, so it needs a Python
+on the machine.
+
+### Install
+
+```
+pip install piper-tts
+```
+
+That installs a `piper` executable next to your Python (on Windows,
+`…\Scripts\piper.exe`) as well as the `python -m piper` module form.
+
+On Windows, pip usually prints a warning that `piper.exe` landed in a `Scripts`
+folder **which is not on PATH**. That is the normal outcome, not a broken
+install — and you can ignore it: when nothing is configured and `piper` cannot
+be found, the engine falls back to `python -m piper`, then `py -m piper`, so a
+bare `pip install piper-tts` works with zero configuration. The Studio's tts
+page shows which command actually answered.
+
+To pin it explicitly instead:
+
+| purpose | variables |
+|---|---|
+| executable | `MOTION_STUDIO_PIPER_EXE` (falls back to `piper`, then `python -m piper` / `py -m piper` on PATH) |
+| Python (module form) | `MOTION_STUDIO_PIPER_PYTHON` — used as `<python> -m piper` when no exe is set |
+| voices folder | `MOTION_STUDIO_PIPER_VOICES` (default `engine/vendor/piper/voices`) |
+
+An explicitly configured command never falls back — a user who named a binary
+meant it.
+
+All three can also be set on the Studio's vendors page instead
+(`tts.piper.exe` / `.python` / `.voicesDir` in `settings.json`); the environment
+wins, as everywhere else.
+
+### Voices are files you download
+
+Each voice is **two files** — the model and its config — from
+[huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices):
+
+```
+en_US-lessac-medium.onnx
+en_US-lessac-medium.onnx.json
+```
+
+The easiest way to fetch one is Piper's own downloader, aimed straight at the
+voices folder:
+
+```
+python -m piper.download_voices en_US-lessac-medium --download-dir engine/vendor/piper/voices
+```
+
+Or download both files by hand and put them in the voices folder. Every `.onnx` there with its `.onnx.json`
+alongside becomes a voice in `list_voices` and in the Studio's picker; a model
+whose config is missing is skipped rather than offered, because Piper cannot
+load it. Names follow `{locale}-{speaker}-{quality}`, which is where the
+engine gets the locale and quality it shows you. Sizes run from ~20 MB (`low`)
+to ~110 MB (`high`).
+
+**Each voice carries its own licence** — check its `MODEL_CARD` on Hugging
+Face. Some are more restrictive than Piper itself.
+
+Motion Studio itself never downloads voices: the engine does not fetch from the
+internet, and this feature was not the place to start. The downloader above is
+Piper's own tool, run by you.
+
+### Behaviour
+
+- **`rate` maps to Piper's `--length-scale`** on the same scale the Azure vendor
+  uses — each step is 10% of default speed — so a project can switch vendors
+  without re-timing every line. It is clamped to a 0.4–3× range.
+- `volume` (0..100) becomes Piper's `--volume` multiplier.
+- **`--no-normalize` is always passed.** Piper otherwise normalizes every clip
+  to full scale, which would silently overwrite the level balance between
+  narration and music. Levels come out as synthesized and the measurement is
+  the truth.
+- Azure-only options (`style`, `pitch`, `role`) are reported in `warnings`
+  rather than silently dropped.
+- Narration text is passed with `--input-file` — a UTF-8 file, never argv —
+  so quotes, newlines and unicode in a script are safe. Same rule as the exe
+  vendor.
+- **Output is not bit-identical between runs.** Piper's inference is stochastic
+  (`noise_scale`/`noise_w`), so re-synthesizing the same line gives a slightly
+  different take. That is fine for narration — audio is generated once and
+  thereafter read as a file — but it is not the determinism the frame renderer
+  guarantees.
+
+Expect roughly 1–2 seconds per line on CPU, most of it model loading; the
+`--cuda` path is not wired up.
+
+---
+
 ## Vendor: `system` (Windows speech exe) — v0.6
 
 Offline, free, no account, and the reason narration existed before v0.17. Motion
@@ -213,10 +360,43 @@ Notes:
 vendor and probe it (→ `tts_unavailable` before anything is written); resolve a
 destination under the project's `assets/` (default `assets/narration-<n>.wav`,
 sandbox-checked); hand the text to the vendor
-(`core/tts-vendors.js` → the exe or Azure); parse the WAV header for the
-authoritative duration; then, in `attach` mode, append a
+(`core/tts-vendors.js` → the exe, Azure, or Piper); parse the WAV header for the
+authoritative duration; measure the clip's `peakDb`/`meanDb` (v0.19 — a direct
+PCM read, so a music bed's `gainDb` can be set relative to the narration
+without rendering first); then, in `attach` mode, append a
 `{ src, startInFrames?, gainDb? }` track to `config.audio` so the next render
 mixes it in. `list_voices` returns the chosen vendor's catalogue.
+
+### Sentence timings (v0.19)
+
+`synthesize_speech { sentenceTimings: true }` synthesizes **per sentence**
+(simple terminator split — `.` `!` `?` `…` and CJK forms), concatenates the
+clips locally with `sentenceGapSeconds` of silence between them (default 0.3),
+and returns `timings`:
+
+```json
+"timings": [
+  { "text": "This is a teapot.", "startSeconds": 0,    "startInFrames": 0,
+    "durationSeconds": 0.99,     "durationInFrames": 30 },
+  { "text": "It is quite hot.",  "startSeconds": 1.29, "startInFrames": 39, … }
+]
+```
+
+Offsets are exact because the engine placed the clips itself, so captions and
+cues can be timed to the frame instead of eyeballed. Trade-offs to know:
+inter-sentence pacing becomes `sentenceGapSeconds` rather than the vendor's
+own prosody, and abbreviations like "Mr." split (pre-split yourself if that
+matters). **Word-level timing is not available**: Piper's CLI cannot emit
+alignment data, and Azure word-boundary events require the websocket Speech
+SDK — a heavy dependency this repo deliberately keeps out (see
+"External tool integration style" in the repo conventions).
+
+### Vendor override notes (v0.19)
+
+Calling `synthesize_speech`/`synthesize_music` with an explicit `vendor` that
+differs from the machine's configured default adds a `vendorNote` to the
+response: the override applies to that call only, and vendor-less calls (and
+the Studio UI) keep using the default.
 
 `core/tts-vendors.js` is the only vendor-aware module: it owns the vendor list,
 the precedence rule, and the probe/synthesize/list calls, so the Studio, the MCP
@@ -298,7 +478,7 @@ someone else's name can have.
 
 ## Troubleshooting
 
-Open the Studio's **🗣 vendors** page first: it names the active vendor, its
+Open the Studio's **🗣 tts** page first: it names the active vendor, its
 live status, and what is missing — which answers most of the below without a
 terminal. `list_vendors` is the same information for an agent.
 
@@ -306,6 +486,7 @@ terminal. `list_vendors` is the same information for an agent.
   `MOTION_STUDIO_TTS_EXE` is unset, points at a missing file, or the exe crashed
   on `--list-voices`. This is a setup problem for the user to fix, not something
   an agent should retry.
+- **`tts_unavailable` (piper)** — Piper is not installed (`pip install piper-tts`), or it runs but the voices folder has no usable voice (each voice is an `.onnx` **plus** its `.onnx.json`). The message says which. pip's "piper.exe is installed in a Scripts folder which is not on PATH" warning on Windows is fine — the engine falls back to `python -m piper` automatically; set `MOTION_STUDIO_PIPER_EXE` only when the Python on PATH is not the one pip installed into.
 - **`tts_unavailable` (azure)** — no key or region in the environment, a key
   Azure rejected (401/403), a region that doesn't resolve (404), or the service
   was unreachable. The message says which.

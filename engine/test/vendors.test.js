@@ -20,6 +20,7 @@ import {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport, filterVoices,
 } from '../src/core/tts-vendors.js';
 import { updateSettings, readSettings, validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
+import { resolveVendorFrom, walkVendorChain, normalizeVendorChain, chainFallbackNote } from '../src/core/vendors.js';
 import { clearAzureVoiceCache } from '../src/core/tts-azure.js';
 import { startFakeAzure } from './helpers/fake-azure-speech.mjs';
 
@@ -76,8 +77,11 @@ test('vendors: MOTION_STUDIO_TTS_VENDOR overrides settings, an argument override
   await updateSettings({ tts: { vendor: 'system' } }, home);
   process.env.MOTION_STUDIO_TTS_VENDOR = 'azure';
   try {
-    assert.deepEqual(await resolveSpeechVendor({ dataDir: home }), { vendor: 'azure', source: 'env' });
-    assert.deepEqual(await resolveSpeechVendor({ vendor: 'system', dataDir: home }), { vendor: 'system', source: 'argument' });
+    // A single-valued env var / argument resolves to a chain of exactly itself:
+    // an explicitly named vendor is never redirected to another (v0.19).
+    assert.deepEqual(await resolveSpeechVendor({ dataDir: home }), { vendor: 'azure', source: 'env', chain: ['azure'] });
+    assert.deepEqual(await resolveSpeechVendor({ vendor: 'system', dataDir: home }),
+      { vendor: 'system', source: 'argument', chain: ['system'] });
   } finally {
     delete process.env.MOTION_STUDIO_TTS_VENDOR;
   }
@@ -85,6 +89,164 @@ test('vendors: MOTION_STUDIO_TTS_VENDOR overrides settings, an argument override
 
 test('vendors: an unknown vendor is invalid_config, not a silent fallback', async () => {
   await assert.rejects(resolveSpeechVendor({ vendor: 'elevenlabs', dataDir: home }), (e) => e.code === 'invalid_config');
+});
+
+/* -------------------- preference chains (v0.19) -------------------- */
+/* The unit half runs on a stub probe, so the walk's rules are tested without
+ * caring which vendors this machine happens to have; the integration half below
+ * drives the real speech vendors by breaking the Azure key. */
+
+test('chain: normalizeVendorChain keeps order, drops unknown/dupes, null for nothing usable', () => {
+  const allowed = ['a', 'b', 'c'];
+  assert.deepEqual(normalizeVendorChain(['b', 'a'], allowed), ['b', 'a']);
+  assert.deepEqual(normalizeVendorChain(['b', 'zz', 'b', 'a'], allowed), ['b', 'a']);
+  assert.equal(normalizeVendorChain([], allowed), null);
+  assert.equal(normalizeVendorChain(['zz'], allowed), null);
+  assert.equal(normalizeVendorChain('b', allowed), null);
+  assert.equal(normalizeVendorChain(null, allowed), null);
+});
+
+test('chain: resolveVendorFrom prefers a stored chain, and an argument collapses it to one', () => {
+  const base = { allowed: ['system', 'azure', 'piper'], fallback: 'system' };
+  assert.deepEqual(
+    resolveVendorFrom('speech', { ...base, storedVendor: 'system', storedVendors: ['azure', 'piper'] }),
+    { vendor: 'azure', source: 'settings', chain: ['azure', 'piper'] },
+  );
+  // An explicit argument outranks the chain AND refuses to inherit it: the
+  // caller named a vendor, so that vendor runs or the call fails.
+  assert.deepEqual(
+    resolveVendorFrom('speech', { ...base, vendor: 'piper', storedVendors: ['azure', 'system'] }),
+    { vendor: 'piper', source: 'argument', chain: ['piper'] },
+  );
+  // An unusable stored chain falls through to the scalar rather than erroring.
+  assert.deepEqual(
+    resolveVendorFrom('speech', { ...base, storedVendor: 'azure', storedVendors: [] }),
+    { vendor: 'azure', source: 'settings', chain: ['azure'] },
+  );
+});
+
+test('chain: a comma-separated env var is a chain; a typo in it throws', () => {
+  const base = { allowed: ['system', 'azure', 'piper'], fallback: 'system' };
+  process.env.MOTION_STUDIO_TTS_VENDOR = ' piper , system ';
+  try {
+    assert.deepEqual(resolveVendorFrom('speech', base),
+      { vendor: 'piper', source: 'env', chain: ['piper', 'system'] });
+    process.env.MOTION_STUDIO_TTS_VENDOR = 'piper,elevenlabs';
+    assert.throws(() => resolveVendorFrom('speech', base), (e) => e.code === 'invalid_config');
+  } finally {
+    delete process.env.MOTION_STUDIO_TTS_VENDOR;
+  }
+});
+
+test('chain: walkVendorChain skips the unavailable and reports what it passed', async () => {
+  const probes = [];
+  const probe = async (id) => {
+    probes.push(id);
+    return id === 'piper' ? { available: true } : { available: false, error: `${id} not set up` };
+  };
+  const walked = await walkVendorChain({ vendor: 'azure', source: 'settings', chain: ['azure', 'piper'] }, probe);
+  assert.equal(walked.vendor, 'piper');
+  assert.deepEqual(walked.skipped, [{ vendor: 'azure', error: 'azure not set up' }]);
+  assert.deepEqual(walked.status, { available: true });
+  assert.equal(walked.exhausted, undefined);
+  assert.deepEqual(probes, ['azure', 'piper']);   // stops at the first winner
+  assert.match(chainFallbackNote('speech', walked), /"piper".*"azure".*not available/s);
+});
+
+test('chain: a one-entry chain probes nothing — single-vendor setups keep the old cost', async () => {
+  let probed = 0;
+  const walked = await walkVendorChain(
+    { vendor: 'system', source: 'default', chain: ['system'] },
+    async () => { probed++; return { available: false }; },
+  );
+  assert.equal(probed, 0, 'resolution must not spawn a probe for a single vendor');
+  assert.deepEqual(walked, { vendor: 'system', source: 'default', chain: ['system'], status: null, skipped: [] });
+  assert.equal(chainFallbackNote('speech', walked), null);
+});
+
+test('chain: an exhausted chain reports the HEAD, so the error names the first choice', async () => {
+  const walked = await walkVendorChain(
+    { vendor: 'azure', source: 'settings', chain: ['azure', 'piper'] },
+    async (id) => ({ available: false, error: `${id} down` }),
+  );
+  assert.equal(walked.vendor, 'azure');
+  assert.equal(walked.exhausted, true);
+  assert.equal(walked.status.error, 'azure down');
+  assert.deepEqual(walked.skipped.map((s) => s.vendor), ['azure', 'piper']);
+  // Nothing ran, so there is no fallback to announce — the caller raises
+  // tts_unavailable for the head instead.
+  assert.equal(chainFallbackNote('speech', walked), null);
+});
+
+test('chain: settings accept an ordered array and refuse a broken one', () => {
+  const withTts = (tts) => ({ ...structuredClone(DEFAULT_SETTINGS), tts: { ...DEFAULT_SETTINGS.tts, ...tts } });
+  assert.ok(validateSettings(withTts({ vendors: ['piper', 'system'] })));
+  assert.ok(validateSettings(withTts({ vendors: null })));
+  for (const bad of [[], ['piper', 'piper'], ['elevenlabs'], 'piper']) {
+    assert.throws(() => validateSettings(withTts({ vendors: bad })), (e) => e.code === 'invalid_config',
+      `expected ${JSON.stringify(bad)} to be refused`);
+  }
+});
+
+test('chain: a real chain falls past a broken Azure to the system exe, and says so', async () => {
+  await updateSettings({ tts: { vendor: 'azure', vendors: ['azure', 'system'] } }, home);
+  try {
+    // Both usable: the top preference wins and nothing is announced.
+    const healthy = await resolveSpeechVendor({ dataDir: home, probe: true });
+    assert.equal(healthy.vendor, 'azure');
+    assert.deepEqual(healthy.skipped, []);
+
+    // Break Azure the way a user would (no key) — a *setup* problem, which is
+    // the only thing the walk is allowed to fall back past.
+    delete process.env.AZURE_SPEECH_KEY;
+    const fell = await resolveSpeechVendor({ dataDir: home, probe: true });
+    assert.equal(fell.vendor, 'system');
+    assert.deepEqual(fell.chain, ['azure', 'system']);
+    assert.deepEqual(fell.skipped.map((s) => s.vendor), ['azure']);
+    assert.equal(fell.status.available, true, 'the winner\'s status comes back so nothing is probed twice');
+
+    // An explicitly requested vendor is still never redirected.
+    const explicit = await resolveSpeechVendor({ vendor: 'azure', dataDir: home, probe: true });
+    assert.equal(explicit.vendor, 'azure');
+    assert.deepEqual(explicit.chain, ['azure']);
+    assert.deepEqual(explicit.skipped, []);
+
+    // The report agrees, and shows both the preference and the reality.
+    const report = await speechVendorReport({ dataDir: home });
+    assert.equal(report.preferred, 'azure');
+    assert.equal(report.active, 'system');
+    assert.equal(report.fellBack, true);
+    const byId = Object.fromEntries(report.vendors.map((v) => [v.id, v]));
+    assert.equal(byId.azure.priority, 1);
+    assert.equal(byId.system.priority, 2);
+    assert.equal(byId.piper.priority, null, 'a vendor outside the chain has no rank');
+    assert.equal(byId.system.active, true);
+    assert.equal(byId.azure.active, false);
+  } finally {
+    process.env.AZURE_SPEECH_KEY = 'test-key';
+    await updateSettings({ tts: { vendor: 'system', vendors: null } }, home);
+    clearAzureVoiceCache();
+  }
+});
+
+test('chain: synthesis runs on the fallback vendor, not the unavailable favourite', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-chain-syn-'));
+  await updateSettings({ tts: { vendor: 'azure', vendors: ['azure', 'system'] } }, home);
+  delete process.env.AZURE_SPEECH_KEY;
+  try {
+    const resolved = await resolveSpeechVendor({ dataDir: home, probe: true });
+    const res = await synthesizeWithVendor({
+      text: 'chain check', outPath: path.join(dir, 'vo.wav'), dataDir: home, resolved,
+    });
+    assert.equal(res.vendor, 'system');
+    assert.equal(res.vendorSource, 'settings');
+    assert.ok((await fsp.stat(path.join(dir, 'vo.wav'))).size > 0);
+  } finally {
+    process.env.AZURE_SPEECH_KEY = 'test-key';
+    await updateSettings({ tts: { vendor: 'system', vendors: null } }, home);
+    clearAzureVoiceCache();
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 test('vendors: both stubs probe as available', async () => {
@@ -185,7 +347,7 @@ test('studio: GET /api/vendors reports both vendors and the active one', async (
   const { status, data } = await j('/api/vendors');
   assert.equal(status, 200, JSON.stringify(data));
   assert.equal(data.speech.active, 'system');
-  assert.deepEqual(data.speech.vendors.map((v) => v.id), ['system', 'azure']);
+  assert.deepEqual(data.speech.vendors.map((v) => v.id), ['system', 'azure', 'piper']);
   assert.ok(data.azure.outputFormats.includes('riff-24khz-16bit-mono-pcm'));
   assert.equal(JSON.stringify(data).includes('test-key'), false);
 });

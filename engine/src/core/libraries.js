@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Optional 3D libraries an agent can attach to a project (v0.7).
  *
  * Motion Studio compositions are self-contained HTML/CSS/JS. A project can opt
@@ -45,10 +45,52 @@ export const LIBRARIES = {
     }],
     scripts: ['three.min.js'], // loaded before frame-api.js in composition.html
     template: 'lib-three',
+    // Optional addons (v0.19), vendored from three's examples/js UMD builds —
+    // the global-script twins of examples/jsm, which existed through r147.
+    // This is also why the core stays pinned ≤0.147: r148 removed examples/js
+    // and r160 removed the UMD core build, and Motion Studio compositions are
+    // plain <script> tags by design (hermetic, no bundler at render time).
+    addons: {
+      geometries: {
+        files: [{
+          vendor: 'three/examples/TeapotGeometry.js',
+          dest: 'three.TeapotGeometry.js',
+          url: 'https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/geometries/TeapotGeometry.js',
+        }],
+        note: 'THREE.TeapotGeometry(size, segments) — the canonical Utah teapot as a single geometry.',
+      },
+      loaders: {
+        files: [{
+          vendor: 'three/examples/GLTFLoader.js',
+          dest: 'three.GLTFLoader.js',
+          url: 'https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/loaders/GLTFLoader.js',
+        }],
+        note: 'glTF/GLB import via new THREE.GLTFLoader().load(...). Loading a model file needs MOTION_STUDIO_ALLOW_LOCAL_FETCH=1, and every loaded mesh must be warmed up (renderer.compile) before the first captured frame.',
+      },
+      postprocessing: {
+        // Script order matters: shaders first, then Pass/ShaderPass/MaskPass,
+        // then the composer and the passes that build on them.
+        files: [
+          ['CopyShader', 'shaders/CopyShader.js'],
+          ['LuminosityHighPassShader', 'shaders/LuminosityHighPassShader.js'],
+          ['Pass', 'postprocessing/Pass.js'],
+          ['ShaderPass', 'postprocessing/ShaderPass.js'],
+          ['MaskPass', 'postprocessing/MaskPass.js'],
+          ['EffectComposer', 'postprocessing/EffectComposer.js'],
+          ['RenderPass', 'postprocessing/RenderPass.js'],
+          ['UnrealBloomPass', 'postprocessing/UnrealBloomPass.js'],
+        ].map(([name, rel]) => ({
+          vendor: `three/examples/${name}.js`,
+          dest: `three.${name}.js`,
+          url: `https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/${rel}`,
+        })),
+        note: 'THREE.EffectComposer + RenderPass + UnrealBloomPass (and ShaderPass for custom shaders). Compose in setFrame: composer.render() replaces renderer.render(). Call composer.setSize(W, H) once and keep bloom parameters frame-driven if animated.',
+      },
+    },
     notes: [
       ...COMMON_NOTES,
       'Do not use THREE.Clock or getDelta(); compute rotations/positions from `frame`.',
-      'Add-ons (OrbitControls, loaders, postprocessing) live in three/examples/jsm and are not bundled here.',
+      'Optional addons: add_library { library:"three", addons:["geometries"|"loaders"|"postprocessing"] } — TeapotGeometry, GLTFLoader, EffectComposer/bloom. Other examples/jsm modules are not bundled.',
     ],
   },
   babylon: {
@@ -94,3 +136,18 @@ export function getLibrary(id) {
 }
 
 export const LIBRARY_IDS = Object.keys(LIBRARIES);
+
+/**
+ * The file entries an addon contributes, in load order (v0.19). Addons come in
+ * two shapes: single-file ({vendor, dest, url}, the original babylon form) and
+ * multi-file ({files: [...]}); this normalizes both so addLibrary and
+ * fetch-libs.mjs iterate one way.
+ */
+export function addonFiles(addon) {
+  return addon.files ?? [addon];
+}
+
+/** Every addon id across every library — for tool schemas. */
+export const ADDON_IDS = [...new Set(
+  Object.values(LIBRARIES).flatMap((l) => Object.keys(l.addons || {})),
+)];

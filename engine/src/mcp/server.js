@@ -22,9 +22,12 @@
  *   MOTION_STUDIO_TTS_EXE       path to the Windows text-to-speech exe (optional;
  *                               enables the "system" speech vendor — v0.6)
  *   MOTION_STUDIO_TTS_VENDOR    speech vendor for synthesize_speech: "system"
- *                               (default) or "azure" — v0.17. Overrides
+ *                               (default), "azure" or "piper". Overrides
  *                               settings.json's tts.vendor; a call that names
  *                               a vendor still wins over both.
+ *   MOTION_STUDIO_PIPER_EXE     the piper executable, and the folder holding
+ *   MOTION_STUDIO_PIPER_VOICES  its downloaded .onnx voices (v0.18). See
+ *                               docs/tts-setup.md.
  *   AZURE_SPEECH_KEY            Azure AI Speech resource key + region for the
  *   AZURE_SPEECH_REGION         "azure" vendor (v0.17). Read from the
  *                               environment only — never stored in settings.
@@ -39,6 +42,7 @@
  */
 
 import path from 'node:path';
+import os from 'node:os';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -58,7 +62,9 @@ import {
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { resolveInProject } from '../core/sandbox.js';
-import { wavDurationSeconds, framesForDuration } from '../core/tts.js';
+import {
+  wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
+} from '../core/tts.js';
 import {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport,
   unavailableWithAlternatives, TTS_VENDORS,
@@ -67,8 +73,10 @@ import {
   resolveMusicVendor, checkMusicVendor, synthesizeMusicWithVendor, musicVendorReport,
   musicUnavailableWithAlternatives, MUSIC_VENDORS,
 } from '../core/music-vendors.js';
+import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm } from '../core/film.js';
+import { mixAudioOnly, measureAudioLevels } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -96,6 +104,39 @@ const resolveFfmpeg = () => resolveFfmpegPath({ dataDir: store.dataDir });
 
 /** The resolved binary, for the tools that spawn ffmpeg themselves. */
 const ffmpegPathOnly = async () => (await resolveFfmpeg()).path;
+
+/**
+ * The `vendorNote` a synthesize_* response carries when the vendor that ran is
+ * not the obvious one (v0.19). Two cases, either or both:
+ *
+ *   - the call named a vendor explicitly that differs from this machine's
+ *     configured default — the override applies to this call only;
+ *   - resolution walked a preference chain past a higher-priority vendor that
+ *     is not available here.
+ *
+ * A fallback nobody can see is the failure mode preference chains have to avoid,
+ * so this is not decoration. Never throws: a note must not be able to fail the
+ * synthesis it annotates.
+ */
+async function vendorNoteFor(capability, resolved) {
+  const notes = [];
+  try {
+    const fallback = chainFallbackNote(capability, resolved);
+    if (fallback) notes.push(fallback);
+    if (resolved.source === 'argument') {
+      const resolveDefault = capability === 'music' ? resolveMusicVendor : resolveSpeechVendor;
+      const dflt = await resolveDefault({ dataDir: store.dataDir });
+      if (dflt.vendor !== resolved.vendor) {
+        notes.push(
+          `Explicit vendor "${resolved.vendor}" overrides this machine's default ` +
+          `"${dflt.vendor}"${dflt.chain?.length > 1 ? ` (chain: ${dflt.chain.join(' → ')})` : ''} for this call only — ` +
+          'vendor-less calls (and the Studio UI) keep using the default; change it in Studio settings to make this permanent.',
+        );
+      }
+    }
+  } catch { /* a hint is never worth failing over */ }
+  return notes.length ? { vendorNote: notes.join(' ') } : {};
+}
 
 /**
  * Cache prereq result; re-check on demand if it previously failed, or if the
@@ -260,6 +301,11 @@ server.registerTool(
       'give the composition a transparent background). The output filename extension follows the format automatically. ' +
       'output.audioLimiter (default true) brick-walls the mixed audio at -1 dBFS; set false only if you want the ' +
       'summed mix passed through untouched, and remember track gains sum directly (amix runs with normalize=0). ' +
+      'Audio tracks take clip-relative trim/fades (v0.19): trimEndInFrames keeps only the clip\'s first N frames; ' +
+      'fadeInFrames fades up from the clip start; fadeOutFrames fades to silence ending at trimEndInFrames if set, ' +
+      'else at the composition end — so a music bed longer than the video resolves instead of hard-cutting. ' +
+      'duck:true on a track auto-ducks it under the mix of all non-ducked tracks (sidechain compression — the bed ' +
+      'dips while narration speaks and recovers in the gaps; engages only when ducked and non-ducked tracks both exist). ' +
       'project.json cannot be written via write_composition_file; use this tool so config invariants are validated.',
     inputSchema: {
       projectId: z.string(),
@@ -276,6 +322,14 @@ server.registerTool(
                 src: z.string().describe('Project-relative audio path, e.g. assets/music.mp3'),
                 startInFrames: z.number().int().min(0).optional(),
                 gainDb: z.number().optional(),
+                trimEndInFrames: z.number().int().min(1).optional()
+                  .describe('Keep only the clip\'s first N frames (clip-relative)'),
+                fadeInFrames: z.number().int().min(0).optional()
+                  .describe('Fade up from silence over the clip\'s first N frames'),
+                fadeOutFrames: z.number().int().min(0).optional()
+                  .describe('Fade to silence over the last N frames before trimEndInFrames (or the composition end)'),
+                duck: z.boolean().optional()
+                  .describe('Auto-duck: compress this track under the mix of all non-ducked tracks (music bed under narration)'),
               }),
             )
             .optional(),
@@ -595,6 +649,86 @@ server.registerTool(
 );
 
 server.registerTool(
+  'preview_audio',
+  {
+    title: 'Mix the audio timeline to a standalone WAV',
+    description:
+      'Render just the project\'s config.audio timeline to a WAV in the "out" dir — the exact filter graph the ' +
+      'final render will use (delay, gain, trim/fades, limiter), minus the video (new in v0.19). Takes seconds ' +
+      'instead of a full render: use it to audition the mix and check levels BEFORE rendering. Returns the mixed ' +
+      'peakDb/meanDb, a clipping flag, and each source clip\'s own measured level so a bad balance points at the ' +
+      'track that caused it. mix.envelopeDb is the per-second RMS of the mix (null = digital silence) and ' +
+      'mix.silentTailSeconds the length of the dead tail, so a mix that goes silent early is visible here ' +
+      'without measuring the WAV yourself. Fails with no_audio_tracks when config.audio is empty.',
+    inputSchema: {
+      projectId: z.string(),
+      outputFilename: z.string().optional()
+        .describe('Bare .wav filename inside the "out" dir (default audio-preview.wav)'),
+    },
+  },
+  wrap(async ({ projectId, outputFilename }) => {
+    await requirePrereqs();
+    const entry = await store.getProjectEntry(projectId);
+    const config = await store.readConfig(projectId);
+    if (!config.audio?.length) {
+      throw new EngineError(
+        ErrorCodes.NO_AUDIO_TRACKS,
+        'This project has no audio tracks — attach one with synthesize_speech / synthesize_music / synthesize_sfx, or update_project_config { audio: [...] }.',
+        { projectId },
+      );
+    }
+    const name = outputFilename ?? 'audio-preview.wav';
+    if (name.includes('/') || name.includes('\\') || name.includes('..') || !name.endsWith('.wav')) {
+      throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare .wav filename');
+    }
+    const outDir = path.join(entry.path, config.output.dir);
+    await fsp.mkdir(outDir, { recursive: true });
+    const outputPath = path.join(outDir, name);
+    const ffmpegPath = await ffmpegPathOnly();
+    const videoDurationSec = config.durationInFrames / config.fps;
+
+    await mixAudioOnly({
+      audioTracks: config.audio, outputPath, fps: config.fps,
+      projectRoot: entry.path, output: config.output, ffmpegPath, videoDurationSec,
+    });
+
+    // Per-clip levels: direct PCM read for WAVs, ffmpeg decode for the rest.
+    const tracks = [];
+    for (const t of config.audio) {
+      const abs = path.resolve(entry.path, t.src);
+      let levels = { peakDb: null, meanDb: null };
+      if (/\.wav$/i.test(t.src)) {
+        levels = await measureWavLevels(abs).catch(() => levels);
+      } else {
+        levels = (await measureAudioLevels({ filePath: abs, ffmpegPath })) ?? levels;
+      }
+      tracks.push({ ...t, clipPeakDb: levels.peakDb, clipMeanDb: levels.meanDb });
+    }
+    const mix = await measureWavLevels(outputPath).catch(() => ({ peakDb: null, meanDb: null }));
+    // Whole-file peak/mean can look healthy while the tail is dead — report a
+    // per-second envelope so a mix that goes silent early is visible here
+    // instead of only in the rendered film.
+    const envelope = await measureWavEnvelope(outputPath).catch(() => null);
+
+    return ok({
+      outputPath,
+      durationSeconds: Number(videoDurationSec.toFixed(3)),
+      limiter: config.output.audioLimiter !== false,
+      tracks,
+      mix: {
+        peakDb: mix.peakDb,
+        meanDb: mix.meanDb,
+        clipping: mix.peakDb !== null && mix.peakDb >= -0.1,
+        ...(envelope ? {
+          envelopeDb: envelope.envelopeDb,
+          silentTailSeconds: envelope.silentTailSeconds,
+        } : {}),
+      },
+    });
+  }),
+);
+
+server.registerTool(
   'write_asset_file',
   {
     title: 'Write a binary asset (base64)',
@@ -682,13 +816,19 @@ server.registerTool(
   {
     title: 'Synthesize narration (text-to-speech)',
     description:
-      'Turn narration text into a spoken WAV in the project\'s assets/ folder. Two vendors (v0.17): "system" = the ' +
+      'Turn narration text into a spoken WAV in the project\'s assets/ folder. Three vendors: "system" = the ' +
       'local Windows speech exe (offline, needs MOTION_STUDIO_TTS_EXE), "azure" = Azure AI Speech neural voices ' +
-      '(cross-platform, needs AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in the environment). Omit `vendor` to use the ' +
-      'machine\'s configured default — check it with list_vendors; an unconfigured vendor fails with ' +
-      'tts_unavailable, which the user must fix (do not retry). ' +
+      '(cloud, needs AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in the environment, billed per character), "piper" = ' +
+      'local neural voices (offline and free, any OS, needs Piper installed plus downloaded .onnx voices). ' +
+      'Omit `vendor` to use the machine\'s configured default — check it with list_vendors; an unconfigured vendor ' +
+      'fails with tts_unavailable, which the user must fix (do not retry). ' +
       'Returns the clip length as durationSeconds AND durationInFrames — use durationInFrames to size the ' +
-      'Sequence() block the narration plays under. mode="attach" (default) also appends the clip to the ' +
+      'Sequence() block the narration plays under — plus the measured peakDb/meanDb of the clip, so you can set ' +
+      'a music bed\'s gainDb relative to the narration without rendering first. ' +
+      'sentenceTimings=true additionally synthesizes per sentence and returns `timings` — each sentence\'s ' +
+      'start/duration in seconds AND frames — so captions and cues can be placed exactly instead of eyeballed ' +
+      '(inter-sentence pacing becomes sentenceGapSeconds rather than the vendor\'s own). ' +
+      'mode="attach" (default) also appends the clip to the ' +
       'project\'s audio tracks so the next render mixes it in automatically; mode="asset-only" just writes the ' +
       'WAV and reports its duration, leaving you to wire it later with update_project_config. ' +
       'List available voices first with list_voices. Narration text is passed safely (UTF-8 file for the exe, ' +
@@ -696,7 +836,7 @@ server.registerTool(
     inputSchema: {
       projectId: z.string(),
       text: z.string().min(1).describe('Narration text (UTF-8)'),
-      vendor: z.enum(['system', 'azure']).optional()
+      vendor: z.enum(['system', 'azure', 'piper']).optional()
         .describe('Speech vendor; omit to use the configured default (see list_vendors)'),
       voice: z.string().optional().describe('Voice name from list_voices; omit for the vendor default'),
       rate: z.number().int().min(-10).max(10).optional().describe('Speaking rate (engine scale, e.g. -10..10)'),
@@ -709,13 +849,19 @@ server.registerTool(
         .describe('Project-relative .wav under assets/ (default assets/narration-<n>.wav)'),
       startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
       gainDb: z.number().optional().describe('attach mode: track gain in dB'),
+      sentenceTimings: z.boolean().default(false)
+        .describe('Synthesize per sentence and report each sentence\'s start/duration in the clip — for caption sync, cue placement, lip-sync (v0.19)'),
+      sentenceGapSeconds: z.number().min(0).max(5).default(0.3)
+        .describe('sentenceTimings only: silence inserted between sentences'),
     },
   },
-  wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb }) => {
+  wrap(async ({ projectId, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds }) => {
     // Probe before touching the project: an unconfigured vendor should fail
-    // without leaving a half-written asset behind.
-    const resolved = await resolveSpeechVendor({ vendor, dataDir: store.dataDir });
-    const probe = await checkSpeechVendor(resolved.vendor, { dataDir: store.dataDir });
+    // without leaving a half-written asset behind. `probe: true` also walks a
+    // configured preference chain to the first available vendor (v0.19) and
+    // hands back the status it used, so nothing is probed twice.
+    const resolved = await resolveSpeechVendor({ vendor, dataDir: store.dataDir, probe: true });
+    const probe = resolved.status ?? await checkSpeechVendor(resolved.vendor, { dataDir: store.dataDir });
     if (!probe.available) throw await unavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
 
     const entry = await store.getProjectEntry(projectId);
@@ -735,13 +881,50 @@ server.registerTool(
     // Reuse the sandbox's write guards (allow-list incl. .wav, traversal/symlink checks).
     const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
 
-    // Pass the caller's `vendor` through as given (possibly undefined) rather
-    // than the resolved id: resolution is deterministic, so the dispatcher
-    // reaches the same vendor — but it also reports where the choice really
-    // came from instead of calling every call an explicit argument.
-    const result = await synthesizeWithVendor({
-      vendor, text, outPath: abs, voice, rate, volume, style, dataDir: store.dataDir,
-    });
+    // Hand the dispatcher the decision already made above rather than letting it
+    // resolve again. Before preference chains that was merely wasted work
+    // (resolution was deterministic); now resolution consults live availability,
+    // so resolving twice could pick two different vendors — the probe that
+    // guarded the write and the synthesis that follows it must agree.
+    let result;
+    let timings = null;
+    const sentences = sentenceTimings ? splitSentences(text) : null;
+    if (sentences && sentences.length > 1) {
+      // Per-sentence synthesis + local concat: the only vendor-agnostic way to
+      // get alignment data out of CLIs that cannot emit any (v0.19). Offsets
+      // are exact because we place the clips ourselves; the trade-off is that
+      // inter-sentence pacing is sentenceGapSeconds, not the vendor's own.
+      const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-timings-'));
+      try {
+        const clips = [];
+        for (let i = 0; i < sentences.length; i++) {
+          const clipPath = path.join(tmpDir, `sentence-${i}.wav`);
+          result = await synthesizeWithVendor({
+            vendor, text: sentences[i], outPath: clipPath, voice, rate, volume, style,
+            dataDir: store.dataDir, resolved,
+          });
+          clips.push(await fsp.readFile(clipPath));
+        }
+        const joined = concatWavBuffers(clips, { gapSeconds: sentenceGapSeconds });
+        await fsp.writeFile(abs, joined.buffer);
+        timings = joined.segments.map((seg, i) => ({
+          text: sentences[i],
+          startSeconds: seg.startSeconds,
+          startInFrames: Math.round(seg.startSeconds * config.fps),
+          durationSeconds: seg.durationSeconds,
+          durationInFrames: framesForDuration(seg.durationSeconds, config.fps),
+        }));
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    } else {
+      result = await synthesizeWithVendor({
+        vendor, text, outPath: abs, voice, rate, volume, style, dataDir: store.dataDir, resolved,
+      });
+      if (sentences) {
+        timings = null; // single sentence: filled in below once the duration is measured
+      }
+    }
 
     const stat = await fsp.stat(abs).catch(() => null);
     if (!stat || stat.size === 0) {
@@ -754,6 +937,16 @@ server.registerTool(
 
     const durationSeconds = await wavDurationSeconds(abs);
     const durationInFrames = framesForDuration(durationSeconds, config.fps);
+    // Same level report music/sfx return, so narration can be balanced against
+    // a bed without a render (v0.19). Nulls = unmeasurable, never an error.
+    const levels = await measureWavLevels(abs).catch(() => ({ peakDb: null, meanDb: null }));
+    if (sentences && !timings) {
+      // Single sentence: the clip IS the sentence; report it in the same shape.
+      timings = [{
+        text: sentences[0], startSeconds: 0, startInFrames: 0,
+        durationSeconds: Number(durationSeconds.toFixed(4)), durationInFrames,
+      }];
+    }
 
     let attached = false;
     let audio;
@@ -773,6 +966,8 @@ server.registerTool(
       assetPath: normalized,
       vendor: result.vendor,
       vendorSource: result.vendorSource,
+      ...(resolved.chain.length > 1 ? { vendorChain: resolved.chain } : {}),
+      ...(await vendorNoteFor('speech', resolved)),
       voice: result.voice ?? voice ?? null,
       ...(result.style ? { style: result.style } : {}),
       ...(result.warnings?.length ? { warnings: result.warnings } : {}),
@@ -782,6 +977,9 @@ server.registerTool(
       sampleRate: result.sampleRate,
       channels: result.channels,
       bytes: stat.size,
+      peakDb: levels.peakDb,
+      meanDb: levels.meanDb,
+      ...(timings ? { timings } : {}),
       reportedDurationSeconds: result.durationSeconds,
       attached,
       ...(attached
@@ -798,12 +996,13 @@ server.registerTool(
     description:
       'List the speech voices available from a vendor, for use as the "voice" argument to synthesize_speech. ' +
       'Omit "vendor" to query the configured default (see list_vendors). The system vendor returns the ' +
-      'voices installed on this Windows machine; the azure vendor returns several hundred neural voices, so ' +
+      'voices installed on this Windows machine; the azure vendor returns several hundred cloud neural voices, so ' +
       'filter with "locale" (e.g. "en-US") or "search" — results are capped at "limit" (default 50) and the ' +
-      'response reports the true "total". Each voice carries any expressive "styles" it supports. ' +
+      'response reports the true "total"; the piper vendor returns the voice files the user has downloaded ' +
+      '(names like en_US-lessac-medium). Each voice carries any expressive "styles" it supports (azure only). ' +
       'Fails with tts_unavailable when the vendor is not configured.',
     inputSchema: {
-      vendor: z.enum(['system', 'azure']).optional().describe('Speech vendor; omit for the configured default'),
+      vendor: z.enum(['system', 'azure', 'piper']).optional().describe('Speech vendor; omit for the configured default'),
       locale: z.string().optional().describe('Filter by locale prefix, e.g. "en" or "en-GB" (azure)'),
       search: z.string().optional().describe('Filter by substring of the name / locale name / gender'),
       limit: z.number().int().min(1).max(500).default(50).describe('Max voices to return'),
@@ -821,11 +1020,14 @@ server.registerTool(
       returned: result.voices.length,
       truncated: result.truncated,
       // Names alone for the system vendor (that is all it has); full metadata
-      // for Azure, where locale/gender/styles are how you actually choose.
+      // for the others, where locale/gender/styles/quality are how you choose.
       voices: result.vendor === 'system'
         ? result.voices.map((v) => v.name)
         : result.voices.map((v) => ({
-          name: v.name, locale: v.locale, gender: v.gender,
+          name: v.name,
+          locale: v.locale,
+          ...(v.gender ? { gender: v.gender } : {}),
+          ...(v.quality ? { quality: v.quality } : {}),
           ...(v.styles.length ? { styles: v.styles } : {}),
         })),
       ...(result.truncated ? { hint: 'Narrow the list with locale/search, or page with offset.' } : {}),
@@ -843,6 +1045,10 @@ server.registerTool(
       'is the one that will be used when no vendor is named, and — if it is not available — exactly what the user ' +
       'must configure. Call this when a generator returns tts_unavailable / music_unavailable, so you can tell the ' +
       'user which vendor to fix, or switch to one that is already working. ' +
+      'Each capability reports `chain` — the user\'s ordered vendor preference (v0.19) — with `preferred` as its ' +
+      'head, `active` as the vendor that will ACTUALLY run (the first one in the chain that is available), and ' +
+      '`fellBack: true` when those differ; each vendor carries its 1-based `priority` in the chain, or null when ' +
+      'it is not in it. A chain of one is the common case and behaves exactly as a single configured vendor. ' +
       'Reports credential *sources* only; never a key itself.',
     inputSchema: {
       capability: z.enum(['speech', 'music']).optional().describe('Omit to report both'),
@@ -933,13 +1139,15 @@ server.registerTool(
       assetPath: z.string().optional().describe('Project-relative .wav under assets/ (default assets/music-<n>.wav)'),
       startInFrames: z.number().int().min(0).optional().describe('attach mode: track start offset in frames'),
       gainDb: z.number().optional().describe('attach mode: track gain in dB (e.g. -8 for a background bed)'),
+      duck: z.boolean().optional().describe('attach mode: auto-duck this bed under the non-ducked tracks (see update_project_config)'),
     },
   },
-  wrap(async ({ projectId, spec, vendor, mode, assetPath, startInFrames, gainDb }) => {
+  wrap(async ({ projectId, spec, vendor, mode, assetPath, startInFrames, gainDb, duck }) => {
     // Resolve + probe before touching the project, so an unconfigured vendor
-    // fails without leaving a half-written asset behind.
-    const resolved = await resolveMusicVendor({ vendor, dataDir: store.dataDir });
-    const probe = await checkMusicVendor(resolved.vendor, { dataDir: store.dataDir });
+    // fails without leaving a half-written asset behind. `probe: true` also
+    // walks a configured preference chain to the first available vendor (v0.19).
+    const resolved = await resolveMusicVendor({ vendor, dataDir: store.dataDir, probe: true });
+    const probe = resolved.status ?? await checkMusicVendor(resolved.vendor, { dataDir: store.dataDir });
     if (!probe.available) throw await musicUnavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
     const entry = await store.getProjectEntry(projectId);
     const config = await store.readConfig(projectId);
@@ -953,9 +1161,11 @@ server.registerTool(
     }
     const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
 
-    // As with speech: hand the dispatcher the caller's own `vendor` so the
-    // reported vendorSource stays truthful (see synthesize_speech).
-    const result = await synthesizeMusicWithVendor({ vendor, spec, outPath: abs, dataDir: store.dataDir });
+    // As with speech: hand the dispatcher the resolution already made, so the
+    // vendor that was probed is the vendor that renders (see synthesize_speech).
+    const result = await synthesizeMusicWithVendor({
+      vendor, spec, outPath: abs, dataDir: store.dataDir, resolved,
+    });
 
     const stat = await fsp.stat(abs).catch(() => null);
     if (!stat || stat.size === 0) {
@@ -969,6 +1179,7 @@ server.registerTool(
       const track = { src: normalized };
       if (startInFrames !== undefined) track.startInFrames = startInFrames;
       if (gainDb !== undefined) track.gainDb = gainDb;
+      if (duck !== undefined) track.duck = duck;
       audioTrackIndex = config.audio?.length ?? 0;
       const updated = await store.updateConfig(projectId, { audio: [...(config.audio ?? []), track] });
       audio = updated.audio;
@@ -980,6 +1191,8 @@ server.registerTool(
       assetPath: normalized,
       vendor: result.vendor,
       vendorSource: result.vendorSource,
+      ...(resolved.chain.length > 1 ? { vendorChain: resolved.chain } : {}),
+      ...(await vendorNoteFor('music', resolved)),
       bpm: result.bpm,
       tracks: result.tracks,
       notes: result.notes,
@@ -1127,13 +1340,17 @@ server.registerTool(
       'The result includes determinism notes you MUST follow: drive all animation from the injected frame — ' +
       'no requestAnimationFrame, no THREE.Clock / Babylon render loop / particle systems (all wall-clock based) — ' +
       'and compile shaders before the first frame (the starters warm up materials, else single-frame captures render blank). ' +
-      'addons: babylon supports "loaders" (glTF/GLB import via SceneLoader); loading a model also needs env MOTION_STUDIO_ALLOW_LOCAL_FETCH=1. ' +
+      'addons (v0.19): three supports "geometries" (THREE.TeapotGeometry), "loaders" (THREE.GLTFLoader), and ' +
+      '"postprocessing" (EffectComposer / RenderPass / UnrealBloomPass / ShaderPass); babylon supports "loaders" ' +
+      '(glTF/GLB import via SceneLoader). Loading a model file with either loader also needs env ' +
+      'MOTION_STUDIO_ALLOW_LOCAL_FETCH=1. ' +
       'Requires the vendored build (run scripts/fetch-libs.mjs once); otherwise fails with library_unavailable.',
     inputSchema: {
       projectId: z.string(),
       library: z.enum(['three', 'babylon']),
       scaffold: z.boolean().default(true).describe('Replace composition.html/js/css with the library starter'),
-      addons: z.array(z.enum(['loaders'])).optional().describe('Optional addons — babylon "loaders" for glTF/GLB'),
+      addons: z.array(z.enum(['geometries', 'loaders', 'postprocessing'])).optional()
+        .describe('Optional addons — three: geometries/loaders/postprocessing; babylon: loaders'),
     },
   },
   wrap(async ({ projectId, library, scaffold, addons }) => ok(await store.addLibrary(projectId, { library, scaffold, addons }))),

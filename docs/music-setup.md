@@ -28,8 +28,7 @@ ready, saying so — and the rest of the engine is unaffected.
 
 ## Picking a vendor
 
-**In the Studio:** `npm run studio` → **🗣 vendors** in the sidebar footer, then
-the **music** section. Each card shows live status and where each path came
+**In the Studio:** `npm run studio` → **♫ music** in the sidebar footer. Each card shows live status and where each path came
 from; **▶ listen** renders a short phrase on any of the 128 General MIDI
 instruments through the selected vendor, so you can hear a SoundFont before
 committing a film to it.
@@ -40,14 +39,31 @@ committing a film to it.
 ```
 explicit argument (synthesize_music { vendor })
   > MOTION_STUDIO_MUSIC_VENDOR
-  > settings.json music.vendor
+  > settings.json music.vendors (chain) or music.vendor (single)
   > "node"
 ```
 
 `node` is the default because it is the only one that works off Windows and the
-only one that needs no binaries a fresh clone has to build. There is **no silent
-fallback** between vendors: a machine that quietly swapped synthesizers would
-produce a film whose soundtrack changes character between scenes.
+only one that needs no binaries a fresh clone has to build.
+
+### Preference chains
+
+Tick **both** vendors on the music page and you get an ordered chain
+(`music.vendors: ["fluidsynth", "node"]`, ▲▼ to rank): the highest-ranked vendor
+that is actually set up renders the spec, so a machine without the FluidSynth
+exes falls through to `node` instead of failing. `MOTION_STUDIO_MUSIC_VENDOR`
+accepts a comma-separated list for the same thing.
+
+There is still **no silent fallback**, in the sense that mattered: a vendor you
+name explicitly is never redirected, only *unconfigured* vendors are skipped
+(a vendor that fails mid-render is a hard error), and every fallback is reported —
+`vendorNote` + `vendorChain` on the result, a warning line in the Studio,
+`preferred` vs `active` from `list_vendors`. What it costs: with a chain of two,
+the choice is made per call, so a vendor that disappears between two
+`synthesize_music` calls in one film changes the timbre from that point on. Tick
+one vendor if a film's soundtrack must be one synthesizer no matter what — that
+is still the default. Full reasoning in [tts-setup.md](tts-setup.md#preference-chains--ticking-more-than-one)
+and `engine/src/core/vendors.js`.
 
 Agents discover all of this with **`list_vendors`**, which reports both
 capabilities (speech and music), which vendor each will use, and what to fix.
@@ -101,7 +117,22 @@ to leave levels exactly as rendered.
 
 `synthesize_music` reports the measured `peakDb` of what was actually written,
 plus `attenuatedDb` when the target pulled it down. You cannot hear the output;
-that number is how you know whether the bed will fight the narration.
+that number is how you know whether the bed will fight the narration. Since
+v0.19 `synthesize_speech` reports its clip's `peakDb`/`meanDb` too, so the
+bed/narration balance is arithmetic, not guesswork — and the `preview_audio`
+tool mixes the whole timeline to a WAV (fades, ducking, limiter included) so
+the result can be checked in seconds without a render.
+
+Two v0.19 track controls matter for beds specifically: `fadeOutFrames` ends a
+bed musically at the composition end instead of hard-cutting mid-reverb-tail,
+and `duck: true` (settable at attach time) sidechain-compresses the bed under
+the non-ducked tracks, dipping it while narration speaks. See
+[user-guide.md §Audio](user-guide.md) and `update_project_config` in
+[mcp-setup.md](mcp-setup.md).
+
+An explicit `vendor` argument that differs from the machine's configured
+default adds a `vendorNote` to the response (v0.19) — the override is for that
+call only; the default is changed on the vendors page.
 
 ---
 
@@ -237,7 +268,7 @@ about the CLI contract and that a WAV lands at `--out`.
 
 ## Troubleshooting
 
-Open the Studio's **🗣 vendors** page first: it names the active music vendor,
+Open the Studio's **♫ music** page first: it names the active music vendor,
 its live status, and what is missing. `list_vendors` is the same information for
 an agent.
 

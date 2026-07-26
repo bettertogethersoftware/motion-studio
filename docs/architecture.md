@@ -1,4 +1,4 @@
-# Motion Studio — Architecture (v0.17)
+# Motion Studio — Architecture (v0.18)
 
 ## 1. System overview
 
@@ -139,7 +139,8 @@ v0.14: `browser_crashed` — a crash-shaped Chromium failure ("Target closed" et
 al.), classified so it stops masquerading as `composition_error`/
 `frame_timeout`/`internal_error`; the capture loop relaunches and retries on it
 in place, and it only surfaces after the per-render relaunch budget (3) is
-spent.
+spent. New in v0.19: `no_audio_tracks` — `preview_audio` on a project whose
+`config.audio` is empty.
 `render_already_in_progress` was retired from the render path in v0.5 and held
 reserved; **v0.11 raises it again for a different condition** — not
 in-process concurrency, which still queues, but a *second OS process* holding
@@ -234,17 +235,40 @@ pressure typically erases the speedup on desktop hardware.
 
 ## 9. Audio
 
-`project.json` may declare `audio: [{ src, startInFrames?, gainDb? }]`.
-After the silent video exists, a single FFmpeg pass builds a
-`-filter_complex` graph — per-track `adelay` (frame offset → ms) and
-`volume`, then `amix` with `normalize=0` so adding a quiet voiceover doesn't
-duck the music bed — and muxes with the video stream copied. The audio codec
+`project.json` may declare `audio: [{ src, startInFrames?, gainDb?,
+trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }]` (the last four new
+in v0.19). After the silent video exists, a single FFmpeg pass builds a
+`-filter_complex` graph — per-track clip-relative `atrim`/`afade` (fade-out
+bounded by the trim, else by the composition end), then `adelay` (frame offset
+→ ms) and `volume`, then `amix` with `normalize=0` so adding a quiet voiceover
+doesn't duck the music bed — and muxes with the video stream copied. Every
+track chain ends in `aformat` pinning **44.1 kHz stereo**: without it, ffmpeg
+negotiates a common format across the mix inputs, and one 16 kHz mono
+narration WAV (Piper's native output) silently downsampled the entire mix —
+music bed included — to 16 kHz.
+**Auto-duck (v0.19):** when some tracks carry `duck: true` and others don't,
+the graph splits into a foreground submix and a bed submix and runs
+`sidechaincompress` (threshold ≈ −34 dBFS, ratio 8, attack 50 ms, release
+400 ms) with the foreground as the key, so the bed dips under narration and
+recovers in the gaps; with only one side present the graph is unchanged.
+Both the bed and the sidechain are silence-padded (`apad=whole_dur`) to the
+composition length before the compressor: `sidechaincompress` is asymmetric
+about EOF — a sidechain that ends first terminates the filter (which used to
+hard-silence the bed from the last narration clip to the end of the film),
+and a bed that ends first stalls the graph forever. Padding both to the same
+bound makes them reach EOF together, so neither failure mode is reachable.
+`preview_audio` (v0.19) reuses this exact graph against an `anullsrc` stand-in
+for the video input to produce a standalone WAV mixdown without a render. The audio codec
 comes from the format registry (AAC for mp4, Opus for webm, PCM for ProRes);
 GIF and png-sequence cannot carry audio, so configured tracks are skipped
 with a `log` warning rather than failing the render. The mixed audio is
 `apad`-ded and `atrim`-med to exactly the video duration: a 5-second music
 bed under a 0.8-second clip yields a 0.8-second file, which `-shortest`
-would not guarantee in the general case.
+would not guarantee in the general case. That outer `apad` carries
+`whole_dur` too — with the duck branches already ending at exactly the
+composition length, an *unbounded* pad feeding `atrim` busy-spins forever on
+some builds, so the graph keeps zero infinite generators and terminates by
+construction.
 
 **Clipping protection (v0.10).** `normalize=0` is deliberate — it keeps the
 music bed at the level the author set — but it also means gains sum straight
@@ -295,7 +319,7 @@ is generated once and thereafter read as a file.
 Two of the three generators have more than one possible implementation:
 
 ```
-speech  →  system (core/tts.js, Windows exe)   |  azure      (core/tts-azure.js)
+speech  →  system (core/tts.js, Windows exe)   |  azure (core/tts-azure.js)  |  piper (core/tts-piper.js)
 music   →  node   (core/music-node.js)         |  fluidsynth (core/music.js)
 ```
 
@@ -318,10 +342,30 @@ no binaries a fresh clone must build. The "active" source is read from the
 *stored* settings, not the merged ones, so the UI can distinguish "the user
 chose this" from "this is what ships".
 
-**There is no fallback between vendors, in either capability.** A machine that
-quietly swapped synthesizers would produce a film whose soundtrack changes
-character between scenes — worse than a clear failure naming what to install.
-An unavailable vendor does, however, name any sibling that is ready.
+**Preference chains, and the fallback rule they narrow.** Through v0.19 the rule
+was absolute: no fallback between vendors ever, because a machine that quietly
+swapped synthesizers would produce a film whose soundtrack changes character
+between scenes. Settings may now name an ordered chain (`tts.vendors` /
+`music.vendors`; the env vars accept a comma-separated list) and resolution walks
+it to the first vendor that is available — but the original concern is answered by
+scoping, not dropped:
+
+- an explicitly named vendor resolves to a chain of exactly itself, so a caller's
+  choice is never redirected — it runs or it raises `*_unavailable`;
+- only *unavailability* is skipped (an unconfigured vendor), never *failure*: one
+  that probes fine and then fails during synthesis is a hard error;
+- a one-entry chain — still the default — probes nothing, so single-vendor
+  machines keep both the old behaviour and the old cost;
+- every fallback is reported: `skipped` from `walkVendorChain`, `vendorNote` and
+  `vendorChain` on the MCP result, a warning line on the Studio page,
+  `preferred` vs `active` + `fellBack` from `list_vendors`;
+- an exhausted chain reports its *head*, so the error names the user's first
+  choice rather than whichever candidate happened to be last.
+
+The residual cost is stated where users will meet it: with a chain of two or more,
+resolution happens per call, so a vendor that becomes unavailable between two
+calls in one film changes everything after it. An unavailable vendor also still
+names any sibling that is ready.
 
 Two rules carry over from §6's error model. Setup problems and failures stay
 distinct: a missing or rejected credential is `tts_unavailable` / a missing
@@ -455,7 +499,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-357 tests across 20 suites; see `engine/test/`. A clean run has **zero
+374 tests across 21 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

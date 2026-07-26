@@ -16,7 +16,8 @@
       <span class="brand-mark">▶</span>
       <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
-        <span class="version">v0.17 · deterministic renderer</span>
+        <span class="version">v0.19 · deterministic renderer</span>
+        <span id="engine-status" class="rail-status">engine —</span>
       </div>
       <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
@@ -34,8 +35,8 @@
     </div>
 
     <footer class="rail-foot">
-      <span id="engine-status">engine —</span>
-      <button id="btn-vendors" class="ghost foot-btn" title="speech vendors">🗣<span class="foot-label"> vendors</span></button>
+      <button id="btn-tts" class="ghost foot-btn" title="tts vendors">🗣<span class="foot-label"> tts</span></button>
+      <button id="btn-music" class="ghost foot-btn" title="music vendors">♫<span class="foot-label"> music</span></button>
       <button id="btn-settings" class="ghost foot-btn" title="global settings">⚙<span class="foot-label"> settings</span></button>
     </footer>
   </aside>
@@ -48,13 +49,14 @@
       what you scrub here is exactly what renders.</p>
     </div>
 
-    <!-- Speech vendors (v0.17). A full page rather than another dialog: it
-         holds two vendors' configuration, a few hundred voices, and an
-         audition player — none of which belongs in a modal. -->
+    <!-- Vendor pages (v0.17; split per capability in v0.18). One stage page
+         showing a single capability at a time — 🗣 tts or ♫ music from the
+         footer buttons — so narration settings never sit under a music
+         heading, and vice versa. -->
     <section id="vendors-page" class="vendors-page hidden">
       <header class="page-head">
-        <h2>vendors</h2>
-        <span class="dim">who speaks and who plays — for the Studio <em>and</em> every connected agent</span>
+        <h2 id="vendors-title">tts vendors</h2>
+        <span id="vendors-subtitle" class="dim">who narrates — for the Studio and every connected agent</span>
         <span class="spacer"></span>
         <span id="vendors-msg" class="dim"></span>
         <button id="btn-vendors-save" class="primary">save</button>
@@ -63,21 +65,27 @@
       </header>
 
       <p class="dim note vendors-intro">
-        Pick which vendor generates narration and which renders music. The choice is global —
-        <code>synthesize_speech</code> and <code>synthesize_music</code> over MCP use it too, unless a call names a
-        vendor explicitly. API keys are read from the machine's environment only and are never written to
+        The choice is global — agents connected over MCP use the vendor picked here too, unless a call names one
+        explicitly. Tick <strong>more than one</strong> to make a preference chain: the highest-ranked vendor that is
+        actually set up gets used, so a missing key falls through instead of failing. Reorder with ▲▼. A vendor that
+        is set up but then <em>fails</em> is still an error — nothing is silently finished by someone else.
+        API keys are read from the machine's environment only and are never written to
         <code>settings.json</code>.
       </p>
 
-      <p class="section-label capability-label">speech <span class="dim">· narration</span></p>
+      <div id="cap-speech">
+      <p class="chain-note mono" id="speech-chain-note"></p>
       <div class="vendor-cards">
         <!-- ------------------------------ system ------------------------------ -->
         <article class="vendor-card" data-vendor="system">
           <header class="vendor-head">
             <label class="radio">
-              <input type="radio" name="active-vendor" value="system">
+              <input type="checkbox" name="speech-vendor" value="system">
               <span class="v-title">system speech</span>
             </label>
+            <span class="rank mono hidden" data-rank="system"></span>
+            <button class="ghost tiny" data-up="system" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="system" title="lower priority">▼</button>
             <span class="pill" data-status="system">probing…</span>
           </header>
           <p class="dim v-summary">
@@ -103,9 +111,12 @@
         <article class="vendor-card" data-vendor="azure">
           <header class="vendor-head">
             <label class="radio">
-              <input type="radio" name="active-vendor" value="azure">
+              <input type="checkbox" name="speech-vendor" value="azure">
               <span class="v-title">azure ai speech</span>
             </label>
+            <span class="rank mono hidden" data-rank="azure"></span>
+            <button class="ghost tiny" data-up="azure" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="azure" title="lower priority">▼</button>
             <span class="pill" data-status="azure">probing…</span>
           </header>
           <p class="dim v-summary">
@@ -150,17 +161,75 @@
             process on restart. A region set in the environment overrides the field above.
           </p>
         </article>
+
+        <!-- ------------------------------- piper -------------------------------- -->
+        <article class="vendor-card" data-vendor="piper">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="checkbox" name="speech-vendor" value="piper">
+              <span class="v-title">piper</span>
+            </label>
+            <span class="rank mono hidden" data-rank="piper"></span>
+            <button class="ghost tiny" data-up="piper" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="piper" title="lower priority">▼</button>
+            <span class="pill" data-status="piper">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            Neural voices running entirely on this machine — no account, no per-character billing, no network, any OS.
+            Installed separately (<code>pip install piper-tts</code>, GPLv3) with voices you download; each voice
+            carries its own licence.
+          </p>
+          <dl class="env-list mono" data-facts="piper"></dl>
+          <p class="v-error err-line hidden" data-error="piper"></p>
+
+          <div class="config-grid vendor-grid">
+            <label class="wide">executable
+              <input id="pi-exe" placeholder="(piper on PATH)" spellcheck="false">
+            </label>
+            <label>python
+              <input id="pi-python" placeholder="(only if no exe)" spellcheck="false">
+            </label>
+            <label class="wide">voices folder
+              <input id="pi-voices" placeholder="(engine/vendor/piper/voices)" spellcheck="false">
+            </label>
+          </div>
+
+          <div class="fieldrow vendor-test">
+            <label class="grow">test line
+              <input data-test-text="piper" value="Motion Studio. Scene one, take one." maxlength="400">
+            </label>
+            <label>voice
+              <select data-voice="piper"></select>
+            </label>
+            <button class="ghost test-btn" data-test="piper">▶ test</button>
+            <span class="dim mono" data-test-msg="piper"></span>
+          </div>
+
+          <p class="dim note">
+            Voices are two files each — <code>en_US-lessac-medium.onnx</code> and its <code>.onnx.json</code> — from
+            <span class="mono">huggingface.co/rhasspy/piper-voices</span>. Drop both in the voices folder; everything
+            there shows up in the picker.
+          </p>
+        </article>
       </div>
 
-      <p class="section-label capability-label">music <span class="dim">· note specs → audio</span></p>
+      <p class="section-label">environment <span class="dim">(read-only · keys shown masked)</span></p>
+      <dl id="speech-env" class="env-list mono"></dl>
+      </div><!-- /cap-speech -->
+
+      <div id="cap-music" class="hidden">
+      <p class="chain-note mono" id="music-chain-note"></p>
       <div class="vendor-cards">
         <!-- ------------------------------- node -------------------------------- -->
         <article class="vendor-card" data-vendor="node">
           <header class="vendor-head">
             <label class="radio">
-              <input type="radio" name="active-music-vendor" value="node">
+              <input type="checkbox" name="music-vendor" value="node">
               <span class="v-title">node synthesizer</span>
             </label>
+            <span class="rank mono hidden" data-rank="node"></span>
+            <button class="ghost tiny" data-up="node" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="node" title="lower priority">▼</button>
             <span class="pill" data-status="node">probing…</span>
           </header>
           <p class="dim v-summary">
@@ -192,9 +261,12 @@
         <article class="vendor-card" data-vendor="fluidsynth">
           <header class="vendor-head">
             <label class="radio">
-              <input type="radio" name="active-music-vendor" value="fluidsynth">
+              <input type="checkbox" name="music-vendor" value="fluidsynth">
               <span class="v-title">fluidsynth (external)</span>
             </label>
+            <span class="rank mono hidden" data-rank="fluidsynth"></span>
+            <button class="ghost tiny" data-up="fluidsynth" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="fluidsynth" title="lower priority">▼</button>
             <span class="pill" data-status="fluidsynth">probing…</span>
           </header>
           <p class="dim v-summary">
@@ -228,8 +300,9 @@
         It is what keeps a bed at the same loudness against your narration when you switch vendors.
       </p>
 
-      <p class="section-label">environment <span class="dim">(read-only · keys shown masked)</span></p>
-      <dl id="vendors-env" class="env-list mono"></dl>
+      <p class="section-label">environment <span class="dim">(read-only)</span></p>
+      <dl id="music-env" class="env-list mono"></dl>
+      </div><!-- /cap-music -->
     </section>
 
     <div id="workbench" class="workbench hidden">

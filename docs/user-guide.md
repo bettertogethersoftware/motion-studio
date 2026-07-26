@@ -1,4 +1,4 @@
-# Motion Studio — User Guide (v0.17)
+# Motion Studio — User Guide (v0.18)
 
 ## Installation and first run
 
@@ -13,7 +13,8 @@ npm run doctor       # prints the prerequisite check as JSON (exit 0 = ready)
 npm run studio       # → http://127.0.0.1:7345
 ```
 
-Open `http://127.0.0.1:7345` in any browser. The footer shows engine status;
+Open `http://127.0.0.1:7345` in any browser. Engine status sits at the top
+of the sidebar, under the brand;
 if a prerequisite is missing a banner names it, and every render also
 re-verifies prerequisites and reports a structured `prereqs_missing` error
 rather than failing mysteriously. Set `PORT` to change the port. The Studio
@@ -93,8 +94,8 @@ put there shows up on the next refresh.
   `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor variables (API keys shown
   masked, never in full).
 
-The speech vendor lives on its own page — **🗣 vendors**, next to ⚙ settings —
-because it carries two vendors' configuration and a voice catalogue; see
+Narration and music vendors each live on their own page — **🗣 tts** and
+**♫ music** in the sidebar footer, next to ⚙ settings; see
 [Generated narration](#generated-narration-text-to-speech) below.
 
 Settings persist in `~/.motion-studio/settings.json` and are genuinely global:
@@ -187,7 +188,7 @@ Use the **audio** tab, or add tracks to `project.json` directly:
 
 ```json
 "audio": [
-  { "src": "assets/music.mp3", "gainDb": -6 },
+  { "src": "assets/music.mp3", "gainDb": -6, "fadeOutFrames": 30, "duck": true },
   { "src": "assets/voiceover.wav", "startInFrames": 45 }
 ]
 ```
@@ -204,6 +205,34 @@ Drop the files in `assets/` and re-render. mp4 muxes AAC, webm muxes Opus,
 prores muxes PCM; gif and png-sequence cannot carry audio (tracks are
 skipped with a warning in the logs).
 
+Since v0.19 a track also takes (all optional, all in frames, all
+clip-relative):
+
+- **`trimEndInFrames`** — keep only the clip's first N frames.
+- **`fadeInFrames`** — fade up from silence at the clip start.
+- **`fadeOutFrames`** — fade to silence ending at `trimEndInFrames` if set,
+  otherwise at the composition end. A music bed longer than the video now
+  resolves instead of cutting off at the last frame.
+- **`duck: true`** — sidechain auto-ducking: this track is compressed by the
+  mix of all *non*-ducked tracks, so a bed dips while narration speaks and
+  recovers in the gaps. Engages only when ducked and non-ducked tracks both
+  exist.
+
+### Hearing the mix before a render (`preview_audio`, v0.19)
+
+The `preview_audio` MCP tool mixes the audio timeline to
+`out/audio-preview.wav` using the exact filter graph the render will use —
+delays, gains, trims, fades, ducking, limiter — with no video pass. It reports
+the mixed `peakDb`/`meanDb`, a `clipping` flag, and each source clip's own
+level, so a bad balance names the track that caused it. Seconds instead of a
+full render.
+
+The `mix` block also carries `envelopeDb` — the mix's RMS level per second,
+with `null` marking digital silence — and `silentTailSeconds`, the length of
+the dead run at the end. Whole-file peak/mean can look perfectly healthy while
+the last seconds are silent; the envelope makes a mix that dies early visible
+in the tool result instead of only in the rendered film.
+
 ### Generated narration (text-to-speech)
 
 You can synthesize a voiceover instead of supplying an audio file. An agent
@@ -212,9 +241,8 @@ speaks your text to `assets/narration-<n>.wav`, reports the clip's length in
 frames, and — in the default `attach` mode — adds it to the `audio` list above
 for you. The synthesized WAV mixes through the exact audio path described above.
 
-Since v0.17 the voice comes from one of two **speech vendors**, chosen on the
-**🗣 vendors** page in the sidebar footer (which also picks the music vendor —
-see below).
+Since v0.17 the voice comes from one of several **speech vendors**, chosen on the
+**🗣 tts** page in the sidebar footer.
 
 - **system** — the local Windows speech executable
   (`MOTION_STUDIO_TTS_EXE`). Offline and free, but Windows-only and limited to
@@ -224,8 +252,15 @@ see below).
   set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in your Windows environment
   (`setx AZURE_SPEECH_KEY "<key>"`, then restart the Studio). Keys are read from
   the environment only and are never written into `settings.json`.
+- **piper** *(v0.18)* — [Piper](https://github.com/OHF-Voice/piper1-gpl) neural
+  voices running on this machine: no account, no billing, no network, any OS.
+  Install it yourself (`pip install piper-tts`, GPLv3) and download the voices
+  you want — two files each, an `.onnx` and its `.onnx.json`, from
+  huggingface.co/rhasspy/piper-voices — into the folder named by
+  `MOTION_STUDIO_PIPER_VOICES`. Everything in that folder shows up in the
+  picker.
 
-The vendors page shows each vendor's live status, what it is missing if it is
+The page shows each vendor's live status, what it is missing if it is
 unavailable, its voice catalogue (filterable by locale), and a **▶ test** button
 that speaks a line so you can hear a voice before committing a render to it.
 Whichever vendor you save is used by the Studio *and* by every agent connected
@@ -233,12 +268,31 @@ over MCP; a tool call can still name a vendor explicitly for one clip. If the
 selected vendor isn't configured, the speech tools return `tts_unavailable` and
 the rest of Motion Studio is unaffected.
 
+#### Ticking more than one vendor (preference chain)
+
+The vendor boxes are checkboxes, not radio buttons: tick **several** and the
+highest-ranked one that is actually set up gets used. Rank them with the ▲▼
+buttons — the badge on each card shows `#1`, `#2`, … and the line above the cards
+always says which vendor will really be used, plus anything it skipped.
+
+The point is resilience, not variety: with `azure → piper`, narration uses the
+good cloud voices while the key is valid and keeps working offline the moment it
+isn't. Three things it will *not* do — a vendor you name explicitly in a tool call
+is never swapped for another; only vendors that are **unconfigured** are skipped
+(one that fails partway through a clip is still an error); and it never happens
+silently, so expect a warning line here and a `vendorNote` on the tool result.
+
+One caveat: the choice is made per clip. Across a long film, a vendor that stops
+being available halfway through changes the voice from that point on. If a film's
+narration has to be one voice no matter what, tick exactly one vendor — that is
+still the default — and let it fail loudly instead.
+
 ### Generated music (note specs)
 
 Music works the same way: an agent authors a short note spec and
 `synthesize_music` renders it against a General MIDI SoundFont into `assets/`,
-adding it to the audio timeline. The **music** section of the vendors page picks
-who renders it:
+adding it to the audio timeline. The **♫ music** page in the sidebar footer
+picks who renders it:
 
 - **node** *(default)* — renders the SoundFont in-process. Works on any OS,
   needs nothing installed beyond the SoundFont that already ships, and is about
@@ -248,8 +302,9 @@ who renders it:
   download them yourself.
 
 Both read the same SoundFont and sound the same; **▶ listen** renders a short
-phrase on any of the 128 General MIDI instruments through whichever vendor is
-selected, so you can audition a SoundFont before committing a film to it. The
+phrase on any of the 128 General MIDI instruments through whichever vendor would
+actually be used, so you can audition a SoundFont before committing a film to it.
+Ticking both makes a preference chain, exactly as on the tts page above. The
 **target peak** control (default −3 dBFS) applies to both vendors and only ever
 attenuates, which is what keeps a bed at the same loudness against your
 narration when you switch. See [music-setup.md](music-setup.md).

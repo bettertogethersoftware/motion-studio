@@ -1,4 +1,4 @@
-# Motion Studio v0.17 — code-driven video renderer
+# Motion Studio v0.19 — code-driven video renderer
 
 Motion Studio renders videos from HTML/CSS/JS animations using a
 deterministic, frame-driven model. Animations are authored as **pure
@@ -11,14 +11,17 @@ two kinds of users through one shared render engine:
   hot reload, render queue with progress + ETA, and full project management —
   create/configure/delete projects, manage `assets/` (upload, audition,
   rename, delete), edit the audio timeline, pick and audition the **speech and
-  music vendors**, and set global preferences including an FFmpeg binary
-  override.
+  music vendors** (one, or an ordered fallback chain), and set global
+  preferences including an FFmpeg binary override.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (28 tools): author compositions, manage assets, synthesize
-  narration (local Windows voices or Azure AI Speech), music beds (an
-  in-process SoundFont synth or FluidSynth) and sound effects, attach 3D
-  libraries (Three.js/Babylon.js), preview frames as images, render, poll,
-  cancel, and assemble multi-scene films. No shell, no arbitrary file access.
+  tool surface (29 tools): author compositions, manage assets, synthesize
+  narration (local Windows voices, Azure AI Speech, or local neural Piper —
+  with measured levels and per-sentence timings), music beds (an in-process
+  SoundFont synth or FluidSynth) and sound effects, audition the audio mix
+  without a render (`preview_audio`), attach 3D libraries
+  (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as
+  images, render, poll, cancel, and assemble multi-scene films. No shell, no
+  arbitrary file access.
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -29,9 +32,13 @@ with its rationale in [docs/CHANGELOG.md](docs/CHANGELOG.md) — read it first.
 Headlines: the Windows-only WinForms app became the Studio web UI (v0.5),
 long-form film assembly (v0.9), vendored-build provenance (v0.13), in-job
 crash recovery (v0.14), the full Studio management surface (v0.15), settings
-that reach every entry point (v0.16), and second implementations of both audio
+that reach every entry point (v0.16), second implementations of both audio
 generators — Azure AI Speech, and an in-process SoundFont synth that finally
-makes music cross-platform — behind one vendors page (v0.17).
+makes music cross-platform — behind one vendors page (v0.17), local neural
+narration through Piper (v0.18), and an audio timeline you can hear and
+measure before rendering — track fades/trim, sidechain auto-ducking,
+`preview_audio`, narration levels + sentence timings, plus Three.js addons
+and a deterministic particle emitter (v0.19).
 
 ## Quick start
 
@@ -95,8 +102,9 @@ motion-studio/
 │   │   ├── settings.js            global user preferences + ffmpeg/vendor config (v0.15)
 │   │   ├── tts.js                 speech vendor "system": spawn Windows exe, WAV duration (v0.6)
 │   │   ├── tts-azure.js           speech vendor "azure": Azure AI Speech over REST (v0.17)
+│   │   ├── tts-piper.js           speech vendor "piper": local neural voices, spawned (v0.18)
 │   │   ├── tts-vendors.js         speech vendor registry, selection and dispatch (v0.17)
-│   │   ├── vendors.js             shared vendor kit: selection, status, errors (v0.17)
+│   │   ├── vendors.js             shared vendor kit: selection, preference chains, status, errors (v0.17)
 │   │   ├── libraries.js           optional 3D library registry (three/babylon) (v0.7)
 │   │   ├── music.js               music vendor "fluidsynth": MIDI exe → FluidSynth → WAV (v0.8)
 │   │   ├── music-node.js          music vendor "node": note spec → SoundFont, in-process (v0.17)
@@ -107,25 +115,25 @@ motion-studio/
 │   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (28 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents (29 tools)
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: projects/assets/settings/render/jobs/SSE
 │   │   └── public/                  vanilla-JS single-page UI (no build step)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.1 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      357 tests across 20 suites (see below)
+│   └── test/                      374 tests across 21 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4) — REAL rendered output in out/
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
 │                                  — real alpha render + proof composite in out/
 └── docs/
-    ├── CHANGELOG.md               v0.2 → v0.17 decision log (read this first)
+    ├── CHANGELOG.md               v0.2 → v0.19 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
     ├── user-guide.md              Studio UI, projects, assets, audio, settings, CLI
     ├── frame-api.md               the authoring contract (v1.1)
     ├── mcp-setup.md               agent setup + full tool reference
     ├── knowledge-base.md          field notes: failure modes seen in real productions
-    ├── tts-setup.md               speech vendors: Azure setup (v0.17), exe contract + build (v0.6)
+    ├── tts-setup.md               speech vendors: Piper (v0.18), Azure (v0.17), exe contract (v0.6)
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music vendors: in-process synth (v0.17) + FluidSynth (v0.8)
     ├── sfx-setup.md               sound effects: cue spec + synthesis (v0.12)
@@ -159,7 +167,7 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-357 tests across 20 suites: core units, pipeline integration (real FFmpeg,
+374 tests across 21 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure REST

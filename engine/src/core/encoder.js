@@ -1,4 +1,4 @@
-/**
+﻿/**
  * FFmpeg encoder (format-aware since v0.5).
  *
  * DEFAULT frame delivery = stream PNG buffers straight into FFmpeg's stdin
@@ -186,7 +186,19 @@ export async function concatSegments({ segmentPaths, outputPath, ffmpegPath = 'f
  * Build the -filter_complex graph for the configured audio tracks.
  * Exported separately so it is unit-testable without running ffmpeg.
  *
- * Track: { src, startInFrames = 0, gainDb = 0 }
+ * Track: { src, startInFrames = 0, gainDb = 0,
+ *          trimEndInFrames?, fadeInFrames?, fadeOutFrames? }   (v0.19)
+ *
+ * trimEndInFrames is CLIP-relative: keep only the clip's first N frames.
+ * fadeOutFrames ends at the clip's effective end — trimEndInFrames when set,
+ * otherwise where the composition ends (videoDurationSec), which is exactly
+ * the "music bed longer than the video" case that used to hard-cut.
+ *
+ * Every track chain ends in aformat pinning 44.1 kHz stereo, so no single
+ * input (a 16 kHz mono narration WAV, say) can drag the negotiated mix format
+ * down. When ducking, the sidechain is silence-padded to the composition
+ * length: sidechaincompress ends at its first input EOF, so an unpadded
+ * sidechain used to silence the bed from the last narration clip onward.
  */
 /**
  * Brick-wall limiter appended to the mix (v0.10). limit=0.891 is -1 dBFS;
@@ -201,24 +213,95 @@ export const LIMITER_FILTER = 'alimiter=limit=0.891:level=0';
  * @param {boolean} [options.limiter=true] append LIMITER_FILTER to the mix.
  *   amix runs with normalize=0 so gains sum directly — three tracks at 0 dB can
  *   sum well past full scale. Set false to pass the mix through untouched.
+ * @param {number|null} [options.videoDurationSec=null] composition length in
+ *   seconds; bounds a fadeOutFrames when the track has no trimEndInFrames.
  */
-export function buildAudioFilter(tracks, fps, { limiter = true } = {}) {
+export function buildAudioFilter(tracks, fps, { limiter = true, videoDurationSec = null } = {}) {
   const chains = [];
   const mixInputs = [];
   tracks.forEach((t, i) => {
-    const delayMs = Math.round(((t.startInFrames ?? 0) / fps) * 1000);
+    const startFrames = t.startInFrames ?? 0;
+    const delayMs = Math.round((startFrames / fps) * 1000);
     const gain = t.gainDb ?? 0;
     const label = `a${i}`;
+    const steps = [];
+    // Clip-relative operations first (trim, fades), then placement (adelay)
+    // and gain — so frame numbers in the track config mean clip frames.
+    const trimSec = t.trimEndInFrames !== undefined ? t.trimEndInFrames / fps : null;
+    if (trimSec !== null) steps.push(`atrim=0:${trimSec.toFixed(3)}`);
+    if (t.fadeInFrames) {
+      steps.push(`afade=t=in:st=0:d=${(t.fadeInFrames / fps).toFixed(3)}`);
+    }
+    if (t.fadeOutFrames) {
+      const boundSec = trimSec
+        ?? (videoDurationSec !== null ? Math.max(0, videoDurationSec - startFrames / fps) : null);
+      if (boundSec !== null) {
+        const d = t.fadeOutFrames / fps;
+        steps.push(`afade=t=out:st=${Math.max(0, boundSec - d).toFixed(3)}:d=${d.toFixed(3)}`);
+      }
+    }
+    steps.push(`adelay=${delayMs}|${delayMs}`, `volume=${gain}dB`);
+    // Pin every track to one rate/layout BEFORE any mixing. Without this,
+    // ffmpeg negotiates a common format across the mix inputs and a 16 kHz
+    // mono narration WAV (e.g. Piper) can drag the entire mix — music bed
+    // included — down to 16 kHz. It also keeps sidechaincompress timing exact,
+    // which otherwise drifts when its two inputs arrive at different rates.
+    steps.push('aformat=sample_rates=44100:channel_layouts=stereo');
     // input 0 is the video; audio inputs start at 1
-    chains.push(`[${i + 1}:a]adelay=${delayMs}|${delayMs},volume=${gain}dB[${label}]`);
+    chains.push(`[${i + 1}:a]${steps.join(',')}[${label}]`);
     mixInputs.push(`[${label}]`);
   });
+  // Auto-duck (v0.19): tracks marked duck:true are compressed by the mix of
+  // the tracks that are NOT marked — narration pushes the bed down, and the
+  // bed comes back up in the gaps. Only engages when both sides exist.
+  const duckIdx = tracks.map((t, i) => (t.duck ? i : -1)).filter((i) => i >= 0);
+  const useDucking = duckIdx.length > 0 && duckIdx.length < tracks.length;
+
   const mixOut = limiter ? '[amix]' : '[aout]';
-  const mix =
-    tracks.length === 1
-      ? `${mixInputs[0]}anull${mixOut}`
-      : `${mixInputs.join('')}amix=inputs=${tracks.length}:normalize=0${mixOut}`;
-  const graph = [...chains, mix];
+  const graph = [...chains];
+  if (useDucking) {
+    const fg = mixInputs.filter((_, i) => !tracks[i].duck);
+    const bed = mixInputs.filter((_, i) => tracks[i].duck);
+    const sub = (inputs, out) =>
+      inputs.length === 1
+        ? `${inputs[0]}anull${out}`
+        : `${inputs.join('')}amix=inputs=${inputs.length}:normalize=0${out}`;
+    // aformat: sidechaincompress needs both sides in one layout, and the mono
+    // narration WAVs would otherwise disagree with a stereo bed.
+    // The per-track aformat above already made both sides 44.1 kHz stereo, so
+    // no branch-level format fixup is needed here.
+    graph.push(sub(fg, '[fgraw]'));
+    graph.push(sub(bed, '[bed0]'));
+    graph.push('[fgraw]asplit=2[fgmix][sc0]');
+    // sidechaincompress is asymmetric about EOF: it ends cleanly when the
+    // SIDECHAIN ends first, but that used to hard-silence the bed from the
+    // last narration clip onward; and if the BED ends first while the
+    // sidechain continues, the filter stalls forever making no progress.
+    // Silence-pad BOTH branches to the composition length so they reach EOF
+    // together: the bed plays out in full, the compressor releases naturally
+    // into the padded silence, and the graph always terminates. Without a
+    // known composition length (tests only — both muxer callers pass it) the
+    // pads are skipped and ducking keeps the legacy early-end behavior.
+    if (videoDurationSec !== null) {
+      const pad = `apad=whole_dur=${videoDurationSec.toFixed(3)}`;
+      graph.push(`[bed0]${pad}[bed]`);
+      graph.push(`[sc0]${pad}[sc]`);
+    } else {
+      graph.push('[bed0]anull[bed]');
+      graph.push('[sc0]anull[sc]');
+    }
+    // threshold=0.02 ≈ -34 dBFS: quiet narration still ducks the bed. ratio 8
+    // is a firm push (~10 dB on a typical bed); 50/400 ms keeps word-rate
+    // pumping out of the release.
+    graph.push('[bed][sc]sidechaincompress=threshold=0.02:ratio=8:attack=50:release=400[bedduck]');
+    graph.push(`[fgmix][bedduck]amix=inputs=2:normalize=0${mixOut}`);
+  } else {
+    graph.push(
+      tracks.length === 1
+        ? `${mixInputs[0]}anull${mixOut}`
+        : `${mixInputs.join('')}amix=inputs=${tracks.length}:normalize=0${mixOut}`,
+    );
+  }
   if (limiter) graph.push(`[amix]${LIMITER_FILTER}[aout]`);
   return graph.join(';');
 }
@@ -328,9 +411,13 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projec
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath];
   for (const t of audioTracks) args.push('-i', path.resolve(projectRoot, t.src));
 
+  // apad is BOUNDED (whole_dur): with the duck branches also padded to the
+  // composition length, an unbounded apad into atrim can busy-spin forever
+  // when the mix ends at exactly the trim point. whole_dur keeps the graph
+  // free of infinite generators, so it terminates by construction.
   const filter =
-    buildAudioFilter(audioTracks, fps, { limiter: output.audioLimiter !== false }) +
-    `;[aout]apad,atrim=0:${videoDurationSec.toFixed(3)}[afinal]`;
+    buildAudioFilter(audioTracks, fps, { limiter: output.audioLimiter !== false, videoDurationSec }) +
+    `;[aout]apad=whole_dur=${videoDurationSec.toFixed(3)},atrim=0:${videoDurationSec.toFixed(3)}[afinal]`;
 
   args.push(
     '-filter_complex', filter,
@@ -343,4 +430,33 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projec
   collectStderr(proc, stderrTail);
   if (onSpawn && proc.pid) onSpawn(proc.pid);
   await waitExit(proc, stderrTail, 'audio-mux');
+}
+
+/**
+ * Mix the configured audio tracks to a standalone WAV — the same graph the
+ * final render uses (delay/gain/trim/fades/limiter), minus the video (v0.19).
+ * Lets a caller audition and level-check the mix in seconds instead of paying
+ * for a full render. A silent anullsrc stands in as input 0 so the
+ * buildAudioFilter graph (whose audio inputs start at 1) is reused verbatim —
+ * what you hear is what the render will mux.
+ */
+export async function mixAudioOnly({ audioTracks, outputPath, fps, projectRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    // dummy input 0 (the "video" slot in the shared filter graph)
+    '-f', 'lavfi', '-t', videoDurationSec.toFixed(3), '-i', 'anullsrc=r=44100:cl=stereo',
+  ];
+  for (const t of audioTracks) args.push('-i', path.resolve(projectRoot, t.src));
+
+  // Bounded pad — see muxAudio for why apad must carry whole_dur here.
+  const filter =
+    buildAudioFilter(audioTracks, fps, { limiter: output.audioLimiter !== false, videoDurationSec }) +
+    `;[aout]apad=whole_dur=${videoDurationSec.toFixed(3)},atrim=0:${videoDurationSec.toFixed(3)}[afinal]`;
+
+  args.push('-filter_complex', filter, '-map', '[afinal]', '-c:a', 'pcm_s16le', outputPath);
+  const stderrTail = [];
+  const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  collectStderr(proc, stderrTail);
+  if (onSpawn && proc.pid) onSpawn(proc.pid);
+  await waitExit(proc, stderrTail, 'audio-preview');
 }

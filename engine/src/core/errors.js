@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Structured errors shared by the CLI and MCP entry points.
  *
  * Every failure that can cross a process/tool boundary is an EngineError with
@@ -56,6 +56,8 @@ export const ErrorCodes = Object.freeze({
   // bad composition. The capture loop relaunches and retries on this code; it
   // only surfaces to callers after the relaunch budget is spent.
   BROWSER_CRASHED: 'browser_crashed',
+  // added in v0.19 (audio-only mixdown / preview_audio) — see docs/CHANGELOG.md
+  NO_AUDIO_TRACKS: 'no_audio_tracks',
 });
 
 export class EngineError extends Error {
