@@ -345,6 +345,42 @@ learned the hard way:
   `capture_preview_frames`, pass `preflight: false` to `render` — the probe
   would re-check what you just looked at, at one Chromium launch per scene.
 
+## Saved films & the Studio film editor
+
+Everything above treats a film as the argument list of one `build_film` call.
+A **saved film** makes it a persistent document instead — reopenable,
+editable a track at a time, buildable many times — shared between the
+Studio's **visual film editor** and the MCP tools.
+
+- **In the Studio:** the rail's **films** section (+ new → the editor at
+  `/film.html?id=…`). Timeline tracks for scenes (drag to reorder, per-scene
+  render buttons, compatibility flags), master audio (waveforms, drag/trim,
+  gain/fades/duck), captions and overlays; a preview that plays the real
+  rendered scenes with the build's exact ffmpeg mix; a build panel with live
+  job progress and measured levels. See the walkthrough in
+  [user-guide.md](user-guide.md#the-film-editor).
+- **Over MCP:** `save_film` / `list_films` / `remove_film` edit the same
+  documents; `build_saved_film` assembles as an async job (poll like a
+  render). See [mcp-setup.md](mcp-setup.md#saved-films-studio-film-editor-parity).
+
+Two capabilities exist only on saved films, both applied by a **finishing
+pass** — one extra encode after the lossless concat, run only when used:
+
+- **Overlays** — images (logo, watermark, lower-third) or videos (a
+  transparent `.webm` stinger keeps its alpha) composited over the film with
+  percent-of-frame geometry, opacity, and a frame-accurate window. Overlay
+  assets live in the output project's `assets/` (video extensions are
+  accepted there for this purpose).
+- **Captions** — text cues with frame-accurate in/out. A **`.srt` sidecar is
+  always written** next to the built film; `burnCaptions` additionally
+  renders them into the picture via a generated `.ass` (font size and
+  position are resolution-relative, set in `captionStyle`).
+
+The finishing pass takes its encode settings (crf/preset) from the output
+project's `output` config — so the "one final delivery encode" from the
+quality pipeline above and the finishing pass can be the same single
+generation of loss.
+
 ## Current limits (v0.9)
 
 - **No built-in transitions.** Cuts only. For crossfades, bake the transition into

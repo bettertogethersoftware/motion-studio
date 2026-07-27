@@ -35,6 +35,13 @@ Projects live under `~/.motion-studio/projects/` by default and are listed
 from a shared registry — projects created by an AI agent through MCP appear
 in the same list, because they are the same thing on disk.
 
+The sidebar has two tabs: **projects** and **films**. The films tab lists
+saved films — documents that combine several projects into one long video on
+a visual timeline. **+ new** there opens the [film editor](#the-film-editor);
+the ✕ on a film's row deletes only the film definition, never the projects it
+references. Films created or edited by an agent (`save_film` over MCP) appear
+in the same list, for the same reason.
+
 The **config** tab is a complete view of `project.json`: the composition
 fields (name/fps/size/duration), the whole `output` block (format, dir,
 filename, crf, preset, pix fmt, transparent, audio limiter), read-only
@@ -374,13 +381,63 @@ still wins.
 
 One composition is the right size for a shot or a scene, not for minutes of
 video. To build something longer, make **each scene its own project** (same
-width/height/fps/format), render each, and stitch the results with the
-`build_film` MCP tool — it concatenates the rendered scenes **losslessly**
-(`-c copy`, no re-encode) into one continuous film, optionally laying a single
-master audio track over the whole thing. Each scene stays a short, independent,
-resumable render, so you can fix one scene and re-stitch in seconds. See
-[film-setup.md](film-setup.md) for the pattern, the quality pipeline, and how it
-scales to arbitrary length.
+width/height/fps/format), render each, and combine the results into a film.
+Assembly concatenates the rendered scenes **losslessly** (`-c copy`, no
+re-encode) into one continuous video, so each scene stays a short,
+independent, resumable render — fix one scene, re-render only it, re-stitch
+in seconds.
+
+### The film editor
+
+Click **+ new** in the rail's **films** tab, name the film, and the
+visual editor opens (a dedicated “…— Master” project is scaffolded to hold
+the film's assets and output). The left panel lists your projects; the right
+panel is the context inspector — and the **build panel** docks there too, so
+assembling never covers the timeline. The timeline has four kinds of track:
+
+- **scenes** — **drag a project from the left panel onto the timeline** to
+  place it (an insert marker shows where it lands), or hit the row's **+** to
+  append it; drag scene blocks to reorder. Incompatible projects (different
+  resolution/fps/format) and unrendered scenes are flagged, and each scene
+  has a **render** button right in the inspector, so you never leave the
+  editor to fix a red flag. Scene blocks are butt-joined — a film has no
+  gaps — so order is the only thing to drag.
+- **audio** — a master timeline laid over the whole film (it replaces
+  per-scene audio, same rule as `build_film`). “+ audio” places an asset at
+  the playhead; “+ narration” synthesizes speech through your configured
+  vendor right into the film, and can drop a **synced caption per sentence**
+  and duck the music bed under the voice in the same click. Tracks show
+  decoded waveforms; drag to move, drag the right edge to trim, and set
+  gain / fades / **duck** in the inspector. Overlapping tracks auto-pack
+  into lanes.
+- **captions** — text blocks with frame-accurate in/out. A `.srt` sidecar is
+  always written next to the built film; tick **burn captions** to also
+  render them into the picture (size/position under the film inspector).
+- **overlay** — images (logo, watermark) or videos (a transparent `.webm`
+  stinger keeps its alpha) composited over the film: position/width in % of
+  frame, opacity, frame-accurate window.
+
+The **preview plays your real rendered scenes** back to back with overlays
+and captions drawn in place. With a master timeline, pressing play builds the
+mix through **the exact ffmpeg graph the final film uses** (gains, fades,
+ducking, limiter) — what you hear is what ships. Snap, zoom, undo/redo and
+autosave behave the way you'd expect from an NLE; Space plays, arrows step,
+Del removes the selected block.
+
+**build film →** opens the build panel in the right-side column (the
+timeline stays visible and editable) and assembles: lossless concat,
+master-audio mux with optional **master-to-peak** (measure the mix, shift
+every track by one offset, re-mux once — your balance survives), then — only
+if the film uses overlays or burned captions — a single finishing encode.
+The panel shows live progress (the header button carries the percent even if
+you switch back to editing) and, when it lands, the measured
+`peak/mean dBFS` of the mix and a download link.
+
+Films are shared with connected agents (`save_film` / `build_saved_film`
+over MCP edit and build the same documents), and the original one-shot
+`build_film` tool still works for scripted assembly. See
+[film-setup.md](film-setup.md) for the underlying model, the quality
+pipeline, and how it scales to arbitrary length.
 
 ## The CLI
 

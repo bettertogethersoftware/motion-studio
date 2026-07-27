@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### Saved films & the Studio film editor: films become documents, not one-shot calls
+
+Long-form work always had the right *engine* shape — one project per scene,
+`build_film` to stitch — and the wrong *authoring* shape for a human: the film
+itself existed only as the argument list of the last `build_film` call. Change
+one gain and the whole definition lived in whoever's head (or transcript)
+made that call. This release makes the film a **persistent document** and
+gives it a **visual editor**.
+
+- **Saved films (`core/films.js`).** A film — ordered scene list, master
+  audio timeline, caption track, overlay track, mastering options — persists
+  in `films.json` beside the project registry (`FilmStore`). Every save
+  validates (`invalid_film` carries the full problem list); `planFilm`
+  resolves a film against reality *without throwing* — per-scene rendered
+  state, signature mismatches, missing assets — because an editor must open
+  broken documents to let you fix them. Films build through the existing
+  `JobManager`, so progress/logs/cancel work exactly like renders.
+- **The Studio film editor** (`/film.html?id=…`; the rail gained a
+  **films tab** beside projects — one list at a time instead of two stacked
+  sections). A timeline NLE over the document: a projects panel on the left
+  to **drag projects onto the timeline** as scenes (insert marker shows the
+  drop position; the row's + appends), a scene track (drag to reorder,
+  per-scene render buttons, mismatch/unrendered flags), auto-packing audio
+  lanes with decoded waveforms (drag to move, edge-drag to trim, fades and
+  sidechain duck per track), caption and overlay lanes with edge-resizable
+  blocks, a context inspector, zoom/snap, undo/redo, autosave. The **build
+  panel docks into the same right-side column** (not a modal), so the
+  timeline stays visible and editable while a build runs — the header button
+  carries the live percent. The preview plays the
+  scenes' **real rendered outputs** back to back (double-buffered `<video>`,
+  byte-range serving added for seeking) with overlays and captions drawn
+  geometrically as the finishing pass will burn them — and master audio
+  auditions through **the build's exact ffmpeg mix graph** (new
+  `POST /api/films/:id/preview-audio` runs `mixAudioOnly`), because a
+  WebAudio approximation would lie about ducking and the limiter.
+- **Overlays and captions (finishing pass).** A film can composite image or
+  video overlays (percent-of-frame geometry, opacity; transparent `.webm`
+  keeps alpha via the libvpx decoder) and burn captions (generated `.ass`,
+  resolution-relative styling) in **one** finishing encode after the lossless
+  concat — a single extra generation, only when the film actually uses these
+  tracks, with real frame progress (`-progress` parsing in
+  `encoder.runFfmpeg`). Captions always also write a `.srt` **sidecar**,
+  burned or not. Video asset extensions (`.mp4/.webm/.mov`) joined the asset
+  sandbox allow-list for overlay sources.
+- **Narration inside the editor.** `POST /api/projects/:id/tts` synthesizes
+  through the configured vendor chain straight into `assets/` and returns
+  measured duration/levels — and with `sentenceTimings` the editor's
+  "+ narration" turns one take into a placed audio track **plus a synced
+  caption block per sentence**, with music beds optionally marked
+  `duck: true` in the same action.
+- **MCP parity: `save_film` / `list_films` / `remove_film` /
+  `build_saved_film`.** Agents edit the same documents the human sees in the
+  editor. `build_saved_film` submits the assembly as an **async job**
+  (poll with `get_render_status` / `wait_for_render`) because a finishing
+  encode on a long film can outlive an MCP request timeout — the same
+  reasoning that capped `wait_for_render`.
+- New error codes: `film_not_found`, `invalid_film`. New Studio API:
+  `GET/POST /api/films`, `GET/PATCH/DELETE /api/films/:id`,
+  `POST /api/films/:id/build`, `POST /api/films/:id/preview-audio`,
+  `POST /api/projects/:id/tts`; media endpoints honour HTTP `Range`.
+
 ### Film assembly: the mix you audition is the mix you ship, and offsets come back
 
 Four fixes found by building a real nine-scene film end-to-end over MCP.

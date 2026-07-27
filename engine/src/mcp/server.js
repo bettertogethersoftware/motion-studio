@@ -79,6 +79,7 @@ import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { validateScenes, assembleFilm, filmLayout } from '../core/film.js';
+import { FilmStore, planFilm, submitFilmBuild } from '../core/films.js';
 import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -93,6 +94,7 @@ if (process.env.MOTION_STUDIO_BROWSER_MODULE) {
 }
 
 const store = new ProjectStore();
+const filmStore = new FilmStore(store.dataDir);
 const jobs = new JobManager({
   maxConcurrent: 1,
   maxJobsPerSession: Number(process.env.MOTION_STUDIO_MAX_RENDERS) || Infinity,
@@ -1679,6 +1681,170 @@ server.registerTool(
       audioTargetPeakDb,
     });
     return ok({ outputProjectId: outId, sceneOrder: scenes.map((s) => s.projectId), ...result });
+  }),
+);
+
+/* ------------------------------------------------------------------ */
+/* Saved films — the Studio film editor's documents, shared over MCP.  */
+/* ------------------------------------------------------------------ */
+
+const FILM_AUDIO_TRACK = z.object({
+  id: z.string().optional().describe('Stable track id (assigned if omitted)'),
+  label: z.string().optional().describe('Editor display label (not used by the mixer)'),
+  src: z.string().describe('Project-relative audio under the output project\'s assets/'),
+  startInFrames: z.number().int().min(0).optional(),
+  gainDb: z.number().optional(),
+  trimEndInFrames: z.number().int().min(1).optional(),
+  fadeInFrames: z.number().int().min(0).optional(),
+  fadeOutFrames: z.number().int().min(0).optional(),
+  duck: z.boolean().optional(),
+});
+const FILM_OVERLAY = z.object({
+  id: z.string().optional(),
+  src: z.string().describe('Image or video under the output project\'s assets/ (transparent .webm keeps alpha)'),
+  fromFrame: z.number().int().min(0),
+  toFrame: z.number().int().min(1),
+  xPct: z.number().min(-100).max(200).optional().describe('Top-left x as % of frame width (default 0)'),
+  yPct: z.number().min(-100).max(200).optional().describe('Top-left y as % of frame height (default 0)'),
+  widthPct: z.number().min(0.1).max(400).nullable().optional().describe('Width as % of frame width, aspect kept; null = natural size'),
+  opacity: z.number().min(0).max(1).optional(),
+});
+const FILM_CAPTION = z.object({
+  id: z.string().optional(),
+  text: z.string().min(1),
+  fromFrame: z.number().int().min(0),
+  toFrame: z.number().int().min(1),
+});
+
+server.registerTool(
+  'save_film',
+  {
+    title: 'Create or update a saved film',
+    description:
+      'Create or update a SAVED FILM — the persistent film document the Studio\'s visual film editor edits. Where ' +
+      'build_film is a one-shot assembly, a saved film remembers its ordered scene list, master audio timeline, ' +
+      'caption track (burned in and/or exported as a .srt sidecar) and overlay track (logos / watermarks / ' +
+      'transparent stingers composited in a single finishing encode), so a human can keep cutting in the editor and ' +
+      'either side can rebuild at any time. Pass filmId to update (omitted fields keep their saved values; array ' +
+      'fields REPLACE wholesale). Audio/overlay src paths are relative to the OUTPUT project\'s assets/. Times are ' +
+      'in frames on the film timeline — get scene offsets from list_films or build_film {plan:true}. The response ' +
+      'includes the resolved plan with a `problems` list (unrendered scenes, signature mismatches, missing assets); ' +
+      'a film with problems can be saved, but not built. Build it with build_saved_film.',
+    inputSchema: {
+      filmId: z.string().optional().describe('Update this film; omit to create'),
+      name: z.string().min(1).optional().describe('Film name (required when creating)'),
+      scenes: z.array(z.object({ projectId: z.string() })).optional().describe('Scene projects in play order'),
+      outputProjectId: z.string().optional()
+        .describe('Dedicated master project holding assets/ and out/ (create one — never a scene)'),
+      outputFilename: z.string().optional().describe('Bare output filename (default "film")'),
+      audio: z.array(FILM_AUDIO_TRACK).optional().describe('Master audio timeline (replaces per-scene audio)'),
+      overlays: z.array(FILM_OVERLAY).optional(),
+      captions: z.array(FILM_CAPTION).optional(),
+      captionStyle: z.object({
+        sizePct: z.number().min(1).max(20).optional().describe('Font size as % of frame height (default 4.5)'),
+        position: z.enum(['bottom', 'top']).optional(),
+      }).optional(),
+      audioTargetPeakDb: z.number().min(-60).max(0).nullable().optional()
+        .describe('Master the mix to this peak on build (e.g. -2); null disables'),
+      burnCaptions: z.boolean().optional().describe('Burn captions into the picture (a .srt sidecar is written either way)'),
+    },
+  },
+  wrap(async ({ filmId, ...fields }) => {
+    const provided = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+    let film;
+    if (filmId) {
+      film = await filmStore.updateFilm(filmId, provided);
+    } else {
+      if (!provided.name) throw new EngineError(ErrorCodes.INVALID_FILM, 'creating a film requires a name');
+      film = await filmStore.createFilm(provided);
+    }
+    const plan = await planFilm({ film, store });
+    return ok({
+      film,
+      totalFrames: plan.totalFrames,
+      durationSeconds: plan.durationSeconds,
+      sceneLayout: plan.scenes.map((s) => ({
+        projectId: s.projectId, name: s.name, filmOffset: s.filmOffset,
+        durationInFrames: s.durationInFrames, startSeconds: s.startSeconds, rendered: s.rendered,
+      })),
+      problems: plan.problems,
+      editorUrl: `/film.html?id=${film.id}`,
+    });
+  }),
+);
+
+server.registerTool(
+  'list_films',
+  {
+    title: 'List saved films',
+    description:
+      'List every saved film (the documents the Studio film editor edits) with its full definition — scenes, ' +
+      'master audio, captions, overlays — plus the resolved scene layout and a `problems` list per film. ' +
+      'Use save_film to change one, build_saved_film to assemble one.',
+    inputSchema: {},
+  },
+  wrap(async () => {
+    const films = await filmStore.listFilms();
+    const out = [];
+    for (const film of films) {
+      const plan = await planFilm({ film, store }).catch(() => null);
+      out.push({
+        film,
+        ...(plan ? {
+          totalFrames: plan.totalFrames,
+          durationSeconds: plan.durationSeconds,
+          fps: plan.fps,
+          problems: plan.problems,
+        } : {}),
+      });
+    }
+    return ok({ films: out });
+  }),
+);
+
+server.registerTool(
+  'remove_film',
+  {
+    title: 'Delete a saved film',
+    description:
+      'Delete a saved film definition. Scene projects, their rendered outputs, and anything already built to the ' +
+      'output project\'s out/ are untouched — only the film document goes.',
+    inputSchema: { filmId: z.string() },
+  },
+  wrap(async ({ filmId }) => ok(await filmStore.removeFilm(filmId))),
+);
+
+server.registerTool(
+  'build_saved_film',
+  {
+    title: 'Build a saved film (async job)',
+    description:
+      'Assemble a saved film to its output file as an ASYNC JOB — returns a jobId immediately; poll with ' +
+      'get_render_status or wait_for_render exactly like a render. The build is build_film\'s lossless concat + ' +
+      'master-audio mux, plus — only when the film has overlays or burns captions — ONE finishing encode that ' +
+      'composites them (crf/preset from the output project\'s config). Captions always also write a .srt sidecar ' +
+      'next to the film. Async because a finishing encode on a long film can outlive an MCP request timeout, ' +
+      'which is the same reason wait_for_render caps its wait. Every scene must already be rendered ' +
+      '(scene_not_rendered lists offenders). The finished job\'s status carries the measured audio block ' +
+      '(peakDb/meanDb/clipping) when a master timeline exists — read it.',
+    inputSchema: {
+      filmId: z.string(),
+      outputFilename: z.string().optional().describe('Override + persist the film\'s output filename'),
+      audioTargetPeakDb: z.number().min(-60).max(0).nullable().optional().describe('Override + persist the mastering target'),
+      burnCaptions: z.boolean().optional().describe('Override + persist caption burn-in'),
+    },
+  },
+  wrap(async ({ filmId, ...knobs }) => {
+    await requirePrereqs();
+    const patch = Object.fromEntries(Object.entries(knobs).filter(([, v]) => v !== undefined));
+    const film = Object.keys(patch).length
+      ? await filmStore.updateFilm(filmId, patch)
+      : await filmStore.getFilm(filmId);
+    const submitted = await submitFilmBuild({ film, store, jobs, ffmpegPath: await ffmpegPathOnly() });
+    return ok({
+      ...submitted,
+      hint: 'Poll with get_render_status { jobId } or wait_for_render { jobIds: [jobId] }.',
+    });
   }),
 );
 

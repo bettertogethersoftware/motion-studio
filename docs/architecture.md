@@ -11,9 +11,9 @@ Motion Studio is three thin entry points around one shared render engine.
    http://127.0.0.1:7345                            │  MCP over stdio
         │ HTTP/SSE (localhost only)                 ▼
         ▼                                   MCP server (engine/src/mcp/server.js)
- Studio server (engine/src/studio/)           28 tools, path sandbox
-   projects / assets / settings                     │
-   preview / render API                             │
+ Studio server (engine/src/studio/)           33 tools, path sandbox
+   projects / assets / films / settings             │
+   preview / render / film-build API                │
    hot-reload SSE, output download                  │
         │            in-process calls               │
         └──────────────┬────────────────────────────┘
@@ -29,6 +29,8 @@ Motion Studio is three thin entry points around one shared render engine.
           settings.js  — global user preferences (all entry points; see §11)
           vendors.js   — vendor kit: selection, status, errors (see §9.2)
           tts-vendors.js / music-vendors.js — per-capability dispatch
+          film.js      — one-shot scene assembly (lossless concat, see §13)
+          films.js     — saved films: store, planning, finishing pass (§13)
                        ▼
         headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
 ```
@@ -137,7 +139,10 @@ v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`. New in v0.11:
 `short_render` (the encoded file has fewer frames than were rendered). New in
 v0.14: `browser_crashed` — a crash-shaped Chromium failure ("Target closed" et
 al.), classified so it stops masquerading as `composition_error`/
-`frame_timeout`/`internal_error`; the capture loop relaunches and retries on it
+`frame_timeout`/`internal_error`; the capture loop relaunches and retries on it.
+New with saved films: `film_not_found` and `invalid_film` (the latter carries
+the FULL `problems` list in `detail`, because an editor fixing a film wants
+every complaint at once)
 in place, and it only surfaces after the per-render relaunch budget (3) is
 spent. New in v0.19: `no_audio_tracks` — `preview_audio` on a project whose
 `config.audio` is empty.
@@ -540,7 +545,52 @@ itself, so a proxy can never overwrite the deliverable, and job status carries
 `proxy: { scale, frameStep }` so the Studio and agents can tell a draft from
 the real thing.
 
-## 13. Testability
+## 13. Saved films and the film editor
+
+`build_film` (core/film.js) is a one-shot verb; a human cutting a long video
+needs a *document*. `core/films.js` supplies it:
+
+- **`FilmStore`** persists film definitions — ordered scene refs, master
+  audio timeline, caption track, overlay track, mastering options — in
+  `films.json` beside `projects.json` (same atomic-rename write). A film
+  references SCENE projects (rendered video) and one OUTPUT project whose
+  `assets/` holds audio/overlay files and whose `out/` receives builds; audio
+  and overlay `src`s are project-relative under `assets/`, exactly like
+  `config.audio`.
+- **`validateFilm`** runs on every save and throws `invalid_film` with the
+  complete `problems` list. **`planFilm`** resolves a film against reality
+  *without throwing* — rendered state, signature mismatches, missing
+  projects/assets, out-of-range cues — because an editor must open a broken
+  document to let you repair it. The Studio's validation chip and the MCP
+  tools' `problems` field are both this one function.
+- **Builds are jobs.** `submitFilmBuild` pre-resolves (so a bad film fails
+  the submit call with a structured error) and then runs `buildFilmArtifact`
+  as a `JobManager` job — same status/logs/cancel surface as renders, and
+  `build_saved_film` is async over MCP for the same reason `wait_for_render`
+  caps its wait: a finishing encode can outlive a request timeout.
+- **The finishing pass.** Assembly is still `assembleFilm`'s lossless concat
+  (+ master-audio mux). Only when a film has overlays or burns captions does
+  ONE extra encode run: `buildOverlayGraph` (pure, unit-tested) composes the
+  `-filter_complex` — percent-of-frame geometry, opacity via
+  `colorchannelmixer`, `enable='between(t,…)'` windows, `setpts` shifts for
+  video overlays, `.webm` decoded with libvpx so alpha survives — and
+  captions burn via a generated `.ass` (resolution-relative styling; ffmpeg
+  runs with `cwd` at the temp dir because the subtitles filter cannot take a
+  Windows absolute path without unmaintainable escaping). Captions always
+  also write a `.srt` sidecar next to the output. Encode settings come from
+  the output project's `output` config via the same `buildVideoArgs` the
+  renderer uses; `encoder.runFfmpeg` parses `-progress` so the job reports
+  real frame progress.
+- **The editor lies as little as possible.** `/film.html` plays the scenes'
+  actual rendered files (byte-range serving makes them seekable), draws
+  overlays/captions with the same geometry the finishing pass burns, and
+  auditions master audio through `POST /api/films/:id/preview-audio`, which
+  runs `mixAudioOnly` — the render's own filter graph (fades, trims,
+  sidechain ducking, limiter). It deliberately does NOT approximate the mix
+  in WebAudio: an approximation that gets ducking wrong is worse than a
+  one-second wait for the truth.
+
+## 14. Testability
 
 The renderer takes an injectable `browserFactory`; tests substitute a fake
 browser that emits real, self-encoded PNGs (RGB and RGBA), so the entire
@@ -555,7 +605,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-492 tests across 26 suites; see `engine/test/`. A clean run has **zero
+535 tests across 27 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

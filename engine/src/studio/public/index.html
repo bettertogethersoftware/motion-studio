@@ -22,9 +22,13 @@
       <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
 
-    <div class="rail-section">
+    <nav class="rail-tabs">
+      <button id="rail-tab-projects" class="rail-tab active">projects</button>
+      <button id="rail-tab-films" class="rail-tab">films</button>
+    </nav>
+
+    <div class="rail-section" id="rail-projects">
       <div class="rail-head">
-        <span>projects</span>
         <span class="sort-toggle" title="sort projects">
           <button id="sort-name" class="sort-btn" title="sort by name">a–z</button>
           <button id="sort-date" class="sort-btn" title="sort by last modified">date</button>
@@ -32,6 +36,14 @@
         <button id="btn-new" class="ghost" title="New project">+ new</button>
       </div>
       <ul id="project-list" class="project-list"></ul>
+    </div>
+
+    <div class="rail-section hidden" id="rail-films">
+      <div class="rail-head">
+        <span class="dim">combine projects into one video</span>
+        <button id="btn-new-film" class="ghost" title="New film — combine scene projects in the visual editor">+ new</button>
+      </div>
+      <ul id="film-list" class="project-list film-list"></ul>
     </div>
 
     <footer class="rail-foot">
@@ -572,6 +584,20 @@
     <div class="fieldrow right">
       <button type="button" id="btn-new-cancel" class="ghost">cancel</button>
       <button type="submit" class="primary">create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="new-film-dialog">
+  <form id="new-film-form" method="dialog">
+    <h2>new film</h2>
+    <label>name <input name="name" required placeholder="My Film"></label>
+    <p class="dim note">A film combines rendered scene projects into one continuous video, with a master
+    audio timeline, captions and overlays — arranged in the visual editor that opens next.
+    A dedicated “&lt;name&gt; — Master” project is created to hold the film's assets and output.</p>
+    <div class="fieldrow right">
+      <button type="button" id="btn-new-film-cancel" class="ghost">cancel</button>
+      <button type="submit" class="primary">create & open editor</button>
     </div>
   </form>
 </dialog>

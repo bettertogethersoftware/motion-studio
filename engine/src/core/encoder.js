@@ -51,6 +51,49 @@ function waitExit(proc, stderrTail, what) {
   });
 }
 
+/**
+ * Run one ffmpeg invocation to completion (saved-film finishing pass).
+ *
+ * Unlike the specialised helpers above/below, this takes a prebuilt argument
+ * list — the film module composes overlay/subtitle graphs that no other
+ * caller shares. `-progress pipe:1` is appended when `onProgressFrame` is
+ * given, so a long finishing encode can report real frame progress instead
+ * of an indeterminate spinner. `cwd` exists because the subtitles filter
+ * cannot take a Windows absolute path without a fragile escaping dance —
+ * the caller runs ffmpeg from the directory holding the .ass file instead.
+ */
+export async function runFfmpeg({ args, ffmpegPath = 'ffmpeg', onSpawn, what = 'ffmpeg', cwd, onProgressFrame, signal }) {
+  if (signal?.aborted) throw new EngineError(ErrorCodes.CANCELLED, `${what}: cancelled before start`);
+  const fullArgs = onProgressFrame ? [...args, '-progress', 'pipe:1', '-nostats'] : args;
+  const stderrTail = [];
+  const proc = spawn(ffmpegPath, fullArgs, {
+    stdio: ['ignore', onProgressFrame ? 'pipe' : 'ignore', 'pipe'],
+    ...(cwd ? { cwd } : {}),
+  });
+  collectStderr(proc, stderrTail);
+  if (onSpawn && proc.pid) onSpawn(proc.pid);
+  const onAbort = () => { try { proc.kill('SIGKILL'); } catch { /* already gone */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (onProgressFrame) {
+    let buf = '';
+    proc.stdout.on('data', (d) => {
+      buf += d.toString('utf8');
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        const m = /^frame=\s*(\d+)/.exec(line);
+        if (m) onProgressFrame(Number(m[1]));
+      }
+    });
+  }
+  try {
+    await waitExit(proc, stderrTail, what);
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Resolve the video-encode argument list for an output config. */
 export function buildVideoArgs(output = {}) {
   if (output.intermediate) return INTERMEDIATE.videoArgs(output);

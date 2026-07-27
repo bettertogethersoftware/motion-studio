@@ -148,6 +148,21 @@ async function checkPrereqs() {
   }
 }
 
+/* ------------------------------ rail tabs ------------------------------ */
+
+/* The rail shows ONE list at a time — projects or films — switched by tabs.
+ * Stacking both sections squeezed each into a sliver once either list grew. */
+function setRailTab(tab) {
+  localStorage.setItem('ms.railTab', tab);
+  $('#rail-tab-projects').classList.toggle('active', tab === 'projects');
+  $('#rail-tab-films').classList.toggle('active', tab === 'films');
+  $('#rail-projects').classList.toggle('hidden', tab !== 'projects');
+  $('#rail-films').classList.toggle('hidden', tab !== 'films');
+}
+$('#rail-tab-projects').addEventListener('click', () => setRailTab('projects'));
+$('#rail-tab-films').addEventListener('click', () => setRailTab('films'));
+setRailTab(localStorage.getItem('ms.railTab') === 'films' ? 'films' : 'projects');
+
 /* ------------------------------ projects ------------------------------ */
 
 let sortMode = localStorage.getItem('ms.sortMode') || 'name'; // 'name' | 'date'
@@ -2091,6 +2106,65 @@ for (const tab of document.querySelectorAll('.tab')) {
   });
 }
 
+/* -------------------------------- films -------------------------------- */
+
+/* Saved films (the film editor's documents). The rail lists them; clicking
+ * one opens /film.html?id=… — the editor is its own page so the workbench
+ * stays a single-project surface. */
+
+async function loadFilms() {
+  let films = [];
+  try {
+    ({ films } = await api('/api/films'));
+  } catch { /* older server: hide the section silently */ }
+  const ul = $('#film-list');
+  ul.innerHTML = '';
+  if (!films.length) {
+    ul.innerHTML = '<li class="dim film-empty">no films yet — “+ new” combines scene projects</li>';
+    return;
+  }
+  for (const f of films) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'p-name';
+    name.textContent = f.name;
+    name.title = `${f.name} — open the film editor`;
+    const meta = document.createElement('span');
+    meta.className = 'p-meta';
+    meta.textContent = `${f.scenes}sc`;
+    const del = document.createElement('button');
+    del.className = 'film-del';
+    del.textContent = '✕';
+    del.title = 'delete this film (the scene projects are untouched)';
+    del.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete film "${f.name}"?\n\nScene projects and rendered files are untouched — only the film definition goes.`)) return;
+      try {
+        await api(`/api/films/${f.id}`, { method: 'DELETE' });
+        loadFilms();
+      } catch (err) { toastError(err); }
+    });
+    li.append(name, meta, del);
+    li.addEventListener('click', () => { location.href = `/film.html?id=${f.id}`; });
+    ul.appendChild(li);
+  }
+}
+
+$('#btn-new-film').addEventListener('click', () => $('#new-film-dialog').showModal());
+$('#btn-new-film-cancel').addEventListener('click', () => $('#new-film-dialog').close());
+$('#new-film-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const { film } = await api('/api/films', {
+      method: 'POST',
+      body: { name: e.target.name.value, createOutputProject: true },
+    });
+    location.href = `/film.html?id=${film.id}`;
+  } catch (err) {
+    toastError(err);
+  }
+});
+
 /* ---------------------------- new project ----------------------------- */
 
 $('#btn-new').addEventListener('click', () => {
@@ -2132,4 +2206,14 @@ $('#new-form').addEventListener('submit', async (e) => {
 
 checkPrereqs();
 loadSettings().catch(() => {});
-loadProjects().catch((e) => console.error(e));
+loadProjects()
+  .then(() => {
+    // Deep link from the film editor's "open project ↗".
+    const deep = new URLSearchParams(location.search).get('project');
+    if (deep && state.projects.some((p) => p.id === deep && !p.missing)) {
+      setRailTab('projects'); // the highlight should be visible where you land
+      selectProject(deep);
+    }
+  })
+  .catch((e) => console.error(e));
+loadFilms().catch(() => {});

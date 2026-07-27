@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Studio — Film Editor</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/film.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
+</head>
+<body>
+<div class="fe-frame">
+  <header class="fe-top">
+    <a href="/" class="ghost back-btn" id="btn-back" title="back to the Studio">←</a>
+    <span class="brand-mark">▶</span>
+    <input id="film-name" class="fe-name" spellcheck="false" title="film name">
+    <span id="film-facts" class="dim mono"></span>
+    <button id="btn-problems" class="ghost warn hidden"></button>
+    <span class="spacer"></span>
+    <span id="save-state" class="mono dim">saved</span>
+    <button id="btn-undo" class="ghost" title="undo (Ctrl+Z)" disabled>↶</button>
+    <button id="btn-redo" class="ghost" title="redo (Ctrl+Y)" disabled>↷</button>
+    <button id="btn-build" class="primary">build film →</button>
+  </header>
+
+  <div id="problems-panel" class="problems hidden"><ul id="problems-list"></ul></div>
+
+  <main class="fe-main">
+    <aside class="fe-projects" id="fe-projects">
+      <div class="fe-proj-head">
+        <span class="proj-head-label">projects</span>
+        <span class="dim drag-hint">drag onto the timeline →</span>
+        <button id="btn-projects-collapse" class="ghost tiny-btn" title="collapse">«</button>
+      </div>
+      <ul id="fe-project-list" class="proj-rail-list"></ul>
+    </aside>
+
+    <section class="fe-stage">
+      <div class="fe-viewport" id="fe-viewport">
+        <div id="player-box">
+          <video class="scene" id="video-a" playsinline preload="auto"></video>
+          <video class="scene" id="video-b" playsinline preload="auto"></video>
+          <div id="overlay-layer"></div>
+          <div id="caption-layer"></div>
+          <div id="scene-placeholder" class="hidden">
+            <span class="ph-name"></span><span class="ph-note"></span>
+          </div>
+        </div>
+      </div>
+      <div class="transport">
+        <button id="btn-play" class="transport-btn" title="play/pause (space)">▶</button>
+        <button id="btn-step-back" class="transport-btn" title="step back (←)">‹</button>
+        <button id="btn-step-fwd" class="transport-btn" title="step forward (→)">›</button>
+        <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
+        <span class="mono dim" id="timecode">00:00.00</span>
+        <span class="spacer"></span>
+        <span id="mix-state" class="mono dim" title="master-audio preview: the build's exact ffmpeg mix"></span>
+      </div>
+    </section>
+
+    <aside class="fe-inspector" id="inspector"></aside>
+  </main>
+
+  <section class="fe-timeline-wrap">
+    <div class="fe-tools">
+      <div class="group">
+        <button id="btn-add-scene" class="ghost">+ scene</button>
+        <button id="btn-add-tts" class="ghost" title="synthesize narration into the film">+ narration</button>
+        <button id="btn-add-audio" class="ghost" title="place an audio asset on the timeline">+ audio</button>
+        <button id="btn-add-caption" class="ghost" title="add a caption at the playhead">+ caption</button>
+        <button id="btn-add-overlay" class="ghost" title="overlay an image or video on the film">+ overlay</button>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <button id="btn-zoom-out" class="ghost" title="zoom out (-)">−</button>
+        <input type="range" id="zoom-slider" min="0" max="100" value="0" title="zoom">
+        <button id="btn-zoom-in" class="ghost" title="zoom in (+)">+</button>
+        <button id="btn-zoom-fit" class="ghost" title="fit the whole film">fit</button>
+        <button id="btn-snap" class="ghost toggle-btn on" title="snap to cuts, clips and the playhead">snap</button>
+      </div>
+      <span class="spacer"></span>
+      <span id="tl-hint" class="dim mono"></span>
+    </div>
+    <div class="tl-scroll" id="tl-scroll">
+      <div class="tl-inner" id="tl-inner"></div>
+    </div>
+  </section>
+</div>
+
+<dialog id="audio-dialog" class="fe-dialog">
+  <h2>add audio</h2>
+  <p class="dim note">Audio assets live in the film's output project. The clip is placed at the playhead.</p>
+  <div class="fieldrow">
+    <button id="btn-audio-upload" class="ghost">+ upload file…</button>
+    <input type="file" id="audio-file-input" accept=".wav,.mp3,.ogg,.m4a,.flac" multiple hidden>
+    <span id="audio-upload-msg" class="dim mono"></span>
+  </div>
+  <ul id="audio-pick" class="pick-list"></ul>
+  <div class="fieldrow right">
+    <button type="button" class="ghost" data-close="audio-dialog">close</button>
+  </div>
+</dialog>
+
+<dialog id="overlay-dialog" class="fe-dialog">
+  <h2>add overlay</h2>
+  <p class="dim note">An image (logo, watermark, lower-third) or a video (transparent .webm stinger) composited
+  over the film by the finishing pass. Placed at the playhead for 3 seconds — drag to taste.</p>
+  <div class="fieldrow">
+    <button id="btn-overlay-upload" class="ghost">+ upload file…</button>
+    <input type="file" id="overlay-file-input" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.webm,.mp4,.mov" multiple hidden>
+    <span id="overlay-upload-msg" class="dim mono"></span>
+  </div>
+  <ul id="overlay-pick" class="pick-list"></ul>
+  <div class="fieldrow right">
+    <button type="button" class="ghost" data-close="overlay-dialog">close</button>
+  </div>
+</dialog>
+
+<dialog id="tts-dialog" class="fe-dialog">
+  <h2>narration</h2>
+  <form id="tts-form" method="dialog">
+    <textarea id="tts-text" placeholder="Type the narration. It is synthesized into the film's assets and placed at the playhead." maxlength="20000"></textarea>
+    <div class="fieldrow" style="margin-top:10px">
+      <label>vendor
+        <select id="tts-vendor"></select>
+      </label>
+      <label class="grow">voice
+        <input id="tts-voice" list="tts-voice-list" placeholder="(vendor default)" spellcheck="false">
+        <datalist id="tts-voice-list"></datalist>
+      </label>
+      <label>rate
+        <input id="tts-rate" type="number" min="-10" max="10" value="0" style="width:64px">
+      </label>
+    </div>
+    <div class="fieldrow" style="margin-top:8px">
+      <label class="check"><input type="checkbox" id="tts-captions" checked> auto-captions from sentence timings</label>
+      <label class="check"><input type="checkbox" id="tts-duckbed" checked> duck music beds under it</label>
+    </div>
+    <p class="dim note">Auto-captions synthesizes per sentence and drops a synced caption block for each one.
+    “Duck” marks every non-narration track to dip under the voice in the final mix.</p>
+    <div class="fieldrow right" style="margin-top:10px">
+      <span id="tts-msg" class="dim mono" style="margin-right:auto"></span>
+      <button type="button" class="ghost" data-close="tts-dialog">cancel</button>
+      <button type="submit" id="tts-generate" class="primary">generate ♪</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/film.js"></script>
+</body>
+</html>

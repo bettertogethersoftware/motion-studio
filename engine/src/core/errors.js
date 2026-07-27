@@ -58,6 +58,9 @@ export const ErrorCodes = Object.freeze({
   BROWSER_CRASHED: 'browser_crashed',
   // added in v0.19 (audio-only mixdown / preview_audio) — see docs/CHANGELOG.md
   NO_AUDIO_TRACKS: 'no_audio_tracks',
+  // added with saved films (Studio film editor + save_film) — see docs/CHANGELOG.md
+  FILM_NOT_FOUND: 'film_not_found',
+  INVALID_FILM: 'invalid_film',
 });
 
 export class EngineError extends Error {

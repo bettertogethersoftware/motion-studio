@@ -465,6 +465,7 @@ export class ProjectStore {
       if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)) return 'image';
       if (['.mp3', '.wav', '.ogg', '.m4a', '.flac'].includes(ext)) return 'audio';
       if (['.woff', '.woff2', '.ttf', '.otf'].includes(ext)) return 'font';
+      if (['.mp4', '.webm', '.mov'].includes(ext)) return 'video';
       return 'data';
     };
     const walk = async (dir, rel) => {

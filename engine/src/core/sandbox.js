@@ -31,6 +31,9 @@ export const ASSET_EXTENSIONS = new Set([
   '.mp3', '.wav', '.ogg', '.m4a', '.flac',
   '.woff', '.woff2', '.ttf', '.otf',
   '.json', '.txt',
+  // Video assets (saved films): overlay stingers / lower-thirds — a
+  // transparent .webm or .mov laid over the film by the finishing pass.
+  '.mp4', '.webm', '.mov',
 ]);
 
 // project.json is managed through dedicated config tools, not raw file writes,

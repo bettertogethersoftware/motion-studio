@@ -36,7 +36,7 @@ Optional environment variables can be set in the server config's `env` block: `M
 
 ## Tools
 
-All tools return JSON text content; failures set `isError` with a body of `{ code, message, detail? }` using the stable codes listed in [architecture.md](architecture.md) §4. Paths passed to file tools are always **project-relative**; absolute paths and `..` escapes are rejected with `path_outside_project`.
+All tools return JSON text content; failures set `isError` with a body of `{ code, message, detail? }` using the stable codes listed in [architecture.md](architecture.md) §6. Paths passed to file tools are always **project-relative**; absolute paths and `..` escapes are rejected with `path_outside_project`.
 
 ### Projects
 
@@ -127,9 +127,24 @@ it never renders (render each scene first with `render`).
 |---|---|---|
 | `build_film` | `scenes` (req: ordered `[{ projectId }]`), `outputProjectId?` (pass a dedicated film project — defaulting to the first scene dumps the film into that scene's folder), `outputFilename?`, `audio?` (master timeline `[{ src, startInFrames?, gainDb?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }]` — **the same shaping as `config.audio` since v0.22**, so a `preview_audio`-tuned mix reproduces exactly), `audioTargetPeakDb?` **(v0.11)**, `plan?` **(v0.22)** | Concatenates the scenes' rendered outputs **losslessly** (`-c copy`) into one film and returns `{ outputPath, scenes, sceneLayout, totalFrames, durationSeconds, fps, format, hasAudio }`. **`sceneLayout` (v0.22)** gives each scene's `filmOffset`, `durationInFrames` and `startSeconds` — place master audio and sfx cues against it rather than accumulating durations by hand. **`plan: true` (v0.22)** returns that layout and validates scene consistency **without assembling and without requiring the scenes to be rendered**, which is when you actually need the offsets to place narration. Scenes must share resolution/fps/format/pixel-format (mp4/webm/prores only). With no `audio`, per-scene audio is preserved (scenes must be consistently audio or silent); with `audio`, one master timeline is laid over the whole film (replacing scene audio). **With a master timeline the result also carries `audio: { tracks, limiter, peakDb, meanDb, clipping, targetPeakDb?, appliedOffsetDb? }` (v0.11)** — the measured level of the assembled film, the same report `render` has produced since v0.10. `audioTargetPeakDb` (−60..0, e.g. `-2`) measures the mix, applies one offset to **every** track so the relative balance is preserved, re-muxes once and re-measures — use it instead of guessing a master gain. Errors: `scene_not_rendered`, `inconsistent_scenes`, `path_outside_project`, `file_not_found`, `invalid_config`. |
 
-Note there is **no final-encode step in the MCP surface**: the concat is
+### Saved films (Studio film editor parity)
+
+A **saved film** is the persistent document behind the Studio's visual film
+editor: ordered scenes + master audio + captions + overlays, stored in
+`films.json` in the data dir. These tools edit and build the same documents
+the human sees on the editor timeline.
+
+| tool | arguments | returns / notes |
+|---|---|---|
+| `save_film` | `filmId?` (update; omit to create), `name?` (required on create), `scenes?`, `outputProjectId?`, `outputFilename?`, `audio?` (master timeline, full `config.audio` shaping + `label`), `overlays?` (`[{ src, fromFrame, toFrame, xPct?, yPct?, widthPct?, opacity? }]` — images or videos under the output project's `assets/`; transparent `.webm` keeps alpha), `captions?` (`[{ text, fromFrame, toFrame }]`), `captionStyle?` (`{ sizePct?, position? }`), `audioTargetPeakDb?`, `burnCaptions?` | Upserts the film (omitted fields keep their saved values; array fields **replace** wholesale) and returns it plus the resolved `sceneLayout`, `totalFrames` and a **`problems` list** (unrendered scenes, signature mismatches, missing assets). A film with problems saves fine but will not build. Errors: `invalid_film` (full problem list in `detail`), `film_not_found`. |
+| `list_films` | — | Every saved film with its full definition, layout and `problems`. |
+| `remove_film` | `filmId` | Deletes the definition only — scene projects and built outputs are untouched. |
+| `build_saved_film` | `filmId`, `outputFilename?`, `audioTargetPeakDb?`, `burnCaptions?` (overrides persist onto the film) | Submits the assembly as an **async job** — returns `{ jobId, outputPath, totalFrames }` immediately; poll with `get_render_status` / `wait_for_render` like a render. The build = `build_film`'s lossless concat + master-audio mux, **plus one finishing encode only when the film has overlays or burns captions** (encode settings from the output project's `output` config). Captions always also write a `.srt` sidecar. The finished job's status carries the measured `audio` block when a master timeline exists. Errors: `film_not_found`, `scene_not_rendered`, `inconsistent_scenes`, `invalid_film`, `file_not_found`. |
+
+Note there is **no final-encode step in the one-shot `build_film`**: the concat is
 `-c copy`, so the scenes' own `output.crf`/format is what ships — choose the
-deliverable quality when you render the scenes. For scaling to long-form, see
+deliverable quality when you render the scenes. (A *saved film* re-encodes once
+— and only — when overlays/burned captions force a finishing pass.) For scaling to long-form, see
 [film-setup.md](film-setup.md).
 
 ### Preview

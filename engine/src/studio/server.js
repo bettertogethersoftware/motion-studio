@@ -42,8 +42,17 @@
  *   DELETE /api/projects/:id/asset?path=     delete an asset; &updateAudio=1 also
  *                                            drops config.audio tracks using it (v0.15)
  *   POST   /api/projects/:id/asset/rename    {from,to,updateAudio?} within assets/ (v0.15)
+ *   POST   /api/projects/:id/tts             {text,vendor?,voice?,sentenceTimings?,…}
+ *                                            → narration WAV into assets/ (+ per-sentence timings)
  *   POST   /api/projects/:id/render          {frameRange?,workers?} → job
  *   POST   /api/projects/:id/still           {frame,outputFilename?}
+ *   GET    /api/films                        saved films (film editor documents)
+ *   POST   /api/films                        {name,scenes?,outputProjectId?|createOutputProject}
+ *   GET    /api/films/:id                    film + resolved detail (layout, problems)
+ *   PATCH  /api/films/:id                    {patch} — scenes/audio/overlays/captions/…
+ *   DELETE /api/films/:id
+ *   POST   /api/films/:id/build              {outputFilename?,audioTargetPeakDb?,burnCaptions?} → job
+ *   POST   /api/films/:id/preview-audio      master mix as WAV (the build's exact ffmpeg graph)
  *   GET    /api/jobs                         all jobs
  *   GET    /api/jobs/:id                     status (incl. etaMs, queuePosition)
  *   GET    /api/jobs/:id/logs?tail=
@@ -65,18 +74,25 @@ import {
 import {
   speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
   ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS, OPENAI_ENV, DEEPGRAM_ENV,
+  resolveSpeechVendor, checkSpeechVendor, unavailableWithAlternatives,
 } from '../core/tts-vendors.js';
 import {
   musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
 } from '../core/music-vendors.js';
 import { maskKey } from '../core/tts-azure.js';
 import { PIPER_ENV } from '../core/tts-piper.js';
-import { parseWavHeader } from '../core/tts.js';
+import {
+  parseWavHeader, wavDurationSeconds, framesForDuration, measureWavLevels, splitSentences, concatWavBuffers,
+} from '../core/tts.js';
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInProject } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
+import {
+  FilmStore, planFilm, submitFilmBuild, toMixerTracks,
+} from '../core/films.js';
+import { mixAudioOnly } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -135,6 +151,12 @@ const STATUS_FOR_CODE = {
   // and a project name that already exists (pick another).
   [ErrorCodes.RENDER_ALREADY_IN_PROGRESS]: 409,
   [ErrorCodes.PROJECT_ALREADY_EXISTS]: 409,
+  // Saved films (film editor).
+  [ErrorCodes.FILM_NOT_FOUND]: 404,
+  [ErrorCodes.INVALID_FILM]: 400,
+  [ErrorCodes.SCENE_NOT_RENDERED]: 409,
+  [ErrorCodes.INCONSISTENT_SCENES]: 409,
+  [ErrorCodes.NO_AUDIO_TRACKS]: 400,
 };
 
 /** Preview clips are for auditioning a voice, not for rendering a script. */
@@ -195,7 +217,7 @@ function readRawBody(req, limit) {
   });
 }
 
-async function streamFile(res, absPath, { download = false } = {}) {
+async function streamFile(res, absPath, { download = false, range = null } = {}) {
   let stat;
   try {
     stat = await fsp.stat(absPath);
@@ -206,13 +228,34 @@ async function streamFile(res, absPath, { download = false } = {}) {
   const ext = path.extname(absPath).toLowerCase();
   const headers = {
     'Content-Type': MIME[ext] ?? 'application/octet-stream',
-    'Content-Length': stat.size,
     'Cache-Control': 'no-store',
+    // The film editor's preview <video> seeks scene outputs; without byte
+    // ranges Chromium can only ever play them from the start.
+    'Accept-Ranges': 'bytes',
   };
   if (download) headers['Content-Disposition'] = `attachment; filename="${path.basename(absPath)}"`;
-  res.writeHead(200, headers);
+
+  let status = 200;
+  let readOpts;
+  const m = range ? /^bytes=(\d*)-(\d*)$/.exec(range) : null;
+  if (m && (m[1] !== '' || m[2] !== '')) {
+    let start = m[1] === '' ? Math.max(0, stat.size - Number(m[2])) : Number(m[1]);
+    let end = m[1] !== '' && m[2] !== '' ? Number(m[2]) : stat.size - 1;
+    end = Math.min(end, stat.size - 1);
+    if (start > end || start >= stat.size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      return res.end();
+    }
+    status = 206;
+    headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+    headers['Content-Length'] = end - start + 1;
+    readOpts = { start, end };
+  } else {
+    headers['Content-Length'] = stat.size;
+  }
+  res.writeHead(status, headers);
   await new Promise((resolve, reject) => {
-    const stream = fs.createReadStream(absPath);
+    const stream = fs.createReadStream(absPath, readOpts);
     stream.pipe(res);
     stream.on('error', reject);
     res.on('finish', resolve);
@@ -228,7 +271,8 @@ async function streamFile(res, absPath, { download = false } = {}) {
  * @param {JobManager}  [opts.jobs]
  * @param {Function}    [opts.browserFactory]  DI for tests (fake Chromium)
  */
-export function createStudioServer({ store = new ProjectStore(), jobs = new JobManager(), browserFactory = null } = {}) {
+export function createStudioServer({ store = new ProjectStore(), jobs = new JobManager(), films = null, browserFactory = null } = {}) {
+  const filmStore = films ?? new FilmStore(store.dataDir);
   // Parallel renders need the factory too: workers inherit the env hook, but
   // the parent's preflight page does not — without it a fake-browser test that
   // asks for workers > 1 would reach for real Chromium (same rule as the MCP
@@ -248,7 +292,8 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
         return await streamFile(res, path.join(PUBLIC_DIR, 'index.html'));
       }
-      if (req.method === 'GET' && parts.length === 1 && ['app.js', 'styles.css'].includes(parts[0])) {
+      if (req.method === 'GET' && parts.length === 1
+          && ['app.js', 'styles.css', 'film.html', 'film.js', 'film.css'].includes(parts[0])) {
         return await streamFile(res, path.join(PUBLIC_DIR, parts[0]));
       }
 
@@ -259,7 +304,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         const entry = await store.getProjectEntry(parts[1]);
         const rel = decodeURIComponent(parts.slice(2).join('/')) || 'composition.html';
         const abs = resolveInProject(entry.path, rel); // throws path_outside_project on escape
-        return await streamFile(res, abs);
+        return await streamFile(res, abs, { range: req.headers.range });
       }
 
       /* -------------------------------- API ---------------------------------- */
@@ -478,6 +523,130 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         }
       }
 
+      /* -------------------------------- films -------------------------------- */
+      // Saved films: the film editor's document model. A film is an ordered
+      // scene list + master audio/overlay/caption tracks, persisted in
+      // films.json and built through the same job manager as renders.
+      if (parts[1] === 'films') {
+        if (parts.length === 2) {
+          if (req.method === 'GET') {
+            const all = await filmStore.listFilms();
+            return sendJson(res, 200, {
+              films: all.map((f) => ({
+                id: f.id, name: f.name, createdAt: f.createdAt, updatedAt: f.updatedAt,
+                scenes: f.scenes.length, audioTracks: f.audio.length,
+                overlays: f.overlays.length, captions: f.captions.length,
+                outputProjectId: f.outputProjectId,
+              })),
+            });
+          }
+          if (req.method === 'POST') {
+            const body = await readBody(req);
+            let outputProjectId = body.outputProjectId ?? null;
+            // The editor's default: scaffold a dedicated master project so the
+            // film and its audio/overlay assets never land inside a scene.
+            if (!outputProjectId && body.createOutputProject !== false) {
+              const settings = await readSettings(store.dataDir);
+              const first = body.scenes?.[0]?.projectId
+                ? await store.readConfig(body.scenes[0].projectId).catch(() => null)
+                : null;
+              const proj = await store.createProject(withNewProjectDefaults(settings, {
+                name: `${String(body.name ?? 'Film').trim()} — Master`,
+                width: first?.width, height: first?.height, fps: first?.fps,
+                durationInFrames: 1, // never rendered; holds assets + out/
+              }));
+              outputProjectId = proj.id;
+            }
+            const film = await filmStore.createFilm({ ...body, outputProjectId });
+            return sendJson(res, 201, { film });
+          }
+        }
+        const filmId = parts[2];
+        if (parts.length === 3) {
+          if (req.method === 'GET') {
+            const film = await filmStore.getFilm(filmId);
+            const detail = await planFilm({ film, store });
+            return sendJson(res, 200, { film, detail });
+          }
+          if (req.method === 'PATCH') {
+            const { patch } = await readBody(req);
+            const film = await filmStore.updateFilm(filmId, patch ?? {});
+            const detail = await planFilm({ film, store });
+            return sendJson(res, 200, { film, detail });
+          }
+          if (req.method === 'DELETE') {
+            return sendJson(res, 200, await filmStore.removeFilm(filmId));
+          }
+        }
+
+        // POST /api/films/:id/build — persist any last-minute mastering knobs,
+        // then submit the assembly as a job (poll /api/jobs/:id like a render).
+        if (req.method === 'POST' && parts[3] === 'build' && parts.length === 4) {
+          const body = await readBody(req);
+          const patch = {};
+          for (const k of ['outputFilename', 'audioTargetPeakDb', 'burnCaptions']) {
+            if (body[k] !== undefined) patch[k] = body[k];
+          }
+          const film = Object.keys(patch).length
+            ? await filmStore.updateFilm(filmId, patch)
+            : await filmStore.getFilm(filmId);
+          const submitted = await submitFilmBuild({ film, store, jobs, ffmpegPath: await ffmpegPath() });
+          return sendJson(res, 202, submitted);
+        }
+
+        // POST /api/films/:id/preview-audio — the REAL master mix (gains,
+        // fades, trims, ducking, limiter — the same ffmpeg graph the build
+        // uses) as one WAV, so the editor auditions exactly what ships.
+        // A WebAudio approximation cannot reproduce sidechain ducking.
+        if (req.method === 'POST' && parts[3] === 'preview-audio' && parts.length === 4) {
+          const film = await filmStore.getFilm(filmId);
+          if (!film.audio.length) {
+            throw new EngineError(ErrorCodes.NO_AUDIO_TRACKS, 'This film has no master audio tracks to preview');
+          }
+          if (!film.outputProjectId) {
+            throw new EngineError(ErrorCodes.INVALID_FILM, 'The film needs an output project — its assets/ holds the audio files');
+          }
+          const outEntry = await store.getProjectEntry(film.outputProjectId);
+          const outCfg = await store.readConfig(film.outputProjectId);
+          const detail = await planFilm({ film, store });
+          if (!detail.totalFrames || !detail.fps) {
+            throw new EngineError(ErrorCodes.INVALID_FILM, 'Add at least one scene first — the mix length is the film length');
+          }
+          const tracks = toMixerTracks(film.audio).map((t) => {
+            const abs = resolveInProject(outEntry.path, t.src.replace(/\\/g, '/'));
+            if (!fs.existsSync(abs)) {
+              throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `audio not found: ${t.src}`, { path: t.src });
+            }
+            return { ...t, src: abs };
+          });
+          const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-film-mix-'));
+          const outPath = path.join(dir, 'mix.wav');
+          try {
+            await mixAudioOnly({
+              audioTracks: tracks,
+              outputPath: outPath,
+              fps: detail.fps,
+              projectRoot: outEntry.path,
+              output: { audioLimiter: outCfg.output?.audioLimiter !== false },
+              ffmpegPath: await ffmpegPath(),
+              videoDurationSec: detail.totalFrames / detail.fps,
+            });
+            const wav = await fsp.readFile(outPath);
+            const levels = await measureWavLevels(outPath).catch(() => null);
+            res.writeHead(200, {
+              'Content-Type': 'audio/wav',
+              'Content-Length': wav.length,
+              'Cache-Control': 'no-store',
+              'X-Mix-Peak-Db': String(levels?.peakDb ?? ''),
+              'X-Mix-Mean-Db': String(levels?.meanDb ?? ''),
+            });
+            return res.end(wav);
+          } finally {
+            await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }
+
       // /api/projects...
       if (parts[1] === 'projects') {
         if (parts.length === 2) {
@@ -587,7 +756,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'file must be a plain name inside the out dir');
           }
           const abs = resolveInProject(entry.path, path.posix.join(config.output.dir, file));
-          return await streamFile(res, abs, { download: url.searchParams.get('download') === '1' });
+          return await streamFile(res, abs, { download: url.searchParams.get('download') === '1', range: req.headers.range });
         }
 
         // assets CRUD (v0.15) — all paths are project-relative and confined
@@ -604,7 +773,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Assets must live under assets/ (got "${rel}")`);
             }
             const abs = resolveInProject(entry.path, rel);
-            return await streamFile(res, abs, { download: url.searchParams.get('download') === '1' });
+            return await streamFile(res, abs, { download: url.searchParams.get('download') === '1', range: req.headers.range });
           }
           if (req.method === 'PUT') {
             const buf = await readRawBody(req, MAX_ASSET_BYTES);
@@ -619,6 +788,101 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         if (req.method === 'POST' && parts[3] === 'asset' && parts[4] === 'rename') {
           const { from, to, updateAudio = false } = await readBody(req);
           return sendJson(res, 200, await store.renameAsset(projectId, from, to, { updateAudio }));
+        }
+
+        // POST /api/projects/:id/tts — synthesize narration straight into the
+        // project's assets/ (asset-only; the caller decides where it sits on a
+        // timeline). The film editor's "+ narration" runs through here. With
+        // sentenceTimings the per-sentence offsets come back too, which is
+        // what turns one narration take into a synced caption track.
+        if (req.method === 'POST' && parts[3] === 'tts' && parts.length === 4) {
+          const body = await readBody(req);
+          const text = String(body.text ?? '').trim();
+          if (!text) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'tts needs text to speak');
+          if (text.length > 20_000) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'tts text is limited to 20000 characters');
+
+          const resolved = await resolveSpeechVendor({ vendor: body.vendor || undefined, dataDir: store.dataDir, probe: true });
+          const probe = resolved.status ?? await checkSpeechVendor(resolved.vendor, { dataDir: store.dataDir });
+          if (!probe.available) throw await unavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
+
+          const entry = await store.getProjectEntry(projectId);
+          const config = await store.readConfig(projectId);
+          const assetsDir = path.join(entry.path, 'assets');
+          await fsp.mkdir(assetsDir, { recursive: true });
+
+          let rel = body.assetPath;
+          if (!rel) {
+            const taken = new Set(await fsp.readdir(assetsDir).catch(() => []));
+            let n = 1;
+            while (taken.has(`narration-${n}.wav`)) n++;
+            rel = `assets/narration-${n}.wav`;
+          }
+          const normalized = String(rel).replace(/\\/g, '/');
+          if (!normalized.startsWith('assets/')) {
+            throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Narration must be written under assets/ (got "${rel}")`);
+          }
+          const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
+
+          const common = {
+            voice: body.voice || undefined, rate: body.rate ?? undefined,
+            volume: body.volume ?? undefined, style: body.style || undefined,
+            deterministic: body.deterministic ?? undefined,
+            dataDir: store.dataDir, resolved,
+          };
+          const sentences = body.sentenceTimings ? splitSentences(text) : null;
+          const gapSeconds = Math.min(5, Math.max(0, Number(body.sentenceGapSeconds ?? 0.3)));
+          let result;
+          let timings = null;
+          if (sentences && sentences.length > 1) {
+            const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-studio-tts-'));
+            try {
+              const clips = [];
+              for (let i = 0; i < sentences.length; i++) {
+                const clipPath = path.join(dir, `sentence-${i}.wav`);
+                result = await synthesizeWithVendor({ ...common, text: sentences[i], outPath: clipPath, sentenceSilence: 0 });
+                clips.push(await fsp.readFile(clipPath));
+              }
+              const joined = concatWavBuffers(clips, { gapSeconds });
+              await fsp.writeFile(abs, joined.buffer);
+              timings = joined.segments.map((seg, i) => ({
+                text: sentences[i],
+                startSeconds: seg.startSeconds,
+                startInFrames: Math.round(seg.startSeconds * config.fps),
+                durationSeconds: seg.durationSeconds,
+                durationInFrames: framesForDuration(seg.durationSeconds, config.fps),
+              }));
+            } finally {
+              await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+            }
+          } else {
+            result = await synthesizeWithVendor({ ...common, text, outPath: abs });
+          }
+
+          const stat = await fsp.stat(abs).catch(() => null);
+          if (!stat || stat.size === 0) {
+            throw new EngineError(ErrorCodes.TTS_FAILED, `Speech engine reported success but no audio was written to ${normalized}`);
+          }
+          const durationSeconds = await wavDurationSeconds(abs);
+          const durationInFrames = framesForDuration(durationSeconds, config.fps);
+          const levels = await measureWavLevels(abs).catch(() => ({ peakDb: null, meanDb: null }));
+          if (sentences && !timings) {
+            timings = [{
+              text: sentences[0], startSeconds: 0, startInFrames: 0,
+              durationSeconds: Number(durationSeconds.toFixed(4)), durationInFrames,
+            }];
+          }
+          return sendJson(res, 201, {
+            assetPath: normalized,
+            vendor: result.vendor,
+            voice: result.voice ?? body.voice ?? null,
+            durationSeconds,
+            durationInFrames,
+            fps: config.fps,
+            bytes: stat.size,
+            peakDb: levels.peakDb,
+            meanDb: levels.meanDb,
+            ...(timings ? { timings } : {}),
+          });
         }
 
         // render / still

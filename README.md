@@ -12,9 +12,15 @@ two kinds of users through one shared render engine:
   create/configure/delete projects, manage `assets/` (upload, audition,
   rename, delete), edit the audio timeline, pick and audition the **speech and
   music vendors** (one, or an ordered fallback chain), and set global
-  preferences including an FFmpeg binary override.
+  preferences including an FFmpeg binary override. For long-form work the
+  **film editor** combines scene projects into saved films on a visual
+  timeline — drag-to-reorder scenes, multi-lane master audio with waveforms,
+  fades and auto-ducking, captions (burn-in and/or `.srt` sidecar), image and
+  transparent-video overlays, in-editor narration with auto-synced captions,
+  a preview that plays the real rendered scenes with the build's exact audio
+  mix, and one-click assembly with measured mastering.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (29 tools): author compositions, manage assets, synthesize
+  tool surface (33 tools): author compositions, manage assets, synthesize
   narration through **six speech vendors** (local Windows voices, local neural
   Piper, or Azure / ElevenLabs / OpenAI / Deepgram in the cloud — with
   measured levels, per-sentence timings, and a `deterministic` option), music
@@ -24,7 +30,9 @@ two kinds of users through one shared render engine:
   3D libraries (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview
   frames as images, render — including cheap **proxy motion drafts**
   (`proxy: { scale, frameStep }`) — poll, cancel, and assemble multi-scene
-  films. No shell, no arbitrary file access.
+  films, one-shot (`build_film`) or as **saved films** shared with the
+  Studio's film editor (`save_film` / `build_saved_film`: master audio,
+  captions, overlays, async builds). No shell, no arbitrary file access.
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -115,24 +123,25 @@ motion-studio/
 │   │   ├── music-vendors.js       music vendor registry, dispatch and level control (v0.17)
 │   │   ├── sfx.js                 sound effects: pure-JS cue synthesis (v0.12)
 │   │   ├── film.js                film: stitch rendered scene projects into one film (v0.9)
+│   │   ├── films.js               saved films: FilmStore, planning, overlay/caption finishing pass
 │   │   ├── lock.js                cross-process render lock (v0.11)
 │   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (29 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents (33 tools)
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
-│   │   ├── server.js                localhost API: projects/assets/settings/render/jobs/SSE
-│   │   └── public/                  vanilla-JS single-page UI (no build step)
+│   │   ├── server.js                localhost API: projects/assets/films/settings/render/jobs/SSE
+│   │   └── public/                  vanilla-JS UI (no build step): index/app + the film editor (film.html/js/css)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.3 (copied into projects)
 │   ├── templates/default/         project scaffold (HTML/JS/CSS)
-│   └── test/                      492 tests across 26 suites (see below)
+│   └── test/                      535 tests across 27 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4)
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
 └── docs/
     ├── CHANGELOG.md               v0.2 → v0.19 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
-    ├── user-guide.md              Studio UI, projects, assets, audio, settings, CLI
+    ├── user-guide.md              Studio UI, projects, assets, audio, films/film editor, settings, CLI
     ├── frame-api.md               the authoring contract (v1.3)
     ├── mcp-setup.md               agent setup + full tool reference
     ├── knowledge-base.md          field notes: failure modes seen in real productions
@@ -140,7 +149,7 @@ motion-studio/
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music vendors: in-process synth (v0.17) + FluidSynth (v0.8)
     ├── sfx-setup.md               sound effects: cue spec + synthesis (v0.12)
-    ├── film-setup.md              long-form: build_film scene assembly (v0.9)
+    ├── film-setup.md              long-form: build_film scene assembly (v0.9), saved films + the film editor
     ├── SKILL.md                   drop-in agent skill
     └── spec-changes.md            historical v0.2-era decision log
 ```
@@ -170,14 +179,16 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-492 tests across 26 suites: core units, pipeline integration (real FFmpeg,
+535 tests across 27 suites: core units, pipeline integration (real FFmpeg,
 probe-verified outputs for every format incl. transparent WebM alpha and the
 parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
 stdio), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure REST
 endpoint), music vendors (the real in-process synth against a tiny generated
 SoundFont, plus the two-stage MIDI→FluidSynth pipeline against stubs), sound
 effects, film
-assembly (scene validation + real concat/master-audio mux), 3D libraries
+assembly (scene validation + real concat/master-audio mux), saved films
+(store, planning, caption/overlay builders, and the Studio films API driven
+end to end through render → build → finishing pass), 3D libraries
 (add_library vendoring + scaffold), vendored-build provenance, frame-api
 runtime (vm-hosted), Studio HTTP server (ephemeral port, sandbox 403s, SSE hot
 reload, settings, asset CRUD, speech-vendor API), and a gated real-Chromium suite (capture

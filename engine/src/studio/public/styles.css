@@ -89,6 +89,28 @@ body {
   font: 11px var(--mono); color: var(--dim);
 }
 
+/* rail tabs: one list at a time — projects or films */
+.rail-tabs { display: flex; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.rail-tab {
+  flex: 1;
+  background: none; border: none; color: var(--dim);
+  font: 11px var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
+  padding: 9px 0; cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.rail-tab:hover { color: var(--text); }
+.rail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.rail-collapsed .rail-tabs { display: none; }
+.film-list .film-empty { padding: 4px 16px; font-size: 11px; cursor: default; }
+.film-del {
+  background: none; border: none; color: var(--dim);
+  font-size: 11px; cursor: pointer; padding: 0 2px;
+  visibility: hidden; flex-shrink: 0;
+}
+.film-list li:hover .film-del { visibility: visible; }
+.film-del:hover { color: var(--err); }
+
 /* sort toggle (rail head) */
 .sort-toggle { display: inline-flex; border: 1px solid var(--line); margin-left: auto; margin-right: 8px; }
 .sort-btn {
