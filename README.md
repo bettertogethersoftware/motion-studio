@@ -218,6 +218,7 @@ motion-studio/
     ├── transcribe-setup.md        reading supplied speech: whisper.cpp, sentence + word timing (v0.22)
     ├── film-setup.md              long-form: films, scenes, master audio, the film editor
     ├── agent-environments.md      Env A / Env B: what an agent can reach, and why it matters
+    ├── competitive-position.md    where this wins, what to stop trying to win, and in what order
     ├── SKILL.md                   drop-in agent skill — MCP only (Env A)
     ├── SKILL-shell.md             drop-in agent skill — MCP + ffmpeg/whisper.cpp (Env B)
     ├── todo_task/                 planned work, scoped against the two environments

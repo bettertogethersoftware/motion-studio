@@ -6,9 +6,16 @@
 > test — which is now met: an MCP-only agent can conform a supplied clip to a film,
 > place it on the timeline beside rendered scenes, and build the result losslessly.
 >
-> **Two follow-ons are open**, both found the same way — by building a real film
+> **Three follow-ons are open**, all found the same way — by building a real film
 > and reading the result back:
 >
+> - **[render-review-plan.md](render-review-plan.md) — the agent cannot see its
+>   own output.** Every image-returning tool points at the *composition*; nothing
+>   points at the deliverable, and `build_film` reports the assembled film's audio
+>   while saying nothing about its picture. This is the one gap where a competitor
+>   is straightforwardly ahead. The fix does **not** need a video-understanding
+>   model — the agent already is one — it needs frames of the rendered file plus
+>   the picture analogue of `preview_audio`. Largest capability gap on this list.
 > - [film-colour-plan.md](film-colour-plan.md) — the film's colour tags are
 >   inherited rather than stated, so conformed footage matches the scenes on
 >   everything except colour. It is measured and reported (`signature.color`,
@@ -21,6 +28,19 @@
 >   schema), and `transcribe_asset` runs a `.en` model against a non-English
 >   `language` and returns a confident wrong transcript. Unlike the plans below,
 >   these are bugs rather than capability — none needs a design decision.
+> - [lint-branch-awareness-plan.md](lint-branch-awareness-plan.md) — the
+>   `sequence-gap` lint merges every literal `Sequence` in a file regardless of
+>   which branch it sits in, so a shared engine dispatched on `SCENE.mode` warns
+>   falsely on every scene whose duration differs from the branch's. It fires on
+>   exactly the pattern [film-setup.md](../film-setup.md) prescribes, which teaches
+>   agents to skim past a rule the skill tells them to treat as a real bug.
+>   Also a bug, not capability, and against the check's own stated intent.
+
+> For **why these are ordered the way they are** against the alternatives — and
+> which fronts are deliberately being conceded — see
+> [competitive-position.md](../competitive-position.md). It scores this product
+> against Remotion, Motion Canvas, Revideo and the generative models, and argues
+> that plan 5 plus the defect list is what changes the ranking.
 
 Five plans, in ship order. They exist because of one observation: a film built
 from a person's own recording is the thing users most want, and the thing this
@@ -33,12 +53,21 @@ product currently handles worst.
 | 2 | ~~footage segments~~ — **SHIPPED**, see [task_completed/footage-segment-plan.md](../task_completed/footage-segment-plan.md) | medium | **the whole use case** ✔ |
 | 3 | ~~`transcode_asset`~~ — **SHIPPED**, see [task_completed/transcode-asset-plan.md](../task_completed/transcode-asset-plan.md) | medium | Env A parity ✔ |
 | 4 | **[film colour](film-colour-plan.md)** — state it at the render encode | medium | conformed footage matching on colour too |
+| 5 | **[render review](render-review-plan.md)** — frames of the deliverable, and picture measurement | small → medium | **the agent verifying its own work** |
 | — | **[MCP surface defects](mcp-defects-plan.md)** — five bugs, two P1 | small each | not a plan; unblocks nothing, just wrong today |
+| — | **[`sequence-gap` branch blindness](lint-branch-awareness-plan.md)** — one bug, P2 | small | not a plan; a false warning on the documented shared-engine pattern |
 
 Plan 4 was not foreseen when plans 0–3 were ordered; it surfaced from the
 acceptance test below actually being run. It is the only one that **changes
 rendered pixels**, which is why it is filed rather than done — the plans above it
 all added capability or knowledge without altering existing output.
+
+Plan 5 was found the same way plan 4 was, one film later: the acceptance test
+below says an agent must be able to *build* the film, and it turns out that is
+only half of what a producer does. Plans 0–3 gave the agent the operations. Plan
+5 is the first one about giving it back the **result** — and unlike plan 4 it
+adds capability without touching a rendered pixel, so it is not blocked on a
+decision the way colour is.
 
 The defect list is unnumbered on purpose: it is not part of this sequence and
 nothing waits on it. It sits here because it was found by the same method — the
