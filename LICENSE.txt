@@ -1,4 +1,5 @@
 Unlicense
+The software is still under development, it may be changed dramatically without any notice.
 
 Copyright (c) 2026 Better Together Software
 
