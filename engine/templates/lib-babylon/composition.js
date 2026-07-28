@@ -1,5 +1,5 @@
 /*
- * Babylon.js starter — __PROJECT_NAME__ (__DURATION__ frames @ __FPS__ fps).
+ * Babylon.js starter — __SCENE_NAME__ (__DURATION__ frames @ __FPS__ fps).
  *
  * DETERMINISM (required by the frame-driven render):
  *   - No engine.runRenderLoop(); call scene.render() inside setFrame.

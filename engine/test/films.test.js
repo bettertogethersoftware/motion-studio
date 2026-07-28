@@ -1,7 +1,7 @@
 /**
- * Saved films: FilmStore CRUD + validation, the pure caption/overlay builders
- * (no ffmpeg), planFilm against a real ProjectStore, and the Studio films API
- * end to end — create → edit → render scenes (fake browser) → build (real
+ * Films: document validation, the pure caption/overlay builders (no ffmpeg),
+ * planFilm against a real WorkspaceStore, and the Studio films API end to end
+ * — create → add scenes → edit → render scenes (fake browser) → build (real
  * ffmpeg concat + finishing pass) → download, gated on ffmpeg where needed.
  */
 import { test, before, after } from 'node:test';
@@ -14,12 +14,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
-  FilmStore, validateFilm, normalizeFilm, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm,
+  validateFilm, normalizeFilm, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm,
 } from '../src/core/films.js';
-import { ProjectStore } from '../src/core/project.js';
 import { JobManager } from '../src/core/jobs.js';
 import { createStudioServer } from '../src/studio/server.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
+import { makeStore, TEST_WS } from './helpers/workspace.mjs';
 
 const execFileP = promisify(execFile);
 let haveFfmpeg = false;
@@ -61,6 +61,19 @@ test('normalizeFilm stamps ids and fills defaults', () => {
 
 test('validateFilm rejects a path-escaping outputFilename', () => {
   assert.throws(() => validateFilm(normalizeFilm({ name: 'F', outputFilename: '../evil' })),
+    (e) => e.code === 'invalid_film');
+});
+
+test('validateFilm rejects bad scene refs and duplicates', () => {
+  assert.throws(() => validateFilm(normalizeFilm({ name: 'F', scenes: [{ slug: '../nope' }] })),
+    (e) => e.code === 'invalid_film');
+  assert.throws(() => validateFilm(normalizeFilm({ name: 'F', scenes: [{ slug: 'a' }, { slug: 'a' }] })),
+    (e) => e.code === 'invalid_film' && /more than once/.test(e.detail.problems.join(' ')));
+});
+
+test('validateFilm checks sceneDefaults shape', () => {
+  validateFilm(normalizeFilm({ name: 'F', sceneDefaults: { fps: 24, width: 640 } }));
+  assert.throws(() => validateFilm(normalizeFilm({ name: 'F', sceneDefaults: { fps: 0 } })),
     (e) => e.code === 'invalid_film');
 });
 
@@ -119,27 +132,34 @@ test('buildOverlayGraph with captions only burns straight off the base', () => {
 
 /* -------------------------------- store --------------------------------- */
 
-test('FilmStore: create → get → update → list → remove', async () => {
+test('film documents: create → get → update → list → remove (folder survives)', async () => {
   await withTmp(async (home) => {
-    const films = new FilmStore(home);
-    const film = await films.createFilm({ name: 'My Film', scenes: [{ projectId: 'a' }] });
-    assert.ok(film.id);
-    assert.equal((await films.getFilm(film.id)).name, 'My Film');
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, { name: 'My Film' });
+    assert.equal(film.id, `${TEST_WS}/my-film`);
+    assert.equal((await store.getFilm(film.id)).name, 'My Film');
 
-    const updated = await films.updateFilm(film.id, {
+    const updated = await store.updateFilm(film.id, {
       audio: [{ src: 'assets/bed.wav', gainDb: -8, duck: true }],
       captions: [{ text: 'Hi', fromFrame: 0, toFrame: 30 }],
     });
     assert.equal(updated.audio.length, 1);
     assert.ok(updated.audio[0].id, 'update stamps ids too');
-    assert.equal(updated.scenes.length, 1, 'unpatched fields survive');
 
-    assert.equal((await films.listFilms()).length, 1);
-    await assert.rejects(films.updateFilm(film.id, { nope: 1 }), (e) => e.code === 'invalid_film');
-    await assert.rejects(films.getFilm('missing'), (e) => e.code === 'film_not_found');
+    assert.equal((await store.listFilms(TEST_WS)).length, 1);
+    await assert.rejects(store.updateFilm(film.id, { nope: 1 }), (e) => e.code === 'invalid_film');
+    await assert.rejects(store.getFilm(`${TEST_WS}/missing`), (e) => e.code === 'film_not_found');
 
-    await films.removeFilm(film.id);
-    assert.equal((await films.listFilms()).length, 0);
+    // Without deleteFiles only the document goes; the folder lists as broken.
+    await store.removeFilm(film.id);
+    const after = await store.listFilms(TEST_WS);
+    assert.equal(after.length, 1);
+    assert.equal(after[0].broken, true);
+    assert.ok(fs.existsSync(film.path));
+
+    await store.removeFilm(film.id, { deleteFiles: true }).catch(() => {});
+    await fsp.rm(film.path, { recursive: true, force: true });
+    assert.equal((await store.listFilms(TEST_WS)).length, 0);
   });
 });
 
@@ -147,18 +167,16 @@ test('FilmStore: create → get → update → list → remove', async () => {
 
 test('planFilm reports problems instead of throwing', async () => {
   await withTmp(async (home) => {
-    const store = new ProjectStore(home);
-    const films = new FilmStore(home);
-    const a = await store.createProject({ name: 'Scene A', width: 320, height: 240, fps: 30, durationInFrames: 10 });
-    const b = await store.createProject({ name: 'Scene B', width: 640, height: 480, fps: 30, durationInFrames: 20 });
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, { name: 'Plan' });
+    await store.createScene(film.id, { name: 'Scene A', width: 320, height: 240, fps: 30, durationInFrames: 10 });
+    await store.createScene(film.id, { name: 'Scene B', width: 640, height: 480, fps: 30, durationInFrames: 20 });
 
-    const film = await films.createFilm({
-      name: 'Plan',
-      scenes: [{ projectId: a.id }, { projectId: b.id }, { projectId: 'ghost' }],
-      outputProjectId: a.id,
+    const doc = await store.updateFilm(film.id, {
+      scenes: [{ slug: 'scene-a' }, { slug: 'scene-b' }, { slug: 'ghost' }],
       audio: [{ src: 'assets/missing.wav' }],
     });
-    const plan = await planFilm({ film, store });
+    const plan = await planFilm({ film: doc, store });
     const codes = plan.problems.map((p) => p.code);
     assert.ok(codes.includes('scene_missing'), codes.join(','));
     assert.ok(codes.includes('signature_mismatch'));
@@ -166,6 +184,7 @@ test('planFilm reports problems instead of throwing', async () => {
     assert.ok(codes.includes('asset_missing'));
     assert.equal(plan.totalFrames, 30); // ghost contributes 0
     assert.equal(plan.scenes[1].filmOffset, 10);
+    assert.equal(plan.scenes[0].sceneId, `${film.id}/scene-a`);
   });
 });
 
@@ -175,7 +194,7 @@ let server, base, home;
 before(async () => {
   home = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-films-studio-'));
   server = createStudioServer({
-    store: new ProjectStore(home),
+    store: await makeStore(home),
     jobs: new JobManager(),
     browserFactory: makeFakeBrowserFactory(),
   });
@@ -208,45 +227,46 @@ async function waitJob(jobId, timeoutMs = 90_000) {
   }
 }
 
-let sceneA, sceneB, filmId, masterId;
+const enc = encodeURIComponent;
+let filmId, sceneA, sceneB;
 
-test('films API: create film + auto master project', async () => {
-  sceneA = (await j('/api/projects', { method: 'POST', body: { name: 'Cut A', width: 320, height: 240, fps: 30, durationInFrames: 8 } })).data;
-  sceneB = (await j('/api/projects', { method: 'POST', body: { name: 'Cut B', width: 320, height: 240, fps: 30, durationInFrames: 8 } })).data;
-
-  const created = await j('/api/films', {
+test('films API: create film in a workspace, add scenes', async () => {
+  const created = await j(`/api/workspaces/${TEST_WS}/films`, {
     method: 'POST',
-    body: { name: 'E2E Film', scenes: [{ projectId: sceneA.id }, { projectId: sceneB.id }] },
+    body: { name: 'E2E Film', width: 320, height: 240, fps: 30, durationInFrames: 8 },
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
   filmId = created.data.film.id;
-  masterId = created.data.film.outputProjectId;
-  assert.ok(masterId, 'a dedicated master project is scaffolded');
+  assert.equal(filmId, `${TEST_WS}/e2e-film`);
+  assert.deepEqual(created.data.film.sceneDefaults, { fps: 30, width: 320, height: 240, durationInFrames: 8 });
 
-  const { data } = await j('/api/projects');
-  const master = data.projects.find((p) => p.id === masterId);
-  assert.match(master.name, /E2E Film — Master/);
+  sceneA = (await j(`/api/films/${enc(filmId)}/scenes`, { method: 'POST', body: { name: 'Cut A' } })).data;
+  sceneB = (await j(`/api/films/${enc(filmId)}/scenes`, { method: 'POST', body: { name: 'Cut B' } })).data;
+  assert.equal(sceneA.config.width, 320, 'sceneDefaults inherited');
 
-  const list = await j('/api/films');
-  assert.equal(list.data.films.length, 1);
-  assert.equal(list.data.films[0].scenes, 2);
+  const tree = await j('/api/workspaces');
+  const ws = tree.data.workspaces.find((w) => w.id === TEST_WS);
+  assert.ok(ws, 'workspace listed');
+  assert.equal(ws.films.length, 1);
+  assert.equal(ws.films[0].scenes, 2);
 });
 
 test('films API: detail reports layout and problems', async () => {
-  const { status, data } = await j(`/api/films/${filmId}`);
+  const { status, data } = await j(`/api/films/${enc(filmId)}`);
   assert.equal(status, 200);
   assert.equal(data.detail.totalFrames, 16);
   assert.equal(data.detail.scenes[1].filmOffset, 8);
   const codes = data.detail.problems.map((p) => p.code);
   assert.ok(codes.includes('scene_not_rendered'));
+  assert.equal(data.sceneFolders.length, 2);
 });
 
 test('films API: PATCH edits tracks, rejects junk', async () => {
-  const bad = await j(`/api/films/${filmId}`, { method: 'PATCH', body: { patch: { bogus: true } } });
+  const bad = await j(`/api/films/${enc(filmId)}`, { method: 'PATCH', body: { patch: { bogus: true } } });
   assert.equal(bad.status, 400);
   assert.equal(bad.data.code, 'invalid_film');
 
-  const patched = await j(`/api/films/${filmId}`, {
+  const patched = await j(`/api/films/${enc(filmId)}`, {
     method: 'PATCH',
     body: { patch: { captions: [{ text: 'Hello film', fromFrame: 0, toFrame: 12 }] } },
   });
@@ -255,46 +275,51 @@ test('films API: PATCH edits tracks, rejects junk', async () => {
 });
 
 test('films API: build refuses while scenes are unrendered', async () => {
-  const res = await j(`/api/films/${filmId}/build`, { method: 'POST', body: {} });
-  assert.equal(res.status, haveFfmpeg ? 409 : 503); // no ffmpeg: prereq resolution wins
-  if (haveFfmpeg) assert.equal(res.data.code, 'scene_not_rendered');
+  const res = await j(`/api/films/${enc(filmId)}/build`, { method: 'POST', body: {} });
+  assert.equal(res.status, 409);
+  assert.equal(res.data.code, 'scene_not_rendered');
 });
 
 test('films API: render scenes → build with master audio + captions → sidecar', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
 
-  for (const p of [sceneA, sceneB]) {
-    const job = (await j(`/api/projects/${p.id}/render`, { method: 'POST', body: { workers: 1 } })).data;
+  for (const s of [sceneA, sceneB]) {
+    const job = (await j(`/api/scenes/${enc(s.id)}/render`, { method: 'POST', body: { workers: 1 } })).data;
     const done = await waitJob(job.jobId);
     assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
   }
 
-  // A one-second bed into the master project's assets (raw-body upload).
+  // A one-second bed into the FILM's own assets (raw-body upload).
   const wavPath = path.join(home, 'bed.wav');
   await execFileP('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-ar', '44100', wavPath]);
-  const put = await fetch(`${base}/api/projects/${masterId}/asset?path=${encodeURIComponent('assets/bed.wav')}`, {
+  const put = await fetch(`${base}/api/films/${enc(filmId)}/asset?path=${enc('assets/bed.wav')}`, {
     method: 'PUT', body: await fsp.readFile(wavPath),
   });
   assert.equal(put.status, 201);
 
-  const patched = await j(`/api/films/${filmId}`, {
+  const patched = await j(`/api/films/${enc(filmId)}`, {
     method: 'PATCH',
     body: { patch: { audio: [{ src: 'assets/bed.wav', gainDb: -6 }] } },
   });
   assert.equal(patched.status, 200);
 
-  const build = await j(`/api/films/${filmId}/build`, { method: 'POST', body: { outputFilename: 'e2e', audioTargetPeakDb: -2 } });
+  const build = await j(`/api/films/${enc(filmId)}/build`, { method: 'POST', body: { outputFilename: 'e2e', audioTargetPeakDb: -2 } });
   assert.equal(build.status, 202, JSON.stringify(build.data));
   const done = await waitJob(build.data.jobId);
   assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
   assert.ok(done.audio, 'master timeline reports measured levels');
 
-  const master = (await j(`/api/projects/${masterId}`)).data;
-  const outDir = path.join(master.path, 'out');
+  // The film folder's out/ holds the build + sidecar.
+  const { data: film } = await j(`/api/films/${enc(filmId)}`);
+  const outDir = path.join(film.film.path, 'out');
   assert.ok(fs.existsSync(path.join(outDir, 'e2e.mp4')), 'film written');
   assert.ok(fs.existsSync(path.join(outDir, 'e2e.srt')), 'caption sidecar written');
   const srt = await fsp.readFile(path.join(outDir, 'e2e.srt'), 'utf8');
   assert.match(srt, /Hello film/);
+
+  // And downloads through the film output route.
+  const dl = await fetch(`${base}/api/films/${enc(filmId)}/output?file=e2e.mp4`);
+  assert.equal(dl.status, 200);
 });
 
 test('films API: overlay triggers the finishing pass', async (t) => {
@@ -302,37 +327,37 @@ test('films API: overlay triggers the finishing pass', async (t) => {
 
   const pngPath = path.join(home, 'logo.png');
   await execFileP('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=red:s=64x64:d=1', '-frames:v', '1', pngPath]);
-  const put = await fetch(`${base}/api/projects/${masterId}/asset?path=${encodeURIComponent('assets/logo.png')}`, {
+  const put = await fetch(`${base}/api/films/${enc(filmId)}/asset?path=${enc('assets/logo.png')}`, {
     method: 'PUT', body: await fsp.readFile(pngPath),
   });
   assert.equal(put.status, 201);
 
-  await j(`/api/films/${filmId}`, {
+  await j(`/api/films/${enc(filmId)}`, {
     method: 'PATCH',
     body: { patch: { overlays: [{ src: 'assets/logo.png', fromFrame: 0, toFrame: 16, xPct: 5, yPct: 5, widthPct: 20, opacity: 0.8 }] } },
   });
-  const build = await j(`/api/films/${filmId}/build`, { method: 'POST', body: { outputFilename: 'e2e-overlay' } });
+  const build = await j(`/api/films/${enc(filmId)}/build`, { method: 'POST', body: { outputFilename: 'e2e-overlay' } });
   assert.equal(build.status, 202, JSON.stringify(build.data));
   const done = await waitJob(build.data.jobId);
   assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
 
-  const master = (await j(`/api/projects/${masterId}`)).data;
-  const outPath = path.join(master.path, 'out', 'e2e-overlay.mp4');
+  const { data: film } = await j(`/api/films/${enc(filmId)}`);
+  const outPath = path.join(film.film.path, 'out', 'e2e-overlay.mp4');
   assert.ok(fs.existsSync(outPath));
   assert.ok((await fsp.stat(outPath)).size > 0);
 });
 
 test('films API: preview-audio streams the master mix', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const res = await fetch(`${base}/api/films/${filmId}/preview-audio`, { method: 'POST' });
+  const res = await fetch(`${base}/api/films/${enc(filmId)}/preview-audio`, { method: 'POST' });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /audio\/wav/);
   const buf = Buffer.from(await res.arrayBuffer());
   assert.ok(buf.length > 44, 'more than a WAV header');
 });
 
-test('asset streaming honours Range requests (video scrubbing)', async () => {
-  const res = await fetch(`${base}/api/projects/${masterId}/asset?path=${encodeURIComponent('assets/bed.wav')}`, {
+test('film asset streaming honours Range requests (video scrubbing)', async () => {
+  const res = await fetch(`${base}/api/films/${enc(filmId)}/asset?path=${enc('assets/bed.wav')}`, {
     headers: { Range: 'bytes=0-3' },
   });
   if (res.status === 404) return; // wav upload skipped without ffmpeg
@@ -342,15 +367,35 @@ test('asset streaming honours Range requests (video scrubbing)', async () => {
   assert.equal(Buffer.from(await res.arrayBuffer()).toString('ascii'), 'RIFF');
 });
 
-test('studio TTS endpoint rejects empty text up front', async () => {
-  const res = await j(`/api/projects/${masterId}/tts`, { method: 'POST', body: { text: '  ' } });
+test('studio TTS endpoint rejects empty text up front (film target)', async () => {
+  const res = await j(`/api/films/${enc(filmId)}/tts`, { method: 'POST', body: { text: '  ' } });
   assert.equal(res.status, 400);
   assert.equal(res.data.code, 'invalid_config');
 });
 
-test('films API: delete leaves projects alone', async () => {
-  const res = await j(`/api/films/${filmId}`, { method: 'DELETE' });
+test('workspace library: upload → list → use in a scene via the store', async () => {
+  const put = await fetch(`${base}/api/workspaces/${TEST_WS}/library/file?path=${enc('plates/bg.png')}`, {
+    method: 'PUT', body: Buffer.from('89504e470d0a1a0a', 'hex'),
+  });
+  assert.equal(put.status, 201);
+  const list = await j(`/api/workspaces/${TEST_WS}/library`);
+  assert.deepEqual(list.data.files.map((f) => f.path), ['plates/bg.png']);
+
+  const get = await fetch(`${base}/api/workspaces/${TEST_WS}/library/file?path=${enc('plates/bg.png')}`);
+  assert.equal(get.status, 200);
+
+  const del = await j(`/api/workspaces/${TEST_WS}/library/file?path=${enc('plates/bg.png')}`, { method: 'DELETE' });
+  assert.equal(del.status, 200);
+  assert.equal((await j(`/api/workspaces/${TEST_WS}/library`)).data.files.length, 0);
+});
+
+test('films API: delete without deleteFiles keeps the folder (listed as broken)', async () => {
+  const res = await j(`/api/films/${enc(filmId)}`, { method: 'DELETE' });
   assert.equal(res.status, 200);
-  assert.equal((await j('/api/films')).data.films.length, 0);
-  assert.equal((await j(`/api/projects/${masterId}`)).status, 200, 'master project survives');
+  const tree = await j('/api/workspaces');
+  const ws = tree.data.workspaces.find((w) => w.id === TEST_WS);
+  const entry = ws.films.find((f) => f.id === filmId);
+  assert.ok(entry?.broken, 'film folder still present, flagged broken');
+  // Scene folders inside survive.
+  assert.equal((await j(`/api/scenes/${enc(sceneA.id)}`)).status, 200, 'scene folder survives');
 });

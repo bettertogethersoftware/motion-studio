@@ -26,7 +26,7 @@ a whole **cue list** and renders a single mono WAV spanning the piece:
 
 ```
 synthesize_sfx {
-  projectId,
+  target,                      // a scene "<film>/<scene>", or a film "<film>"
   spec: {
     cues: [
       { atFrame: 0,     type: "chime",   pitch: 82, gain: 0.4, decay: 2.0 },
@@ -39,8 +39,9 @@ synthesize_sfx {
 }
 ```
 
-`fps` and the bed length come from the **project** — `durationInFrames` defaults
-to the project's, so the bed spans the composition without you restating what the
+`fps` and the bed length come from the **target** — `durationInFrames` defaults
+to the target's (the scene's duration, or the whole film's length for a film
+target), so the bed spans the composition without you restating what the
 engine already knows.
 
 ## Time is in frames

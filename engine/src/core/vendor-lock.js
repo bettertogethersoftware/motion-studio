@@ -19,9 +19,9 @@
  * different code — they diverge around byte 2,317,477, where the floating build
  * carries an extra `var t;`. A version string is a claim; a hash is a fact.
  *
- * Also used by ProjectStore.addLibrary to stamp config.libraryBuilds: a project
+ * Also used by WorkspaceStore.addLibrary to stamp config.libraryBuilds: a scene
  * copies these files at a point in time, so "what does the repo hold now" (git)
- * and "what did this project copy" (libraryBuilds) are different facts once the
+ * and "what did this scene copy" (libraryBuilds) are different facts once the
  * libraries are ever upgraded.
  *
  * The lockfile lives at engine/vendor.lock.json — outside engine/vendor/, whose

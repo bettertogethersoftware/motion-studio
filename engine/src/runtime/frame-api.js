@@ -1,5 +1,5 @@
 /*!
- * Motion Studio Frame API runtime — v1.3
+ * Motion Studio Frame API runtime — v1.4
  *
  * Loaded as a classic <script> before composition code. Provides the four
  * primitives of the frame-driven contract (docs/frame-api.md):
@@ -24,6 +24,13 @@
  * ParticleSystem, requestAnimationFrame loops) are wall-clock based and banned
  * by the frame contract, so every composition was hand-rolling the same
  * seeded loop; this is that loop, done once.
+ *
+ * v1.4: MotionStudio.seekVideo(video, seconds, {fps}) + videoReady(video) —
+ * the deterministic way to use FOOTAGE. A <video> cannot be played (that
+ * would make the picture a function of wall-clock time), so compositions
+ * seek per frame; every one of them was hand-rolling the same guards, and
+ * the one that matters most — never awaiting `seeked` on an element that
+ * failed to load — hangs the whole render when omitted.
  *
  * Also exported as bare globals (interpolate, Sequence, ...) for terse
  * composition code. Runs in both the render Chromium (Puppeteer) and the
@@ -351,11 +358,89 @@
     global.__motionStudioRegistered = true;
   }
 
+  /* -------------------------------- video ------------------------------ */
+
+  /**
+   * Wait until a <video> can be seeked — resolving on failure too (v1.4).
+   *
+   * `loadeddata` never fires for a file that is missing or undecodable, so
+   * awaiting it alone deadlocks the frame. This resolves on `error` as well;
+   * seekVideo() then sees an unusable element and no-ops rather than hanging.
+   */
+  function videoReady(video) {
+    return new Promise(function (resolve) {
+      if (!video) { resolve(false); return; }
+      if (video.readyState >= 2) { resolve(true); return; }
+      var done = function (ok) {
+        video.removeEventListener('loadeddata', onLoad);
+        video.removeEventListener('error', onErr);
+        resolve(ok);
+      };
+      var onLoad = function () { done(true); };
+      var onErr = function () { done(false); };
+      video.addEventListener('loadeddata', onLoad);
+      video.addEventListener('error', onErr);
+    });
+  }
+
+  /**
+   * Show the frame of `video` at `seconds` — the deterministic way to use
+   * footage in a composition (v1.4).
+   *
+   * Video is the one asset type that cannot simply be drawn: it has a
+   * playhead, and playing it would make the picture a function of wall-clock
+   * time, which the frame contract forbids. So a composition SEEKS instead —
+   *
+   *     await seekVideo(host, from + frame / fps, { fps });
+   *
+   * — and every composition that does this needs the same three guards, each
+   * of which fails silently or catastrophically when omitted:
+   *
+   *  1. **Never wait on an unusable element.** A <video> whose src 404s never
+   *     fires `seeked`, so a bare `currentTime = t; await seeked` deadlocks
+   *     the frame until the render times out — historically with no clue as
+   *     to which file. Bailing out here turns that into a missing picture,
+   *     and the engine names the failed request in the error.
+   *  2. **Clamp to the last real frame.** Seeking past the end never
+   *     completes on some builds; pass `fps` and the target is clamped to
+   *     duration - 1/fps.
+   *  3. **Skip a seek that is already satisfied**, or a scene whose footage
+   *     is shorter than the scene pays a pointless round trip per frame.
+   *
+   * Deliberately has NO internal timeout: a genuinely stuck seek must fail
+   * loudly as a frame timeout, not silently capture the wrong frame.
+   *
+   * @param {HTMLVideoElement} video
+   * @param {number} seconds            target time in the video's own timeline
+   * @param {{fps?: number}} [options]  scene fps, used to clamp to the last frame
+   * @returns {Promise<boolean>}        true if the element is showing that time
+   */
+  function seekVideo(video, seconds, options) {
+    options = options || {};
+    return new Promise(function (resolve) {
+      if (!video) { resolve(false); return; }
+      var duration = video.duration;
+      var usable = typeof duration === 'number' && isFinite(duration) && duration > 0 && video.readyState >= 1;
+      if (!usable) { resolve(false); return; }
+
+      var last = options.fps > 0 ? duration - 1 / options.fps : duration - 1e-3;
+      var t = Math.min(Math.max(0, Number(seconds) || 0), Math.max(0, last));
+      if (Math.abs(video.currentTime - t) < 1e-4) { resolve(true); return; }
+
+      var onSeeked = function () {
+        video.removeEventListener('seeked', onSeeked);
+        resolve(true);
+      };
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = t;
+    });
+  }
+
   /* ------------------------------- export ------------------------------ */
 
   const api = {
     interpolate, Sequence, Loop, spring, interpolateColors, random, particles, easings,
-    registerComposition, version: 1.3,
+    registerComposition, videoReady, seekVideo, version: 1.4,
   };
   global.MotionStudio = api;
   // Bare-name conveniences for terse composition code.
@@ -365,6 +450,8 @@
   global.spring = spring;
   global.interpolateColors = interpolateColors;
   global.particles = particles;
+  global.seekVideo = seekVideo;
+  global.videoReady = videoReady;
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api; // for engine unit tests
 })(typeof window !== 'undefined' ? window : globalThis);

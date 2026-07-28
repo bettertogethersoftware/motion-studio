@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStudioServer } from '../src/studio/server.js';
-import { ProjectStore } from '../src/core/project.js';
+import { makeStore } from './helpers/workspace.mjs';
 import { JobManager } from '../src/core/jobs.js';
 import {
   synthesizeNodeMusic, checkNodeMusic, validateMusicSpec, specToMidi, MUSIC_NODE_DEFAULTS,
@@ -49,7 +49,7 @@ before(async () => {
   process.env.MOTION_STUDIO_SOUNDFONT = soundfont;
   delete process.env.MOTION_STUDIO_MUSIC_VENDOR;
 
-  store = new ProjectStore(home);
+  store = await makeStore(home);
   server = createStudioServer({ store, jobs: new JobManager() });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;

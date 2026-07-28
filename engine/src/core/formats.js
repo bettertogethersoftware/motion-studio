@@ -96,7 +96,7 @@ export const FORMATS = Object.freeze({
  * even at yuv420p. Most consumer decoders (Windows Movies & TV, phone/TV/GPU
  * hardware paths, browsers) cannot decode that profile — the file plays as
  * black video with working audio, which reads as "the render produced no
- * visuals" when the frames are all there. Happened with a real project;
+ * visuals" when the frames are all there. Happened with a real video;
  * ffmpeg/VLC decode it fine, which makes the confusion worse.
  *
  * Never fatal — crf 0 stays legal (the file is valid, and a lossless master

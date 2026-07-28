@@ -1,8 +1,8 @@
 # Motion Studio — Music Generation Setup
 
 An agent authors a small note **spec**; the engine renders it to audio against a
-General MIDI SoundFont and adds it to the project's audio tracks. Since **v0.17**
-that render comes from one of two **music vendors**:
+General MIDI SoundFont and adds it to a scene's (or a film's master timeline's)
+audio tracks. Since **v0.17** that render comes from one of two **music vendors**:
 
 | vendor | what it is | needs | platform |
 |---|---|---|---|
@@ -130,7 +130,7 @@ Two v0.19 track controls matter for beds specifically: `fadeOutFrames` ends a
 bed musically at the composition end instead of hard-cutting mid-reverb-tail,
 and `duck: true` (settable at attach time) sidechain-compresses the bed under
 the non-ducked tracks, dipping it while narration speaks. See
-[user-guide.md §Audio](user-guide.md) and `update_project_config` in
+[user-guide.md §Audio](user-guide.md) and `update_scene_config` in
 [mcp-setup.md](mcp-setup.md).
 
 An explicit `vendor` argument that differs from the machine's configured

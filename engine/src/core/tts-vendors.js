@@ -17,7 +17,7 @@
  *
  *   explicit argument  >  MOTION_STUDIO_TTS_VENDOR  >  settings.tts.vendor  >  "system"
  *
- * The default stays "system" on purpose: an existing project that has been
+ * The default stays "system" on purpose: an existing setup that has been
  * narrating with the local exe must not start billing an Azure subscription
  * because a newer version knows how to.
  *
@@ -48,7 +48,7 @@ import {
   resolveVendorFrom, walkVendorChain, unavailableError, buildReport,
 } from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
-import { defaultDataDir } from './project.js';
+import { defaultDataDir } from './scene.js';
 
 export {
   TTS_VENDORS, AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT, AZURE_ENV,
@@ -535,7 +535,7 @@ export async function synthesizeWithVendor({
     warnNonDeterministic('system');
     // No probe first: synthesizeSpeech already maps a missing/unstartable exe
     // to tts_unavailable, and probing here would spawn the exe twice on every
-    // narration call (the MCP tool probes once, before it touches the project).
+    // narration call (the MCP tool probes once, before it touches the target).
     const result = await synthesizeSpeech({
       text, outPath, voice, rate, volume, ...(timeoutMs ? { timeoutMs } : {}),
     });

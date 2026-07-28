@@ -1,6 +1,10 @@
 /* Motion Studio — Studio UI logic (vanilla JS, no build step).
  *
- * The preview iframe loads the project's real entry HTML from /preview/:id/
+ * v0.20 storage model: workspaces → films → scenes. A scene is what a
+ * the whole editor below operates on one scene at a
+ * time; ids are slug paths ("ws/film/scene") sent URL-encoded as ONE segment.
+ *
+ * The preview iframe loads the scene's real entry HTML from /preview/:sid/
  * (same origin), and the transport drives it through the identical
  * window.setFrame(n) contract the headless renderer uses. */
 
@@ -19,9 +23,11 @@ const api = async (path, opts = {}) => {
 };
 
 const state = {
-  projects: [],
-  projectId: null,
-  projectPath: null,
+  tree: [],             // workspaces (each with films) from GET /api/workspaces
+  filmScenes: {},       // filmId → scene list, fetched lazily when a film expands
+  sceneId: null,        // full "ws/film/scene" id of the open scene
+  scenePath: null,
+  libraryWs: null,      // workspace id whose library page is showing, or null
   config: null,
   frame: 0,
   playing: false,
@@ -34,6 +40,11 @@ const state = {
   audioPreview: null,   // shared <audio> for asset auditioning
   audioDraft: [],       // staged config.audio edits (saved with one PATCH)
 };
+
+/* Ids are slug paths; every route takes them URL-encoded as one segment. */
+const enc = encodeURIComponent;
+const sceneUrl = (suffix = '') => `/api/scenes/${enc(state.sceneId)}${suffix}`;
+const filmIdOf = (sceneId) => sceneId.split('/').slice(0, 2).join('/');
 
 async function copyText(text) {
   try {
@@ -148,100 +159,214 @@ async function checkPrereqs() {
   }
 }
 
-/* ------------------------------ rail tabs ------------------------------ */
+/* --------------------------- workspace tree ---------------------------- */
 
-/* The rail shows ONE list at a time — projects or films — switched by tabs.
- * Stacking both sections squeezed each into a sliver once either list grew. */
-function setRailTab(tab) {
-  localStorage.setItem('ms.railTab', tab);
-  $('#rail-tab-projects').classList.toggle('active', tab === 'projects');
-  $('#rail-tab-films').classList.toggle('active', tab === 'films');
-  $('#rail-projects').classList.toggle('hidden', tab !== 'projects');
-  $('#rail-films').classList.toggle('hidden', tab !== 'films');
+/* One tree, not tabbed lists: workspace header
+ * rows, films under each workspace, scenes under an expanded film, plus a
+ * library row per workspace. Collapse state persists across reloads. */
+
+function loadIdSet(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); }
+  catch { return new Set(); } // stale/corrupt value: start fresh rather than crash
 }
-$('#rail-tab-projects').addEventListener('click', () => setRailTab('projects'));
-$('#rail-tab-films').addEventListener('click', () => setRailTab('films'));
-setRailTab(localStorage.getItem('ms.railTab') === 'films' ? 'films' : 'projects');
+const saveIdSet = (key, set) => localStorage.setItem(key, JSON.stringify([...set]));
+const collapsedWs = loadIdSet('ms.wsCollapsed');   // workspaces default OPEN
+const expandedFilms = loadIdSet('ms.filmsOpen');   // films default CLOSED
 
-/* ------------------------------ projects ------------------------------ */
-
-let sortMode = localStorage.getItem('ms.sortMode') || 'name'; // 'name' | 'date'
-
-function syncSortButtons() {
-  $('#sort-name').classList.toggle('active', sortMode === 'name');
-  $('#sort-date').classList.toggle('active', sortMode === 'date');
+/** tiny element helper — the tree builds a lot of spans */
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text != null) e.textContent = text;
+  return e;
 }
-for (const mode of ['name', 'date']) {
-  $(`#sort-${mode}`).addEventListener('click', () => {
-    sortMode = mode;
-    localStorage.setItem('ms.sortMode', mode);
-    syncSortButtons();
-    renderProjectList();
-  });
-}
-syncSortButtons();
 
-function renderProjectList() {
-  const projects = [...state.projects];
-  if (sortMode === 'name') projects.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  else projects.sort((a, b) => (a.lastModified < b.lastModified ? 1 : -1)); // newest first
-  const ul = $('#project-list');
+async function loadWorkspaces() {
+  const { workspaces } = await api('/api/workspaces');
+  state.tree = workspaces;
+  // Scene lists are per-film fetches; refresh the ones that are showing.
+  const showing = [...expandedFilms].filter((fid) =>
+    workspaces.some((w) => w.films.some((f) => f.id === fid)));
+  await Promise.all(showing.map((fid) => loadFilmScenes(fid).catch(() => {})));
+  renderTree();
+}
+
+async function loadFilmScenes(filmId) {
+  const { sceneFolders } = await api(`/api/films/${enc(filmId)}`);
+  state.filmScenes[filmId] = sceneFolders;
+  return sceneFolders;
+}
+
+function renderTree() {
+  const ul = $('#workspace-tree');
   ul.innerHTML = '';
-  for (const p of projects) {
-    const li = document.createElement('li');
-    li.className = (p.id === state.projectId ? 'active ' : '') + (p.missing ? 'missing' : '');
-    const name = document.createElement('span');
-    name.className = 'p-name';
-    name.textContent = p.name;
-    name.title = p.name;
-    const meta = document.createElement('span');
-    meta.className = 'p-meta';
-    meta.textContent = p.missing ? 'missing' : sortMode === 'date' ? (p.lastModified ?? '').slice(0, 10) : '';
-    li.append(name, meta);
-    if (!p.missing) li.addEventListener('click', () => selectProject(p.id));
-    ul.appendChild(li);
+  if (!state.tree.length) {
+    ul.appendChild(el('li', 'dim tree-note', 'no workspaces yet — “+ workspace” starts one'));
+    return;
+  }
+  for (const ws of state.tree) {
+    const open = !collapsedWs.has(ws.id);
+
+    const wsRow = el('li', 'tree-ws');
+    const name = el('span', 'ws-name', ws.name);
+    name.title = `${ws.name} — ${ws.path}`;
+    const add = el('button', 'ghost tiny tree-add', '+ film');
+    add.title = 'new film in this workspace';
+    add.addEventListener('click', (e) => { e.stopPropagation(); openNewFilmDialog(ws.id); });
+    wsRow.append(el('span', 'chev', open ? '▾' : '▸'), name, add);
+    wsRow.addEventListener('click', () => {
+      if (open) collapsedWs.add(ws.id); else collapsedWs.delete(ws.id);
+      saveIdSet('ms.wsCollapsed', collapsedWs);
+      renderTree();
+    });
+    ul.appendChild(wsRow);
+    if (!open) continue;
+
+    for (const f of ws.films) appendFilmRows(ul, f);
+    if (!ws.films.length) {
+      // The row's "+ film" only appears on hover, which would leave a fresh
+      // workspace with no visible way forward — so the empty state IS the button.
+      const first = el('li', 'tree-note tree-first-film');
+      first.append(el('span', 'p-name dim', '+ first film'));
+      first.title = 'create this workspace\'s first film';
+      first.addEventListener('click', () => openNewFilmDialog(ws.id));
+      ul.appendChild(first);
+    }
+
+    // Library row: the workspace's shared-asset surface (the human uploads,
+    // the agent consumes via list_shared_assets / use_shared_asset).
+    const lib = el('li', 'tree-lib' + (state.libraryWs === ws.id ? ' active' : ''));
+    lib.append(
+      el('span', 'chev', ''),
+      el('span', 'p-name', '⧉ library'),
+      el('span', 'p-meta', `${ws.library.files} file${ws.library.files === 1 ? '' : 's'}`),
+    );
+    lib.title = `shared assets for this workspace's agent (${fmtBytes(ws.library.bytes)})`;
+    lib.addEventListener('click', () => openLibrary(ws.id));
+    ul.appendChild(lib);
   }
 }
 
-async function loadProjects() {
-  const { projects } = await api('/api/projects');
-  state.projects = projects;
-  renderProjectList();
+/** One film row, plus its scene rows when expanded. */
+function appendFilmRows(ul, f) {
+  const fOpen = expandedFilms.has(f.id);
+
+  const row = el('li', 'tree-film' + (f.broken ? ' missing' : ''));
+  const chev = el('button', 'chev chev-btn', fOpen ? '▾' : '▸');
+  chev.title = fOpen ? 'hide scenes' : 'show scenes';
+  chev.addEventListener('click', (e) => { e.stopPropagation(); toggleFilm(f.id); });
+  const name = el('span', 'p-name', f.name);
+  name.title = f.broken ? `${f.name} — film.json is broken or missing` : `${f.name} — open the film editor`;
+  const meta = el('span', 'p-meta', f.broken ? 'broken' : `${f.scenes}sc`);
+  const del = el('button', 'film-del', '✕');
+  del.title = 'delete this film…';
+  del.addEventListener('click', (e) => { e.stopPropagation(); deleteFilm(f); });
+  row.append(chev, name, meta, del);
+  row.addEventListener('click', () => { location.href = `/film.html?id=${enc(f.id)}`; });
+  ul.appendChild(row);
+  if (!fOpen) return;
+
+  const scenes = state.filmScenes[f.id];
+  if (!scenes) {
+    ul.appendChild(el('li', 'dim tree-note tree-note-scene', 'loading…'));
+    return;
+  }
+  for (const s of scenes) {
+    const sRow = el('li',
+      'tree-scene' + (s.id === state.sceneId ? ' active' : '') + (s.missing ? ' missing' : ''));
+    const sName = el('span', 'p-name', s.name);
+    sName.title = s.id;
+    sRow.append(sName, el('span', 'p-meta', s.missing ? 'missing' : s.unlisted ? 'unlisted' : ''));
+    if (!s.missing) sRow.addEventListener('click', () => selectScene(s.id).catch(toastError));
+    ul.appendChild(sRow);
+  }
+  const addScene = el('li', 'tree-scene scene-add');
+  addScene.append(el('span', 'p-name dim', '+ scene'));
+  addScene.title = 'scaffold a new scene into this film';
+  addScene.addEventListener('click', () => openNewSceneDialog(f.id));
+  ul.appendChild(addScene);
 }
 
-async function selectProject(id) {
+function toggleFilm(filmId) {
+  if (expandedFilms.has(filmId)) expandedFilms.delete(filmId);
+  else if (!state.filmScenes[filmId]) {
+    expandedFilms.add(filmId);
+    loadFilmScenes(filmId).then(renderTree).catch(toastError);
+  } else {
+    expandedFilms.add(filmId);
+  }
+  saveIdSet('ms.filmsOpen', expandedFilms);
+  renderTree();
+}
+
+/** Two plain confirms instead of a dialog: the second decides file deletion. */
+async function deleteFilm(f) {
+  if (!confirm(`Delete film "${f.name}"?`)) return;
+  const deleteFiles = confirm(
+    'Also delete the film folder on disk — its scenes, assets and rendered output?\n\n' +
+    'OK: delete everything.\nCancel: remove only the film definition (film.json); all files stay.');
+  try {
+    await api(`/api/films/${enc(f.id)}${deleteFiles ? '?deleteFiles=1' : ''}`, { method: 'DELETE' });
+    delete state.filmScenes[f.id];
+    if (state.sceneId && filmIdOf(state.sceneId) === f.id && deleteFiles) closeWorkbench();
+    await loadWorkspaces();
+  } catch (err) { toastError(err); }
+}
+
+$('#btn-new-workspace').addEventListener('click', async () => {
+  const name = prompt('Workspace name:');
+  if (!name || !name.trim()) return;
+  try {
+    await api('/api/workspaces', { method: 'POST', body: { name: name.trim() } });
+    await loadWorkspaces();
+  } catch (err) { toastError(err); }
+});
+
+/* ------------------------------- scenes ------------------------------- */
+
+async function selectScene(id) {
   stopPlayback();
-  stopAudition(); // a clip from the previous project would keep playing with its stop button gone
+  stopAudition(); // a clip from the previous scene would keep playing with its stop button gone
   stopJobPolling();
-  if (vendorState.openCapability) showVendorsPage(null); // picking a project leaves the vendor pages
+  if (vendorState.openCapability) showVendorsPage(null); // picking a scene leaves the vendor pages
   if (state.settingsOpen) showSettingsPage(false);       // …and the settings page
+  if (state.libraryWs) showLibraryPage(null);            // …and the library
   state.events?.close();
-  state.projectId = id;
-  const proj = await api(`/api/projects/${id}`);
-  state.config = proj.config;
+  state.sceneId = id;
+  const scene = await api(sceneUrl());
+  state.config = scene.config;
   state.frame = 0;
 
-  state.projectPath = proj.path;
+  state.scenePath = scene.path;
 
   $('#empty-state').classList.add('hidden');
   $('#workbench').classList.remove('hidden');
-  $('#project-title').textContent = proj.name;
-  const sep = proj.path.includes('\\') ? '\\' : '/';
-  const pathEl = $('#project-path');
-  pathEl.textContent = proj.path;
-  pathEl.title = proj.path;
+  $('#scene-title').textContent = scene.name;
+  const sep = scene.path.includes('\\') ? '\\' : '/';
+  const pathEl = $('#scene-path');
+  pathEl.textContent = scene.path;
+  pathEl.title = scene.path;
   const assetsEl = $('#assets-path');
-  assetsEl.textContent = proj.path + sep + 'assets';
+  assetsEl.textContent = scene.path + sep + 'assets';
   assetsEl.title = assetsEl.textContent;
   updateMeta();
   fillConfigForm();
   loadOutputs().catch(() => {});
   loadAssets().catch(() => {});
-  loadAudioEditor().catch(() => {}); // resets any staged track edits from the previous project
-  await loadProjects(); // refresh active highlight
+  loadAudioEditor().catch(() => {}); // resets any staged track edits from the previous scene
+
+  // Reveal the scene in the tree (expand its workspace + film) and repaint.
+  const filmId = filmIdOf(id);
+  if (collapsedWs.delete(id.split('/')[0])) saveIdSet('ms.wsCollapsed', collapsedWs);
+  if (!expandedFilms.has(filmId)) {
+    expandedFilms.add(filmId);
+    saveIdSet('ms.filmsOpen', expandedFilms);
+  }
+  if (!state.filmScenes[filmId]) loadFilmScenes(filmId).then(renderTree).catch(() => {});
+  renderTree();
 
   // Hot reload stream.
-  const es = new EventSource(`/api/projects/${id}/events`);
+  const es = new EventSource(sceneUrl('/events'));
   const dot = $('#hot-reload-dot');
   es.onopen = () => dot.classList.add('live');
   es.onmessage = () => {
@@ -253,6 +378,18 @@ async function selectProject(id) {
   state.events = es;
 
   reloadPreview();
+}
+
+/** Drop the open scene and show the empty state (delete flows). */
+function closeWorkbench() {
+  stopPlayback();
+  stopJobPolling();
+  state.events?.close();
+  state.sceneId = null;
+  state.scenePath = null;
+  state.config = null;
+  $('#workbench').classList.add('hidden');
+  $('#empty-state').classList.remove('hidden');
 }
 
 function updateMeta() {
@@ -285,15 +422,15 @@ function fitPreview() {
 async function reloadPreview({ refetchConfig = false } = {}) {
   if (refetchConfig) {
     try {
-      const proj = await api(`/api/projects/${state.projectId}`);
-      state.config = proj.config;
+      const scene = await api(sceneUrl());
+      state.config = scene.config;
       updateMeta();
       fillConfigForm();
     } catch { /* keep previous */ }
   }
   const iframe = $('#preview');
   const entry = state.config.entry || 'composition.html';
-  iframe.src = `/preview/${state.projectId}/${entry}?t=${Date.now()}`;
+  iframe.src = `/preview/${enc(state.sceneId)}/${entry}?t=${Date.now()}`;
   state.frameReady = new Promise((resolve) => {
     iframe.onload = async () => {
       fitPreview();
@@ -368,7 +505,7 @@ window.addEventListener('resize', fitPreview);
 
 /* Which output fields each format actually consumes — mirrors core/formats.js.
  * Irrelevant fields are shown disabled rather than hidden, so the config tab
- * is a complete picture of project.json instead of a curated subset. */
+ * is a complete picture of scene.json instead of a curated subset. */
 const FORMAT_CAPS = {
   mp4: { crf: 1, preset: 1, pixFmt: 1, transparent: 0, audio: 1 },
   webm: { crf: 1, preset: 0, pixFmt: 0, transparent: 1, audio: 1 },
@@ -419,7 +556,7 @@ function fillConfigForm() {
 
 $('#config-form').format.addEventListener('change', applyFormatCaps);
 
-/** Everything in project.json the form cannot edit, shown rather than hidden. */
+/** Everything in scene.json the form cannot edit, shown rather than hidden. */
 function fillConfigFacts() {
   const c = state.config;
   const dl = $('#config-facts');
@@ -468,12 +605,14 @@ $('#config-form').addEventListener('submit', async (e) => {
         pixFmt: f.pixFmt.value.trim() || null,
       },
     };
-    const { config } = await api(`/api/projects/${state.projectId}/config`, { method: 'PATCH', body: { patch } });
+    const { config } = await api(sceneUrl('/config'), { method: 'PATCH', body: { patch } });
     state.config = config;
     updateMeta();
     fillConfigForm();
     msg.textContent = 'saved ✓';
-    loadProjects();
+    // A renamed/retimed scene changes what the tree shows for its film.
+    delete state.filmScenes[filmIdOf(state.sceneId)];
+    loadFilmScenes(filmIdOf(state.sceneId)).then(renderTree).catch(() => {});
     reloadPreview();
   } catch (err) {
     msg.textContent = err.message;
@@ -499,7 +638,7 @@ $('#btn-render').addEventListener('click', async () => {
       workers: Number($('#rd-workers').value),
       frameRange: parseRange($('#rd-range').value, state.config.durationInFrames),
     };
-    const job = await api(`/api/projects/${state.projectId}/render`, { method: 'POST', body });
+    const job = await api(sceneUrl('/render'), { method: 'POST', body });
     trackJob(job.jobId);
   } catch (err) {
     toastError(err);
@@ -508,13 +647,13 @@ $('#btn-render').addEventListener('click', async () => {
 
 $('#btn-still').addEventListener('click', async () => {
   try {
-    const res = await api(`/api/projects/${state.projectId}/still`, { method: 'POST', body: { frame: state.frame } });
+    const res = await api(sceneUrl('/still'), { method: 'POST', body: { frame: state.frame } });
     loadOutputs();
     const a = $('#job-download');
     $('#job-card').classList.remove('hidden');
     a.classList.remove('hidden');
     a.textContent = `⤓ ${res.outputPath.split(/[\\/]/).pop()} (frame ${res.frame})`;
-    a.href = `/api/projects/${state.projectId}/output?file=${encodeURIComponent(res.outputPath.split(/[\\/]/).pop())}&download=1`;
+    a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(res.outputPath.split(/[\\/]/).pop())}&download=1`;
   } catch (err) {
     toastError(err);
   }
@@ -550,7 +689,7 @@ function trackJob(jobId) {
           const a = $('#job-download');
           a.classList.remove('hidden');
           a.textContent = `⤓ ${file}`;
-          a.href = `/api/projects/${state.projectId}/output?file=${encodeURIComponent(file)}&download=1`;
+          a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(file)}&download=1`;
         }
         loadOutputs().catch(() => {});
       }
@@ -576,7 +715,7 @@ $('#btn-cancel').addEventListener('click', () => {
 const fmtBytes = (n) => (n == null ? '—' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' kB');
 
 async function loadOutputs() {
-  const { files } = await api(`/api/projects/${state.projectId}/outputs`);
+  const { files } = await api(sceneUrl('/outputs'));
   const ul = $('#output-list');
   ul.innerHTML = '';
   if (!files.length) {
@@ -590,7 +729,7 @@ async function loadOutputs() {
     } else {
       const a = document.createElement('a');
       a.textContent = f.name;
-      a.href = `/api/projects/${state.projectId}/output?file=${encodeURIComponent(f.name)}&download=1`;
+      a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(f.name)}&download=1`;
       const size = document.createElement('span');
       size.className = 'size';
       size.textContent = fmtBytes(f.bytes);
@@ -658,7 +797,7 @@ function toggleAudition(relPath, btn) {
 
 /* -------------------------------- audio -------------------------------- */
 
-/* config.audio is the only part of project.json with real structure, and it
+/* config.audio is the only part of scene.json with real structure, and it
  * was previously invisible in the UI — you had to hand-edit JSON to see what a
  * film's timeline was. Edits are staged in state.audioDraft and written with
  * one PATCH, so a half-typed path never reaches disk. */
@@ -759,7 +898,7 @@ function renderAudioList() {
   syncAuditionButtons();
   const caps = FORMAT_CAPS[state.config?.output?.format] ?? FORMAT_CAPS.mp4;
   $('#audio-note').textContent = caps.audio
-    ? 'Paths are project-relative. Tracks mix without normalization and are trimmed/padded to the video length.'
+    ? 'Paths are scene-relative. Tracks mix without normalization and are trimmed/padded to the video length.'
     : `Note: ${state.config.output.format} cannot carry audio — these tracks are skipped at render time with a warning in the logs.`;
 }
 
@@ -768,9 +907,9 @@ async function loadAudioEditor() {
   $('#audio-msg').textContent = '';
   $('#audio-msg').classList.remove('warn');
   renderAudioList();
-  // Offer the project's audio assets as autocomplete for src.
+  // Offer the scene's audio assets as autocomplete for src.
   try {
-    const { files } = await api(`/api/projects/${state.projectId}/assets`);
+    const { files } = await api(sceneUrl('/assets'));
     const dl = $('#audio-asset-options');
     dl.innerHTML = '';
     for (const f of files.filter((x) => x.kind === 'audio')) {
@@ -794,7 +933,7 @@ $('#btn-save-audio').addEventListener('click', async () => {
   msg.classList.remove('warn');
   msg.textContent = '…';
   try {
-    const { config } = await api(`/api/projects/${state.projectId}/config`, {
+    const { config } = await api(sceneUrl('/config'), {
       method: 'PATCH',
       body: { patch: { audio: tracks } },
     });
@@ -814,12 +953,12 @@ $('#btn-save-audio').addEventListener('click', async () => {
 /* ------------------------------- assets ------------------------------- */
 
 const assetPreviewUrl = (rel) =>
-  `/preview/${state.projectId}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+  `/preview/${enc(state.sceneId)}/${rel.split('/').map(encodeURIComponent).join('/')}`;
 
 const KIND_GLYPH = { image: '🖼', audio: '♫', font: 'Aa', data: '⧉' };
 
 async function loadAssets() {
-  const { files } = await api(`/api/projects/${state.projectId}/assets`);
+  const { files } = await api(sceneUrl('/assets'));
   const ul = $('#asset-list');
   ul.innerHTML = '';
   if (!files.length) {
@@ -878,7 +1017,7 @@ async function loadAssets() {
       return b;
     };
     actions.append(
-      mkBtn('copy', 'copy the project-relative path (use this in your composition)', (e) => {
+      mkBtn('copy', 'copy the scene-relative path (use this in your composition)', (e) => {
         copyText(f.path);
         flashButton(e.target, '✓ copied');
       }),
@@ -896,7 +1035,7 @@ async function loadAssets() {
           );
         }
         try {
-          const res = await api(`/api/projects/${state.projectId}/asset/rename`, {
+          const res = await api(sceneUrl('/asset/rename'), {
             method: 'POST',
             body: { from: f.path, to, updateAudio },
           });
@@ -909,7 +1048,7 @@ async function loadAssets() {
     dl.className = 'a-btn download-link';
     dl.textContent = '⤓';
     dl.title = 'download';
-    dl.href = `/api/projects/${state.projectId}/asset?path=${encodeURIComponent(f.path)}&download=1`;
+    dl.href = `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent(f.path)}&download=1`;
     actions.appendChild(dl);
 
     li.append(thumb, name, badge, size, actions);
@@ -940,7 +1079,7 @@ function openAssetDeleteDialog(f) {
   refBox.classList.toggle('hidden', !f.audioRefs);
   if (f.audioRefs) {
     $('#asset-delete-count').textContent =
-      `${f.audioRefs} audio track${f.audioRefs === 1 ? '' : 's'} in this project reference it.`;
+      `${f.audioRefs} audio track${f.audioRefs === 1 ? '' : 's'} in this scene reference it.`;
     const ul = $('#asset-delete-list');
     ul.innerHTML = '';
     for (const t of (state.config?.audio ?? []).filter((t) => (t.src ?? '').toLowerCase() === f.path.toLowerCase())) {
@@ -963,7 +1102,7 @@ $('#asset-delete-form').addEventListener('submit', async (e) => {
   const updateAudio = Number(dlg.dataset.refs) > 0 && e.target.updateAudio.checked;
   try {
     const res = await api(
-      `/api/projects/${state.projectId}/asset?path=${encodeURIComponent(path)}${updateAudio ? '&updateAudio=1' : ''}`,
+      `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent(path)}${updateAudio ? '&updateAudio=1' : ''}`,
       { method: 'DELETE' },
     );
     dlg.close();
@@ -978,7 +1117,7 @@ async function uploadAssets(fileList) {
   for (const file of fileList) {
     try {
       const res = await fetch(
-        `/api/projects/${state.projectId}/asset?path=${encodeURIComponent('assets/' + file.name)}`,
+        `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent('assets/' + file.name)}`,
         { method: 'PUT', body: file },
       );
       if (!res.ok) {
@@ -1013,16 +1152,15 @@ $('#btn-copy-assets-path').addEventListener('click', (e) => {
   flashButton(e.target, '✓');
 });
 
-/* --------------------------- project actions --------------------------- */
+/* ---------------------------- scene actions ---------------------------- */
 
 $('#btn-copy-path').addEventListener('click', (e) => {
-  copyText(state.projectPath ?? '');
+  copyText(state.scenePath ?? '');
   flashButton(e.target, '✓');
 });
 
-$('#btn-delete-project').addEventListener('click', () => {
-  const proj = state.projects.find((p) => p.id === state.projectId);
-  $('#delete-summary').textContent = `Delete "${proj?.name ?? state.projectId}"?`;
+$('#btn-delete-scene').addEventListener('click', () => {
+  $('#delete-summary').textContent = `Remove "${state.config?.name ?? state.sceneId}" from its film?`;
   $('#delete-form').deleteFiles.checked = false;
   $('#delete-dialog').showModal();
 });
@@ -1030,18 +1168,14 @@ $('#btn-delete-cancel').addEventListener('click', () => $('#delete-dialog').clos
 $('#delete-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const deleteFiles = e.target.deleteFiles.checked ? 1 : 0;
+  const filmId = filmIdOf(state.sceneId);
   try {
-    await api(`/api/projects/${state.projectId}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
+    await api(`${sceneUrl()}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
     $('#delete-dialog').close();
-    stopPlayback();
-    stopJobPolling();
-    state.events?.close();
-    state.projectId = null;
-    state.projectPath = null;
-    state.config = null;
-    $('#workbench').classList.add('hidden');
-    $('#empty-state').classList.remove('hidden');
-    await loadProjects();
+    closeWorkbench();
+    delete state.filmScenes[filmId];
+    await loadFilmScenes(filmId).catch(() => {});
+    await loadWorkspaces();
   } catch (err) {
     toastError(err);
   }
@@ -1091,7 +1225,7 @@ $('#rd-workers').addEventListener('change', (e) => { e.target.dataset.touched = 
 
 /** Show/hide the inline settings page (v0.22 — was a modal dialog). Mirrors
  *  showVendorsPage: it owns the stage while open, and closing restores
- *  whatever the project state says should be there. */
+ *  whatever the scene state says should be there. */
 function showSettingsPage(open) {
   if (open) {
     if (vendorState.openCapability) showVendorsPage(null);
@@ -1100,9 +1234,9 @@ function showSettingsPage(open) {
     $('#workbench').classList.add('hidden');
     $('#empty-state').classList.add('hidden');
   } else {
-    $('#empty-state').classList.toggle('hidden', !!state.projectId);
-    $('#workbench').classList.toggle('hidden', !state.projectId);
-    if (state.projectId) fitPreview();
+    $('#empty-state').classList.toggle('hidden', !!state.sceneId || !!state.libraryWs);
+    $('#workbench').classList.toggle('hidden', !state.sceneId || !!state.libraryWs);
+    if (state.sceneId) fitPreview();
   }
   $('#settings-page').classList.toggle('hidden', !open);
   $('#btn-settings').classList.toggle('active', open);
@@ -1114,10 +1248,10 @@ $('#btn-settings').addEventListener('click', async () => {
   try {
     const { settings, environment } = await loadSettings();
     const f = $('#settings-form');
-    f.fps.value = settings.newProjectDefaults.fps;
-    f.width.value = settings.newProjectDefaults.width;
-    f.height.value = settings.newProjectDefaults.height;
-    f.durationInFrames.value = settings.newProjectDefaults.durationInFrames;
+    f.fps.value = settings.newSceneDefaults.fps;
+    f.width.value = settings.newSceneDefaults.width;
+    f.height.value = settings.newSceneDefaults.height;
+    f.durationInFrames.value = settings.newSceneDefaults.durationInFrames;
     f.defaultWorkers.value = String(settings.render.defaultWorkers);
     f.ffmpegPath.value = settings.ffmpeg.path ?? '';
     f.ffmpegCrf.value = settings.ffmpeg.defaultCrf ?? '';
@@ -1137,7 +1271,7 @@ $('#btn-settings').addEventListener('click', async () => {
       dl.append(dt, dd);
     };
     row('data dir', environment.dataDir);
-    row('projects root', environment.projectsRoot);
+    row('workspaces root', environment.workspacesRoot);
     row('settings file', environment.settingsPath);
     for (const [k, v] of Object.entries(environment.env)) row(k, v);
     showSettingsPage(true);
@@ -1153,7 +1287,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
   msg.textContent = '…';
   try {
     const patch = {
-      newProjectDefaults: {
+      newSceneDefaults: {
         fps: Number(f.fps.value),
         width: Number(f.width.value),
         height: Number(f.height.value),
@@ -1480,9 +1614,9 @@ function showVendorsPage(capability) {
     $('#empty-state').classList.add('hidden');
     stopPlayback();
   } else {
-    $('#empty-state').classList.toggle('hidden', !!state.projectId);
-    $('#workbench').classList.toggle('hidden', !state.projectId);
-    if (state.projectId) fitPreview();
+    $('#empty-state').classList.toggle('hidden', !!state.sceneId || !!state.libraryWs);
+    $('#workbench').classList.toggle('hidden', !state.sceneId || !!state.libraryWs);
+    if (state.sceneId) fitPreview();
   }
 }
 
@@ -2108,82 +2242,32 @@ for (const tab of document.querySelectorAll('.tab')) {
 
 /* -------------------------------- films -------------------------------- */
 
-/* Saved films (the film editor's documents). The rail lists them; clicking
- * one opens /film.html?id=… — the editor is its own page so the workbench
- * stays a single-project surface. */
+/* --------------------------- new film / scene -------------------------- */
 
-async function loadFilms() {
-  let films = [];
-  try {
-    ({ films } = await api('/api/films'));
-  } catch { /* older server: hide the section silently */ }
-  const ul = $('#film-list');
-  ul.innerHTML = '';
-  if (!films.length) {
-    ul.innerHTML = '<li class="dim film-empty">no films yet — “+ new” combines scene projects</li>';
-    return;
-  }
-  for (const f of films) {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'p-name';
-    name.textContent = f.name;
-    name.title = `${f.name} — open the film editor`;
-    const meta = document.createElement('span');
-    meta.className = 'p-meta';
-    meta.textContent = `${f.scenes}sc`;
-    const del = document.createElement('button');
-    del.className = 'film-del';
-    del.textContent = '✕';
-    del.title = 'delete this film (the scene projects are untouched)';
-    del.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Delete film "${f.name}"?\n\nScene projects and rendered files are untouched — only the film definition goes.`)) return;
-      try {
-        await api(`/api/films/${f.id}`, { method: 'DELETE' });
-        loadFilms();
-      } catch (err) { toastError(err); }
-    });
-    li.append(name, meta, del);
-    li.addEventListener('click', () => { location.href = `/film.html?id=${f.id}`; });
-    ul.appendChild(li);
-  }
-}
+/* A film is the container a video is authored in; the timeline itself is
+ * edited on /film.html. Creating one here only needs a name and the scene
+ * dimensions every scene inside will inherit. */
 
-$('#btn-new-film').addEventListener('click', () => $('#new-film-dialog').showModal());
-$('#btn-new-film-cancel').addEventListener('click', () => $('#new-film-dialog').close());
-$('#new-film-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    const { film } = await api('/api/films', {
-      method: 'POST',
-      body: { name: e.target.name.value, createOutputProject: true },
-    });
-    location.href = `/film.html?id=${film.id}`;
-  } catch (err) {
-    toastError(err);
-  }
-});
-
-/* ---------------------------- new project ----------------------------- */
-
-$('#btn-new').addEventListener('click', () => {
-  const d = state.settings?.newProjectDefaults;
+let newFilmWorkspace = null;
+function openNewFilmDialog(wsId) {
+  newFilmWorkspace = wsId;
+  const d = state.settings?.newSceneDefaults;
+  const f = $('#new-film-form');
   if (d) {
-    const f = $('#new-form');
     f.width.value = d.width;
     f.height.value = d.height;
     f.fps.value = d.fps;
     f.durationInFrames.value = d.durationInFrames;
   }
-  $('#new-dialog').showModal();
-});
-$('#btn-new-cancel').addEventListener('click', () => $('#new-dialog').close());
-$('#new-form').addEventListener('submit', async (e) => {
+  $('#new-film-workspace').textContent = wsId;
+  $('#new-film-dialog').showModal();
+}
+$('#btn-new-film-cancel').addEventListener('click', () => $('#new-film-dialog').close());
+$('#new-film-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
   try {
-    const proj = await api('/api/projects', {
+    const { film } = await api(`/api/workspaces/${enc(newFilmWorkspace)}/films`, {
       method: 'POST',
       body: {
         name: f.name.value,
@@ -2193,27 +2277,140 @@ $('#new-form').addEventListener('submit', async (e) => {
         durationInFrames: Number(f.durationInFrames.value),
       },
     });
-    $('#new-dialog').close();
+    $('#new-film-dialog').close();
     f.reset();
-    await loadProjects();
-    selectProject(proj.id);
+    location.href = `/film.html?id=${enc(film.id)}`;
   } catch (err) {
     toastError(err);
   }
+});
+
+/* A scene inherits the film's sceneDefaults, so the dialog asks only for a
+ * name and an optional duration — diverging width/fps would break the film's
+ * lossless concat, and is left to the config tab where the warning is. */
+
+let newSceneFilm = null;
+function openNewSceneDialog(filmId) {
+  newSceneFilm = filmId;
+  $('#new-scene-film').textContent = filmId;
+  $('#new-scene-dialog').showModal();
+}
+$('#btn-new-scene-cancel').addEventListener('click', () => $('#new-scene-dialog').close());
+$('#new-scene-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const duration = Number(f.durationInFrames.value);
+  try {
+    const scene = await api(`/api/films/${enc(newSceneFilm)}/scenes`, {
+      method: 'POST',
+      body: {
+        name: f.name.value,
+        ...(duration > 0 ? { durationInFrames: duration } : {}),
+      },
+    });
+    $('#new-scene-dialog').close();
+    f.reset();
+    delete state.filmScenes[newSceneFilm];
+    await loadFilmScenes(newSceneFilm).catch(() => {});
+    await loadWorkspaces();
+    await selectScene(scene.id);
+  } catch (err) {
+    toastError(err);
+  }
+});
+
+/* ---------------------------- shared library --------------------------- */
+
+/* The workspace library is the human's half of the asset story: drop large
+ * files here (a 500 MB plate, a licensed soundtrack) and the workspace's
+ * agent can pull them into any scene with use_shared_asset — no base64, no
+ * 25 MB tool cap. It is a page rather than a tab because it belongs to the
+ * workspace, not to whichever scene happens to be open. */
+
+function showLibraryPage(wsId) {
+  state.libraryWs = wsId;
+  $('#library-page').classList.toggle('hidden', !wsId);
+  if (wsId) {
+    $('#workbench').classList.add('hidden');
+    $('#empty-state').classList.add('hidden');
+  } else {
+    $('#workbench').classList.toggle('hidden', !state.sceneId);
+    $('#empty-state').classList.toggle('hidden', !!state.sceneId);
+  }
+  renderTree();
+}
+
+async function openLibrary(wsId) {
+  stopPlayback();
+  stopAudition();
+  if (vendorState.openCapability) showVendorsPage(null);
+  if (state.settingsOpen) showSettingsPage(false);
+  showLibraryPage(wsId);
+  const ws = state.tree.find((w) => w.id === wsId);
+  $('#library-title').textContent = `${ws?.name ?? wsId} — shared library`;
+  $('#library-path').textContent = ws ? `${ws.path}${ws.path.includes('\\') ? '\\' : '/'}library` : '';
+  await refreshLibrary();
+}
+
+async function refreshLibrary() {
+  const ws = state.libraryWs;
+  if (!ws) return;
+  const tbody = $('#library-rows');
+  tbody.innerHTML = '';
+  let files = [];
+  try { ({ files } = await api(`/api/workspaces/${enc(ws)}/library`)); }
+  catch (err) { return toastError(err); }
+  $('#library-empty').classList.toggle('hidden', files.length > 0);
+  for (const f of files) {
+    const tr = document.createElement('tr');
+    tr.append(el('td', 'lib-path', f.path), el('td', null, f.kind),
+      el('td', 'num', fmtBytes(f.bytes)), el('td', 'dim', (f.mtime ?? '').slice(0, 16).replace('T', ' ')));
+    const actions = el('td', 'lib-actions');
+    const dl = el('a', 'ghost tiny', 'download');
+    dl.href = `/api/workspaces/${enc(ws)}/library/file?path=${enc(f.path)}&download=1`;
+    const del = el('button', 'ghost tiny danger', 'delete');
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete "${f.path}" from the library?\n\nScenes that already pulled it in keep their copy.`)) return;
+      try {
+        await api(`/api/workspaces/${enc(ws)}/library/file?path=${enc(f.path)}`, { method: 'DELETE' });
+        await refreshLibrary();
+        await loadWorkspaces();
+      } catch (err) { toastError(err); }
+    });
+    actions.append(dl, del);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+}
+
+$('#btn-library-close').addEventListener('click', () => showLibraryPage(null));
+$('#library-upload').addEventListener('change', async (e) => {
+  const ws = state.libraryWs;
+  const files = [...e.target.files];
+  e.target.value = ''; // let the same file be re-picked after a fix
+  if (!ws || !files.length) return;
+  // A subfolder prefix keeps a big library navigable; it is optional and the
+  // server re-checks the path, so a typo fails safely.
+  const folder = ($('#library-folder').value || '').trim().replace(/^\/+|\/+$/g, '');
+  for (const file of files) {
+    const rel = folder ? `${folder}/${file.name}` : file.name;
+    try {
+      await fetch(`/api/workspaces/${enc(ws)}/library/file?path=${enc(rel)}`, { method: 'PUT', body: file })
+        .then(async (r) => { if (!r.ok) throw new Error((await r.json()).message ?? r.statusText); });
+    } catch (err) { toastError(err); }
+  }
+  await refreshLibrary();
+  await loadWorkspaces();
 });
 
 /* -------------------------------- boot -------------------------------- */
 
 checkPrereqs();
 loadSettings().catch(() => {});
-loadProjects()
-  .then(() => {
-    // Deep link from the film editor's "open project ↗".
-    const deep = new URLSearchParams(location.search).get('project');
-    if (deep && state.projects.some((p) => p.id === deep && !p.missing)) {
-      setRailTab('projects'); // the highlight should be visible where you land
-      selectProject(deep);
-    }
+loadWorkspaces()
+  .then(async () => {
+    // Deep link from the film editor's "open scene ↗".
+    const deep = new URLSearchParams(location.search).get('scene');
+    if (deep) await selectScene(deep).catch(toastError);
   })
   .catch((e) => console.error(e));
-loadFilms().catch(() => {});

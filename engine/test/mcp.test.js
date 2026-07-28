@@ -77,17 +77,41 @@ const callJson = async (name, args = {}) => {
   return { isError: !!res.isError, data: JSON.parse(text), content: res.content };
 };
 
+/**
+ * v0.20: a scene lives inside a film, so the old one-call create_project is
+ * now create_film + create_scene. Most tests just want "a scene with these
+ * dimensions"; this gives them one, in a film of its own so their configs
+ * cannot collide with another test's.
+ *
+ * @returns the create_scene result, whose `scene` field is the "<film>/<scene>" id
+ */
+let filmCounter = 0;
+const makeScene = async (call, { name, ...dims }) => {
+  const film = await call('create_film', { name: `${name} Film ${++filmCounter}`, ...dims });
+  assert.equal(film.isError, false, JSON.stringify(film.data));
+  const scene = await call('create_scene', { film: film.data.film, name, ...dims });
+  assert.equal(scene.isError, false, JSON.stringify(scene.data));
+  return scene;
+};
+/** The same, on the shared client. */
+const newScene = (opts) => makeScene((n, a) => callJson(n, a), opts);
+/** create_scene's result id, for tools that take a target. */
+const sceneOf = (res) => res.data.scene;
+
 test('mcp: exposes the full spec tool surface', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { tools } = await client.listTools();
   const names = tools.map((x) => x.name).sort();
   for (const required of [
-    'list_projects', 'create_project', 'get_project', 'read_composition_file',
+    // v0.20 storage model: workspace → film → scene
+    'get_workspace', 'list_films', 'create_film', 'get_film', 'update_film', 'remove_film',
+    'create_scene', 'get_scene', 'remove_scene', 'update_scene_config',
+    'list_shared_assets', 'use_shared_asset',
+    'read_composition_file',
     'write_composition_file', 'capture_preview_frame', 'render',
     'get_render_status', 'cancel_render', 'list_render_jobs', 'get_logs',
-    'update_project_config',
     // new in v0.5
-    'render_still', 'write_asset_file', 'remove_project',
+    'render_still', 'write_asset_file',
     // new in v0.6 (text-to-speech)
     'synthesize_speech', 'list_voices',
     // new in v0.7 (3D libraries)
@@ -124,55 +148,71 @@ test('mcp: resources include frame-api reference', async (t) => {
   assert.match(doc.contents[0].text, /registerComposition|setFrame/);
 });
 
-let projectId;
+let sceneId;
 
-test('mcp: create_project scaffolds and lists', async (t) => {
+test('mcp: create_film + create_scene scaffold, and the workspace lists them', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { isError, data } = await callJson('create_project', {
+  const film = await callJson('create_film', {
     name: 'Agent Demo', fps: 30, width: 320, height: 240, durationInFrames: 20,
   });
+  assert.equal(film.isError, false, JSON.stringify(film.data));
+  assert.equal(film.data.film, 'agent-demo', 'the film id is the slug of its name');
+  assert.deepEqual(film.data.sceneDefaults, { fps: 30, width: 320, height: 240, durationInFrames: 20 });
+
+  const { isError, data } = await callJson('create_scene', { film: film.data.film, name: 'Main' });
   assert.equal(isError, false, JSON.stringify(data));
-  projectId = data.id;
+  sceneId = data.scene;
+  assert.equal(sceneId, 'agent-demo/main', 'scene ids are film/scene, workspace-local');
+  // The film's sceneDefaults are inherited, which is what keeps scenes concatenable.
+  assert.equal(data.config.width, 320);
+  assert.equal(data.config.durationInFrames, 20);
   assert.ok(data.files.some((f) => f.path === 'composition.js'));
   assert.ok(fs.existsSync(path.join(data.path, 'frame-api.js')));
 
-  const list = await callJson('list_projects');
-  assert.equal(list.data.projects.length, 1);
+  const list = await callJson('list_films');
+  assert.equal(list.data.films.length, 1);
+  assert.equal(list.data.films[0].film, 'agent-demo');
+  assert.equal(list.data.films[0].sceneLayout.length, 1);
+
+  // The workspace is this server's own — every id above is relative to it.
+  const ws = await callJson('get_workspace');
+  assert.equal(ws.data.workspace, 'default');
+  assert.equal(ws.data.films.length, 1);
 });
 
 test('mcp: write with syntax error fails fast with structured code', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { isError, data } = await callJson('write_composition_file', {
-    projectId, path: 'composition.js', content: 'function ( { nope',
+    scene: sceneId, path: 'composition.js', content: 'function ( { nope',
   });
   assert.equal(isError, true);
   assert.equal(data.code, 'syntax_error');
   assert.match(data.message, /Syntax error/);
 });
 
-test('mcp: path traversal rejected with path_outside_project', async (t) => {
+test('mcp: path traversal rejected with path_not_allowed', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { isError, data } = await callJson('write_composition_file', {
-    projectId, path: '../../evil.js', content: '1',
+    scene: sceneId, path: '../../evil.js', content: '1',
   });
   assert.equal(isError, true);
-  assert.equal(data.code, 'path_outside_project');
+  assert.equal(data.code, 'path_not_allowed');
 });
 
 test('mcp: read/write round trip', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const ok = await callJson('write_composition_file', {
-    projectId, path: 'composition.js',
+    scene: sceneId, path: 'composition.js',
     content: 'MotionStudio.registerComposition(function (f) { /* agent edit */ });\n',
   });
   assert.equal(ok.isError, false);
-  const read = await callJson('read_composition_file', { projectId, path: 'composition.js' });
+  const read = await callJson('read_composition_file', { scene: sceneId, path: 'composition.js' });
   assert.match(read.data.content, /agent edit/);
 });
 
 test('mcp: capture_preview_frame returns an image content block', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const res = await client.callTool({ name: 'capture_preview_frame', arguments: { projectId, frame: 3 } });
+  const res = await client.callTool({ name: 'capture_preview_frame', arguments: { scene: sceneId, frame: 3 } });
   assert.ok(!res.isError, JSON.stringify(res.content));
   const img = res.content.find((c) => c.type === 'image');
   assert.equal(img.mimeType, 'image/png');
@@ -182,14 +222,14 @@ test('mcp: capture_preview_frame returns an image content block', async (t) => {
 
 test('mcp: out-of-range preview frame → invalid_config', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { isError, data } = await callJson('capture_preview_frame', { projectId, frame: 999 });
+  const { isError, data } = await callJson('capture_preview_frame', { scene: sceneId, frame: 999 });
   assert.equal(isError, true);
   assert.equal(data.code, 'invalid_config');
 });
 
 test('mcp: render → status poll → done → logs', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const start = await callJson('render', { projectId, frameRange: [0, 9] });
+  const start = await callJson('render', { scene: sceneId, frameRange: [0, 9] });
   assert.equal(start.isError, false, JSON.stringify(start.data));
   const { jobId, outputPath, totalFrames } = start.data;
   assert.equal(totalFrames, 10);
@@ -212,21 +252,47 @@ test('mcp: render → status poll → done → logs', async (t) => {
   assert.equal(jobsList[0].jobId, jobId);
 });
 
-test('mcp: unknown project → project_not_found', async (t) => {
+test('mcp: unknown scene → scene_not_found; a malformed id → invalid_id', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { isError, data } = await callJson('get_project', { projectId: 'nope' });
+  const { isError, data } = await callJson('get_scene', { scene: 'no-film/no-scene' });
   assert.equal(isError, true);
-  assert.equal(data.code, 'project_not_found');
+  assert.equal(data.code, 'scene_not_found');
+  // A bare word is not a scene id at all — that is a different mistake.
+  const malformed = await callJson('get_scene', { scene: 'nope' });
+  assert.equal(malformed.data.code, 'invalid_id');
+});
+
+test('mcp: a server cannot address another workspace, even by guessing its slug', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // Ids are workspace-LOCAL: this server qualifies every one with its own
+  // workspace before touching the store. A fully-qualified id from another
+  // workspace therefore has one segment too many and is refused as malformed,
+  // rather than resolving into someone else's tree. This is the isolation
+  // guarantee that lets two agents work at once.
+  const otherFilm = await callJson('get_film', { film: 'other-workspace/their-film' });
+  assert.equal(otherFilm.isError, true);
+  assert.equal(otherFilm.data.code, 'invalid_id');
+
+  const otherScene = await callJson('get_scene', { scene: 'other-workspace/their-film/their-scene' });
+  assert.equal(otherScene.isError, true);
+  assert.equal(otherScene.data.code, 'invalid_id');
+
+  // Traversal through an id is refused by the same slug rule.
+  for (const bad of ['../escape', 'a/../../escape', 'C:/Windows']) {
+    const res = await callJson('get_film', { film: bad });
+    assert.equal(res.isError, true, `expected refusal for ${bad}`);
+    assert.equal(res.data.code, 'invalid_id', `expected invalid_id for ${bad}`);
+  }
 });
 
 /* ----------------------------- v0.5 tools ----------------------------- */
 
 test('mcp: render returns state and queues concurrent submissions (v0.5)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const a = await callJson('render', { projectId });
+  const a = await callJson('render', { scene: sceneId });
   assert.equal(a.isError, false, JSON.stringify(a.data));
   assert.equal(a.data.state, 'running');
-  const b = await callJson('render', { projectId });
+  const b = await callJson('render', { scene: sceneId });
   assert.equal(b.isError, false, JSON.stringify(b.data));
   assert.equal(b.data.state, 'queued');
   assert.equal(b.data.queuePosition, 1);
@@ -245,43 +311,43 @@ test('mcp: render returns state and queues concurrent submissions (v0.5)', async
 
 test('mcp: render_still writes a PNG into out/ and rejects bad filenames', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const ok1 = await callJson('render_still', { projectId, frame: 3 });
+  const ok1 = await callJson('render_still', { scene: sceneId, frame: 3 });
   assert.equal(ok1.isError, false, JSON.stringify(ok1.data));
   assert.ok(ok1.data.outputPath.endsWith('still-3.png'));
   assert.ok(fs.existsSync(ok1.data.outputPath));
-  const bad = await callJson('render_still', { projectId, frame: 0, outputFilename: '../evil.png' });
+  const bad = await callJson('render_still', { scene: sceneId, frame: 0, outputFilename: '../evil.png' });
   assert.equal(bad.isError, true);
-  assert.equal(bad.data.code, 'path_outside_project');
+  assert.equal(bad.data.code, 'path_not_allowed');
 });
 
 test('mcp: write_asset_file round-trips base64 and enforces the sandbox', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const bytes = Buffer.from('{"brand":"#f9564f"}', 'utf8');
   const w = await callJson('write_asset_file', {
-    projectId, path: 'assets/brand.json', contentBase64: bytes.toString('base64'),
+    target: sceneId, path: 'assets/brand.json', contentBase64: bytes.toString('base64'),
   });
   assert.equal(w.isError, false, JSON.stringify(w.data));
   assert.equal(w.data.written.bytes, bytes.length);
-  const r = await callJson('read_composition_file', { projectId, path: 'assets/brand.json' });
+  const r = await callJson('read_composition_file', { scene: sceneId, path: 'assets/brand.json' });
   assert.equal(r.data.content, bytes.toString('utf8'));
   const outside = await callJson('write_asset_file', {
-    projectId, path: 'brand.json', contentBase64: bytes.toString('base64'),
+    target: sceneId, path: 'brand.json', contentBase64: bytes.toString('base64'),
   });
   assert.equal(outside.isError, true);
-  assert.equal(outside.data.code, 'path_outside_project');
+  assert.equal(outside.data.code, 'path_not_allowed');
 });
 
 test('mcp: list_assets reports kind and audio reference counts (v0.15)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const wav = Buffer.alloc(1024, 3).toString('base64');
-  await callJson('write_asset_file', { projectId, path: 'assets/bed.wav', contentBase64: wav });
-  await callJson('write_asset_file', { projectId, path: 'assets/spare.wav', contentBase64: wav });
-  await callJson('update_project_config', {
-    projectId,
+  await callJson('write_asset_file', { target: sceneId, path: 'assets/bed.wav', contentBase64: wav });
+  await callJson('write_asset_file', { target: sceneId, path: 'assets/spare.wav', contentBase64: wav });
+  await callJson('update_scene_config', {
+    scene: sceneId,
     patch: { audio: [{ src: 'assets/bed.wav', startInFrames: 0, gainDb: -4 }] },
   });
 
-  const list = await callJson('list_assets', { projectId });
+  const list = await callJson('list_assets', { target: sceneId });
   assert.equal(list.isError, false, JSON.stringify(list.data));
   const bed = list.data.files.find((f) => f.path === 'assets/bed.wav');
   const spare = list.data.files.find((f) => f.path === 'assets/spare.wav');
@@ -294,89 +360,99 @@ test('mcp: list_assets reports kind and audio reference counts (v0.15)', async (
 test('mcp: rename_asset repoints audio tracks and refuses to clobber (v0.15)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const renamed = await callJson('rename_asset', {
-    projectId, from: 'assets/bed.wav', to: 'assets/audio/bed.wav', updateAudio: true,
+    target: sceneId, from: 'assets/bed.wav', to: 'assets/audio/bed.wav', updateAudio: true,
   });
   assert.equal(renamed.isError, false, JSON.stringify(renamed.data));
   assert.equal(renamed.data.audioRefs, 1);
   assert.equal(renamed.data.audioTracksUpdated, 1);
-  assert.equal(renamed.data.config.audio[0].src, 'assets/audio/bed.wav');
-  assert.equal(renamed.data.config.audio[0].gainDb, -4, 'track settings survive the move');
+  assert.equal(renamed.data.audio[0].src, 'assets/audio/bed.wav');
+  assert.equal(renamed.data.audio[0].gainDb, -4, 'track settings survive the move');
 
   const clobber = await callJson('rename_asset', {
-    projectId, from: 'assets/spare.wav', to: 'assets/audio/bed.wav',
+    target: sceneId, from: 'assets/spare.wav', to: 'assets/audio/bed.wav',
   });
   assert.equal(clobber.isError, true);
   assert.equal(clobber.data.code, 'invalid_config');
 
   const escape = await callJson('rename_asset', {
-    projectId, from: 'assets/spare.wav', to: '../escaped.wav',
+    target: sceneId, from: 'assets/spare.wav', to: '../escaped.wav',
   });
   assert.equal(escape.isError, true);
-  assert.equal(escape.data.code, 'path_outside_project');
+  assert.equal(escape.data.code, 'path_not_allowed');
 });
 
 test('mcp: delete_asset reports references and only strips tracks when asked (v0.15)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   // Without the flag the track survives — but the agent is told it now dangles.
-  const kept = await callJson('delete_asset', { projectId, path: 'assets/audio/bed.wav' });
+  const kept = await callJson('delete_asset', { target: sceneId, path: 'assets/audio/bed.wav' });
   assert.equal(kept.isError, false, JSON.stringify(kept.data));
   assert.equal(kept.data.deleted, true);
   assert.equal(kept.data.audioRefs, 1);
   assert.equal(kept.data.audioTracksRemoved, 0);
-  const still = await callJson('get_project', { projectId });
+  const still = await callJson('get_scene', { scene: sceneId });
   assert.equal(still.data.config.audio.length, 1, 'reference deliberately left in place');
 
   // Restore it and delete again, this time cleaning the timeline.
   await callJson('write_asset_file', {
-    projectId, path: 'assets/audio/bed.wav', contentBase64: Buffer.alloc(512, 9).toString('base64'),
+    target: sceneId, path: 'assets/audio/bed.wav', contentBase64: Buffer.alloc(512, 9).toString('base64'),
   });
   const cleaned = await callJson('delete_asset', {
-    projectId, path: 'assets/audio/bed.wav', updateAudio: true,
+    target: sceneId, path: 'assets/audio/bed.wav', updateAudio: true,
   });
   assert.equal(cleaned.data.audioTracksRemoved, 1);
-  assert.deepEqual(cleaned.data.config.audio, []);
+  assert.deepEqual(cleaned.data.audio, []);
 
-  const missing = await callJson('delete_asset', { projectId, path: 'assets/audio/bed.wav' });
+  const missing = await callJson('delete_asset', { target: sceneId, path: 'assets/audio/bed.wav' });
   assert.equal(missing.isError, true);
   assert.equal(missing.data.code, 'file_not_found');
 
-  const outside = await callJson('delete_asset', { projectId, path: 'composition.js' });
+  const outside = await callJson('delete_asset', { target: sceneId, path: 'composition.js' });
   assert.equal(outside.isError, true);
-  assert.equal(outside.data.code, 'path_outside_project');
-  const proj = await callJson('get_project', { projectId });
+  assert.equal(outside.data.code, 'path_not_allowed');
+  const proj = await callJson('get_scene', { scene: sceneId });
   assert.ok(fs.existsSync(path.join(proj.data.path, 'composition.js')), 'sandbox kept the source file');
 });
 
-test('mcp: remove_project unregisters (files kept by default)', async (t) => {
+test('mcp: remove_scene drops it from the film (files kept by default)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const made = await callJson('create_project', { name: 'Disposable', fps: 30, width: 320, height: 240, durationInFrames: 10 });
-  const rm = await callJson('remove_project', { projectId: made.data.id });
+  const made = await newScene({ name: 'Disposable', fps: 30, width: 320, height: 240, durationInFrames: 10 });
+  const rm = await callJson('remove_scene', { scene: sceneOf(made) });
   assert.equal(rm.isError, false, JSON.stringify(rm.data));
-  assert.equal(rm.data.unregistered, true);
+  assert.equal(rm.data.removed, true);
   assert.equal(rm.data.filesDeleted, false);
-  assert.ok(fs.existsSync(path.join(made.data.path, 'project.json')));
-  const gone = await callJson('get_project', { projectId: made.data.id });
+  assert.ok(fs.existsSync(path.join(made.data.path, 'scene.json')), 'the folder stays');
+  // It left the film's play order…
+  const info = await callJson('get_film', { film: sceneOf(made).split('/')[0] });
+  assert.deepEqual(info.data.scenes, [], 'dropped from the play order');
+  // …but the folder is still readable, which is what "unlisted" means: nothing
+  // an agent made disappears without an explicit deleteFiles.
+  const still = await callJson('get_scene', { scene: sceneOf(made) });
+  assert.equal(still.isError, false, JSON.stringify(still.data));
+
+  const purged = await callJson('remove_scene', { scene: sceneOf(made), deleteFiles: true });
+  assert.equal(purged.data.filesDeleted, true);
+  const gone = await callJson('get_scene', { scene: sceneOf(made) });
   assert.equal(gone.isError, true);
-  assert.equal(gone.data.code, 'project_not_found');
+  assert.equal(gone.data.code, 'scene_not_found');
 });
 
-test('mcp: update_project_config switches format and fixes the filename extension (v0.5)', async (t) => {
+test('mcp: update_scene_config switches format and fixes the filename extension (v0.5)', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { isError, data } = await callJson('update_project_config', {
-    projectId, patch: { output: { format: 'webm', transparent: true } },
+  const { isError, data } = await callJson('update_scene_config', {
+    scene: sceneId, patch: { output: { format: 'webm', transparent: true } },
   });
   assert.equal(isError, false, JSON.stringify(data));
   assert.equal(data.config.output.format, 'webm');
   assert.equal(data.config.output.transparent, true);
   assert.ok(data.config.output.filename.endsWith('.webm'), data.config.output.filename);
   // transparent mp4 is rejected by validation
-  const bad = await callJson('update_project_config', {
-    projectId, patch: { output: { format: 'mp4', transparent: true } },
+  const bad = await callJson('update_scene_config', {
+    scene: sceneId, patch: { output: { format: 'mp4', transparent: true } },
   });
   assert.equal(bad.isError, true);
   assert.equal(bad.data.code, 'invalid_config');
   // restore mp4 for any later tests
-  await callJson('update_project_config', { projectId, patch: { output: { format: 'mp4', transparent: false } } });
+  await callJson('update_scene_config', { scene: sceneId, patch: { output: { format: 'mp4', transparent: false } } });
 });
 
 /* --------------------------- v0.6 text-to-speech --------------------------- */
@@ -384,7 +460,7 @@ test('mcp: update_project_config switches format and fixes the filename extensio
 test('mcp: synthesize_speech attach mode adds an audio track and reports frames', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const res = await callJson('synthesize_speech', {
-    projectId, text: 'Welcome to Motion Studio.', voice: 'Microsoft David Desktop', mode: 'attach',
+    target: sceneId, text: 'Welcome to Motion Studio.', voice: 'Microsoft David Desktop', mode: 'attach',
   });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, true);
@@ -394,7 +470,7 @@ test('mcp: synthesize_speech attach mode adds an audio track and reports frames'
   assert.equal(res.data.durationInFrames, 30);
   assert.equal(res.data.fps, 30);
 
-  const proj = await callJson('get_project', { projectId });
+  const proj = await callJson('get_scene', { scene: sceneId });
   assert.ok(fs.existsSync(path.join(proj.data.path, 'assets', 'narration-1.wav')));
   assert.ok(
     (proj.data.config.audio ?? []).some((tk) => tk.src === 'assets/narration-1.wav'),
@@ -404,18 +480,18 @@ test('mcp: synthesize_speech attach mode adds an audio track and reports frames'
 
 test('mcp: synthesize_speech asset-only mode writes a WAV but leaves config.audio unchanged', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const before = await callJson('get_project', { projectId });
+  const before = await callJson('get_scene', { scene: sceneId });
   const beforeCount = (before.data.config.audio ?? []).length;
 
   const res = await callJson('synthesize_speech', {
-    projectId, text: 'Second clip, not attached.', voice: 'Microsoft Zira Desktop', mode: 'asset-only',
+    target: sceneId, text: 'Second clip, not attached.', voice: 'Microsoft Zira Desktop', mode: 'asset-only',
   });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, false);
-  assert.match(res.data.hint, /update_project_config/);
+  assert.match(res.data.hint, /update_scene_config/);
   assert.ok(Number.isInteger(res.data.durationInFrames));
 
-  const proj = await callJson('get_project', { projectId });
+  const proj = await callJson('get_scene', { scene: sceneId });
   assert.ok(fs.existsSync(path.join(proj.data.path, ...res.data.assetPath.split('/'))));
   assert.equal((proj.data.config.audio ?? []).length, beforeCount);
 });
@@ -426,7 +502,7 @@ test('mcp: sentenceTimings gap replaces vendor pacing and duration math adds up'
   // measure 4.0s — if the vendor's own trailing pad leaked in (the pre-v0.20
   // additive-gap bug), the clip would come out longer than clips + gaps.
   const res = await callJson('synthesize_speech', {
-    projectId, text: 'One. Two. Three.', voice: 'Microsoft David Desktop',
+    target: sceneId, text: 'One. Two. Three.', voice: 'Microsoft David Desktop',
     mode: 'asset-only', sentenceTimings: true, sentenceGapSeconds: 0.5,
   });
   assert.equal(res.isError, false, JSON.stringify(res.data));
@@ -444,7 +520,7 @@ test('mcp: sentenceTimings gap replaces vendor pacing and duration math adds up'
 test('mcp: deterministic flag is warned about, not dropped, on an unsupporting vendor', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const res = await callJson('synthesize_speech', {
-    projectId, text: 'Pinned take.', voice: 'Microsoft David Desktop',
+    target: sceneId, text: 'Pinned take.', voice: 'Microsoft David Desktop',
     mode: 'asset-only', deterministic: true,
   });
   assert.equal(res.isError, false, JSON.stringify(res.data));
@@ -458,10 +534,10 @@ test('mcp: deterministic flag is warned about, not dropped, on an unsupporting v
 test('mcp: synthesize_speech rejects an assetPath outside assets/', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const res = await callJson('synthesize_speech', {
-    projectId, text: 'x', voice: 'Microsoft David Desktop', assetPath: '../evil.wav',
+    target: sceneId, text: 'x', voice: 'Microsoft David Desktop', assetPath: '../evil.wav',
   });
   assert.equal(res.isError, true);
-  assert.equal(res.data.code, 'path_outside_project');
+  assert.equal(res.data.code, 'path_not_allowed');
 });
 
 /* ---------------------------- v0.17 speech vendors -------------------------- */
@@ -483,6 +559,21 @@ test('mcp: list_vendors reports both capabilities and which vendor each will use
   const music = Object.fromEntries(data.music.vendors.map((v) => [v.id, v]));
   assert.equal(music.fluidsynth.available, true);
   assert.deepEqual(data.music.allVendors, ['node', 'fluidsynth']);
+
+  // The preference chain must actually reach the agent: a fallback nobody can
+  // see is the failure mode chains exist to avoid, and the tool description
+  // has always promised these fields (they were dropped in projection until
+  // v0.20). One-entry chains are the common case and must still report.
+  for (const cap of [data.speech, data.music]) {
+    assert.ok(Array.isArray(cap.chain), `chain missing: ${JSON.stringify(cap)}`);
+    assert.equal(cap.preferred, cap.chain[0]);
+    assert.equal(cap.fellBack, cap.active !== cap.preferred);
+    // priority is the 1-based rank in the chain, or null outside it.
+    for (const v of cap.vendors) {
+      const expected = cap.chain.includes(v.id) ? cap.chain.indexOf(v.id) + 1 : null;
+      assert.equal(v.priority, expected, `priority wrong for ${v.id}`);
+    }
+  }
 
   // Credentials are never echoed to an agent.
   assert.equal(JSON.stringify(data).includes('test-key'), false);
@@ -520,7 +611,7 @@ test('mcp: list_voices filters the azure catalogue and carries styles', async (t
 test('mcp: synthesize_speech can name the azure vendor per call', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { isError, data } = await callJson('synthesize_speech', {
-    projectId, text: 'The empire, in one breath.', vendor: 'azure', voice: 'en-US-AvaNeural',
+    target: sceneId, text: 'The empire, in one breath.', vendor: 'azure', voice: 'en-US-AvaNeural',
     style: 'newscast', mode: 'asset-only',
   });
   assert.equal(isError, false, JSON.stringify(data));
@@ -535,7 +626,7 @@ test('mcp: synthesize_speech can name the azure vendor per call', async (t) => {
 test('mcp: an unknown azure voice fails with unsupported_voice and suggestions', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { isError, data } = await callJson('synthesize_speech', {
-    projectId, text: 'x', vendor: 'azure', voice: 'en-US-NotAVoice', mode: 'asset-only',
+    target: sceneId, text: 'x', vendor: 'azure', voice: 'en-US-NotAVoice', mode: 'asset-only',
   });
   assert.equal(isError, true);
   assert.equal(data.code, 'unsupported_voice');
@@ -545,7 +636,7 @@ test('mcp: an unknown azure voice fails with unsupported_voice and suggestions',
 test('mcp: the system vendor reports the Azure-only options it ignored', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { data } = await callJson('synthesize_speech', {
-    projectId, text: 'plain', vendor: 'system', style: 'cheerful', mode: 'asset-only',
+    target: sceneId, text: 'plain', vendor: 'system', style: 'cheerful', mode: 'asset-only',
   });
   assert.equal(data.vendor, 'system');
   assert.match((data.warnings ?? []).join(' '), /Azure-only/);
@@ -616,7 +707,7 @@ test('mcp: prereq check honours settings.json ffmpeg.path', async () => {
   await withServer(
     { home: 'home-ffmpeg-settings', settings: { ffmpeg: { path: BOGUS_FFMPEG } } },
     async (call) => {
-      const res = await call('list_projects');
+      const res = await call('get_workspace');
       // If settings were ignored we would probe PATH instead — which on a machine
       // WITH ffmpeg installed would succeed and make this assertion fail.
       assert.equal(res.isError, true);
@@ -638,7 +729,7 @@ test('mcp: MOTION_STUDIO_FFMPEG overrides settings.json', async () => {
       env: { MOTION_STUDIO_FFMPEG: envPath },
     },
     async (call) => {
-      const res = await call('list_projects');
+      const res = await call('get_workspace');
       assert.equal(res.data.code, 'prereqs_missing');
       assert.equal(res.data.detail.ffmpeg.effectivePath, envPath);
       assert.equal(res.data.detail.ffmpeg.source, 'env');
@@ -649,7 +740,7 @@ test('mcp: MOTION_STUDIO_FFMPEG overrides settings.json', async () => {
 test('mcp: with no override the probe reports PATH as the source', async (t) => {
   if (haveFfmpeg) return t.skip('needs a machine without ffmpeg on PATH');
   await withServer({ home: 'home-ffmpeg-path' }, async (call) => {
-    const res = await call('list_projects');
+    const res = await call('get_workspace');
     assert.equal(res.data.code, 'prereqs_missing');
     assert.equal(res.data.detail.ffmpeg.source, 'PATH');
     assert.match(res.data.message, /on PATH/);
@@ -657,24 +748,31 @@ test('mcp: with no override the probe reports PATH as the source', async (t) => 
 });
 
 /* ------------------------ global settings reach the agent ------------------------ */
-// "Global Settings" in the Studio means global: a project an agent creates without
-// naming dimensions gets the user's defaults, and a render that doesn't name a
-// worker count gets theirs. An explicit argument still wins.
+// "Global Settings" in the Studio means global: a film an agent creates without
+// naming dimensions gets the user's defaults (as its sceneDefaults, which its
+// scenes then inherit), and a render that doesn't name a worker count gets
+// theirs. An explicit argument still wins.
 
-test('mcp: create_project and render honour the user\'s global settings', async (t) => {
+test('mcp: create_film/create_scene and render honour the user\'s global settings', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   await withServer(
     {
       home: 'home-globals',
       settings: {
-        newProjectDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 },
+        newSceneDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 },
         render: { defaultWorkers: 2 },
         ffmpeg: { defaultCrf: 18, defaultPreset: 'slow' },
       },
     },
     async (call) => {
-      const made = await call('create_project', { name: 'globals' });
-      assert.equal(made.isError, false);
+      // A film created with no dimensions takes the globals as its defaults…
+      const film = await call('create_film', { name: 'globals' });
+      assert.equal(film.isError, false, JSON.stringify(film.data));
+      assert.deepEqual(film.data.sceneDefaults, { fps: 24, width: 1280, height: 720, durationInFrames: 48 });
+
+      // …and its scenes inherit them.
+      const made = await call('create_scene', { film: film.data.film, name: 'globals' });
+      assert.equal(made.isError, false, JSON.stringify(made.data));
       assert.equal(made.data.config.fps, 24);
       assert.equal(made.data.config.width, 1280);
       assert.equal(made.data.config.height, 720);
@@ -683,16 +781,16 @@ test('mcp: create_project and render honour the user\'s global settings', async 
       assert.equal(made.data.config.output.crf, 18);
       assert.equal(made.data.config.output.preset, 'slow');
 
-      // An explicit argument beats the global; the rest still fill in.
-      const explicit = await call('create_project', { name: 'globals-explicit', fps: 60, width: 1920 });
+      // An explicit argument beats the inherited default; the rest still fill in.
+      const explicit = await call('create_scene', { film: film.data.film, name: 'globals-explicit', fps: 60, width: 1920 });
       assert.equal(explicit.data.config.fps, 60);
       assert.equal(explicit.data.config.width, 1920);
       assert.equal(explicit.data.config.height, 720);
 
       // render reports the worker count it actually used.
-      const started = await call('render', { projectId: made.data.id, frameRange: [0, 1], preflight: false });
+      const started = await call('render', { scene: made.data.scene, frameRange: [0, 1], preflight: false });
       assert.equal(started.data.workers, 2);
-      const named = await call('render', { projectId: made.data.id, frameRange: [0, 1], workers: 1, preflight: false });
+      const named = await call('render', { scene: made.data.scene, frameRange: [0, 1], workers: 1, preflight: false });
       assert.equal(named.data.workers, 1);
     },
   );
@@ -701,11 +799,11 @@ test('mcp: create_project and render honour the user\'s global settings', async 
 test('mcp: with no settings file the factory defaults still apply', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   await withServer({ home: 'home-no-settings' }, async (call) => {
-    const made = await call('create_project', { name: 'factory' });
+    const made = await makeScene(call, { name: 'factory' });
     assert.equal(made.data.config.fps, 30);
     assert.equal(made.data.config.width, 1920);
     assert.equal(made.data.config.durationInFrames, 150);
-    const started = await call('render', { projectId: made.data.id, frameRange: [0, 1], preflight: false });
+    const started = await call('render', { scene: made.data.scene, frameRange: [0, 1], preflight: false });
     assert.equal(started.data.workers, 1);
   });
 });
@@ -722,13 +820,13 @@ const MUSIC_SPEC = {
   ],
 };
 
-let musicProjectId;
+let musicSceneId;
 
 test('mcp: synthesize_music attach mode writes a WAV and adds an audio track', async () => {
-  const proj = await callJson('create_project', { name: 'Music MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
-  musicProjectId = proj.data.id;
+  const proj = await newScene({ name: 'Music MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+  musicSceneId = sceneOf(proj);
 
-  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, mode: 'attach', gainDb: -8 });
+  const res = await callJson('synthesize_music', { target: musicSceneId, spec: MUSIC_SPEC, mode: 'attach', gainDb: -8 });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, true);
   assert.equal(res.data.mode, 'attach');
@@ -741,7 +839,7 @@ test('mcp: synthesize_music attach mode writes a WAV and adds an audio track', a
   assert.equal(res.data.durationInFrames, 8);
   assert.equal(res.data.fps, 30);
 
-  const after = await callJson('get_project', { projectId: musicProjectId });
+  const after = await callJson('get_scene', { scene: musicSceneId });
   assert.ok(fs.existsSync(path.join(after.data.path, 'assets', 'music-1.wav')));
   const track = (after.data.config.audio ?? []).find((tk) => tk.src === 'assets/music-1.wav');
   assert.ok(track, JSON.stringify(after.data.config.audio));
@@ -749,24 +847,24 @@ test('mcp: synthesize_music attach mode writes a WAV and adds an audio track', a
 });
 
 test('mcp: synthesize_music asset-only mode writes a WAV but leaves config.audio unchanged', async () => {
-  const before = await callJson('get_project', { projectId: musicProjectId });
+  const before = await callJson('get_scene', { scene: musicSceneId });
   const beforeCount = (before.data.config.audio ?? []).length;
 
-  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, mode: 'asset-only' });
+  const res = await callJson('synthesize_music', { target: musicSceneId, spec: MUSIC_SPEC, mode: 'asset-only' });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, false);
-  assert.match(res.data.hint, /update_project_config/);
+  assert.match(res.data.hint, /update_scene_config/);
   assert.equal(res.data.assetPath, 'assets/music-2.wav');
 
-  const after = await callJson('get_project', { projectId: musicProjectId });
+  const after = await callJson('get_scene', { scene: musicSceneId });
   assert.ok(fs.existsSync(path.join(after.data.path, ...res.data.assetPath.split('/'))));
   assert.equal((after.data.config.audio ?? []).length, beforeCount);
 });
 
 test('mcp: synthesize_music rejects an assetPath outside assets/', async () => {
-  const res = await callJson('synthesize_music', { projectId: musicProjectId, spec: MUSIC_SPEC, assetPath: '../evil.wav' });
+  const res = await callJson('synthesize_music', { target: musicSceneId, spec: MUSIC_SPEC, assetPath: '../evil.wav' });
   assert.equal(res.isError, true);
-  assert.equal(res.data.code, 'path_outside_project');
+  assert.equal(res.data.code, 'path_not_allowed');
 });
 
 test('mcp: the node music vendor renders end-to-end with no exe at all', async (t) => {
@@ -801,8 +899,8 @@ test('mcp: the node music vendor renders end-to-end with no exe at all', async (
     assert.equal(byId.node.available, true, byId.node.error);
     assert.equal(byId.fluidsynth.available, false, 'the exe chain is deliberately absent here');
 
-    const proj = await call('create_project', { name: 'Node Music', fps: 30, width: 320, height: 240, durationInFrames: 20 });
-    const music = await call('synthesize_music', { projectId: proj.data.id, spec: MUSIC_SPEC, mode: 'attach' });
+    const proj = await makeScene(call, { name: 'Node Music', fps: 30, width: 320, height: 240, durationInFrames: 20 });
+    const music = await call('synthesize_music', { target: proj.data.scene, spec: MUSIC_SPEC, mode: 'attach' });
     assert.equal(music.isError, false, JSON.stringify(music.data));
     assert.equal(music.data.vendor, 'node');
     assert.equal(music.data.vendorSource, 'env');
@@ -834,9 +932,12 @@ test('mcp: synthesize_music returns music_unavailable when the toolchain is miss
   const badClient = new Client({ name: 'ms-test-client-no-music', version: '0.0.1' });
   await badClient.connect(badTransport);
   try {
-    const proj = await badClient.callTool({ name: 'create_project', arguments: { name: 'No Music', fps: 30 } });
-    const projId = JSON.parse(proj.content.find((c) => c.type === 'text').text).id;
-    const res = await badClient.callTool({ name: 'synthesize_music', arguments: { projectId: projId, spec: MUSIC_SPEC } });
+    const badCall = async (name, args) => {
+      const r = await badClient.callTool({ name, arguments: args });
+      return { isError: !!r.isError, data: JSON.parse(r.content.find((c) => c.type === 'text')?.text ?? '{}') };
+    };
+    const scene = await makeScene(badCall, { name: 'No Music', fps: 30 });
+    const res = await badClient.callTool({ name: 'synthesize_music', arguments: { target: sceneOf(scene), spec: MUSIC_SPEC } });
     const text = res.content.find((c) => c.type === 'text')?.text ?? '{}';
     assert.equal(!!res.isError, true);
     assert.equal(JSON.parse(text).code, 'music_unavailable');
@@ -846,12 +947,12 @@ test('mcp: synthesize_music returns music_unavailable when the toolchain is miss
 });
 
 test('mcp: synthesize_music compiles a progression spec before dispatch (v0.20)', async () => {
-  // Self-contained: its own project, the shared (stubbed-fluidsynth) server.
+  // Self-contained: its own scene, the shared (stubbed-fluidsynth) server.
   // The compile step runs in the MCP server before any vendor work, so the
   // stub receives — and echoes — the already-compiled note spec.
-  const proj = await callJson('create_project', { name: 'Progression MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+  const proj = await newScene({ name: 'Progression MCP', fps: 30, width: 320, height: 240, durationInFrames: 30 });
   const res = await callJson('synthesize_music', {
-    projectId: proj.data.id,
+    target: sceneOf(proj),
     spec: { bpm: 96, progression: ['D', 'A', 'Bm', 'G'], style: 'pad-ballad', bars: 8, key: 'D' },
     mode: 'asset-only',
   });
@@ -864,7 +965,7 @@ test('mcp: synthesize_music compiles a progression spec before dispatch (v0.20)'
   assert.equal(res.data.notes, res.data.compiled.notes, 'the vendor rendered exactly the compiled notes');
 
   // A bad chord fails as invalid_music_spec, naming the chord — before any vendor runs.
-  const bad = await callJson('synthesize_music', { projectId: proj.data.id, spec: { progression: ['H7'] } });
+  const bad = await callJson('synthesize_music', { target: sceneOf(proj), spec: { progression: ['H7'] } });
   assert.equal(bad.isError, true);
   assert.equal(bad.data.code, 'invalid_music_spec');
   assert.match(bad.data.message, /H7/);
@@ -873,7 +974,7 @@ test('mcp: synthesize_music compiles a progression spec before dispatch (v0.20)'
   const both = await client.callTool({
     name: 'synthesize_music',
     arguments: {
-      projectId: proj.data.id,
+      target: sceneOf(proj),
       spec: { progression: ['C'], tracks: [{ program: 0, notes: [{ pitch: 60, start: 0, duration: 1 }] }] },
     },
   }).then((r) => !!r.isError, () => true);
@@ -891,13 +992,13 @@ const SFX_SPEC = {
   ],
 };
 
-let sfxProjectId;
+let sfxSceneId;
 
 test('mcp: synthesize_sfx attach mode writes a WAV and adds an audio track', async () => {
-  const proj = await callJson('create_project', { name: 'Sfx MCP', fps: 30, width: 320, height: 240, durationInFrames: 60 });
-  sfxProjectId = proj.data.id;
+  const proj = await newScene({ name: 'Sfx MCP', fps: 30, width: 320, height: 240, durationInFrames: 60 });
+  sfxSceneId = sceneOf(proj);
 
-  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, mode: 'attach', gainDb: -12 });
+  const res = await callJson('synthesize_sfx', { target: sfxSceneId, spec: SFX_SPEC, mode: 'attach', gainDb: -12 });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, true);
   assert.equal(res.data.assetPath, 'assets/sfx-1.wav');
@@ -912,7 +1013,7 @@ test('mcp: synthesize_sfx attach mode writes a WAV and adds an audio track', asy
   assert.equal(res.data.durationSeconds, 2);
   assert.ok(res.data.bytes > 0);
 
-  const after = await callJson('get_project', { projectId: sfxProjectId });
+  const after = await callJson('get_scene', { scene: sfxSceneId });
   assert.ok(fs.existsSync(path.join(after.data.path, 'assets', 'sfx-1.wav')));
   const track = (after.data.config.audio ?? []).find((tk) => tk.src === 'assets/sfx-1.wav');
   assert.ok(track, JSON.stringify(after.data.config.audio));
@@ -920,22 +1021,22 @@ test('mcp: synthesize_sfx attach mode writes a WAV and adds an audio track', asy
 });
 
 test('mcp: synthesize_sfx asset-only mode writes a WAV but leaves config.audio unchanged', async () => {
-  const before = await callJson('get_project', { projectId: sfxProjectId });
+  const before = await callJson('get_scene', { scene: sfxSceneId });
   const beforeCount = (before.data.config.audio ?? []).length;
 
-  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, mode: 'asset-only' });
+  const res = await callJson('synthesize_sfx', { target: sfxSceneId, spec: SFX_SPEC, mode: 'asset-only' });
   assert.equal(res.isError, false, JSON.stringify(res.data));
   assert.equal(res.data.attached, false);
-  assert.match(res.data.hint, /update_project_config/);
+  assert.match(res.data.hint, /update_scene_config/);
   assert.equal(res.data.assetPath, 'assets/sfx-2.wav');
 
-  const after = await callJson('get_project', { projectId: sfxProjectId });
+  const after = await callJson('get_scene', { scene: sfxSceneId });
   assert.equal((after.data.config.audio ?? []).length, beforeCount);
 });
 
 test('mcp: synthesize_sfx reports the real level and leaves a quiet bed quiet', async () => {
   const res = await callJson('synthesize_sfx', {
-    projectId: sfxProjectId, mode: 'asset-only',
+    target: sfxSceneId, mode: 'asset-only',
     spec: { cues: [{ atFrame: 0, type: 'chime', gain: 0.25, decay: 0.4 }] },
   });
   assert.equal(res.data.appliedGainDb, 0, 'a quiet bed must not be normalized up');
@@ -945,7 +1046,7 @@ test('mcp: synthesize_sfx reports the real level and leaves a quiet bed quiet', 
 
 test('mcp: synthesize_sfx surfaces a bad spec as invalid_sfx_spec', async () => {
   const res = await callJson('synthesize_sfx', {
-    projectId: sfxProjectId, mode: 'asset-only',
+    target: sfxSceneId, mode: 'asset-only',
     // Placement outside the bed is a bug, not something to clamp silently.
     spec: { durationInFrames: 30, cues: [{ atFrame: 900, type: 'chime' }] },
   });
@@ -954,53 +1055,137 @@ test('mcp: synthesize_sfx surfaces a bad spec as invalid_sfx_spec', async () => 
 });
 
 test('mcp: synthesize_sfx rejects an assetPath outside assets/', async () => {
-  const res = await callJson('synthesize_sfx', { projectId: sfxProjectId, spec: SFX_SPEC, assetPath: '../evil.wav' });
+  const res = await callJson('synthesize_sfx', { target: sfxSceneId, spec: SFX_SPEC, assetPath: '../evil.wav' });
   assert.equal(res.isError, true);
-  assert.equal(res.data.code, 'path_outside_project');
+  assert.equal(res.data.code, 'path_not_allowed');
 });
 
-/* ------------------------------- v0.9 film assembly ------------------------------- */
+/* ------------------------------ film assembly ------------------------------ */
+// v0.20: a film IS the container, so build_film takes a film id (not a scene
+// list) and runs as an async JOB — the same poll/wait surface as a render.
 
-const renderToDone = async (projectId) => {
-  const start = await callJson('render', { projectId });
-  let status; const deadline = Date.now() + 30_000;
-  do { await new Promise((r) => setTimeout(r, 100)); status = (await callJson('get_render_status', { jobId: start.data.jobId })).data; }
-  while (status.state === 'running' && Date.now() < deadline);
-  assert.equal(status.state, 'done', JSON.stringify(status));
+const renderToDone = async (scene) => {
+  const start = await callJson('render', { scene });
+  assert.equal(start.isError, false, JSON.stringify(start.data));
+  return waitJobDone(start.data.jobId);
 };
 
-test('mcp: build_film concatenates rendered scenes into one film', async (t) => {
-  if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const sceneIds = [];
-  for (const name of ['Scene A', 'Scene B']) {
-    const p = await callJson('create_project', { name, fps: 30, width: 320, height: 240, durationInFrames: 6 });
-    sceneIds.push(p.data.id);
-    await renderToDone(p.data.id);
+const waitJobDone = async (jobId) => {
+  let status; const deadline = Date.now() + 60_000;
+  do {
+    await new Promise((r) => setTimeout(r, 100));
+    status = (await callJson('get_render_status', { jobId })).data;
+  } while (['running', 'queued'].includes(status.state) && Date.now() < deadline);
+  assert.equal(status.state, 'done', JSON.stringify(status));
+  return status;
+};
+
+/** A film with N scenes of the given size, each rendered. */
+async function filmWithRenderedScenes(name, scenes) {
+  const film = await callJson('create_film', { name, fps: 30, width: 320, height: 240, durationInFrames: 6 });
+  assert.equal(film.isError, false, JSON.stringify(film.data));
+  for (const s of scenes) {
+    const made = await callJson('create_scene', { film: film.data.film, ...s });
+    assert.equal(made.isError, false, JSON.stringify(made.data));
+    if (s.render !== false) await renderToDone(made.data.scene);
   }
-  const res = await callJson('build_film', { scenes: sceneIds.map((id) => ({ projectId: id })) });
+  return film.data.film;
+}
+
+test('mcp: build_film concatenates a film\'s rendered scenes', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Concat Film', [{ name: 'Scene A' }, { name: 'Scene B' }]);
+
+  // plan mode answers the layout question without assembling anything — this
+  // is what an agent places narration against BEFORE rendering.
+  const plan = await callJson('build_film', { film, plan: true });
+  assert.equal(plan.isError, false, JSON.stringify(plan.data));
+  assert.equal(plan.data.totalFrames, 12);
+  assert.deepEqual(plan.data.sceneLayout.map((s) => s.filmOffset), [0, 6]);
+  assert.deepEqual(plan.data.problems, []);
+
+  const res = await callJson('build_film', { film });
   assert.equal(res.isError, false, JSON.stringify(res.data));
-  assert.equal(res.data.scenes, 2);
   assert.equal(res.data.totalFrames, 12);
-  assert.ok(fs.existsSync(res.data.outputPath));
+  const done = await waitJobDone(res.data.jobId);
+  assert.ok(fs.existsSync(res.data.outputPath), done.outputPath);
   const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', res.data.outputPath]);
   assert.ok(Math.abs(parseFloat(stdout) - 0.4) < 0.2, `film ~0.4s, got ${stdout.trim()}`);
 });
 
 test('mcp: build_film reports scene_not_rendered when a scene has no output', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const p = await callJson('create_project', { name: 'Unrendered Scene', fps: 30, width: 320, height: 240, durationInFrames: 6 });
-  const res = await callJson('build_film', { scenes: [{ projectId: p.data.id }] });
+  const film = await filmWithRenderedScenes('Unrendered Film', [{ name: 'Ghost', render: false }]);
+  const res = await callJson('build_film', { film });
   assert.equal(res.isError, true);
   assert.equal(res.data.code, 'scene_not_rendered');
+  // plan mode still works on an unrendered film — that is its whole point.
+  const plan = await callJson('build_film', { film, plan: true });
+  assert.equal(plan.isError, false, JSON.stringify(plan.data));
+  assert.ok(plan.data.problems.some((p) => p.code === 'scene_not_rendered'));
 });
 
 test('mcp: build_film rejects scenes with mismatched dimensions', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const a = await callJson('create_project', { name: 'Wide', fps: 30, width: 320, height: 240, durationInFrames: 6 });
-  const b = await callJson('create_project', { name: 'Tall', fps: 30, width: 640, height: 480, durationInFrames: 6 });
-  await renderToDone(a.data.id);
-  await renderToDone(b.data.id);
-  const res = await callJson('build_film', { scenes: [{ projectId: a.data.id }, { projectId: b.data.id }] });
+  // The film's sceneDefaults keep scenes consistent, so a mismatch now takes a
+  // deliberate override — which is exactly when the check has to fire.
+  const film = await filmWithRenderedScenes('Mismatch Film', [
+    { name: 'Wide' },
+    { name: 'Tall', width: 640, height: 480 },
+  ]);
+  const res = await callJson('build_film', { film });
   assert.equal(res.isError, true);
   assert.equal(res.data.code, 'inconsistent_scenes');
+  // get_film's plan names the offender rather than just failing.
+  const info = await callJson('get_film', { film });
+  assert.ok(info.data.plan.problems.some((p) => p.code === 'signature_mismatch'), JSON.stringify(info.data.plan.problems));
+});
+
+test('mcp: films carry their own master audio and assets (no "master project")', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Master Audio Film', [{ name: 'Only' }]);
+
+  // A bed written straight into the FILM's assets, then laid over the timeline.
+  const sfx = await callJson('synthesize_sfx', {
+    target: film, mode: 'asset-only',
+    spec: { durationInFrames: 6, cues: [{ atFrame: 0, type: 'chime', gain: 0.3 }] },
+  });
+  assert.equal(sfx.isError, false, JSON.stringify(sfx.data));
+  assert.equal(sfx.data.assetPath, 'assets/sfx-1.wav');
+
+  const updated = await callJson('update_film', {
+    film, audio: [{ src: sfx.data.assetPath, gainDb: -6 }],
+  });
+  assert.equal(updated.isError, false, JSON.stringify(updated.data));
+
+  const built = await callJson('build_film', { film, outputFilename: 'with-audio' });
+  assert.equal(built.isError, false, JSON.stringify(built.data));
+  const done = await waitJobDone(built.data.jobId);
+  assert.ok(fs.existsSync(built.data.outputPath));
+  assert.ok(done.audio, 'a master timeline reports its measured levels');
+  assert.ok(built.data.outputPath.endsWith('with-audio.mp4'));
+});
+
+test('mcp: the workspace library is listed and links into a scene', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // The human drops files in <workspace>/library on disk; the agent sees them
+  // read-only and pulls them into a scene.
+  const ws = await callJson('get_workspace');
+  const libDir = path.join(ws.data.path, 'library', 'plates');
+  await fsp.mkdir(libDir, { recursive: true });
+  await fsp.writeFile(path.join(libDir, 'bg.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+
+  const list = await callJson('list_shared_assets');
+  assert.equal(list.isError, false, JSON.stringify(list.data));
+  assert.ok(list.data.files.some((f) => f.path === 'plates/bg.png'), JSON.stringify(list.data.files));
+
+  const used = await callJson('use_shared_asset', { target: sceneId, path: 'plates/bg.png' });
+  assert.equal(used.isError, false, JSON.stringify(used.data));
+  assert.equal(used.data.path, 'assets/library/plates/bg.png');
+  const scene = await callJson('get_scene', { scene: sceneId });
+  assert.ok(fs.existsSync(path.join(scene.data.path, ...used.data.path.split('/'))));
+
+  const missing = await callJson('use_shared_asset', { target: sceneId, path: 'nope.png' });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.data.code, 'file_not_found');
 });

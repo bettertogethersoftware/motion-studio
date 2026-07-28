@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>__PROJECT_NAME__</title>
+  <title>__SCENE_NAME__</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <!--
     Motion Studio composition entry point.
-    Stage size is fixed by project.json (__WIDTH__x__HEIGHT__ @ __FPS__fps,
+    Stage size is fixed by scene.json (__WIDTH__x__HEIGHT__ @ __FPS__fps,
     __DURATION__ frames). The render engine loads this file in headless
     Chromium, calls window.setFrame(n) per frame, waits for
     window.frameReady, then screenshots.
@@ -16,7 +16,7 @@
     Load order matters: frame-api.js must load before composition.js.
   -->
   <div id="stage">
-    <div id="title" class="layer">__PROJECT_NAME__</div>
+    <div id="title" class="layer">__SCENE_NAME__</div>
     <div id="subtitle" class="layer">rendered frame by frame</div>
   </div>
 

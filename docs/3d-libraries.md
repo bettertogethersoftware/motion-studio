@@ -14,12 +14,12 @@ the root cause was non-obvious and the gotchas are all still live.
 
 ## 1. `add_library` (shipped)
 
-Attach a pinned 3D library to a project. The build is vendored **locally** into
-the project (never a CDN at render time, so renders stay hermetic) and a
+Attach a pinned 3D library to a scene. The build is vendored **locally** into
+the scene (never a CDN at render time, so renders stay hermetic) and a
 frame-driven starter composition is scaffolded.
 
 ```
-add_library { projectId, library: "three" | "babylon", scaffold?: true }
+add_library { scene, library: "three" | "babylon", scaffold?: true }
 ```
 
 - **`three`** — Three.js (~600 KB, lightweight). Good default for logos,
@@ -125,11 +125,11 @@ MOTION_STUDIO_ALLOW_LOCAL_FETCH=1   # adds Chromium --allow-file-access-from-fil
 ```
 
 Off by default (no behavior change). With it set, a composition can `fetch` its
-own project assets. **Security note:** with the flag on, composition JS can
+own scene assets. **Security note:** with the flag on, composition JS can
 `fetch('file:///…')` any local file and draw it to the canvas (exfiltrate via the
 output image). Acceptable for a local single-user tool running your own
 compositions; do not enable it for untrusted composition code. A longer-term
-alternative is to serve the project over `http://127.0.0.1` during render instead
+alternative is to serve the scene over `http://127.0.0.1` during render instead
 of `file://` (see §4).
 
 Verified: with the flag, a 13.5 MB GLB **fetches and imports** successfully.
@@ -200,7 +200,7 @@ recipe is §3.4.
    the file size.
 
 ### 3.3 The wall — root cause & fix (RESOLVED)
-Reduced to a minimal box in a known-good project, `gl.readPixels` at screen
+Reduced to a minimal box in a known-good scene, `gl.readPixels` at screen
 centre read the **clearColor, not the box** — even though the box was an active,
 in-frustum mesh (`scene.meshes=1`, `getActiveMeshes()=1`, correct active camera).
 The tell was **`mesh.isReady()=false` and `material.isReady()=false`**:
@@ -275,10 +275,10 @@ node scripts/fetch-libs.mjs            # fetch; refuses to overwrite on hash mis
 node scripts/fetch-libs.mjs --update   # accept a new build and rewrite the lock
 ```
 
-`add_library` additionally stamps `config.libraryBuilds` into the project
+`add_library` additionally stamps `config.libraryBuilds` into the scene
 (`{ version, sha256, bytes }` per copied file). That is not redundant with git
 tracking the builds: git says what the repo holds *now*, `libraryBuilds` says what
-the project copied *then* — and they diverge the moment the libraries are upgraded.
+the scene copied *then* — and they diverge the moment the libraries are upgraded.
 
 Note the version is recorded as `null` when a build does not state one: three's
 `REVISION` is minified to `const e="134"` and the Babylon loaders bundle has no

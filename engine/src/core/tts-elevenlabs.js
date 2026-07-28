@@ -371,7 +371,7 @@ export function pickElevenlabsVoice(requested, catalogue) {
  * Map the engine's −10..10 rate onto voice_settings.speed. Each step is 5% of
  * the default speed rather than the 10% the other vendors use, because
  * ElevenLabs only accepts 0.7..1.2 — the full ±10 range maps onto (and is
- * clamped to) that window, so a project switching vendors keeps the *sign and
+ * clamped to) that window, so a film switching vendors keeps the *sign and
  * ordering* of its rate choices even though the magnitude compresses.
  */
 export function speedForRate(rate) {

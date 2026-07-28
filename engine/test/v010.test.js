@@ -21,7 +21,8 @@ import {
   preflightFrameList, MAX_PREVIEW_FRAMES, MIN_FRAMES_FOR_PREFLIGHT,
 } from '../src/core/renderer.js';
 import { measureAudioLevels } from '../src/core/encoder.js';
-import { makeConfig, validateConfig, ProjectStore } from '../src/core/project.js';
+import { makeConfig, validateConfig } from '../src/core/scene.js';
+import { makeSceneIn } from './helpers/workspace.mjs';
 import { ErrorCodes } from '../src/core/errors.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
 
@@ -100,7 +101,7 @@ test('captureFrames: N frames come from ONE page load, in the order requested', 
   const dir = await makeProject('batch');
   const { factory, stats } = countingFactory();
   const shots = await captureFrames({
-    projectPath: dir, config: cfgFor(), frames: [10, 0, 119, 60], browserFactory: factory,
+    scenePath: dir, config: cfgFor(), frames: [10, 0, 119, 60], browserFactory: factory,
   });
   assert.deepEqual(shots.map((s) => s.frame), [10, 0, 119, 60]);
   assert.ok(shots.every((s) => Buffer.isBuffer(s.png) && s.png.length > 0));
@@ -112,7 +113,7 @@ test('captureFrames: rejects an empty list, an over-long list, and out-of-range 
   const dir = await makeProject('batch-invalid');
   const config = cfgFor();
   const { factory } = countingFactory();
-  const call = (frames) => captureFrames({ projectPath: dir, config, frames, browserFactory: factory });
+  const call = (frames) => captureFrames({ scenePath: dir, config, frames, browserFactory: factory });
 
   await assert.rejects(() => call([]), (e) => e.code === ErrorCodes.INVALID_CONFIG);
   await assert.rejects(
@@ -125,10 +126,10 @@ test('captureFrames: rejects an empty list, an over-long list, and out-of-range 
 test('captureSingleFrame: still works and keeps its out-of-range message', async () => {
   const dir = await makeProject('single');
   const { factory } = countingFactory();
-  const png = await captureSingleFrame({ projectPath: dir, config: cfgFor(), frame: 5, browserFactory: factory });
+  const png = await captureSingleFrame({ scenePath: dir, config: cfgFor(), frame: 5, browserFactory: factory });
   assert.ok(Buffer.isBuffer(png) && png.length > 0);
   await assert.rejects(
-    () => captureSingleFrame({ projectPath: dir, config: cfgFor(), frame: 999, browserFactory: factory }),
+    () => captureSingleFrame({ scenePath: dir, config: cfgFor(), frame: 999, browserFactory: factory }),
     (e) => e.code === ErrorCodes.INVALID_CONFIG && /out of range \(composition has frames 0\.\.119\)/.test(e.message),
   );
 });
@@ -142,7 +143,7 @@ test('preflight: a failure at a late frame is caught before the render body runs
   const { factory, stats } = countingFactory({ failAtFrame: late });
   await assert.rejects(
     () => renderComposition({
-      projectPath: dir,
+      scenePath: dir,
       config: cfgFor(),
       outputPath: path.join(dir, 'out.mp4'),
       browserFactory: factory,
@@ -160,7 +161,7 @@ test('preflight: probes endpoints, so a frame-0-only smoke test cannot pass a br
   const { factory } = countingFactory({ failAtFrame: 119 });
   await assert.rejects(
     () => renderComposition({
-      projectPath: dir, config: cfgFor(), outputPath: path.join(dir, 'out.mp4'), browserFactory: factory,
+      scenePath: dir, config: cfgFor(), outputPath: path.join(dir, 'out.mp4'), browserFactory: factory,
     }),
     (e) => /Pre-flight failed at frame 119/.test(e.message),
   );
@@ -173,7 +174,7 @@ test('preflight: can be disabled, and is skipped for short renders', async (t) =
   // Disabled: the probe frames are never captured, so the render reaches 90.
   const off = countingFactory();
   await renderComposition({
-    projectPath: dir, config: cfgFor(), outputPath: path.join(dir, 'off.mp4'),
+    scenePath: dir, config: cfgFor(), outputPath: path.join(dir, 'off.mp4'),
     browserFactory: off.factory, preflight: false,
   });
   assert.equal(off.stats.captured.length, 120, 'exactly the render frames, no probes');
@@ -182,7 +183,7 @@ test('preflight: can be disabled, and is skipped for short renders', async (t) =
   const short = countingFactory();
   const frames = MIN_FRAMES_FOR_PREFLIGHT - 1;
   await renderComposition({
-    projectPath: dir, config: cfgFor({ durationInFrames: frames }), outputPath: path.join(dir, 'short.mp4'),
+    scenePath: dir, config: cfgFor({ durationInFrames: frames }), outputPath: path.join(dir, 'short.mp4'),
     browserFactory: short.factory,
   });
   assert.equal(short.stats.captured.length, frames);
@@ -193,7 +194,7 @@ test('preflight: a healthy composition renders the probe frames plus every real 
   const dir = await makeProject('preflight-ok');
   const { factory, stats } = countingFactory();
   const res = await renderComposition({
-    projectPath: dir, config: cfgFor(), outputPath: path.join(dir, 'ok.mp4'), browserFactory: factory,
+    scenePath: dir, config: cfgFor(), outputPath: path.join(dir, 'ok.mp4'), browserFactory: factory,
   });
   assert.equal(res.frames, 120);
   // 120 real frames + 5 probes, all from the one page the render already opened.
@@ -260,7 +261,7 @@ test('render: the limiter keeps a hot two-track mix under 0 dBFS and reports it'
   config.audio = [{ src: 'assets/tone.wav', gainDb }, { src: 'assets/tone.wav', gainDb }];
   const { factory } = countingFactory();
   const res = await renderComposition({
-    projectPath: dir, config, outputPath: path.join(dir, 'audio.mp4'), browserFactory: factory,
+    scenePath: dir, config, outputPath: path.join(dir, 'audio.mp4'), browserFactory: factory,
   });
 
   assert.equal(res.audio.tracks, 2);
@@ -281,7 +282,7 @@ test('render: with the limiter disabled the same mix is reported as clipping', a
   config.audio = [{ src: 'assets/tone.wav', gainDb }, { src: 'assets/tone.wav', gainDb }];
   const { factory } = countingFactory();
   const res = await renderComposition({
-    projectPath: dir, config, outputPath: path.join(dir, 'clip.mp4'), browserFactory: factory,
+    scenePath: dir, config, outputPath: path.join(dir, 'clip.mp4'), browserFactory: factory,
   });
   assert.equal(res.audio.limiter, false);
   assert.equal(res.audio.clipping, true, `peakDb was ${res.audio.peakDb}`);
@@ -290,32 +291,29 @@ test('render: with the limiter disabled the same mix is reported as clipping', a
 /* ---------------------- determinism warnings on write ---------------- */
 
 test('writeFile: returns determinism warnings but still writes the file', async () => {
-  const store = new ProjectStore(path.join(tmp, 'store'));
-  const proj = await store.createProject({ name: 'Lint Demo', durationInFrames: 30 });
+  const { store, scene } = await makeSceneIn(path.join(tmp, 'store'), { name: 'Lint Demo', durationInFrames: 30 });
   const src = 'MotionStudio.registerComposition((frame) => {\n  const j = Math.random();\n});\n';
-  const res = await store.writeFile(proj.id, 'composition.js', src);
+  const res = await store.writeFile(scene.id, 'composition.js', src);
 
   assert.equal(res.warnings.length, 1);
   assert.equal(res.warnings[0].rule, 'math-random');
   assert.equal(res.warnings[0].line, 2);
-  assert.equal(await store.readFile(proj.id, 'composition.js'), src, 'a warning must not block the write');
+  assert.equal(await store.readFile(scene.id, 'composition.js'), src, 'a warning must not block the write');
 });
 
 test('writeFile: a clean composition reports no warnings key at all', async () => {
-  const store = new ProjectStore(path.join(tmp, 'store2'));
-  const proj = await store.createProject({ name: 'Clean Demo', durationInFrames: 30 });
+  const { store, scene } = await makeSceneIn(path.join(tmp, 'store2'), { name: 'Clean Demo', durationInFrames: 30 });
   const res = await store.writeFile(
-    proj.id, 'composition.js',
+    scene.id, 'composition.js',
     'MotionStudio.registerComposition((frame) => {\n  el.style.opacity = interpolate(frame, [0, 10], [0, 1]);\n});\n',
   );
   assert.equal(res.warnings, undefined);
 });
 
 test('writeFile: a broken file is still rejected before the lint runs', async () => {
-  const store = new ProjectStore(path.join(tmp, 'store3'));
-  const proj = await store.createProject({ name: 'Broken Demo', durationInFrames: 30 });
+  const { store, scene } = await makeSceneIn(path.join(tmp, 'store3'), { name: 'Broken Demo', durationInFrames: 30 });
   await assert.rejects(
-    () => store.writeFile(proj.id, 'composition.js', 'function ( { Math.random()'),
+    () => store.writeFile(scene.id, 'composition.js', 'function ( { Math.random()'),
     (e) => e.code === ErrorCodes.SYNTAX_ERROR,
   );
 });

@@ -19,7 +19,7 @@
 
 import fsp from 'node:fs/promises';
 import { readStoredSettings, readSettings, MUSIC_VENDORS } from './settings.js';
-import { defaultDataDir } from './project.js';
+import { defaultDataDir } from './scene.js';
 import { resolveVendorFrom, walkVendorChain, unavailableError, buildReport } from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
 import { parseWavHeader } from './tts.js'; // the engine's one WAV header reader

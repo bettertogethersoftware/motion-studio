@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Structured errors shared by the CLI and MCP entry points.
  *
  * Every failure that can cross a process/tool boundary is an EngineError with
@@ -10,10 +10,13 @@
 
 export const ErrorCodes = Object.freeze({
   PREREQS_MISSING: 'prereqs_missing',
-  PROJECT_NOT_FOUND: 'project_not_found',
-  PROJECT_ALREADY_EXISTS: 'project_already_exists',
+  // v0.20 storage model: a "scene" is what earlier releases called a project.
+  // The codes were renamed with the concept — nothing had shipped, so there
+  // are no legacy aliases to carry.
+  SCENE_NOT_FOUND: 'scene_not_found',
+  SCENE_ALREADY_EXISTS: 'scene_already_exists',
   INVALID_CONFIG: 'invalid_config',
-  PATH_OUTSIDE_PROJECT: 'path_outside_project',
+  PATH_NOT_ALLOWED: 'path_not_allowed',
   FILE_NOT_FOUND: 'file_not_found',
   SYNTAX_ERROR: 'syntax_error',
   RENDER_ALREADY_IN_PROGRESS: 'render_already_in_progress',
@@ -61,6 +64,15 @@ export const ErrorCodes = Object.freeze({
   // added with saved films (Studio film editor + save_film) — see docs/CHANGELOG.md
   FILM_NOT_FOUND: 'film_not_found',
   INVALID_FILM: 'invalid_film',
+  // added in v0.20 (workspace → film → scene storage model) — see docs/CHANGELOG.md
+  // added in v0.21 (render sidecar / stale-render detection) — see docs/CHANGELOG.md.
+  // Distinct from SHORT_RENDER: that file is incomplete, this one is complete
+  // but was rendered at settings the scene no longer has.
+  STALE_RENDER: 'stale_render',
+  WORKSPACE_NOT_FOUND: 'workspace_not_found',
+  FILM_ALREADY_EXISTS: 'film_already_exists',
+  INVALID_ID: 'invalid_id',
+  MIGRATION_FAILED: 'migration_failed',
 });
 
 export class EngineError extends Error {

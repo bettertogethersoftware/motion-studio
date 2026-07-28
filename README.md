@@ -1,4 +1,4 @@
-# Motion Studio v0.19 — code-driven video renderer
+# Motion Studio v0.20 — code-driven video renderer
 
 Motion Studio renders videos from HTML/CSS/JS animations using a
 deterministic, frame-driven model. Animations are authored as **pure
@@ -7,32 +7,57 @@ functions of a frame number**, captured frame-by-frame in headless Chromium
 two kinds of users through one shared render engine:
 
 - **Humans**, through the cross-platform **Studio web UI** (`npm run studio`):
-  live preview that drives your *actual* composition, scrub/play transport,
-  hot reload, render queue with progress + ETA, and full project management —
-  create/configure/delete projects, manage `assets/` (upload, audition,
-  rename, delete), edit the audio timeline, pick and audition the **speech and
-  music vendors** (one, or an ordered fallback chain), and set global
-  preferences including an FFmpeg binary override. For long-form work the
-  **film editor** combines scene projects into saved films on a visual
-  timeline — drag-to-reorder scenes, multi-lane master audio with waveforms,
-  fades and auto-ducking, captions (burn-in and/or `.srt` sidecar), image and
-  transparent-video overlays, in-editor narration with auto-synced captions,
-  a preview that plays the real rendered scenes with the build's exact audio
-  mix, and one-click assembly with measured mastering.
+  one tree of every **workspace → film → scene** on the machine, live preview
+  that drives your *actual* composition, scrub/play transport, hot reload,
+  render queue with progress + ETA, and full scene management — create,
+  configure and delete scenes, manage `assets/` (upload, audition, rename,
+  delete), edit the audio timeline, pick and audition the **speech and music
+  vendors** (one, or an ordered fallback chain), and set global preferences
+  including an FFmpeg binary override. The **film editor** cuts a film on a
+  visual timeline — drag-to-reorder scenes, multi-lane master audio with
+  waveforms, fades and auto-ducking, captions (burn-in and/or `.srt`
+  sidecar), image and transparent-video overlays, in-editor narration with
+  auto-synced captions, a preview that plays the real rendered scenes with
+  the build's exact audio mix, and one-click assembly with measured
+  mastering. Each workspace also has a **shared-asset library** for the large
+  files you want an agent to use without pushing them through the tool
+  channel.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
-  tool surface (33 tools): author compositions, manage assets, synthesize
-  narration through **six speech vendors** (local Windows voices, local neural
-  Piper, or Azure / ElevenLabs / OpenAI / Deepgram in the cloud — with
-  measured levels, per-sentence timings, and a `deterministic` option), music
-  beds **composed from a chord progression** (`['D','A','Bm','G']` + a style)
-  or from raw notes (in-process SoundFont synth or FluidSynth) and sound
-  effects, audition the audio mix without a render (`preview_audio`), attach
-  3D libraries (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview
-  frames as images, render — including cheap **proxy motion drafts**
-  (`proxy: { scale, frameStep }`) — poll, cancel, and assemble multi-scene
-  films, one-shot (`build_film`) or as **saved films** shared with the
-  Studio's film editor (`save_film` / `build_saved_film`: master audio,
-  captions, overlays, async builds). No shell, no arbitrary file access.
+  tool surface, **bound to one workspace** so two agents never land in each
+  other's films: create films and the scenes inside them, author
+  compositions, manage assets, synthesize narration through **six speech
+  vendors** (local Windows voices, local neural Piper, or Azure / ElevenLabs
+  / OpenAI / Deepgram in the cloud — with measured levels, per-sentence
+  timings, and a `deterministic` option), music beds **composed from a chord
+  progression** (`['D','A','Bm','G']` + a style) or from raw notes
+  (in-process SoundFont synth or FluidSynth) and sound effects, audition the
+  audio mix without a render (`preview_audio`), pull in the human's
+  library files (`use_shared_asset`), read a media file's duration /
+  dimensions / codecs (`probe_asset`), attach 3D libraries
+  (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as
+  images, render — including cheap **proxy motion drafts**
+  (`proxy: { scale, frameStep }`) — poll, cancel, and assemble the film
+  (`build_film`, async, with master audio, captions and overlays). No shell,
+  no arbitrary file access.
+
+### The model: workspace → film → scene
+
+```
+~/.motion-studio/workspaces/<workspace>/     one per AI; the human sees them all
+  library/                                   shared assets the human provides
+  films/<film>/
+    film.json  assets/  out/                 the film owns its audio and output
+    scenes/<scene>/                          one composition — the render unit
+```
+
+A **scene** is one composition (the thing that renders). A **film** is an
+ordered list of scenes plus the master audio, captions and overlays laid over
+them; it owns its own `assets/` and receives its build in its own `out/`.
+Scenes concatenate **losslessly**, so a long video is many short scenes and
+re-cutting costs seconds. Ids are just the slug path — `"my-film"`,
+`"my-film/opening"` — and the filesystem is the registry. Data from before
+v0.20 migrates automatically on first start (old registries are kept under
+`legacy-v019/`; nothing is deleted).
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -46,10 +71,13 @@ crash recovery (v0.14), the full Studio management surface (v0.15), settings
 that reach every entry point (v0.16), second implementations of both audio
 generators — Azure AI Speech, and an in-process SoundFont synth that finally
 makes music cross-platform — behind one vendors page (v0.17), local neural
-narration through Piper (v0.18), and an audio timeline you can hear and
+narration through Piper (v0.18), an audio timeline you can hear and
 measure before rendering — track fades/trim, sidechain auto-ducking,
 `preview_audio`, narration levels + sentence timings, plus Three.js addons
-and a deterministic particle emitter (v0.19).
+and a deterministic particle emitter (v0.19), and the **workspace → film →
+scene** storage model that replaced a flat project list, retired the
+"— Master" output-project convention, gave each agent its own tree and the
+human a shared-asset library (v0.20).
 
 ## Quick start
 
@@ -62,13 +90,19 @@ npm run doctor         # verify prerequisites (JSON report, exit 0 = ready)
 npm run studio         # Studio UI → http://127.0.0.1:7345
 ```
 
-Create a project in the Studio (or via MCP), scrub the scaffolded template,
-hit **render**. To render from the command line:
+In the Studio, create a **film**, add a **scene** to it, scrub the scaffolded
+template, hit **render** — then build the film when its scenes are rendered.
+(A one-scene film is the right shape for a short single clip; there is no
+separate "project" concept.) To render a scene folder from the command line:
 
 ```bash
-node src/cli/render.js --project ../examples/intro-title \
+node src/cli/render.js --scene ../examples/intro-title \
   --output ../examples/intro-title/out/intro-title.mp4 --workers 4
 ```
+
+A scene folder is self-contained — `scene.json` plus the composition — so the
+CLI needs nothing but the folder, and the `examples/` scenes render straight
+from a checkout without a workspace.
 
 If Puppeteer's Chromium download is blocked, install any Chrome/Chromium and
 set `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome`. If FFmpeg is not on PATH,
@@ -85,11 +119,18 @@ Point any MCP client at the stdio server — for Claude Desktop:
   "mcpServers": {
     "motionStudio": {
       "command": "node",
-      "args": ["/absolute/path/to/motion-studio/engine/src/mcp/server.js"]
+      "args": ["/absolute/path/to/motion-studio/engine/src/mcp/server.js"],
+      "env": { "MOTION_STUDIO_WORKSPACE": "claude-desktop" }
     }
   }
 }
 ```
+
+`MOTION_STUDIO_WORKSPACE` names the tree this agent works in (created on
+first use; default `default`). **Give each connected agent its own name** —
+that is what keeps two of them from creating films in the same folder, and
+what lets you tell in the Studio who made what. The workspace's `library/`
+folder is where you drop large files for that agent to use.
 
 Full walkthrough and tool reference: [docs/mcp-setup.md](docs/mcp-setup.md).
 A ready-to-use agent skill is in [docs/SKILL.md](docs/SKILL.md) (pair it
@@ -106,7 +147,9 @@ motion-studio/
 │   │   ├── browser.js             Puppeteer lifecycle (injectable for tests)
 │   │   ├── encoder.js             FFmpeg: stdin pipe, sequence, concat, transcode, audio
 │   │   ├── formats.js             output-format registry (mp4/webm/gif/prores/png-seq)
-│   │   ├── project.js             config schema v2 + migration, registry, scaffolding, assets
+│   │   ├── store.js               workspace → film → scene storage; assets + library (v0.20)
+│   │   ├── migrate.js             one-shot pre-v0.20 layout migration (v0.20)
+│   │   ├── project.js             scene config schema v2 + migration, scaffolding, source lints
 │   │   ├── jobs.js                render job queue (status / logs / cancel / ETA)
 │   │   ├── sandbox.js             path sandbox for all file-touching surfaces
 │   │   ├── progress.js            JSON-line stdout protocol (emitter + parser)
@@ -122,18 +165,18 @@ motion-studio/
 │   │   ├── music-node.js          music vendor "node": note spec → SoundFont, in-process (v0.17)
 │   │   ├── music-vendors.js       music vendor registry, dispatch and level control (v0.17)
 │   │   ├── sfx.js                 sound effects: pure-JS cue synthesis (v0.12)
-│   │   ├── film.js                film: stitch rendered scene projects into one film (v0.9)
-│   │   ├── films.js               saved films: FilmStore, planning, overlay/caption finishing pass
+│   │   ├── film.js                scene assembly primitives: validation, lossless concat (v0.9)
+│   │   ├── films.js               film document: validation, planning, overlay/caption finishing pass
 │   │   ├── lock.js                cross-process render lock (v0.11)
 │   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
 │   ├── src/cli/render.js          CLI entry (also the parallel worker binary)
-│   ├── src/mcp/server.js          MCP entry — stdio server for agents (33 tools)
+│   ├── src/mcp/server.js          MCP entry — stdio server for agents, bound to one workspace
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
-│   │   ├── server.js                localhost API: projects/assets/films/settings/render/jobs/SSE
+│   │   ├── server.js                localhost API: workspaces/films/scenes/library/settings/render/jobs/SSE
 │   │   └── public/                  vanilla-JS UI (no build step): index/app + the film editor (film.html/js/css)
-│   ├── src/runtime/frame-api.js   in-page helper library v1.3 (copied into projects)
-│   ├── templates/default/         project scaffold (HTML/JS/CSS)
+│   ├── src/runtime/frame-api.js   in-page helper library v1.4 (copied into every scene)
+│   ├── templates/default/         scene scaffold (HTML/JS/CSS)
 │   └── test/                      535 tests across 27 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4)
@@ -141,15 +184,15 @@ motion-studio/
 └── docs/
     ├── CHANGELOG.md               v0.2 → v0.19 decision log (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
-    ├── user-guide.md              Studio UI, projects, assets, audio, films/film editor, settings, CLI
-    ├── frame-api.md               the authoring contract (v1.3)
+    ├── user-guide.md              Studio UI: workspaces/films/scenes, library, assets, audio, settings, CLI
+    ├── frame-api.md               the authoring contract (v1.4)
     ├── mcp-setup.md               agent setup + full tool reference
     ├── knowledge-base.md          field notes: failure modes seen in real productions
     ├── tts-setup.md               speech vendors: Piper (v0.18), Azure (v0.17), exe contract (v0.6)
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music vendors: in-process synth (v0.17) + FluidSynth (v0.8)
     ├── sfx-setup.md               sound effects: cue spec + synthesis (v0.12)
-    ├── film-setup.md              long-form: build_film scene assembly (v0.9), saved films + the film editor
+    ├── film-setup.md              long-form: films, scenes, master audio, the film editor
     ├── SKILL.md                   drop-in agent skill
     └── spec-changes.md            historical v0.2-era decision log
 ```
@@ -179,19 +222,21 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-535 tests across 27 suites: core units, pipeline integration (real FFmpeg,
-probe-verified outputs for every format incl. transparent WebM alpha and the
-parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK client over
-stdio), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure REST
-endpoint), music vendors (the real in-process synth against a tiny generated
-SoundFont, plus the two-stage MIDI→FluidSynth pipeline against stubs), sound
-effects, film
-assembly (scene validation + real concat/master-audio mux), saved films
-(store, planning, caption/overlay builders, and the Studio films API driven
-end to end through render → build → finishing pass), 3D libraries
-(add_library vendoring + scaffold), vendored-build provenance, frame-api
-runtime (vm-hosted), Studio HTTP server (ephemeral port, sandbox 403s, SSE hot
-reload, settings, asset CRUD, speech-vendor API), and a gated real-Chromium suite (capture
+547 tests across 28 suites: core units (incl. the workspace/film/scene store,
+the workspace library, and the pre-v0.20 migration), pipeline integration
+(real FFmpeg, probe-verified outputs for every format incl. transparent WebM
+alpha and the parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK
+client over stdio — including that a server cannot address another agent's
+workspace), speech vendors (WAV parsing, stubbed exe contract, stubbed Azure
+REST endpoint), music vendors (the real in-process synth against a tiny
+generated SoundFont, plus the two-stage MIDI→FluidSynth pipeline against
+stubs), sound effects, film assembly (scene validation + real
+concat/master-audio mux), film documents (validation, planning,
+caption/overlay builders, and the Studio films API driven end to end through
+render → build → finishing pass), 3D libraries (add_library vendoring +
+scaffold), vendored-build provenance, frame-api runtime (vm-hosted), Studio
+HTTP server (ephemeral port, sandbox 403s, SSE hot reload, settings, asset
+CRUD, speech-vendor API), and a gated real-Chromium suite (capture
 determinism, genuine `omitBackground` alpha) that runs wherever a browser is
 resolvable:
 
@@ -199,10 +244,12 @@ resolvable:
 PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm test
 ```
 
-A clean run is **0 failures**. Two tests skip by design: the gated
-real-Chromium suite where no browser is resolvable, and — on Windows only —
-`cli: SIGTERM mid-render cancels with exit code 4`, because Windows has no
-signal mechanism (`TerminateProcess` kills before any handler runs).
+A clean run is **0 failures**. A few tests skip by design, depending on the
+machine: the gated real-Chromium suite where no browser is resolvable; on
+Windows, `cli: SIGTERM mid-render cancels with exit code 4`, because Windows
+has no signal mechanism (`TerminateProcess` kills before any handler runs);
+the symlink-escape sandbox test where the shell may not create symlinks; and
+the ffmpeg-source probe, which needs a machine *without* ffmpeg on PATH.
 Cancellation itself is covered on every platform through `JobManager.cancel`.
 
 Rendered example output is not committed (`out/` is git-ignored); re-render an

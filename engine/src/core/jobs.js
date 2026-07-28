@@ -61,7 +61,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ projectId, projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath }) {
+  startRender({ targetId, scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -80,7 +80,8 @@ export class JobManager {
     const jobId = randomUUID();
     const job = {
       jobId,
-      projectId,
+      // What this job is for: a scene id for a render, a film id for a build.
+      targetId,
       outputPath,
       state: JobState.QUEUED,
       phase: 'queued',
@@ -96,7 +97,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath },
+      _run: { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -144,10 +145,10 @@ export class JobManager {
       }
     });
 
-    const { projectPath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath } = job._run;
+    const { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
-      projectPath, config, outputPath, frameRange, workers,
+      scenePath, config, outputPath, frameRange, workers,
       ...(ffmpegPath ? { ffmpegPath } : {}),
       ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
@@ -186,7 +187,7 @@ export class JobManager {
     const queuePosition = job.state === JobState.QUEUED ? this.queue.indexOf(jobId) + 1 : undefined;
     return {
       jobId: job.jobId,
-      projectId: job.projectId,
+      targetId: job.targetId,
       state: job.state,
       phase: job.phase,
       frame: job.frame,

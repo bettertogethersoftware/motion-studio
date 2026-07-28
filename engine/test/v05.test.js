@@ -1,6 +1,6 @@
 /**
  * v0.5 feature tests: output formats (webm / gif / prores / png-sequence),
- * alpha end-to-end, still export, config migration, asset writes, project
+ * alpha end-to-end, still export, config migration, asset writes, scene
  * removal, and ETA in progress. Real FFmpeg is used and outputs are
  * probe-verified; Chromium is replaced by the injectable fake browser.
  */
@@ -17,7 +17,8 @@ import { promisify } from 'node:util';
 import { renderComposition, renderParallel, renderStill } from '../src/core/renderer.js';
 import { buildVideoArgs } from '../src/core/encoder.js';
 import { getFormat, normalizeOutputFilename, FORMATS } from '../src/core/formats.js';
-import { makeConfig, migrateConfig, validateConfig, ProjectStore, MAX_ASSET_BYTES } from '../src/core/project.js';
+import { makeConfig, migrateConfig, validateConfig, MAX_ASSET_BYTES } from '../src/core/scene.js';
+import { makeStore, makeScene } from './helpers/workspace.mjs';
 import { ErrorCodes } from '../src/core/errors.js';
 import { ProgressEmitter } from '../src/core/progress.js';
 import { makeFakeBrowserFactory, encodePng } from './helpers/fake-browser.js';
@@ -105,7 +106,7 @@ test('render: webm (VP9) output is probe-verified', async (t) => {
   const out = path.join(tmp, 'clip.webm');
   const config = cfgFor({}, { format: 'webm', filename: 'clip.webm', crf: 40 });
   await renderComposition({
-    projectPath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   const info = await probe(out);
   assert.equal(info.streams[0].codec_name, 'vp9');
@@ -117,7 +118,7 @@ test('render: transparent webm carries an alpha pixel format end-to-end', async 
   const out = path.join(tmp, 'alpha.webm');
   const config = cfgFor({ durationInFrames: 12 }, { format: 'webm', transparent: true, crf: 40 });
   await renderComposition({
-    projectPath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   const info = await probe(out);
   assert.equal(info.streams[0].codec_name, 'vp9');
@@ -132,7 +133,7 @@ test('render: animated GIF output is probe-verified', async (t) => {
   const out = path.join(tmp, 'clip.gif');
   const config = cfgFor({ durationInFrames: 12 }, { format: 'gif', filename: 'clip.gif' });
   await renderComposition({
-    projectPath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   const info = await probe(out);
   assert.equal(info.streams[0].codec_name, 'gif');
@@ -143,7 +144,7 @@ test('render: ProRes .mov output is probe-verified', async (t) => {
   const out = path.join(tmp, 'master.mov');
   const config = cfgFor({ durationInFrames: 8 }, { format: 'prores', filename: 'master.mov' });
   await renderComposition({
-    projectPath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   const info = await probe(out);
   assert.equal(info.streams[0].codec_name, 'prores');
@@ -154,7 +155,7 @@ test('render: png-sequence writes a folder of frames, no encode', async (t) => {
   const out = path.join(tmp, 'frames-serial');
   const config = cfgFor({ durationInFrames: 10 }, { format: 'png-sequence', filename: 'frames-serial' });
   const res = await renderComposition({
-    projectPath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   assert.equal(res.frames, 10);
   const files = (await fsp.readdir(out)).sort();
@@ -167,11 +168,11 @@ test('parallel: gif goes through the lossless intermediate and matches frame cou
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const out = path.join(tmp, 'par.gif');
   const config = cfgFor({ durationInFrames: 24 }, { format: 'gif', filename: 'par.gif' });
-  await fsp.writeFile(path.join(tmp, 'project.json'), JSON.stringify(config)); // workers re-read it
+  await fsp.writeFile(path.join(tmp, 'scene.json'), JSON.stringify(config)); // workers re-read it
   process.env.MOTION_STUDIO_BROWSER_MODULE = FAKE_MODULE;
   try {
     await renderParallel({
-      projectPath: tmp, config, outputPath: out, workers: 3,
+      scenePath: tmp, config, outputPath: out, workers: 3,
     });
   } finally {
     delete process.env.MOTION_STUDIO_BROWSER_MODULE;
@@ -185,10 +186,10 @@ test('parallel: png-sequence merges worker folders with global numbering', async
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const out = path.join(tmp, 'frames-par');
   const config = cfgFor({ durationInFrames: 20 }, { format: 'png-sequence', filename: 'frames-par' });
-  await fsp.writeFile(path.join(tmp, 'project.json'), JSON.stringify(config)); // workers re-read it
+  await fsp.writeFile(path.join(tmp, 'scene.json'), JSON.stringify(config)); // workers re-read it
   process.env.MOTION_STUDIO_BROWSER_MODULE = FAKE_MODULE;
   try {
-    await renderParallel({ projectPath: tmp, config, outputPath: out, workers: 3 });
+    await renderParallel({ scenePath: tmp, config, outputPath: out, workers: 3 });
   } finally {
     delete process.env.MOTION_STUDIO_BROWSER_MODULE;
   }
@@ -204,12 +205,12 @@ test('renderStill: writes one PNG for the requested frame, validates range', asy
   const out = path.join(tmp, 'stills', 'f5.png');
   const config = cfgFor({ durationInFrames: 10 });
   const res = await renderStill({
-    projectPath: tmp, config, frame: 5, outputPath: out, browserFactory: makeFakeBrowserFactory(),
+    scenePath: tmp, config, frame: 5, outputPath: out, browserFactory: makeFakeBrowserFactory(),
   });
   assert.equal(res.frame, 5);
   assert.ok(fs.existsSync(out));
   await assert.rejects(
-    renderStill({ projectPath: tmp, config, frame: 99, outputPath: out, browserFactory: makeFakeBrowserFactory() }),
+    renderStill({ scenePath: tmp, config, frame: 99, outputPath: out, browserFactory: makeFakeBrowserFactory() }),
     (e) => e.code === ErrorCodes.INVALID_CONFIG,
   );
 });
@@ -217,8 +218,8 @@ test('renderStill: writes one PNG for the requested frame, validates range', asy
 /* ------------------------------- assets ------------------------------ */
 
 test('assets: writeAssetFile confines to assets/, checks extension and size cap', async () => {
-  const store = new ProjectStore(await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-assets-')));
-  const proj = await store.createProject({ name: 'Asset Test' });
+  const store = await makeStore(await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-assets-')));
+  const { scene: proj } = await makeScene(store, { name: 'Asset Test' });
   const png = encodePng(8, 8, () => [200, 40, 40]);
 
   const res = await store.writeAssetFile(proj.id, 'assets/logo.png', png.toString('base64'));
@@ -229,17 +230,17 @@ test('assets: writeAssetFile confines to assets/, checks extension and size cap'
   // outside assets/ → rejected
   await assert.rejects(
     store.writeAssetFile(proj.id, 'logo.png', png.toString('base64')),
-    (e) => e.code === ErrorCodes.PATH_OUTSIDE_PROJECT,
+    (e) => e.code === ErrorCodes.PATH_NOT_ALLOWED,
   );
   // path escape → rejected
   await assert.rejects(
     store.writeAssetFile(proj.id, 'assets/../../evil.png', png.toString('base64')),
-    (e) => e.code === ErrorCodes.PATH_OUTSIDE_PROJECT,
+    (e) => e.code === ErrorCodes.PATH_NOT_ALLOWED,
   );
   // disallowed extension → rejected
   await assert.rejects(
     store.writeAssetFile(proj.id, 'assets/tool.exe', png.toString('base64')),
-    (e) => e.code === ErrorCodes.PATH_OUTSIDE_PROJECT,
+    (e) => e.code === ErrorCodes.PATH_NOT_ALLOWED,
   );
   // over the size cap → asset_too_large
   await assert.rejects(
@@ -249,27 +250,26 @@ test('assets: writeAssetFile confines to assets/, checks extension and size cap'
   assert.ok(MAX_ASSET_BYTES > 1024 * 1024);
 });
 
-/* --------------------------- remove project -------------------------- */
+/* ---------------------------- remove scene --------------------------- */
 
-test('removeProject: unregisters; deletes files only inside the managed root', async () => {
+test('removeScene: leaves the film play order; deletes files only when asked', async () => {
   const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-rm-'));
-  const store = new ProjectStore(dataDir);
+  const store = await makeStore(dataDir);
 
-  // Managed project: deleteFiles honored.
-  const managed = await store.createProject({ name: 'Managed' });
-  const res1 = await store.removeProject(managed.id, { deleteFiles: true });
+  // deleteFiles honored: the scene folder goes away.
+  const { scene: managed, film } = await makeScene(store, { name: 'Managed' });
+  const res1 = await store.removeScene(managed.id, { deleteFiles: true });
   assert.equal(res1.filesDeleted, true);
   assert.ok(!fs.existsSync(managed.path));
 
-  // External-dir project: unregistered but files stay.
-  const extDir = path.join(await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-ext-')), 'proj');
-  const external = await store.createProject({ name: 'External', dir: extDir });
-  const res2 = await store.removeProject(external.id, { deleteFiles: true });
+  // Without deleteFiles the scene leaves the play order but the files stay.
+  const { scene: kept } = await makeScene(store, { name: 'Kept' });
+  const res2 = await store.removeScene(kept.id);
   assert.equal(res2.filesDeleted, false);
-  assert.ok(fs.existsSync(path.join(extDir, 'project.json')));
+  assert.ok(fs.existsSync(path.join(kept.path, 'scene.json')));
 
-  assert.equal((await store.listProjects()).length, 0);
-  await assert.rejects(store.removeProject('nope'), (e) => e.code === ErrorCodes.PROJECT_NOT_FOUND);
+  assert.equal((await store.listScenes(film.id)).filter((s) => !s.unlisted).length, 0);
+  await assert.rejects(store.removeScene(`${film.id}/nope`), (e) => e.code === ErrorCodes.SCENE_NOT_FOUND);
 });
 
 /* -------------------------------- ETA -------------------------------- */
@@ -279,7 +279,7 @@ test('progress: emits etaMs once enough frames are done', async () => {
   const progress = new ProgressEmitter(null, (m) => msgs.push(m));
   const config = cfgFor({ durationInFrames: 8 });
   await renderComposition({
-    projectPath: tmp, config, outputPath: path.join(tmp, 'eta.mp4'),
+    scenePath: tmp, config, outputPath: path.join(tmp, 'eta.mp4'),
     browserFactory: makeFakeBrowserFactory({ captureDelayMs: 5 }),
     progress,
   });

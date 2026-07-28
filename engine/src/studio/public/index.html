@@ -16,34 +16,20 @@
       <span class="brand-mark">▶</span>
       <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
-        <span class="version">v0.19 · deterministic renderer</span>
+        <span class="version">v0.20 · deterministic renderer</span>
         <span id="engine-status" class="rail-status">engine —</span>
       </div>
       <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
 
-    <nav class="rail-tabs">
-      <button id="rail-tab-projects" class="rail-tab active">projects</button>
-      <button id="rail-tab-films" class="rail-tab">films</button>
-    </nav>
-
-    <div class="rail-section" id="rail-projects">
-      <div class="rail-head">
-        <span class="sort-toggle" title="sort projects">
-          <button id="sort-name" class="sort-btn" title="sort by name">a–z</button>
-          <button id="sort-date" class="sort-btn" title="sort by last modified">date</button>
-        </span>
-        <button id="btn-new" class="ghost" title="New project">+ new</button>
+    <!-- v0.20: one tree instead of two tabbed lists — workspaces hold films,
+         films hold scenes. Each workspace is one agent's tree; the Studio
+         (the human) sees them all. -->
+    <div class="rail-section" id="rail-tree">
+      <ul id="workspace-tree" class="ws-tree"></ul>
+      <div class="tree-actions">
+        <button id="btn-new-workspace" class="ghost" title="new workspace — a separate tree, usually one per connected agent">+ workspace</button>
       </div>
-      <ul id="project-list" class="project-list"></ul>
-    </div>
-
-    <div class="rail-section hidden" id="rail-films">
-      <div class="rail-head">
-        <span class="dim">combine projects into one video</span>
-        <button id="btn-new-film" class="ghost" title="New film — combine scene projects in the visual editor">+ new</button>
-      </div>
-      <ul id="film-list" class="project-list film-list"></ul>
     </div>
 
     <footer class="rail-foot">
@@ -55,8 +41,8 @@
 
   <main class="stage">
     <div id="empty-state" class="empty">
-      <p>◤ no project selected</p>
-      <p class="dim">Pick a project on the left or create one.<br>
+      <p>◤ no scene selected</p>
+      <p class="dim">Expand a film on the left and pick a scene, or create one.<br>
       Compositions are pure functions of the frame number —<br>
       what you scrub here is exactly what renders.</p>
     </div>
@@ -357,7 +343,7 @@
         <button id="btn-settings-close" class="ghost">close</button>
       </header>
       <form id="settings-form" autocomplete="off">
-        <p class="section-label">new-project defaults</p>
+        <p class="section-label">new-scene defaults</p>
         <div class="fieldrow">
           <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
           <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
@@ -395,9 +381,9 @@
           <span id="ffmpeg-probe" class="dim mono probe"></span>
         </div>
         <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
-        used for every render and the prereq check; new-project defaults and crf/preset fill in whatever a new
-        project doesn't specify, and an agent that asks for a specific size or codec still gets it.
-        <em>Newly created</em> projects only — existing projects keep their own.</p>
+        used for every render and the prereq check; new-scene defaults and crf/preset fill in whatever a new
+        scene (or film) doesn't specify, and an agent that asks for a specific size or codec still gets it.
+        <em>Newly created</em> scenes only — existing scenes keep their own.</p>
         <div class="fieldrow">
           <button type="submit" class="primary">save</button>
         </div>
@@ -406,10 +392,37 @@
       </form>
     </section>
 
+    <!-- Workspace library (v0.20): the human's upload surface for a
+         workspace's shared assets — same stage-page shell as vendors/settings. -->
+    <section id="library-page" class="vendors-page hidden">
+      <header class="page-head">
+        <h2 id="library-title">library</h2>
+        <span class="spacer"></span>
+        <span id="library-path" class="dim mono path-chip"></span>
+        <button id="btn-library-close" class="ghost">close</button>
+      </header>
+      <p class="dim note library-intro">
+        Files here are shared across the whole workspace and visible to its agent via
+        <code>list_shared_assets</code> / <code>use_shared_asset</code>, which links them into any scene or
+        film without copying the bytes — upload big files (photo sets, music beds, footage, fonts) once
+        instead of pushing them through the 25&nbsp;MB tool channel per scene.
+      </p>
+      <div class="library-upload-row">
+        <label class="lib-folder">subfolder <input id="library-folder" placeholder="plates" size="16"></label>
+        <label class="primary lib-upload-btn" for="library-upload">+ upload files</label>
+        <input type="file" id="library-upload" multiple hidden>
+      </div>
+      <table class="library-table">
+        <thead><tr><th>path</th><th>kind</th><th class="num">size</th><th>modified</th><th></th></tr></thead>
+        <tbody id="library-rows"></tbody>
+      </table>
+      <p id="library-empty" class="dim hidden">Nothing here yet — upload a file, or drop one into the folder above on disk.</p>
+    </section>
+
     <div id="workbench" class="workbench hidden">
       <section class="viewport-wrap">
         <div class="viewport-head">
-          <span id="project-title" class="mono"></span>
+          <span id="scene-title" class="mono"></span>
           <span id="viewport-meta" class="dim mono"></span>
           <span id="hot-reload-dot" title="hot reload connected">●</span>
         </div>
@@ -520,19 +533,19 @@
             </div>
           </form>
 
-          <p class="section-label">project facts <span class="dim">(read-only)</span></p>
+          <p class="section-label">scene facts <span class="dim">(read-only)</span></p>
           <dl id="config-facts" class="env-list mono"></dl>
 
           <details id="raw-config">
-            <summary>raw project.json</summary>
+            <summary>raw scene.json</summary>
             <pre id="raw-config-body" class="logs"></pre>
           </details>
 
           <div class="meta-row">
             <span class="meta-label">location</span>
-            <span id="project-path" class="mono path-chip" title=""></span>
-            <button id="btn-copy-path" class="ghost" title="copy the project folder path">copy</button>
-            <button id="btn-delete-project" class="ghost danger" title="remove this project">delete project…</button>
+            <span id="scene-path" class="mono path-chip" title=""></span>
+            <button id="btn-copy-path" class="ghost" title="copy the scene folder path">copy</button>
+            <button id="btn-delete-scene" class="ghost danger" title="remove this scene">delete scene…</button>
           </div>
         </div>
 
@@ -569,10 +582,26 @@
   </main>
 </div>
 
-<dialog id="new-dialog">
-  <form id="new-form" method="dialog">
-    <h2>new project</h2>
-    <label>name <input name="name" required placeholder="Intro Title"></label>
+<dialog id="new-scene-dialog">
+  <form id="new-scene-form" method="dialog">
+    <h2>new scene</h2>
+    <p class="dim note">in film <span id="new-scene-film" class="mono"></span> — resolution and fps come from
+    the film, so every scene stays concat-compatible. Leave the duration at 0 to take the film's default;
+    change any of it later in the scene's config tab.</p>
+    <label>name <input name="name" required placeholder="Opening Title"></label>
+    <label>duration <input name="durationInFrames" type="number" value="0" min="0"> <span class="dim">frames (0 = film default)</span></label>
+    <div class="fieldrow right">
+      <button type="button" id="btn-new-scene-cancel" class="ghost">cancel</button>
+      <button type="submit" class="primary">create scene</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="new-film-dialog">
+  <form id="new-film-form" method="dialog">
+    <h2>new film</h2>
+    <p class="dim note">in workspace <span id="new-film-workspace" class="mono"></span></p>
+    <label>name <input name="name" required placeholder="My Film"></label>
     <div class="fieldrow">
       <label>width <input name="width" type="number" value="1920" step="2"></label>
       <label>height <input name="height" type="number" value="1080" step="2"></label>
@@ -581,20 +610,11 @@
       <label>fps <input name="fps" type="number" value="30"></label>
       <label>frames <input name="durationInFrames" type="number" value="150"></label>
     </div>
-    <div class="fieldrow right">
-      <button type="button" id="btn-new-cancel" class="ghost">cancel</button>
-      <button type="submit" class="primary">create</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="new-film-dialog">
-  <form id="new-film-form" method="dialog">
-    <h2>new film</h2>
-    <label>name <input name="name" required placeholder="My Film"></label>
-    <p class="dim note">A film combines rendered scene projects into one continuous video, with a master
-    audio timeline, captions and overlays — arranged in the visual editor that opens next.
-    A dedicated “&lt;name&gt; — Master” project is created to hold the film's assets and output.</p>
+    <p class="dim note">A film holds ordered scenes and combines their renders into one continuous video,
+    with a master audio timeline, captions and overlays — arranged in the visual editor that opens next.
+    It keeps its own assets/ (master audio) and out/ (the built film). These dimensions become the film's
+    <em>scene defaults</em>: every scene created inside inherits them, which is what keeps the scenes
+    losslessly concatenable.</p>
     <div class="fieldrow right">
       <button type="button" id="btn-new-film-cancel" class="ghost">cancel</button>
       <button type="submit" class="primary">create & open editor</button>
@@ -604,11 +624,11 @@
 
 <dialog id="delete-dialog">
   <form id="delete-form" method="dialog">
-    <h2>delete project</h2>
+    <h2>delete scene</h2>
     <p id="delete-summary"></p>
     <label class="check"><input name="deleteFiles" type="checkbox"> also delete files on disk</label>
-    <p class="dim" id="delete-note">Unchecked: the project is only unregistered from the list; its folder stays.
-    Folders outside the managed projects root are never deleted from disk.</p>
+    <p class="dim" id="delete-note">Unchecked: the scene leaves the film's play order but its folder stays on
+    disk (listed as “unlisted”). Checked: the scene folder and everything in it is deleted.</p>
     <div class="fieldrow right">
       <button type="button" id="btn-delete-cancel" class="ghost">cancel</button>
       <button type="submit" class="primary">delete</button>

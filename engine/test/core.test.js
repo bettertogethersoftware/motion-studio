@@ -1,18 +1,21 @@
-﻿import { test, beforeEach, afterEach } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveInProject } from '../src/core/sandbox.js';
-import { ProjectStore, validateConfig, makeConfig, checkJsSyntax, checkDeterminism, checkSequenceCoverage, checkCanvasStateBalance } from '../src/core/project.js';
+import { resolveInTarget } from '../src/core/sandbox.js';
+import { validateConfig, makeConfig, checkJsSyntax, checkDeterminism, checkSequenceCoverage, checkCanvasStateBalance, slugify } from '../src/core/scene.js';
+import { WorkspaceStore } from '../src/core/store.js';
+import { migrateLegacyLayout } from '../src/core/migrate.js';
+import { makeStore, makeScene, TEST_WS } from './helpers/workspace.mjs';
 import { parseProgressLine, ProgressStreamParser, ProgressEmitter } from '../src/core/progress.js';
 import { parseFfmpegVersion, parseNodeVersion } from '../src/core/prereqs.js';
 import { buildAudioFilter, LIMITER_FILTER, computeBalanceWarnings } from '../src/core/encoder.js';
 import { encodingCompatibilityWarnings } from '../src/core/formats.js';
 import { ErrorCodes } from '../src/core/errors.js';
-import { DEFAULT_SETTINGS, withNewProjectDefaults, outputSeedFromSettings } from '../src/core/settings.js';
+import { DEFAULT_SETTINGS, withNewSceneDefaults, outputSeedFromSettings } from '../src/core/settings.js';
 
 let tmp;
 beforeEach(async () => { tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-test-')); });
@@ -26,28 +29,28 @@ const codeOf = (fn) => {
 /* ------------------------------ sandbox ------------------------------ */
 
 test('sandbox: allows normal relative paths', () => {
-  const p = resolveInProject(tmp, 'composition.js', { forWrite: true });
+  const p = resolveInTarget(tmp, 'composition.js', { forWrite: true });
   assert.equal(p, path.join(fs.realpathSync(tmp), 'composition.js'));
 });
 
 test('sandbox: rejects traversal, absolute, drive-letter, null-byte paths', () => {
-  assert.equal(codeOf(() => resolveInProject(tmp, '../evil.js')), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  assert.equal(codeOf(() => resolveInProject(tmp, 'a/../../evil.js')), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  assert.equal(codeOf(() => resolveInProject(tmp, '/etc/passwd')), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  assert.equal(codeOf(() => resolveInProject(tmp, 'C:\\Windows\\evil.js')), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  assert.equal(codeOf(() => resolveInProject(tmp, 'a\0.js')), ErrorCodes.PATH_OUTSIDE_PROJECT);
+  assert.equal(codeOf(() => resolveInTarget(tmp, '../evil.js')), ErrorCodes.PATH_NOT_ALLOWED);
+  assert.equal(codeOf(() => resolveInTarget(tmp, 'a/../../evil.js')), ErrorCodes.PATH_NOT_ALLOWED);
+  assert.equal(codeOf(() => resolveInTarget(tmp, '/etc/passwd')), ErrorCodes.PATH_NOT_ALLOWED);
+  assert.equal(codeOf(() => resolveInTarget(tmp, 'C:\\Windows\\evil.js')), ErrorCodes.PATH_NOT_ALLOWED);
+  assert.equal(codeOf(() => resolveInTarget(tmp, 'a\0.js')), ErrorCodes.PATH_NOT_ALLOWED);
 });
 
 test('sandbox: interior ".." that stays inside is fine', () => {
-  const p = resolveInProject(tmp, 'sub/../composition.js');
+  const p = resolveInTarget(tmp, 'sub/../composition.js');
   assert.equal(path.basename(p), 'composition.js');
 });
 
-test('sandbox: write allow-list blocks executables and project.json', () => {
-  assert.equal(codeOf(() => resolveInProject(tmp, 'evil.exe', { forWrite: true })), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  assert.equal(codeOf(() => resolveInProject(tmp, 'project.json', { forWrite: true })), ErrorCodes.PATH_OUTSIDE_PROJECT);
-  // but reading project.json is allowed
-  resolveInProject(tmp, 'project.json');
+test('sandbox: write allow-list blocks executables and scene.json', () => {
+  assert.equal(codeOf(() => resolveInTarget(tmp, 'evil.exe', { forWrite: true })), ErrorCodes.PATH_NOT_ALLOWED);
+  assert.equal(codeOf(() => resolveInTarget(tmp, 'scene.json', { forWrite: true })), ErrorCodes.PATH_NOT_ALLOWED);
+  // but reading scene.json is allowed
+  resolveInTarget(tmp, 'scene.json');
 });
 
 test('sandbox: symlink escape via existing symlinked dir is rejected', async (t) => {
@@ -59,7 +62,7 @@ test('sandbox: symlink escape via existing symlinked dir is rejected', async (t)
       t.skip('symlinks not permitted in this environment');
       return;
     }
-    assert.equal(codeOf(() => resolveInProject(tmp, 'link/file.js', { forWrite: true })), ErrorCodes.PATH_OUTSIDE_PROJECT);
+    assert.equal(codeOf(() => resolveInTarget(tmp, 'link/file.js', { forWrite: true })), ErrorCodes.PATH_NOT_ALLOWED);
   } finally {
     await fsp.rm(outside, { recursive: true, force: true });
   }
@@ -97,64 +100,180 @@ test('config: audio track validation', () => {
 
 /* ------------------------------ store -------------------------------- */
 
-test('store: create → list → get → read/write file round trip', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  const proj = await store.createProject({ name: 'My Intro!', fps: 24, width: 1280, height: 720, durationInFrames: 48 });
-  assert.ok(proj.id);
-  assert.ok(fs.existsSync(path.join(proj.path, 'composition.html')));
-  assert.ok(fs.existsSync(path.join(proj.path, 'frame-api.js')));
+test('store: workspace → film → scene round trip with file read/write', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'My Film', sceneDefaults: { fps: 24, width: 1280, height: 720 } });
+  assert.equal(film.id, `${TEST_WS}/my-film`);
+  const scene = await store.createScene(film.id, { name: 'My Intro!', durationInFrames: 48 });
+  assert.equal(scene.id, `${film.id}/my-intro`); // slugified name
+  assert.ok(fs.existsSync(path.join(scene.path, 'composition.html')));
+  assert.ok(fs.existsSync(path.join(scene.path, 'frame-api.js')));
 
-  // template placeholders substituted
-  const js = await store.readFile(proj.id, 'composition.js');
+  // template placeholders substituted, film sceneDefaults inherited
+  const js = await store.readFile(scene.id, 'composition.js');
   assert.match(js, /const FPS = 24;/);
   assert.match(js, /const DURATION = 48;/);
 
-  const list = await store.listProjects();
-  assert.equal(list.length, 1);
-  assert.equal(list[0].name, 'My Intro!');
+  const films = await store.listFilms(TEST_WS);
+  assert.equal(films.length, 1);
+  assert.equal(films[0].name, 'My Film');
+  const scenes = await store.listScenes(film.id);
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].name, 'My Intro!');
 
-  await store.writeFile(proj.id, 'composition.js', 'MotionStudio.registerComposition(function (f) {});\n');
-  assert.match(await store.readFile(proj.id, 'composition.js'), /registerComposition/);
+  await store.writeFile(scene.id, 'composition.js', 'MotionStudio.registerComposition(function (f) {});\n');
+  assert.match(await store.readFile(scene.id, 'composition.js'), /registerComposition/);
 });
 
-test('store: duplicate project path rejected', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  await store.createProject({ name: 'Same' });
-  await assert.rejects(() => store.createProject({ name: 'Same' }), (e) => e.code === ErrorCodes.PROJECT_ALREADY_EXISTS);
+test('store: duplicate film / scene slugs rejected', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'Same' });
+  await assert.rejects(() => store.createFilm(TEST_WS, { name: 'Same' }), (e) => e.code === ErrorCodes.FILM_ALREADY_EXISTS);
+  await store.createScene(film.id, { name: 'Shot' });
+  await assert.rejects(() => store.createScene(film.id, { name: 'Shot' }), (e) => e.code === ErrorCodes.SCENE_ALREADY_EXISTS);
 });
 
-test('store: unknown project id → project_not_found', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  await assert.rejects(() => store.readConfig('nope'), (e) => e.code === ErrorCodes.PROJECT_NOT_FOUND);
+test('store: unknown ids → scene_not_found / film_not_found / workspace_not_found / invalid_id', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  await assert.rejects(() => store.readConfig(`${TEST_WS}/f/nope`), (e) => e.code === ErrorCodes.SCENE_NOT_FOUND);
+  await assert.rejects(() => store.getFilm(`${TEST_WS}/nope`), (e) => e.code === ErrorCodes.FILM_NOT_FOUND);
+  await assert.rejects(() => store.getWorkspace('nope'), (e) => e.code === ErrorCodes.WORKSPACE_NOT_FOUND);
+  await assert.rejects(() => store.readConfig('not-a-scene-id'), (e) => e.code === ErrorCodes.INVALID_ID);
+  await assert.rejects(() => store.getFilm('../../escape'), (e) => e.code === ErrorCodes.INVALID_ID);
 });
 
 test('store: write with JS syntax error fails fast, file untouched', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  const proj = await store.createProject({ name: 'SyntaxGuard' });
-  const before = await store.readFile(proj.id, 'composition.js');
+  const { store, scene } = await makeScene(await makeStore(path.join(tmp, 'data')), { name: 'SyntaxGuard' });
+  const before = await store.readFile(scene.id, 'composition.js');
   await assert.rejects(
-    () => store.writeFile(proj.id, 'composition.js', 'function ( { broken'),
+    () => store.writeFile(scene.id, 'composition.js', 'function ( { broken'),
     (e) => e.code === ErrorCodes.SYNTAX_ERROR && /Syntax error/.test(e.message),
   );
-  assert.equal(await store.readFile(proj.id, 'composition.js'), before, 'original file preserved');
+  assert.equal(await store.readFile(scene.id, 'composition.js'), before, 'original file preserved');
 });
 
 test('store: sandbox enforced through writeFile', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  const proj = await store.createProject({ name: 'Sandboxed' });
+  const { store, scene } = await makeScene(await makeStore(path.join(tmp, 'data')), { name: 'Sandboxed' });
   await assert.rejects(
-    () => store.writeFile(proj.id, '../outside.js', '1'),
-    (e) => e.code === ErrorCodes.PATH_OUTSIDE_PROJECT,
+    () => store.writeFile(scene.id, '../outside.js', '1'),
+    (e) => e.code === ErrorCodes.PATH_NOT_ALLOWED,
   );
 });
 
 test('store: updateConfig validates and restricts fields', async () => {
-  const store = new ProjectStore(path.join(tmp, 'data'));
-  const proj = await store.createProject({ name: 'Cfg' });
-  const next = await store.updateConfig(proj.id, { fps: 60, durationInFrames: 300 });
+  const { store, scene } = await makeScene(await makeStore(path.join(tmp, 'data')), { name: 'Cfg' });
+  const next = await store.updateConfig(scene.id, { fps: 60, durationInFrames: 300 });
   assert.equal(next.fps, 60);
-  await assert.rejects(() => store.updateConfig(proj.id, { entry: 'hack.html' }), (e) => e.code === ErrorCodes.INVALID_CONFIG);
-  await assert.rejects(() => store.updateConfig(proj.id, { width: 1921 }), (e) => e.code === ErrorCodes.INVALID_CONFIG);
+  await assert.rejects(() => store.updateConfig(scene.id, { entry: 'hack.html' }), (e) => e.code === ErrorCodes.INVALID_CONFIG);
+  await assert.rejects(() => store.updateConfig(scene.id, { width: 1921 }), (e) => e.code === ErrorCodes.INVALID_CONFIG);
+});
+
+test('store: scene order lives in film.json; removeScene keeps the folder as unlisted', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'Order' });
+  const a = await store.createScene(film.id, { name: 'A' });
+  const b = await store.createScene(film.id, { name: 'B' });
+  assert.deepEqual((await store.getFilm(film.id)).scenes.map((s) => s.slug), ['a', 'b']);
+  await store.updateFilm(film.id, { scenes: [{ slug: 'b' }, { slug: 'a' }] });
+  assert.deepEqual((await store.listScenes(film.id)).map((s) => s.slug), ['b', 'a']);
+
+  await store.removeScene(a.id); // keep files
+  const scenes = await store.listScenes(film.id);
+  assert.deepEqual(scenes.map((s) => `${s.slug}:${!!s.unlisted}`), ['b:false', 'a:true']);
+  assert.ok(fs.existsSync(a.path), 'scene folder preserved');
+
+  await store.removeScene(b.id, { deleteFiles: true });
+  assert.ok(!fs.existsSync(b.path), 'scene folder deleted');
+});
+
+test('store: film-level assets and audio tracks (the old "master project" role)', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'Master' });
+  await store.writeAssetFile(film.id, 'assets/music.wav', Buffer.from('RIFF').toString('base64'));
+  const assets = await store.listAssets(film.id);
+  assert.deepEqual(assets.map((a) => a.path), ['assets/music.wav']);
+
+  await store.updateFilm(film.id, { audio: [{ src: 'assets/music.wav', gainDb: -8 }] });
+  const withRefs = await store.listAssets(film.id);
+  assert.equal(withRefs[0].audioRefs, 1);
+
+  const del = await store.deleteAsset(film.id, 'assets/music.wav', { updateAudio: true });
+  assert.equal(del.audioTracksRemoved, 1);
+  assert.deepEqual((await store.getFilm(film.id)).audio, []);
+});
+
+test('store: library upload → list → useLibraryAsset links into a scene', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const { scene } = await makeScene(store);
+  await store.writeLibraryBuffer(TEST_WS, 'plates/bg.png', Buffer.from('89504e470d0a1a0a', 'hex'));
+  const lib = await store.listLibrary(TEST_WS);
+  assert.deepEqual(lib.map((f) => f.path), ['plates/bg.png']);
+
+  const used = await store.useLibraryAsset(scene.id, 'plates/bg.png');
+  assert.equal(used.path, 'assets/library/plates/bg.png');
+  assert.ok(fs.existsSync(path.join(scene.path, 'assets', 'library', 'plates', 'bg.png')));
+
+  await assert.rejects(() => store.useLibraryAsset(scene.id, 'nope.png'), (e) => e.code === ErrorCodes.FILE_NOT_FOUND);
+  await assert.rejects(() => store.useLibraryAsset(scene.id, '../../escape.png'), (e) => e.code === ErrorCodes.PATH_NOT_ALLOWED);
+});
+
+test('slugify: collapses runs and strips edge dashes', () => {
+  assert.equal(slugify('My Film — Master'), 'my-film-master');
+  assert.equal(slugify('  A  B  '), 'a-b');
+  assert.equal(slugify('!!!'), 'untitled');
+});
+
+/* ---------------------------- migration ------------------------------ */
+
+test('migrate: legacy projects.json/films.json becomes workspaces/default', async () => {
+  const dataDir = path.join(tmp, 'legacy');
+  // Deliberately the OLD filename: this fixture is the pre-v0.20 world, and
+  // renaming project.json → scene.json is part of what migration must do.
+  const mkProj = async (slug, name) => {
+    const p = path.join(dataDir, 'projects', slug);
+    await fsp.mkdir(path.join(p, 'assets'), { recursive: true });
+    await fsp.mkdir(path.join(p, 'out'), { recursive: true });
+    await fsp.writeFile(path.join(p, 'project.json'), JSON.stringify({
+      schemaVersion: 2, name, fps: 30, width: 640, height: 360, durationInFrames: 30,
+      entry: 'composition.html', output: { dir: 'out', filename: 'output.mp4', format: 'mp4' },
+    }));
+    return p;
+  };
+  const p1 = await mkProj('s1', 'Film X - Scene 1');
+  const pm = await mkProj('xm', 'Film X - Master');
+  await fsp.writeFile(path.join(pm, 'assets', 'music.wav'), 'RIFF');
+  const loose = await mkProj('loose', 'Loose');
+  await fsp.writeFile(path.join(dataDir, 'projects.json'), JSON.stringify({ projects: [
+    { id: 'u1', name: 'Film X - Scene 1', path: p1, createdAt: '2026-01-01T00:00:00Z' },
+    { id: 'um', name: 'Film X - Master', path: pm, createdAt: '2026-01-01T00:00:00Z' },
+    { id: 'ul', name: 'Loose', path: loose, createdAt: '2026-01-01T00:00:00Z' },
+  ] }));
+  await fsp.writeFile(path.join(dataDir, 'films.json'), JSON.stringify({ films: [{
+    id: 'f1', name: 'Film X', scenes: [{ projectId: 'u1' }], outputProjectId: 'um',
+    outputFilename: 'film-x', audio: [{ src: 'assets/music.wav' }], overlays: [], captions: [],
+  }] }));
+
+  const report = await migrateLegacyLayout(dataDir);
+  assert.equal(report.migrated, true);
+  assert.equal(report.filmIdMap.f1, 'default/film-x');
+
+  const store = new WorkspaceStore(dataDir);
+  const films = await store.listFilms('default');
+  assert.deepEqual(films.map((f) => f.slug).sort(), ['film-x', 'loose']);
+  const filmX = await store.getFilm('default/film-x');
+  assert.deepEqual(filmX.scenes.map((s) => s.slug), ['film-x-scene-1']);
+  assert.deepEqual(filmX.audio.map((t) => t.src), ['assets/music.wav']);
+  // The master project's assets folded into the film folder.
+  assert.ok(fs.existsSync(path.join(filmX.path, 'assets', 'music.wav')));
+  // The config file was renamed with the concept — a moved folder is only a
+  // scene once it carries scene.json, and readConfig proves the store agrees.
+  const sceneDir = path.join(filmX.path, 'scenes', 'film-x-scene-1');
+  assert.ok(fs.existsSync(path.join(sceneDir, 'scene.json')), 'project.json → scene.json');
+  assert.ok(!fs.existsSync(path.join(sceneDir, 'project.json')), 'old name gone');
+  assert.equal((await store.readConfig('default/film-x/film-x-scene-1')).width, 640);
+  // Registries retired; second run is a no-op.
+  assert.ok(!fs.existsSync(path.join(dataDir, 'projects.json')));
+  assert.deepEqual(await migrateLegacyLayout(dataDir), { migrated: false });
 });
 
 /* --------------------------- syntax check ---------------------------- */
@@ -590,13 +709,13 @@ test('encoder: ducking still ends in the limiter by default', () => {
 
 const settingsWith = (patch) => ({
   ...DEFAULT_SETTINGS,
-  newProjectDefaults: { ...DEFAULT_SETTINGS.newProjectDefaults, ...(patch.newProjectDefaults ?? {}) },
+  newSceneDefaults: { ...DEFAULT_SETTINGS.newSceneDefaults, ...(patch.newSceneDefaults ?? {}) },
   ffmpeg: { ...DEFAULT_SETTINGS.ffmpeg, ...(patch.ffmpeg ?? {}) },
 });
 
 test('settings: new-project defaults fill only the fields a caller left unset', () => {
-  const s = settingsWith({ newProjectDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 } });
-  const merged = withNewProjectDefaults(s, { name: 'x', width: 3840 });
+  const s = settingsWith({ newSceneDefaults: { fps: 24, width: 1280, height: 720, durationInFrames: 48 } });
+  const merged = withNewSceneDefaults(s, { name: 'x', width: 3840 });
   assert.equal(merged.width, 3840); // explicit wins
   assert.equal(merged.fps, 24);     // global fills the gap
   assert.equal(merged.height, 720);
@@ -607,16 +726,16 @@ test('settings: new-project defaults fill only the fields a caller left unset', 
 test('settings: an explicit undefined does not clobber a global default', () => {
   // MCP hands unset optional fields through as undefined; a naive spread would
   // overwrite the default with undefined and silently fall back to 30fps.
-  const s = settingsWith({ newProjectDefaults: { fps: 24 } });
-  const merged = withNewProjectDefaults(s, { name: 'x', fps: undefined, height: undefined });
+  const s = settingsWith({ newSceneDefaults: { fps: 24 } });
+  const merged = withNewSceneDefaults(s, { name: 'x', fps: undefined, height: undefined });
   assert.equal(merged.fps, 24);
-  assert.equal(merged.height, DEFAULT_SETTINGS.newProjectDefaults.height);
+  assert.equal(merged.height, DEFAULT_SETTINGS.newSceneDefaults.height);
 });
 
 test('settings: an explicit value equal to the factory default still wins', () => {
   // Guards the "did the caller mean it?" distinction that .default() destroyed.
-  const s = settingsWith({ newProjectDefaults: { fps: 24 } });
-  assert.equal(withNewProjectDefaults(s, { name: 'x', fps: 30 }).fps, 30);
+  const s = settingsWith({ newSceneDefaults: { fps: 24 } });
+  assert.equal(withNewSceneDefaults(s, { name: 'x', fps: 30 }).fps, 30);
 });
 
 test('settings: output seed is null unless an encode default is set', () => {

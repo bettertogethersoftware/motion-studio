@@ -20,7 +20,7 @@ for models, [sfx-setup.md](sfx-setup.md) for generated audio.
 These share a shape: the pipeline reported success and the defect was invisible
 until someone watched or listened to the result. They are why v0.11 exists.
 
-### 1.1 Two renders quietly corrupting one project · **FIXED IN ENGINE**
+### 1.1 Two renders quietly corrupting one scene · **FIXED IN ENGINE**
 
 **Symptom.** Nothing. No error, no warning. The only tell was an unexpected
 number of `node.exe` / `chrome.exe` processes.
@@ -28,7 +28,7 @@ number of `node.exe` / `chrome.exe` processes.
 **Root cause.** A render was backgrounded with a shell `&`, which orphaned it
 from the tool's lifecycle — no completion notification, output going to
 `/dev/null`. Unable to tell whether it was alive, a second render was started.
-Both then wrote the same project's frame files and both ran ffmpeg on the same
+Both then wrote the same scene's frame files and both ran ffmpeg on the same
 output path. The survivor is whichever finished last; any torn frame in between
 is undetectable.
 
@@ -45,7 +45,7 @@ shell `&`. And when a resource can be written by two processes, the absence of a
 error is not evidence of correctness — go look at the process table.
 
 **Subtlety worth keeping:** parallel *workers* must **not** take the lock
-(`lock: false`, set from the CLI's `--segment`). They target the same project by
+(`lock: false`, set from the CLI's `--segment`). They target the same scene by
 design and the parent's lock covers them; a worker taking its own would deadlock
 the fan-out against itself. `renderParallel` also delegates to
 `renderComposition` for a single worker and lets the *delegate* lock, for the
@@ -147,11 +147,11 @@ parallel worker starting mid-film renders differently than a serial pass).
 
 **Fix.** Structural: scene containers hidden by **default in CSS**, each
 `Sequence` only turns its own scene on, no `classList.add`/`remove` in the
-frame function — and for anything measured in minutes, one project per scene
-stitched with `build_film` instead of a single DOM juggling every scene.
+frame function — and for anything measured in minutes, a separate scene folder
+per scene stitched with `build_film` instead of a single DOM juggling every scene.
 Since v0.22 the engine warns on all three fronts: `classlist-mutation` and
 `sequence-gap` lints in `write_composition_file`, and `structureWarnings`
-from `create_project`/`update_project_config` past ~90 seconds.
+from `create_scene`/`update_scene_config` past ~90 seconds.
 
 **Lesson.** "It passed every check" only means the checks that exist. A
 low-effort agent follows the letter of a principle ("reset every frame ✓")
@@ -246,14 +246,14 @@ of scripting against a 32-minute render.
 
 **Symptom.** Fixed a drawing bug, re-previewed, and the bug was still there.
 
-**Root cause.** `film-setup.md` recommends every scene project ship the *same*
-`composition.js` and differ only in a small `scene.js` — but each project holds
+**Root cause.** `film-setup.md` recommends every scene ship the *same*
+`composition.js` and differ only in a small `scene.js` — but each scene holds
 its own **copy**, made at scaffold time. Editing the original reaches nothing.
-On 16 scenes a one-line art fix is a sixteen-project chore.
+On 16 scenes a one-line art fix is a sixteen-scene chore.
 
-**Fix.** `sync_shared_files` / `ProjectStore.syncSharedFiles`. All source files
-are read before anything is written, so a bad path fails before it half-updates a
-film. Measured: 15 projects, 2 files, **71 ms**.
+**Fix.** `sync_shared_files` / `WorkspaceStore.syncSharedFiles`. All source
+files are read before anything is written, so a bad path fails before it
+half-updates a film. Measured: 15 scenes, 2 files, **71 ms**.
 
 **Two things it deliberately does not do:** touch `scene.js` unless you list it
 (that is the per-scene data — syncing it would overwrite every scene with scene
@@ -504,7 +504,7 @@ that produced it.
 **Root cause.** `libraries.js` declared Babylon as `version: 'stable'` fetching
 `https://cdn.babylonjs.com/babylon.js`, and all of `engine/vendor/` was
 git-ignored. Two independent failures hid in that: **acquisition** (two machines
-fetching at different times get different builds) and **provenance** (a project
+fetching at different times get different builds) and **provenance** (a scene
 cannot say what it rendered against, even on one machine).
 
 **The measurement that settled the design.** A version pin fixes only the first —
@@ -520,7 +520,7 @@ lock. `fetch-libs.mjs` hashes every download, **refuses to overwrite on mismatch
 (so a failed run cannot half-upgrade the vendor dir), and `--update` is the only
 way to change the lock. `--verify` checks disk against the lock and exits 1 on
 drift. Both libraries are now pinned to versioned URLs, and `add_library` stamps
-`config.libraryBuilds` (`{version, sha256, bytes}` per file) so the *project*
+`config.libraryBuilds` (`{version, sha256, bytes}` per file) so the *scene*
 records its own build.
 
 Because the pinned build is not the one that made the video, the swap was

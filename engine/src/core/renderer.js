@@ -59,6 +59,7 @@ import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode
 import { measureWavLevels, wavDurationSeconds } from './tts.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
+import { writeRenderMeta } from './film.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -152,7 +153,7 @@ export function normalizeProxy(proxy) {
 /**
  * The scaled capture size for a proxy: floored to EVEN numbers because the
  * mp4/webm/prores encoders reject odd dimensions (chroma subsampling), and a
- * proxy must work with whatever format the project is configured for.
+ * proxy must work with whatever format the scene is configured for.
  * Clamped to 2 so a tiny composition at scale 0.1 cannot round to zero.
  */
 export function proxyDimensions(width, height, scale) {
@@ -211,7 +212,7 @@ async function runPreflight(page, frames, signal, progress) {
  * clipped mix is that it sounds bad, which an agent cannot hear. Never fatal:
  * a measurement failure must not fail an otherwise good render.
  */
-async function reportAudioLevels({ outputPath, config, output, ffmpegPath, projectRoot, progress, onChildPid, signal }) {
+async function reportAudioLevels({ outputPath, config, output, ffmpegPath, assetRoot, progress, onChildPid, signal }) {
   const levels = await measureAudioLevels({
     filePath: outputPath, ffmpegPath, onSpawn: onChildPid, signal,
   }).catch(() => null);
@@ -220,8 +221,8 @@ async function reportAudioLevels({ outputPath, config, output, ffmpegPath, proje
   // mix only gets QUIETER — so measure each source clip and flag any track
   // sitting far under a louder overlapping one. Never fatal, like the rest of
   // this function: a measurement failure just skips that track.
-  const balanceWarnings = projectRoot
-    ? await measureTrackBalance({ config, projectRoot, ffmpegPath, onChildPid, signal }).catch(() => [])
+  const balanceWarnings = assetRoot
+    ? await measureTrackBalance({ config, assetRoot, ffmpegPath, onChildPid, signal }).catch(() => [])
     : [];
   for (const w of balanceWarnings) progress.log('warn', w);
   if (!levels) {
@@ -244,11 +245,11 @@ async function reportAudioLevels({ outputPath, config, output, ffmpegPath, proje
 /** Measure each config.audio clip's own level/duration and run the shared
  *  balance check. WAVs are read directly (fast header+PCM pass); anything else
  *  decodes through ffmpeg. Unmeasurable clips are skipped, never fatal. */
-async function measureTrackBalance({ config, projectRoot, ffmpegPath, onChildPid, signal }) {
+async function measureTrackBalance({ config, assetRoot, ffmpegPath, onChildPid, signal }) {
   if (!config.audio || config.audio.length < 2) return [];
   const measured = [];
   for (const t of config.audio) {
-    const abs = path.resolve(projectRoot, t.src);
+    const abs = path.resolve(assetRoot, t.src);
     let clipMeanDb = null;
     let clipDurationSec = null;
     if (/\.wav$/i.test(t.src)) {
@@ -263,6 +264,19 @@ async function measureTrackBalance({ config, projectRoot, ffmpegPath, onChildPid
     fps: config.fps,
     videoDurationSec: config.durationInFrames / config.fps,
   });
+}
+
+/**
+ * Is this render the scene's canonical output — the whole scene, at its
+ * current settings, in its real destination (v0.21)?
+ *
+ * Only such a render may stamp the sidecar that build_film trusts. A proxy
+ * writes to <name>.proxy.<ext>, a worker segment writes a slice, and a
+ * partial frameRange deliberately leaves the rest of the file stale.
+ */
+function isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config }) {
+  if (prx || skipAudio || asIntermediate) return false;
+  return startFrame === 0 && endFrame === config.durationInFrames - 1;
 }
 
 /**
@@ -286,7 +300,7 @@ export async function verifyFrameCount({ outputPath, expected, progress = new Pr
     throw new EngineError(
       ErrorCodes.SHORT_RENDER,
       `output has ${actual} frames but ${expected} were rendered — the encode did not complete. ` +
-        'Re-render this project; do not assemble this file into a film.',
+        'Re-render this scene; do not assemble this file into a film.',
       { outputPath, expected, actual },
     );
   }
@@ -305,8 +319,8 @@ function outputSettings(config) {
  * Serial render of a frame range.
  *
  * @param {object} opts
- * @param {string} opts.projectPath     absolute path to project folder
- * @param {object} opts.config          validated project config
+ * @param {string} opts.scenePath     absolute path to the scene folder
+ * @param {object} opts.config          validated scene config
  * @param {string} opts.outputPath      absolute output path (file, or directory for png-sequence)
  * @param {[number,number]} [opts.frameRange]  inclusive, defaults to full duration
  * @param {string} [opts.framesDir]     if set: write PNG sequence, encode second-pass
@@ -316,8 +330,8 @@ function outputSettings(config) {
  *   preview (v0.21): capture at width×scale (floored to even), every
  *   frameStep-th frame, encoded at fps/frameStep, written to <name>.proxy.<ext>.
  *   Implies no pre-flight and no audio mux; see the module header.
- * @param {boolean} [opts.lock=true]    take the project's cross-process render lock.
- *   Parallel *workers* must pass false: they render the same project by design,
+ * @param {boolean} [opts.lock=true]    take the scene's cross-process render lock.
+ *   Parallel *workers* must pass false: they render the same scene by design,
  *   and their parent already holds the lock on their behalf.
  * @param {AbortSignal} [opts.signal]
  * @param {ProgressEmitter} [opts.progress]
@@ -326,7 +340,7 @@ function outputSettings(config) {
  */
 export async function renderComposition(opts) {
   const {
-    projectPath, config, outputPath,
+    scenePath, config, outputPath,
     frameRange, framesDir, skipAudio = false, asIntermediate = false,
     proxy = null,
     signal, progress = new ProgressEmitter(null),
@@ -374,7 +388,7 @@ export async function renderComposition(opts) {
   const frameList = steppedFrameList(startFrame, endFrame, prx ? prx.frameStep : 1);
   const totalFrames = frameList.length;
   const startedAt = Date.now();
-  const entryUrl = pathToFileURL(path.resolve(projectPath, config.entry)).href;
+  const entryUrl = pathToFileURL(path.resolve(scenePath, config.entry)).href;
 
   progress.start({ jobId, totalFrames, fps: config.fps, width: capture.width, height: capture.height });
   // Advisory, never fatal: the render proceeds, but the caller learns NOW that
@@ -386,7 +400,7 @@ export async function renderComposition(opts) {
   // Before Chromium: a lock failure should cost nothing.
   let held = null;
   try {
-    if (lock) held = await acquireRenderLock(projectPath, { label: 'render' });
+    if (lock) held = await acquireRenderLock(scenePath, { label: 'render' });
   } catch (err) {
     const e = asEngineError(err);
     progress.error(e);
@@ -500,7 +514,7 @@ export async function renderComposition(opts) {
     }
 
     // A proxy skips the mux entirely: it exists to check MOTION, and on a
-    // typical project the audio pass (decode, filter graph, re-mux) would
+    // typical scene the audio pass (decode, filter graph, re-mux) would
     // dominate the very time the proxy just saved.
     let audio;
     if (!skipAudio && !prx && !isPngSequence && config.audio?.length) {
@@ -519,7 +533,7 @@ export async function renderComposition(opts) {
             audioTracks: config.audio,
             outputPath: outPath,
             fps: config.fps,
-            projectRoot: projectPath,
+            assetRoot: scenePath,
             output,
             ffmpegPath,
             onSpawn: onChildPid,
@@ -528,7 +542,7 @@ export async function renderComposition(opts) {
         } finally {
           await fsp.unlink(silent).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath: outPath, config, output, ffmpegPath, projectRoot: projectPath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath: outPath, config, output, ffmpegPath, assetRoot: scenePath, progress, onChildPid, signal });
       }
     }
 
@@ -538,6 +552,13 @@ export async function renderComposition(opts) {
     const verified = isPngSequence || skipAudio
       ? { frames: totalFrames, verified: false }
       : await verifyFrameCount({ outputPath: outPath, expected: totalFrames, progress, onChildPid, signal });
+
+    // Record what landed on disk (v0.21) — only for a render that IS the whole
+    // scene at its current settings. A proxy, a worker segment or a partial
+    // frameRange must never claim to be the scene's canonical output.
+    if (isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config })) {
+      await writeRenderMeta({ scenePath, config, frames: totalFrames });
+    }
 
     const elapsedMs = Date.now() - startedAt;
     progress.done({ outputPath: outPath, frames: totalFrames, elapsedMs, audio });
@@ -571,7 +592,7 @@ export async function renderComposition(opts) {
  * frames per page — this just exposes it to the preview path.
  */
 export async function captureFrames({
-  projectPath, config, frames,
+  scenePath, config, frames,
   browserFactory = createPuppeteerBrowser, onChildPid = () => {}, signal,
 }) {
   if (!Array.isArray(frames) || frames.length === 0) {
@@ -592,7 +613,7 @@ export async function captureFrames({
   try {
     throwIfAborted(signal);
     const page = await browser.openPage({
-      url: pathToFileURL(path.resolve(projectPath, config.entry)).href,
+      url: pathToFileURL(path.resolve(scenePath, config.entry)).href,
       width: config.width,
       height: config.height,
       transparent,
@@ -616,20 +637,20 @@ export async function captureFrames({
  * PNG bytes. Respects config.output.transparent for alpha-capable use.
  */
 export async function captureSingleFrame({
-  projectPath, config, frame,
+  scenePath, config, frame,
   browserFactory = createPuppeteerBrowser, onChildPid = () => {}, signal,
 }) {
   assertFrameInRange(frame, config);
   const [only] = await captureFrames({
-    projectPath, config, frames: [frame], browserFactory, onChildPid, signal,
+    scenePath, config, frames: [frame], browserFactory, onChildPid, signal,
   });
   return only.png;
 }
 
 /** Render one frame to a PNG file on disk (the "still export" path). */
-export async function renderStill({ projectPath, config, frame, outputPath, browserFactory, onChildPid, signal }) {
+export async function renderStill({ scenePath, config, frame, outputPath, browserFactory, onChildPid, signal }) {
   const png = await captureSingleFrame({
-    projectPath, config, frame, signal,
+    scenePath, config, frame, signal,
     ...(browserFactory ? { browserFactory } : {}),
     ...(onChildPid ? { onChildPid } : {}),
   });
@@ -658,7 +679,7 @@ export async function renderStill({ projectPath, config, frame, outputPath, brow
  */
 export async function renderParallel(opts) {
   const {
-    projectPath, config, outputPath,
+    scenePath, config, outputPath,
     frameRange, workers = Math.max(1, Math.min(os.cpus().length, 4)),
     proxy = null,
     signal, progress = new ProgressEmitter(null),
@@ -698,10 +719,10 @@ export async function renderParallel(opts) {
   const useIntermediate = !isPngSequence && (!fmt.copyConcat || transparent);
 
   // Held for the whole fan-out. Workers run with --segment (lock:false): they
-  // write this same project deliberately, and this lock covers them.
+  // write this same scene deliberately, and this lock covers them.
   let held = null;
   try {
-    if (lock) held = await acquireRenderLock(projectPath, { label: `render x${workerCount}` });
+    if (lock) held = await acquireRenderLock(scenePath, { label: `render x${workerCount}` });
   } catch (err) {
     const e = asEngineError(err);
     progress.error(e);
@@ -722,7 +743,7 @@ export async function renderParallel(opts) {
     if (probeBrowser.pid) onChildPid(probeBrowser.pid);
     try {
       const probePage = await probeBrowser.openPage({
-        url: pathToFileURL(path.resolve(projectPath, config.entry)).href,
+        url: pathToFileURL(path.resolve(scenePath, config.entry)).href,
         width: config.width,
         height: config.height,
         transparent,
@@ -769,7 +790,7 @@ export async function renderParallel(opts) {
       const [a, b] = chunks[i];
       const workerArgs = [
         cliPath,
-        '--project', projectPath,
+        '--scene', scenePath,
         '--output', segmentPaths[i],
         '--frame-range', String(a), String(b),
         '--segment', // suppress audio pass in workers
@@ -867,7 +888,7 @@ export async function renderParallel(opts) {
             audioTracks: config.audio,
             outputPath,
             fps: config.fps,
-            projectRoot: projectPath,
+            assetRoot: scenePath,
             output,
             ffmpegPath,
             onSpawn: onChildPid,
@@ -876,7 +897,7 @@ export async function renderParallel(opts) {
         } finally {
           await fsp.unlink(silentOut).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, projectRoot: projectPath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, assetRoot: scenePath, progress, onChildPid, signal });
       } else if (config.audio?.length && !fmt.audioArgs) {
         progress.log('warn', `Format "${output.format}" cannot carry audio; audio tracks skipped.`);
       }
@@ -887,6 +908,10 @@ export async function renderParallel(opts) {
     const verified = isPngSequence
       ? { frames: totalFrames, verified: false }
       : await verifyFrameCount({ outputPath, expected: totalFrames, progress, onChildPid, signal });
+
+    if (isFullSceneRender({ prx: null, skipAudio: false, asIntermediate: false, startFrame, endFrame, config })) {
+      await writeRenderMeta({ scenePath, config, frames: totalFrames });
+    }
 
     const elapsedMs = Date.now() - startedAt;
     progress.done({ outputPath, frames: totalFrames, elapsedMs, audio });

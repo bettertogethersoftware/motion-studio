@@ -26,13 +26,16 @@
   <div id="problems-panel" class="problems hidden"><ul id="problems-list"></ul></div>
 
   <main class="fe-main">
-    <aside class="fe-projects" id="fe-projects">
-      <div class="fe-proj-head">
-        <span class="proj-head-label">projects</span>
+    <aside class="fe-scenes" id="fe-scenes">
+      <div class="fe-rail-head">
+        <span class="rail-head-label">scenes</span>
         <span class="dim drag-hint">drag onto the timeline →</span>
-        <button id="btn-projects-collapse" class="ghost tiny-btn" title="collapse">«</button>
+        <button id="btn-scenes-collapse" class="ghost tiny-btn" title="collapse">«</button>
       </div>
-      <ul id="fe-project-list" class="proj-rail-list"></ul>
+      <ul id="fe-scene-list" class="scene-rail-list"></ul>
+      <div class="rail-foot">
+        <button id="btn-new-scene" class="ghost" title="scaffold a new scene folder into this film">+ new scene</button>
+      </div>
     </aside>
 
     <section class="fe-stage">
@@ -89,7 +92,7 @@
 
 <dialog id="audio-dialog" class="fe-dialog">
   <h2>add audio</h2>
-  <p class="dim note">Audio assets live in the film's output project. The clip is placed at the playhead.</p>
+  <p class="dim note">Audio assets live in the film's own assets/ folder. The clip is placed at the playhead.</p>
   <div class="fieldrow">
     <button id="btn-audio-upload" class="ghost">+ upload file…</button>
     <input type="file" id="audio-file-input" accept=".wav,.mp3,.ogg,.m4a,.flac" multiple hidden>

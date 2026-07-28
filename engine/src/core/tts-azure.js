@@ -322,7 +322,7 @@ export function escapeXml(text) {
 /**
  * Map the engine's integer rate/volume scale onto SSML prosody.
  *
- * `rate` keeps the exe vendor's −10..10 scale so a project can switch vendors
+ * `rate` keeps the exe vendor's −10..10 scale so a film can switch vendors
  * without re-tuning every call: each step is 10% of the default speed, i.e.
  * rate 3 → "+30%", rate −4 → "-40%". `volume` is already 0..100, which SSML
  * takes verbatim.

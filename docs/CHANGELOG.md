@@ -1,8 +1,238 @@
 # Motion Studio — Changelog
 
-## Unreleased
+## v0.21 — Seeing the media, and catching a stale render
 
-### Saved films & the Studio film editor: films become documents, not one-shot calls
+Three fixes for failures that were invisible from the tool surface: an agent
+could not read a media file's properties at all, a scene rendered at settings
+that later changed still counted as rendered, and a composition referencing a
+missing asset died naming nothing.
+
+### `probe_asset` — read a media file's properties
+
+`list_assets` / `list_shared_assets` report bytes, mtime and a coarse `kind`.
+Nothing answered **how long is this clip, what size is it, does it have
+audio** — the first three questions you ask before building a scene around
+footage. Every answer meant shelling out to `ffprobe`, which the tool surface
+deliberately does not offer.
+
+```
+probe_asset { path: "clip.mp4" }                              # a library file
+probe_asset { target: "my-film/intro", path: "assets/b.webm" } # a scene asset
+→ { container, durationSeconds, bitRate, streams,
+    video: { codec, width, height, fps, frames, pixFmt, durationSeconds },
+    audio: { codec, channels, sampleRate, durationSeconds },
+    hasAudio, notes? }
+```
+
+`notes` calls out properties that bite at render time — above all that
+**H.264/HEVC cannot be decoded by the render browser**, so a `<video>` using
+such a file fails at render time even though the page's own `canPlayType()`
+answers `"probably"`. That single line is the difference between transcoding
+to VP9 up front and discovering it hundreds of frames into a render.
+
+ffprobe is not a declared prerequisite, so an unavailable probe returns
+`probed: false` rather than failing. ffprobe is now resolved as a **sibling of
+whatever `ffmpeg` resolved to** (`resolveFfprobePath`), not as a bare name on
+`PATH` — otherwise `probe_asset` would be unusable in exactly the case
+`MOTION_STUDIO_FFMPEG` exists for: an MCP server with a minimal `PATH`.
+
+### Stale-render detection — the render sidecar
+
+A scene's output file existing was the whole of "is this scene rendered?". It
+cannot answer *is it rendered at the settings the scene has now?* Shorten a
+scene with `update_scene_config` after rendering it and nothing noticed: the
+plan still reported `rendered: true` with a `totalFrames` the concatenation
+cannot produce, and `build_film` cheerfully stitched the old file — after
+which every master-audio offset past that scene drifts against the picture,
+silently, in the finished film.
+
+Each render that is the **whole scene, at its current settings, to its real
+destination** now writes `out/output.mp4.render.json`
+(`{ frames, width, height, fps, format, renderedAt }`):
+
+- `planFilm` compares it with the live config and adds a `stale_render`
+  problem naming the fields that diverged (`frames 217 → 200`); each scene
+  gains `renderVerified: true | false | null`.
+- `validateScenes` (so `build_film`) **refuses** to assemble, throwing the new
+  `stale_render` error code with a `detail.stale[]` of every offender.
+  Distinct from `short_render`: that file is incomplete, this one is complete
+  but no longer describes the scene.
+- Proxies, per-worker segments and partial `frameRange` renders write no
+  sidecar — none of them is the scene's canonical output.
+- A render from an older build has no sidecar, and that is **not** stale:
+  `renderVerified: null`, builds normally. Writing the sidecar is best-effort
+  and never fails a render that already succeeded.
+
+### Frame API v1.4 — `seekVideo()` / `videoReady()`
+
+frame-api.md documented images and fonts and said nothing about **video**,
+yet footage in a composition is both common and the easiest thing in the
+system to get catastrophically wrong. A `<video>` cannot be played — that
+makes the picture a function of wall-clock time, and under parallel rendering
+each worker captures a different moment — so a composition seeks one frame of
+footage per output frame. Every composition doing that was hand-rolling the
+same helper, and the version you write first is the one that hangs:
+
+```js
+await seekVideo(host, 2.0 + frame / 30, { fps: 30 });
+```
+
+`seekVideo` folds in the three guards the hand-rolled version omits:
+
+- **It never awaits `seeked` on an unusable element.** A `<video>` whose src
+  is missing or undecodable never fires the event, so `currentTime = t; await
+  seeked` deadlocks the frame — and then every frame after it. Now it checks
+  `duration > 0 && readyState >= 1` and bails, turning an unexplained render
+  hang into a missing picture (with the failed request named, per below).
+- **It clamps to `duration - 1/fps`**, so a scene longer than its footage does
+  not stall or freeze at the tail.
+- **It skips a seek already satisfied.**
+
+Deliberately no internal timeout: a genuinely stuck seek must fail loudly as a
+frame timeout rather than silently capture the wrong frame. `videoReady(video)`
+awaits `loadeddata` for setup and resolves on `error` too, so a missing file
+cannot deadlock there either. Both are also bare globals.
+
+`docs/frame-api.md` gains **§11** on driving footage (codec, length, in-points,
+and when a film overlay track is the cheaper answer), `video.play()` joins the
+"never use" list in §1, and the pre-render checklist covers footage and
+reading the whole timeout message. Scenes copy the runtime at creation, so new
+scenes get v1.4; existing scenes keep the copy they were scaffolded with.
+
+### Failed asset loads are named in the error
+
+A `<video>` whose `src` does not exist never fires `seeked`, so the frame
+promise never settles and the render dies on a frame timeout — naming
+nothing. A failed request is neither a page error nor a console error, so the
+existing diagnostics could not see it.
+
+The page now also collects `requestfailed` and `HTTP >= 400` responses, and
+every composition/timeout error renders them into the **message** (not just
+`detail`, which a caller whose tool call timed out at the transport may never
+see):
+
+```
+Frame 0 never became ready within 15000ms. Check that frameReady is set true
+after all async work (fonts/images/video seeks) resolves.
+1 asset failed to load — a missing <video>/<img>/<script> is the usual cause
+of a frame that never becomes ready:
+  assets/host-pip.webm (net::ERR_FILE_NOT_FOUND)
+```
+
+Paths are reported relative to the composition, so they read like the `src`
+that produced them rather than a 200-character `file://` URL. Deduped and
+capped at 10.
+
+## v0.20 — Workspaces, films and scenes: the storage model matches the work
+
+Motion Studio stored a flat list of "projects". Nobody was making projects.
+They were making **films**, each cut from many **scenes**, and the gap between
+those two facts had been papered over with conventions for four releases:
+
+- A project was really a scene. Every long-form doc said so; the storage did
+  not, so the relationship lived in prose and in whichever transcript made the
+  last `build_film` call.
+- A film needed a by-convention `"<name> — Master"` project to hold its master
+  audio and receive the build — a film wearing a project's clothes,
+  indistinguishable in the UI from a real scene, and rendererable by mistake.
+- Every agent created scenes in the same shared folder, so a fresh film from
+  one AI appeared amid another's work. Nothing scoped anything.
+- Two shared registry files (`projects.json`, `films.json`) were a
+  read-modify-write lost-update hazard whenever two writers were live.
+
+v0.20 replaces all of it with a hierarchy that says what people actually
+build, and makes the filesystem the registry:
+
+```
+<dataDir>/workspaces/<workspace>/     one per AI; the human sees them all
+  library/                            shared assets the human provides
+  films/<film>/
+    film.json  assets/  out/          the film owns its audio and its output
+    scenes/<scene>/                   a composition folder — the render unit
+```
+
+- **Ids are slug paths.** A film is `"<film>"`, a scene `"<film>/<scene>"`,
+  workspace-local to whichever server is asking. Presence of `film.json` makes
+  a film, `scene.json` makes a scene — there are no registries to fall out
+  of sync and no UUIDs to resolve. Copying a film folder into another
+  workspace *is* moving the film. Slug validation doubles as path safety.
+- **`project.json` → `scene.json`, and `--project` → `--scene`.** The config
+  file is named for the thing it configures. Nothing has shipped, so there is
+  no compatibility argument for keeping the old name — the one place it is
+  still *read* is the migration, which renames each folder's config as it
+  moves it.
+- **The word "project" is gone from the codebase.** Not just the storage model:
+  the module `core/project.js` is now `core/scene.js`; the internal
+  `projectPath` option is `scenePath` and `projectRoot` is `assetRoot` (or
+  `targetRoot` in the sandbox); `resolveInProject` is `resolveInTarget`; the
+  template placeholder `__PROJECT_NAME__` is `__SCENE_NAME__`. Three of these
+  were user- or agent-visible and changed with them: the error code
+  `path_outside_project` → **`path_not_allowed`** (it never only meant
+  "project", and now it guards scenes, films and the library alike), the
+  settings key `newProjectDefaults` → **`newSceneDefaults`**, and a job's
+  `projectId` → **`targetId`** (a job targets a scene when rendering and a film
+  when building — one field, two kinds of id, so neither old name was true).
+  The sole survivor is `core/migrate.js`, which must still recognise the old
+  world in order to convert it.
+- **A workspace per agent.** Each MCP server binds one via
+  `MOTION_STUDIO_WORKSPACE` (default `default`) and cannot name another's
+  films; the Studio browses every workspace, because the human owns the
+  machine. Give each connected AI its own name in its client config.
+- **The film owns its assets and output.** `assets/` holds master audio and
+  overlays, `out/` receives the build. The "— Master" project convention is
+  gone rather than documented. Master narration, score and sfx beds are made
+  by pointing the synth tools' `target` at the **film** instead of a scene.
+- **Scene defaults.** A film records `sceneDefaults` at creation and every
+  scene inherits them, so the rule that scenes must share resolution/fps/format
+  to concatenate losslessly is now the default path instead of discipline —
+  diverging takes a deliberate override, and `planFilm` still reports it.
+- **A shared-asset library.** The 25 MB base64 cap kept large media out of the
+  MCP channel and left "the user gave me a 500 MB plate" with no answer. Each
+  workspace now has a `library/` the human fills through the Studio; agents
+  read it with `list_shared_assets` and pull files in with `use_shared_asset`,
+  which **hardlinks** where the filesystem allows — a huge asset costs no extra
+  disk and the scene still renders hermetically from its own `assets/`.
+
+**Tool surface.** `create_film` / `get_film` / `update_film` / `remove_film` /
+`list_films`, `create_scene` / `get_scene` / `remove_scene` /
+`update_scene_config`, `get_workspace`, `list_shared_assets` /
+`use_shared_asset`. `build_film` now takes a film id and runs as an **async
+job** like a render (`plan: true` still answers "where does each scene land?"
+before anything is rendered). Asset and synth tools take a `target` that
+accepts either a scene or a film. Gone: `create_project`, `get_project`,
+`list_projects`, `update_project_config`, `remove_project`, `save_film`,
+`build_saved_film`. New codes: `scene_not_found`, `scene_already_exists`,
+`workspace_not_found`, `film_already_exists`, `invalid_id`, `migration_failed`.
+
+**The Studio.** The rail is one tree — workspace → films → scenes — with a
+library page per workspace and a scene workbench that is otherwise unchanged
+(preview, config, audio, assets, outputs all behave exactly as before; only
+the ids moved). The film editor's rail lists the film's own scenes instead of
+a global project pool, and everything that pointed at the output project now
+points at the film.
+
+**Migration is automatic and non-destructive.** On first start, saved films
+become film folders (scenes moved in, the old master project's `assets/` and
+`out/` folded into the film), loose projects become single-scene films, and
+`projects.json` / `films.json` move to `<dataDir>/legacy-v019/` beside a
+`migration-report.json` mapping every old UUID to its new id. Nothing is
+deleted; a crash mid-way resumes on the next start.
+
+Nothing had shipped, so there are no compatibility aliases — the old names are
+simply gone. See [architecture.md §11](architecture.md) for the full model.
+
+### Also in v0.20: films become documents, not one-shot calls
+
+> Shipped together with the storage model above. Where that entry describes
+> *where* a film lives, this one describes *what a film is* — the document and
+> the editor, both of which v0.20 then moved into the film's own folder.
+>
+> **Read it as history, not as the current contract.** It was written before
+> the storage rework landed, so the names below are the pre-rework ones:
+> `save_film` / `build_saved_film` are now `update_film` / `build_film`,
+> `projectId` in a `sceneLayout` entry is now `scene` + `slug`, `FilmStore` is
+> now the film's own `film.json`, and the "output project" it refers to no
+> longer exists. The section above is authoritative wherever the two differ.
 
 Long-form work always had the right *engine* shape — one project per scene,
 `build_film` to stitch — and the wrong *authoring* shape for a human: the film
@@ -141,6 +371,62 @@ Three new advisories close the holes that let it through:
 (§3) and two checklist items; SKILL.md states the recipe and tells agents to
 treat `structureWarnings` as a stop-and-restructure signal. All advisory,
 never write/render rejections — same contract as the determinism lint.
+
+### SKILL.md: the guidance that was present but never fired
+
+An agent session made three videos with the skill loaded and reproduced, in
+new forms, most of the failures the skill already warns about. The guidance
+was not missing — it was *unreachable*: written as reference prose in topic
+sections, while the agent worked from the numbered Workflow and never came
+back. The revision moves the load-bearing rules to where a working agent is
+actually looking.
+
+- **Audio gets a workflow step.** The workflow was picture-only (author →
+  check → render); narration, music and sfx lived in three topic sections
+  that read as optional extras, and `preview_audio` was skipped in all three
+  videos. New step 3 "wire the audio, then audition it" makes the order
+  explicit — narration length *determines* scene length — states the
+  arithmetic that must agree (scene duration vs speech tracks vs bed
+  coverage), and makes `preview_audio` unconditional. The 90-second promo
+  had a 44-second bed and 17 seconds of dead tail; `mix.silentTailSeconds`
+  reports exactly that, in seconds, and was never called.
+- **`list_vendors` becomes a step-1 precondition, not advice.**
+  `favoriteVoices`/`favoritePrograms` shipped in v0.20 and were documented in
+  the narration and music sections — and never read, because nothing in the
+  workflow said to look before synthesizing. Step 1 now calls it once per
+  film, and both sections state a numbered precedence (request → starred →
+  vendor default) instead of "check first".
+- **Preview acceptance criteria.** "Look at the returned images" verified
+  that the code ran, not that the picture was right: a product promo shipped
+  with the product at `opacity: 0` in every captured frame. Step 4 now lists
+  what to check — is the subject on screen, is anything on screen that
+  shouldn't be, do the values read correctly, did the frames change, are the
+  claims the user's rather than invented.
+- **The visibility rule is stated in both directions.** §3 covered turning a
+  section *on*; nothing covered an element left visible in CSS that no
+  `Sequence` owns, which is on screen for the whole video and looks
+  deliberate in any single frame. `frame-api.md` §3 gains the ownership test
+  ("name the `Sequence` that turns this on") and the symmetry note, plus two
+  checklist items.
+- **"A clean lint is not a passing grade."** New paragraph naming what the
+  scanner structurally cannot see: a composition with *no* `Sequence` calls
+  (nothing for `sequence-gap` to compare), elements never turned on or off,
+  canvas state like `shadowBlur`/`globalAlpha` set once and never reset
+  (save/restore stays balanced), and values that are simply wrong.
+- **External assets are called out.** A hotlinked CDN `<script src>` previews
+  fine and is a coin-flip across parallel workers; no lint rule covers URLs.
+  Vendor into `assets/`.
+- **Numbers instead of gestures.** `wait_for_render` documented its cap as
+  "deliberately under the MCP client's request timeout"; the actual limits
+  (`timeoutMs` max 50000, default 30000, up to 16 job ids) are now stated, so
+  the first call isn't a validation error.
+- **No fabricated claims.** Promotional copy takes its statistics from the
+  user's own assets or makes none — the session invented accuracy figures and
+  user counts for a medical device.
+
+Opens with a five-item summary of the failures that produce a broken
+deliverable while every automated check passes. Docs only; no behaviour
+change.
 
 ### Favorite voices, vendor tabs, and an inline settings page
 

@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createStudioServer } from '../src/studio/server.js';
-import { ProjectStore } from '../src/core/project.js';
+import { makeStore } from './helpers/workspace.mjs';
 import { JobManager } from '../src/core/jobs.js';
 import {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport, filterVoices,
@@ -50,7 +50,7 @@ before(async () => {
   ]) delete process.env[k];
 
   home = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-vendors-'));
-  store = new ProjectStore(home);
+  store = await makeStore(home);
   server = createStudioServer({ store, jobs: new JobManager() });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;

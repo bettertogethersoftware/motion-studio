@@ -22,7 +22,7 @@ import { promisify } from 'node:util';
 
 import { renderComposition } from '../src/core/renderer.js';
 import { JobManager, JobState } from '../src/core/jobs.js';
-import { makeConfig } from '../src/core/project.js';
+import { makeConfig } from '../src/core/scene.js';
 import { ErrorCodes } from '../src/core/errors.js';
 import { ProgressEmitter } from '../src/core/progress.js';
 import { makeFakeBrowserFactory, encodePng } from './helpers/fake-browser.js';
@@ -52,7 +52,7 @@ test('pipeline: stdin-streamed render produces a valid MP4', async (t) => {
   const out = path.join(tmp, 'stream.mp4');
   const messages = [];
   const result = await renderComposition({
-    projectPath: tmp,
+    scenePath: tmp,
     config: CFG(),
     outputPath: out,
     browserFactory: makeFakeBrowserFactory(),
@@ -80,7 +80,7 @@ test('pipeline: framesDir mode writes PNG sequence then encodes', async (t) => {
   const out = path.join(tmp, 'seq.mp4');
   const framesDir = path.join(tmp, 'frames');
   await renderComposition({
-    projectPath: tmp,
+    scenePath: tmp,
     config: CFG(),
     outputPath: out,
     framesDir,
@@ -104,7 +104,7 @@ test('pipeline: audio pass muxes AAC trimmed to video length', async (t) => {
   const config = { ...CFG(), audio: [{ src: 'assets/tone.wav', startInFrames: 6, gainDb: -3 }] };
   const out = path.join(tmp, 'audio.mp4');
   await renderComposition({
-    projectPath: tmp,
+    scenePath: tmp,
     config,
     outputPath: out,
     browserFactory: makeFakeBrowserFactory(),
@@ -123,7 +123,7 @@ test('pipeline: composition error propagates with frame context', async (t) => {
   await assert.rejects(
     () =>
       renderComposition({
-        projectPath: tmp,
+        scenePath: tmp,
         config: CFG(),
         outputPath: path.join(tmp, 'fail.mp4'),
         browserFactory: makeFakeBrowserFactory({ failAtFrame: 10 }),
@@ -137,7 +137,7 @@ test('pipeline: cancellation mid-render stops cleanly', async (t) => {
   const controller = new AbortController();
   const captured = [];
   const p = renderComposition({
-    projectPath: tmp,
+    scenePath: tmp,
     config: makeConfig({ name: 'Cancel', fps: 30, width: 320, height: 240, durationInFrames: 200 }),
     outputPath: path.join(tmp, 'cancel.mp4'),
     signal: controller.signal,
@@ -166,8 +166,8 @@ test('jobs: full lifecycle running → done with progress snapshots', async (t) 
   const jm = new JobManager();
   const out = path.join(tmp, 'job.mp4');
   const { jobId } = jm.startRender({
-    projectId: 'p1',
-    projectPath: tmp,
+    targetId: 'p1',
+    scenePath: tmp,
     config: CFG(),
     outputPath: out,
     renderFn: (opts) => renderComposition({ ...opts, browserFactory: makeFakeBrowserFactory() }),
@@ -192,7 +192,7 @@ test('jobs: second submit queues, runs after first, bounded queue fills', async 
   const fastRender = (opts) => renderComposition({ ...opts, browserFactory: makeFakeBrowserFactory() });
 
   const first = jm.startRender({
-    projectId: 'p1', projectPath: tmp,
+    targetId: 'p1', scenePath: tmp,
     config: makeConfig({ name: 'Slow', fps: 30, width: 320, height: 240, durationInFrames: 60 }),
     outputPath: path.join(tmp, 'busy.mp4'),
     renderFn: slowRender,
@@ -201,7 +201,7 @@ test('jobs: second submit queues, runs after first, bounded queue fills', async 
 
   // Second submit queues (v0.5) instead of failing.
   const second = jm.startRender({
-    projectId: 'p1', projectPath: tmp, config: CFG(),
+    targetId: 'p1', scenePath: tmp, config: CFG(),
     outputPath: path.join(tmp, 'queued.mp4'), renderFn: fastRender,
   });
   assert.equal(second.state, JobState.QUEUED);
@@ -210,7 +210,7 @@ test('jobs: second submit queues, runs after first, bounded queue fills', async 
 
   // The queue is bounded: a third submit fails with queue_full.
   assert.throws(
-    () => jm.startRender({ projectId: 'p1', projectPath: tmp, config: CFG(), outputPath: path.join(tmp, 'x.mp4'), renderFn: fastRender }),
+    () => jm.startRender({ targetId: 'p1', scenePath: tmp, config: CFG(), outputPath: path.join(tmp, 'x.mp4'), renderFn: fastRender }),
     (e) => e.code === ErrorCodes.QUEUE_FULL && e.detail.queuedJobIds.includes(second.jobId),
   );
 
@@ -228,12 +228,12 @@ test('jobs: cancelling a queued job dequeues it without running', async (t) => {
   const slowRender = (opts) =>
     renderComposition({ ...opts, browserFactory: makeFakeBrowserFactory({ captureDelayMs: 30 }) });
   const running = jm.startRender({
-    projectId: 'p1', projectPath: tmp,
+    targetId: 'p1', scenePath: tmp,
     config: makeConfig({ name: 'Slow', fps: 30, width: 320, height: 240, durationInFrames: 60 }),
     outputPath: path.join(tmp, 'busy2.mp4'), renderFn: slowRender,
   });
   const queued = jm.startRender({
-    projectId: 'p1', projectPath: tmp, config: CFG(),
+    targetId: 'p1', scenePath: tmp, config: CFG(),
     outputPath: path.join(tmp, 'never.mp4'), renderFn: slowRender,
   });
   const res = jm.cancel(queued.jobId);

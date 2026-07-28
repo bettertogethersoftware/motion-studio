@@ -1,15 +1,22 @@
 /**
  * Path sandbox: every file-touching MCP tool resolves paths through here.
  *
- * Contract (spec §5.8 / §11): a tool may only read/write inside the target
- * project's own folder. Rejection happens at the tool-handler level via a
- * structured PATH_OUTSIDE_PROJECT error — never left to convention.
+ * Contract: a tool may only read/write inside the target's own folder — a
+ * scene's, or a film's when the call targets a film's assets. Rejection
+ * happens at the tool-handler level via a structured PATH_NOT_ALLOWED
+ * error — never left to convention.
+ *
+ * This is the INNER boundary, and it only knows about one folder. The outer
+ * one — "an agent may only address its own workspace" — is enforced a layer
+ * up, where ids are parsed and qualified (core/store.js, mcp/server.js);
+ * a valid slug cannot contain a separator, so an id can never widen what
+ * reaches this function.
  *
  * Enforced properties:
  *   - relative paths only ("../", absolute, or drive-letter paths rejected)
- *   - resolved real path must remain under the project root (symlink-escape
+ *   - resolved real path must remain under the target root (symlink-escape
  *     is checked against the deepest existing ancestor, so a symlinked
- *     subfolder pointing outside the project is also rejected)
+ *     subfolder pointing outside it is also rejected)
  *   - null bytes rejected (classic path-truncation vector)
  *   - writes additionally restricted to an allow-listed set of source
  *     extensions — the agent's write surface is composition source files,
@@ -25,7 +32,7 @@ export const WRITABLE_EXTENSIONS = new Set([
 ]);
 
 // Binary asset types accepted by write_asset_file (v0.5). Confined to the
-// project's assets/ folder; see ProjectStore.writeAssetFile.
+// target's assets/ folder; see WorkspaceStore.writeAssetFile.
 export const ASSET_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
   '.mp3', '.wav', '.ogg', '.m4a', '.flac',
@@ -36,52 +43,54 @@ export const ASSET_EXTENSIONS = new Set([
   '.mp4', '.webm', '.mov',
 ]);
 
-// project.json is managed through dedicated config tools, not raw file writes,
-// so config invariants (fps > 0 etc.) can't be bypassed by writing the file directly.
-const WRITE_DENYLIST = new Set(['project.json']);
+// scene.json is managed through dedicated config tools, not raw file writes,
+// so config invariants (fps > 0 etc.) can't be bypassed by writing the file
+// directly. film.json and workspace.json get the same protection — they are
+// documents with validated schemas, owned by WorkspaceStore.
+const WRITE_DENYLIST = new Set(['scene.json', 'film.json', 'workspace.json']);
 
 function reject(relPath, why) {
   throw new EngineError(
-    ErrorCodes.PATH_OUTSIDE_PROJECT,
+    ErrorCodes.PATH_NOT_ALLOWED,
     `Path "${relPath}" is not allowed: ${why}`,
     { path: relPath }
   );
 }
 
 /**
- * Resolve a project-relative path to an absolute path, throwing
- * PATH_OUTSIDE_PROJECT on any escape attempt.
+ * Resolve a target-relative path to an absolute path, throwing
+ * PATH_NOT_ALLOWED on any escape attempt.
  *
- * @param {string} projectRoot absolute path to the project folder
+ * @param {string} targetRoot absolute path to the scene (or film) folder
  * @param {string} relPath     path as supplied by the caller/agent
  * @param {{forWrite?: boolean}} [opts]
  * @returns {string} absolute, verified path
  */
-export function resolveInProject(projectRoot, relPath, { forWrite = false, asAsset = false } = {}) {
+export function resolveInTarget(targetRoot, relPath, { forWrite = false, asAsset = false } = {}) {
   if (typeof relPath !== 'string' || relPath.length === 0) reject(String(relPath), 'empty path');
   if (relPath.includes('\0')) reject(relPath, 'contains null byte');
   if (path.isAbsolute(relPath) || /^[a-zA-Z]:[\\/]/.test(relPath)) {
-    reject(relPath, 'absolute paths are not accepted; use a project-relative path');
+    reject(relPath, 'absolute paths are not accepted; use a path relative to the scene or film folder');
   }
 
-  const root = fs.realpathSync(projectRoot);
+  const root = fs.realpathSync(targetRoot);
   const resolved = path.resolve(root, relPath);
   const rel = path.relative(root, resolved);
-  if (rel === '' && forWrite) reject(relPath, 'refers to the project root itself');
-  if (rel.startsWith('..') || path.isAbsolute(rel)) reject(relPath, 'escapes the project folder');
+  if (rel === '' && forWrite) reject(relPath, 'refers to the target folder itself');
+  if (rel.startsWith('..') || path.isAbsolute(rel)) reject(relPath, 'escapes the target folder');
 
   // Symlink escape: realpath the deepest existing ancestor and re-check.
   let probe = resolved;
   while (!fs.existsSync(probe)) probe = path.dirname(probe);
   const realProbe = fs.realpathSync(probe);
   if (realProbe !== root && path.relative(root, realProbe).startsWith('..')) {
-    reject(relPath, 'resolves through a symlink outside the project folder');
+    reject(relPath, 'resolves through a symlink outside the target folder');
   }
 
   if (forWrite) {
     const base = path.basename(resolved);
     if (WRITE_DENYLIST.has(base)) {
-      reject(relPath, `"${base}" is managed by project tools and cannot be written directly`);
+      reject(relPath, `"${base}" is managed by dedicated tools and cannot be written directly`);
     }
     const ext = path.extname(resolved).toLowerCase();
     const allowed = asAsset ? ASSET_EXTENSIONS : WRITABLE_EXTENSIONS;

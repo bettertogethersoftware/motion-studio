@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { renderComposition, captureSingleFrame } from '../src/core/renderer.js';
-import { makeConfig, validateConfig } from '../src/core/project.js';
+import { makeConfig, validateConfig } from '../src/core/scene.js';
 
 const execFileP = promisify(execFile);
 
@@ -69,12 +69,12 @@ test('real chromium: captureSingleFrame returns frame-dependent pixels', async (
   if (!haveBrowser) return t.skip('no Chromium available (set PUPPETEER_EXECUTABLE_PATH)');
   const dir = path.join(tmp, 'opaque');
   const config = await writeProject(dir);
-  const f0 = await captureSingleFrame({ projectPath: dir, config, frame: 0 });
-  const f9 = await captureSingleFrame({ projectPath: dir, config, frame: 9 });
+  const f0 = await captureSingleFrame({ scenePath: dir, config, frame: 0 });
+  const f9 = await captureSingleFrame({ scenePath: dir, config, frame: 9 });
   assert.equal(f0.slice(0, 4).toString('hex'), '89504e47', 'valid PNG magic');
   assert.notDeepEqual(f0, f9, 'different frames yield different pixels');
   // Determinism: same frame twice is byte-identical.
-  const f0again = await captureSingleFrame({ projectPath: dir, config, frame: 0 });
+  const f0again = await captureSingleFrame({ scenePath: dir, config, frame: 0 });
   assert.ok(f0.equals(f0again), 'same frame is byte-identical across captures');
 });
 
@@ -83,7 +83,7 @@ test('real chromium: serial mp4 render end-to-end', async (t) => {
   const dir = path.join(tmp, 'render');
   const config = await writeProject(dir);
   const out = path.join(dir, 'out', 'output.mp4');
-  const res = await renderComposition({ projectPath: dir, config, outputPath: out });
+  const res = await renderComposition({ scenePath: dir, config, outputPath: out });
   assert.equal(res.frames, 10);
   const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', out]);
   const s = JSON.parse(stdout).streams[0];
@@ -95,7 +95,7 @@ test('real chromium: omitBackground produces genuine alpha in transparent captur
   if (!haveBrowser) return t.skip('no Chromium available');
   const dir = path.join(tmp, 'alpha');
   const config = await writeProject(dir, { transparent: true });
-  const png = await captureSingleFrame({ projectPath: dir, config, frame: 5 });
+  const png = await captureSingleFrame({ scenePath: dir, config, frame: 5 });
   // Decode with ffmpeg to raw RGBA and check the alpha plane has both
   // transparent background pixels and the opaque box.
   const probe = path.join(tmp, 'alpha-frame.png');

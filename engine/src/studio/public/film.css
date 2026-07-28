@@ -45,59 +45,65 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .problems li { font: 12px/1.7 var(--mono); color: var(--accent); }
 .problems li.hard { color: var(--err); }
 
-/* projects rail + stage + inspector */
+/* scenes rail + stage + inspector */
 .fe-main {
   display: grid; grid-template-columns: 216px minmax(0, 1fr) 300px;
   min-height: 0;
 }
-.projects-collapsed .fe-main { grid-template-columns: 30px minmax(0, 1fr) 300px; }
+.rail-collapsed .fe-main { grid-template-columns: 30px minmax(0, 1fr) 300px; }
 
-.fe-projects {
+.fe-scenes {
   border-right: 1px solid var(--line);
   background: var(--ink-2);
   display: flex; flex-direction: column;
   min-height: 0; overflow: hidden;
 }
-.fe-proj-head {
+.fe-rail-head {
   display: flex; align-items: center; gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
   font: 10px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim);
   white-space: nowrap;
 }
-.fe-proj-head .drag-hint { text-transform: none; letter-spacing: 0.02em; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+.fe-rail-head .drag-hint { text-transform: none; letter-spacing: 0.02em; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
 .tiny-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
-.projects-collapsed .fe-proj-head { border-bottom: none; padding: 8px 4px; justify-content: center; }
-.projects-collapsed .proj-head-label,
-.projects-collapsed .drag-hint,
-.projects-collapsed .proj-rail-list { display: none; }
+.rail-collapsed .fe-rail-head { border-bottom: none; padding: 8px 4px; justify-content: center; }
+.rail-collapsed .rail-head-label,
+.rail-collapsed .drag-hint,
+.rail-collapsed .scene-rail-list,
+.rail-collapsed .rail-foot { display: none; }
 
-.proj-rail-list { list-style: none; margin: 0; padding: 6px 0; overflow-y: auto; flex: 1; min-height: 0; }
-.proj-rail-list li {
+.scene-rail-list { list-style: none; margin: 0; padding: 6px 0; overflow-y: auto; flex: 1; min-height: 0; }
+.scene-rail-list li {
   padding: 7px 10px;
   border-left: 2px solid transparent;
   cursor: grab;
   user-select: none;
   display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; align-items: center;
 }
-.proj-rail-list li:hover { background: var(--ink-3); border-left-color: var(--accent); }
-.proj-rail-list .pr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
-.proj-rail-list .pr-meta { grid-column: 1; font: 10px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.proj-rail-list .pr-add {
+.scene-rail-list li:hover { background: var(--ink-3); border-left-color: var(--accent); }
+.scene-rail-list li.listed { cursor: default; }
+.scene-rail-list .sr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.scene-rail-list .sr-meta { grid-column: 1; font: 10px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scene-rail-list .sr-add {
   grid-row: span 2;
   background: none; border: 1px solid var(--line); color: var(--dim);
   font: 13px var(--mono); padding: 2px 8px; cursor: pointer;
 }
-.proj-rail-list .pr-add:hover { color: var(--accent); border-color: var(--accent); }
-.proj-rail-list li.incompat { opacity: 0.55; }
-.proj-rail-list li.incompat .pr-meta { color: var(--err); }
-.proj-rail-list .pr-count { color: var(--accent); }
+.scene-rail-list .sr-add:hover { color: var(--accent); border-color: var(--accent); }
+.scene-rail-list li.incompat { opacity: 0.55; }
+.scene-rail-list li.incompat .sr-meta { color: var(--err); }
+.scene-rail-list .sr-flag { color: var(--accent); }
+.scene-rail-list .sr-flag.unlisted { color: var(--ok); }
+
+.rail-foot { border-top: 1px solid var(--line); padding: 8px 10px; }
+.rail-foot button { width: 100%; }
 
 @keyframes rail-pulse {
   0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
   50% { box-shadow: inset 0 0 0 2px var(--accent); }
 }
-.fe-projects.pulse { animation: rail-pulse 0.9s ease 2; }
+.fe-scenes.pulse { animation: rail-pulse 0.9s ease 2; }
 
 .drag-chip {
   position: fixed; z-index: 50; pointer-events: none;

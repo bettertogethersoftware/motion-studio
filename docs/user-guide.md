@@ -1,4 +1,4 @@
-# Motion Studio — User Guide (v0.18)
+# Motion Studio — User Guide (v0.20)
 
 ## Installation and first run
 
@@ -24,39 +24,66 @@ If Puppeteer's Chromium download is blocked on your network, install any
 Chrome/Chromium yourself and point the engine at it:
 `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm run studio`.
 
-## Working with projects
+## Workspaces, films and scenes
 
-A project is a plain folder: `project.json` (settings), `composition.html`
-(entry), `composition.js` (your animation), `styles.css`, a copy of
-`frame-api.js`, an `assets/` folder, and `out/` for renders. **+ new** in
-the sidebar asks for a name, fps, even dimensions, and duration in frames,
-then scaffolds a working animated template you can render immediately.
-Projects live under `~/.motion-studio/projects/` by default and are listed
-from a shared registry — projects created by an AI agent through MCP appear
-in the same list, because they are the same thing on disk.
+Motion Studio's storage mirrors what you're actually making. A **workspace**
+is one tree of work — each connected AI agent is bound to its own via
+`MOTION_STUDIO_WORKSPACE` (default `"default"`, created on first use), and
+the Studio shows *every* workspace, since the human browses them all. A
+**film** is the video you're building: an ordered list of scenes plus a
+master audio timeline, captions and overlays, with its own `assets/` (master
+audio, overlay files) and `out/` (the built film). A **scene** is one
+composition inside a film — same folder contents as ever (`scene.json`,
+`composition.html`, `composition.js`, `styles.css`, a copy of `frame-api.js`,
+`assets/`, `out/`), same preview/render behaviour; only its location changed.
+There's no standalone scene outside a film — even a single short clip is a
+film with one scene.
 
-The sidebar has two tabs: **projects** and **films**. The films tab lists
-saved films — documents that combine several projects into one long video on
-a visual timeline. **+ new** there opens the [film editor](#the-film-editor);
-the ✕ on a film's row deletes only the film definition, never the projects it
-references. Films created or edited by an agent (`save_film` over MCP) appear
-in the same list, for the same reason.
+The sidebar is **one tree** instead of the old projects/films tabs: each
+workspace row expands to its films (hovering reveals a **+ film** button;
+an empty workspace shows a clickable **+ first film** row instead), each
+film row — name, scene count, a ✕ to delete — expands to its scenes plus a
+**+ scene** row, and a **⧉ library** row sits below a workspace's films (see
+[Shared library](#shared-library) below). **+ workspace** at the very bottom
+starts a new tree.
 
-The **config** tab is a complete view of `project.json`: the composition
-fields (name/fps/size/duration), the whole `output` block (format, dir,
-filename, crf, preset, pix fmt, transparent, audio limiter), read-only
-**project facts** (entry file, schema version, attached 3D libraries and the
-exact build each project vendored), and a **raw project.json** disclosure at
-the bottom. Settings a given format doesn't use are greyed out rather than
-hidden — mp4 has no alpha, GIF ignores crf, and so on — with a note
-explaining why. Clearing an optional field (preset, pix fmt, crf) removes it
-so the format's own default applies again.
+**+ film** opens the **new film** dialog: a name plus width/height/fps/
+duration. Those dimensions become the film's *scene defaults* — every scene
+created inside it inherits them, which is what keeps a film's scenes
+losslessly concatenable — and the visual [film editor](#the-film-editor)
+opens next. **+ scene** opens the **new scene** dialog: just a name and an
+optional duration (0 = the film's default); width/height/fps always come
+from the film, so diverging them is left to the scene's own config tab
+rather than offered up front. Scenes and films created or edited by an agent
+over MCP (`create_scene`, `create_film`, `update_film`, …) appear in the
+same tree, because it's the same thing on disk — presence of `film.json` or
+`scene.json` is what makes a folder a film or a scene, so there's no
+separate registry to fall out of sync. Data lives under
+`~/.motion-studio/workspaces/<workspace>/films/<film>/scenes/<scene>/` by
+default (override with `MOTION_STUDIO_HOME`).
 
-The tab also shows the project's absolute folder location with a copy button,
-and **delete project…** removes it: by default the project is only
-unregistered from the list (the folder stays); tick *also delete files on
-disk* to remove the folder too. Folders outside the managed projects root
-are never deleted from disk, no matter what you tick.
+Clicking a film's row opens the [film editor](#the-film-editor); clicking a
+scene opens the workbench below. The film row's ✕ deletes it — a confirm
+asks whether to also delete its scenes, assets and output, or just the film
+definition (the folder then stays on disk, listed as `broken` until cleaned
+up).
+
+The **config** tab (in the scene workbench) is a complete view of
+`scene.json`: the composition fields (name/fps/size/duration), the whole
+`output` block (format, dir, filename, crf, preset, pix fmt, transparent,
+audio limiter), read-only **scene facts** (entry file, schema version,
+attached 3D libraries and the exact build each scene vendored), and a
+**raw scene.json** disclosure at the bottom. Settings a given format
+doesn't use are greyed out rather than hidden — mp4 has no alpha, GIF
+ignores crf, and so on — with a note explaining why. Clearing an optional
+field (preset, pix fmt, crf) removes it so the format's own default applies
+again.
+
+The tab also shows the scene's absolute folder location with a copy button,
+and **delete scene…** removes it: unchecked, the scene only leaves its
+film's play order (the folder stays on disk, listed as *unlisted* in the
+[film editor](#the-film-editor)'s scenes rail); tick *also delete files on
+disk* to remove the folder too.
 
 Edit `composition.js` in your editor of choice against the Frame API
 ([frame-api.md](frame-api.md) — read it before writing your first
@@ -66,42 +93,67 @@ with `MotionStudio.registerComposition`).
 
 ## Assets (v0.15)
 
-The **assets** tab lists everything under the project's `assets/` folder —
+The **assets** tab lists everything under the scene's `assets/` folder —
 image thumbnails, in-place audio audition, size — and manages it: upload via
 the **+ upload** button or by dropping files onto the panel (25 MB per file;
 images, audio, fonts, JSON/TXT), rename/move within `assets/`, delete, and
-download. **copy** puts the *project-relative* path (`assets/…`) on your
+download. **copy** puts the *scene-relative* path (`assets/…`) on your
 clipboard — exactly the string a composition or an `audio` track references.
-A **♫ n** badge marks files the project's audio timeline uses; deleting one
+A **♫ n** badge marks files the scene's audio timeline uses; deleting one
 asks whether to remove those tracks too (and renaming offers to repoint
 them), so a stale reference can't quietly turn into an ffmpeg error mid-render.
 The folder's absolute path is shown in the tab header (copy button next to
 it) if you'd rather drop large files in with your file manager; anything you
-put there shows up on the next refresh.
+put there shows up on the next refresh. A film has its own `assets/` the
+same way — master audio and overlay files, managed from the
+[film editor](#the-film-editor) instead of this tab.
+
+## Shared library
+
+Each workspace also has a **⧉ library**: shared assets the human manages
+once, that workspace's agent can then pull into any scene or film. It's a
+row in the tree below a workspace's films rather than a tab on a scene,
+since it belongs to the whole workspace, not to whichever scene happens to
+be open.
+
+The library page **uploads** (optionally into a subfolder you type, handy
+once it grows past a handful of files), **downloads**, and **deletes**.
+Unlike scene and film assets there's no 25 MB cap — the library exists
+specifically for the files too big for that channel (a licensed soundtrack,
+a folder of location photos, a multi-gigabyte video plate). An agent lists
+the library with `list_shared_assets` and pulls a file into a scene's or
+film's own `assets/` with `use_shared_asset` — hardlinked where the
+filesystem allows, so a large asset costs no extra disk and the scene or
+film still renders from a normal, self-contained `assets/` folder. Deleting
+a library file doesn't touch copies a scene or film already pulled in.
 
 ## Global settings (v0.15)
 
 **⚙ settings** in the sidebar footer opens the global configuration — since
 v0.22 an inline stage page like the tts/music vendor pages (it replaces the
-project view while open; close restores it), no longer a popup dialog:
+workbench while open; close restores it), no longer a popup dialog:
 
-- **new-project defaults** — the fps/dimensions/duration the *+ new* dialog
-  is pre-filled with, and what any new project gets when its creator didn't
-  specify — including one an agent makes over MCP.
+- **new-scene defaults** — the fps/dimensions/duration the **new film** and
+  **new scene** dialogs are pre-filled with, and what any new film or scene
+  gets when its creator didn't specify — including one an agent makes over
+  MCP (`create_film`/`create_scene`). Newly created films/scenes only;
+  existing ones keep their own.
 - **default workers** — the render tab's initial workers selection, and the
   worker count for any render that doesn't name one.
 - **ffmpeg** — a binary path override (leave empty to use `ffmpeg` on PATH;
   the dialog live-probes the effective binary and shows its version or a
   ✗ if it can't be run — the footer status updates too) and default
-  crf/preset values that seed *newly created* projects' output config.
+  crf/preset values that seed *newly created* scenes' output config.
   The path override applies to every render — the Studio's, the CLI's, and an
   agent's. `MOTION_STUDIO_FFMPEG` overrides it for a single process, and the
   CLI's `--ffmpeg <path>` overrides both (`render.js --doctor` prints which
   binary it settled on and where that came from).
-- a read-only **environment** report: where the data dir, projects root, and
-  registry live, plus the current values of the `MOTION_STUDIO_*` env hooks,
-  `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor variables (API keys shown
-  masked, never in full).
+- a read-only **environment** report: where the data dir and **workspaces
+  root** live (there's no separate registry file — the folder tree under
+  `workspaces/` is authoritative), plus the current values of the
+  `MOTION_STUDIO_*` env hooks (including which **workspace** each connected
+  agent is bound to), `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor
+  variables (API keys shown masked, never in full).
 
 Narration and music vendors each live on their own page — **🗣 tts** and
 **♫ music** in the sidebar footer, next to ⚙ settings; see
@@ -109,15 +161,15 @@ Narration and music vendors each live on their own page — **🗣 tts** and
 
 Settings persist in `~/.motion-studio/settings.json` and are genuinely global:
 the Studio, the CLI, and agents working over MCP all honour them. They fill in
-what a new project or render didn't specify — an explicit choice always wins,
+what a new scene or render didn't specify — an explicit choice always wins,
 so an agent told to make a 4K vertical video still gets one — and they apply
-only at creation. A project already on disk is never rewritten because you
+only at creation. A scene already on disk is never rewritten because you
 changed a global, so it keeps rendering the way it did. One thing that file
 never holds is a credential: API keys are read from the environment only.
 
-The project sidebar sorts by **a–z** or **date** (last modified, newest
-first) via the toggle next to *+ new*, and collapses to a slim strip with the
-**«** button — both choices are remembered per browser.
+The sidebar collapses to a slim strip with the **«** button, and each
+workspace's and film's expanded/collapsed state persists the same way — both
+remembered per browser.
 
 The workbench is a fixed half preview, half panel, so switching tabs never
 resizes the preview; long tabs scroll inside their half. The **▾** button at
@@ -126,15 +178,15 @@ for scrubbing, and clicking any tab brings it back.
 
 ## Preview and scrubbing
 
-Selecting a project loads its *actual entry HTML* into the preview iframe —
+Selecting a scene loads its *actual entry HTML* into the preview iframe —
 the same file headless Chromium renders — and the transport drives it
 through the same `window.setFrame(n)` contract. Scrubbing exercises your
-real animation logic. Space plays/pauses at the project's fps; arrow keys
-step single frames. Transparent projects preview over a checkerboard.
+real animation logic. Space plays/pauses at the scene's fps; arrow keys
+step single frames. Transparent scenes preview over a checkerboard.
 
-Saving any project file hot-reloads the preview automatically (debounced, so
+Saving any scene file hot-reloads the preview automatically (debounced, so
 editor save bursts don't thrash), holding your current frame. If an AI agent
-edits the project over MCP while you have it open, you'll see the change
+edits the scene over MCP while you have it open, you'll see the change
 land live — the amber dot in the preview header flashes on each reload.
 
 The preview runs in *your* browser while the final render runs in
@@ -162,7 +214,7 @@ true). Proxies skip audio and the pre-flight probe, always render serially,
 and write to `output.proxy.mp4` so they never overwrite your deliverable.
 Available via the `render` MCP tool's `proxy` option and the CLI's
 `--proxy [scale] --frame-step N` flags; they work with whatever output format
-the project is configured for (scaled dimensions are floored to even numbers
+the scene is configured for (scaled dimensions are floored to even numbers
 where the encoder demands it).
 
 While a job runs you get a progress bar, effective render fps, an **ETA**,
@@ -190,7 +242,7 @@ same way speech vendors always did, instead of a generic server error.
 
 ## Output formats (v0.5)
 
-The **config** tab (or `project.json`'s `output` block) selects the
+The **config** tab (or `scene.json`'s `output` block) selects the
 deliverable:
 
 | format | you get | typical use |
@@ -223,7 +275,7 @@ real transparent `lower-third.webm` and a proof composite over green.
 
 ## Audio
 
-Use the **audio** tab, or add tracks to `project.json` directly:
+Use the **audio** tab, or add tracks to `scene.json` directly:
 
 ```json
 "audio": [
@@ -233,7 +285,7 @@ Use the **audio** tab, or add tracks to `project.json` directly:
 ```
 
 The tab edits exactly this list: **+ add track** appends a row, `src`
-autocompletes from the project's audio assets, the start frame shows its
+autocompletes from the scene's audio assets, the start frame shows its
 equivalent in seconds as you type, and ▶ auditions the file. Edits are staged
 until you press **save tracks**, so a half-typed path never reaches disk.
 
@@ -259,9 +311,10 @@ clip-relative):
 
 ### Hearing the mix before a render (`preview_audio`, v0.19)
 
-The `preview_audio` MCP tool mixes the audio timeline to
-`out/audio-preview.wav` using the exact filter graph the render will use —
-delays, gains, trims, fades, ducking, limiter — with no video pass. It reports
+The `preview_audio` MCP tool mixes a **scene's or a film's** audio timeline
+to `out/audio-preview.wav` using the exact filter graph the render (or film
+build) will use — delays, gains, trims, fades, ducking, limiter — with no
+video pass. It reports
 the mixed `peakDb`/`meanDb`, a `clipping` flag, and each source clip's own
 level, so a bad balance names the track that caused it. Seconds instead of a
 full render.
@@ -285,10 +338,12 @@ and it is exempt. The final render runs the same check: warnings appear as
 ### Generated narration (text-to-speech)
 
 You can synthesize a voiceover instead of supplying an audio file. An agent
-calls the `synthesize_speech` MCP tool (see [tts-setup.md](tts-setup.md)): it
-speaks your text to `assets/narration-<n>.wav`, reports the clip's length in
-frames, and — in the default `attach` mode — adds it to the `audio` list above
-for you. The synthesized WAV mixes through the exact audio path described above.
+calls the `synthesize_speech` MCP tool (see [tts-setup.md](tts-setup.md))
+targeting a scene or a film: it speaks your text to
+`assets/narration-<n>.wav` in that target's own `assets/`, reports the
+clip's length in frames, and — in the default `attach` mode — adds it to the
+`audio` list above (a scene's own list, or a film's master timeline) for
+you. The synthesized WAV mixes through the exact audio path described above.
 
 Since v0.17 the voice comes from one of several **speech vendors**, chosen on the
 **🗣 tts** page in the sidebar footer.
@@ -379,29 +434,36 @@ still wins.
 
 ## Long-form films (multiple scenes)
 
-One composition is the right size for a shot or a scene, not for minutes of
-video. To build something longer, make **each scene its own project** (same
-width/height/fps/format), render each, and combine the results into a film.
-Assembly concatenates the rendered scenes **losslessly** (`-c copy`, no
-re-encode) into one continuous video, so each scene stays a short,
+A single composition is the right size for a shot, not for minutes of video.
+For anything longer, start a **film** and give it several **scenes** — each
+one inherits the film's width/height/fps, so they're concat-compatible by
+construction — render each, and let the film's assembly stitch them
+together. Assembly concatenates the rendered scenes **losslessly** (`-c
+copy`, no re-encode) into one continuous video, so each scene stays a short,
 independent, resumable render — fix one scene, re-render only it, re-stitch
 in seconds.
 
 ### The film editor
 
-Click **+ new** in the rail's **films** tab, name the film, and the
-visual editor opens (a dedicated “…— Master” project is scaffolded to hold
-the film's assets and output). The left panel lists your projects; the right
-panel is the context inspector — and the **build panel** docks there too, so
-assembling never covers the timeline. The timeline has four kinds of track:
+Creating a film (**+ film** in a workspace, or `create_film` over MCP) opens
+the visual editor right away — there's no separate save step and no more
+dedicated "…— Master" project: the film folder itself holds the assets and
+output. The editor's info bar shows the film's **workspace** and name. The
+left rail lists **the film's own scenes** — every folder under its
+`scenes/`, not a global pool — flagging each as `in film` (already in the
+play order) or `unlisted` (a scene folder that exists but isn't placed yet,
+e.g. made by an agent or copied in by hand). The right panel is the context
+inspector — and the **build panel** docks there too, so assembling never
+covers the timeline. The timeline has four kinds of track:
 
-- **scenes** — **drag a project from the left panel onto the timeline** to
+- **scenes** — **drag a scene from the left rail onto the timeline** to
   place it (an insert marker shows where it lands), or hit the row's **+** to
-  append it; drag scene blocks to reorder. Incompatible projects (different
-  resolution/fps/format) and unrendered scenes are flagged, and each scene
-  has a **render** button right in the inspector, so you never leave the
-  editor to fix a red flag. Scene blocks are butt-joined — a film has no
-  gaps — so order is the only thing to drag.
+  append it; drag scene blocks to reorder. **+ new scene** at the foot of the
+  rail scaffolds a fresh scene folder directly into the film. Incompatible
+  scenes (different resolution/fps/format) and unrendered scenes are
+  flagged, and each scene has a **render** button right in the inspector, so
+  you never leave the editor to fix a red flag. Scene blocks are butt-joined
+  — a film has no gaps — so order is the only thing to drag.
 - **audio** — a master timeline laid over the whole film (it replaces
   per-scene audio, same rule as `build_film`). “+ audio” places an asset at
   the playhead; “+ narration” synthesizes speech through your configured
@@ -433,21 +495,24 @@ The panel shows live progress (the header button carries the percent even if
 you switch back to editing) and, when it lands, the measured
 `peak/mean dBFS` of the mix and a download link.
 
-Films are shared with connected agents (`save_film` / `build_saved_film`
-over MCP edit and build the same documents), and the original one-shot
-`build_film` tool still works for scripted assembly. See
+Films are shared with the agent whose workspace they live in: `update_film`
+and `build_film` over MCP edit and build this same `film.json`, so a film you
+re-cut here is the one the agent rebuilds, and vice versa. See
 [film-setup.md](film-setup.md) for the underlying model, the quality
 pipeline, and how it scales to arbitrary length.
 
 ## The CLI
 
-Everything the Studio does is scriptable:
+Everything the Studio does is scriptable. `<folder>` is any scene folder —
+for example one under
+`~/.motion-studio/workspaces/<workspace>/films/<film>/scenes/<scene>/`, or a
+standalone composition folder like the ones under `examples/`:
 
 ```bash
-node src/cli/render.js --project <folder> --output out/clip.mp4 --workers 4
-node src/cli/render.js --project <folder> --frame-range 0 59 --output out/pace-check.mp4
-node src/cli/render.js --project <folder> --proxy 0.5 --frame-step 2 --output out/clip.mp4   # → out/clip.proxy.mp4
-node src/cli/render.js --project <folder> --capture-frame 42 --capture-out check.png
+node src/cli/render.js --scene <folder> --output out/clip.mp4 --workers 4
+node src/cli/render.js --scene <folder> --frame-range 0 59 --output out/pace-check.mp4
+node src/cli/render.js --scene <folder> --proxy 0.5 --frame-step 2 --output out/clip.mp4   # → out/clip.proxy.mp4
+node src/cli/render.js --scene <folder> --capture-frame 42 --capture-out check.png
 node src/cli/render.js --doctor
 ```
 
@@ -457,6 +522,10 @@ Progress streams to stdout as JSON lines (see
 
 ## Connecting an AI agent
 
-See [mcp-setup.md](mcp-setup.md). Agents see the same project list you do,
-can author compositions, supply assets, and render on your behalf — and are
-sandboxed to project folders: no arbitrary file access, no shell.
+See [mcp-setup.md](mcp-setup.md). An agent works inside its own
+**workspace** (`MOTION_STUDIO_WORKSPACE`) — the Studio shows every
+workspace, but a given agent only ever sees its own — and can create films
+and scenes, author compositions, supply assets, pull files from the
+workspace's shared library, and render on your behalf. Every agent is
+sandboxed to its workspace's scene and film folders: no arbitrary file
+access, no shell.

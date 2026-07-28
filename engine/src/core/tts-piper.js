@@ -66,7 +66,7 @@ const DEFAULT_VOICES_DIR = path.resolve(__dirname, '../../vendor/piper/voices');
  * duration multiplier (1 = the voice's natural pace, 2 = half speed).
  *
  * The scale means the same thing it means for the Azure vendor — each step is
- * 10% of default speed — so a project can change vendors without re-timing
+ * 10% of default speed — so a film can change vendors without re-timing
  * every line. Clamped because the arithmetic has a singularity at rate −10 and
  * nobody wants a ten-times-slower narrator by arithmetic accident.
  */

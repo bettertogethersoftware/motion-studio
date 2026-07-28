@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Text-to-speech (narration) support — added in v0.6.
  *
  * Motion Studio does not synthesize speech itself: narration is produced by an
@@ -7,7 +7,7 @@
  * stays cross-platform for everything except this optional feature, which is
  * Windows-only because it drives the OS speech voices.
  *
- * The exe contract (stable — the external project must match it):
+ * The exe contract (stable — the external tool must match it):
  *
  *   MotionStudioTts.exe --text-file <utf8 path> --out <abs .wav path> \
  *                       --voice "<name>" [--rate N] [--volume N]

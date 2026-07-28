@@ -2,7 +2,7 @@
 /**
  * CLI entry point — the human path. The WinForms Render Orchestrator spawns:
  *
- *   node render.js --project <folder> --output <file.mp4>
+ *   node render.js --scene <folder> --output <file.mp4>
  *                  [--frame-range <start> <end>] [--workers N]
  *                  [--frames-dir <dir>] [--segment]
  *                  [--proxy [scale]] [--frame-step N]
@@ -20,7 +20,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { renderComposition, renderParallel, captureSingleFrame } from '../core/renderer.js';
-import { validateConfig } from '../core/project.js';
+import { validateConfig, SCENE_CONFIG } from '../core/scene.js';
 import { checkPrerequisites } from '../core/prereqs.js';
 import { resolveFfmpegPath } from '../core/settings.js';
 import { ProgressEmitter } from '../core/progress.js';
@@ -31,7 +31,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
-      case '--project': out.project = argv[++i]; break;
+      case '--scene': out.scene = argv[++i]; break;
       case '--output': out.output = argv[++i]; break;
       case '--frame-range': out.frameRange = [Number(argv[++i]), Number(argv[++i])]; break;
       case '--workers': out.workers = Number(argv[++i]); break;
@@ -63,8 +63,8 @@ function parseArgs(argv) {
 }
 
 const USAGE = `Usage:
-  render.js --project <folder> --output <file.mp4> [options]
-  render.js --project <folder> --capture-frame N --capture-out <file.png>
+  render.js --scene <folder> --output <file.mp4> [options]
+  render.js --scene <folder> --capture-frame N --capture-out <file.png>
 
 Options:
   --frame-range <start> <end>   inclusive frame range (default: full composition)
@@ -110,8 +110,8 @@ async function main() {
     );
     return prereqs.ok ? 0 : 3;
   }
-  if (!args.project) {
-    progress.error(new EngineError(ErrorCodes.INVALID_CONFIG, 'Missing --project'));
+  if (!args.scene) {
+    progress.error(new EngineError(ErrorCodes.INVALID_CONFIG, 'Missing --scene'));
     process.stderr.write(USAGE);
     return 2;
   }
@@ -122,12 +122,12 @@ async function main() {
     return 3;
   }
 
-  const projectPath = path.resolve(args.project);
+  const scenePath = path.resolve(args.scene);
   let config;
   try {
-    config = validateConfig(JSON.parse(await fsp.readFile(path.join(projectPath, 'project.json'), 'utf8')));
+    config = validateConfig(JSON.parse(await fsp.readFile(path.join(scenePath, SCENE_CONFIG), 'utf8')));
   } catch (e) {
-    progress.error(e instanceof EngineError ? e : new EngineError(ErrorCodes.INVALID_CONFIG, `Cannot read project.json: ${e.message}`));
+    progress.error(e instanceof EngineError ? e : new EngineError(ErrorCodes.INVALID_CONFIG, `Cannot read ${SCENE_CONFIG}: ${e.message}`));
     return 2;
   }
 
@@ -155,7 +155,7 @@ async function main() {
         return 2;
       }
       const png = await captureSingleFrame({
-        projectPath, config, frame: args.captureFrame, signal: controller.signal,
+        scenePath, config, frame: args.captureFrame, signal: controller.signal,
         ...(browserFactory ? { browserFactory } : {}),
       });
       await fsp.mkdir(path.dirname(path.resolve(args.captureOut)), { recursive: true });
@@ -179,7 +179,7 @@ async function main() {
       ? { ...args.proxy, ...(args.frameStep !== undefined ? { frameStep: args.frameStep } : {}) }
       : undefined;
     const common = {
-      projectPath,
+      scenePath,
       config,
       outputPath: path.resolve(args.output),
       frameRange: args.frameRange,
@@ -194,7 +194,7 @@ async function main() {
       // Workers render a slice each and are spawned by an already-pre-flighted
       // parent; probing again in every worker would just repeat the same check.
       preflight: args.preflight !== false && !args.segment,
-      // Likewise the render lock: every worker targets the same project on
+      // Likewise the render lock: every worker targets the same scene on
       // purpose, and the parent holds one lock covering all of them. A worker
       // taking its own would deadlock the fan-out against itself.
       lock: !args.segment,

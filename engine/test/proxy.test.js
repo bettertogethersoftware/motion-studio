@@ -25,7 +25,7 @@ import {
 } from '../src/core/renderer.js';
 import { FfmpegFrameSink } from '../src/core/encoder.js';
 import { ProgressEmitter } from '../src/core/progress.js';
-import { makeConfig } from '../src/core/project.js';
+import { makeConfig } from '../src/core/scene.js';
 import { ErrorCodes } from '../src/core/errors.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
 
@@ -42,10 +42,10 @@ after(async () => {
 });
 
 async function makeProject(name, configOverrides = {}) {
-  const projectPath = path.join(tmp, name);
-  await fsp.mkdir(projectPath, { recursive: true });
+  const scenePath = path.join(tmp, name);
+  await fsp.mkdir(scenePath, { recursive: true });
   const config = makeConfig({ name, width: 128, height: 72, durationInFrames: 90, ...configOverrides });
-  return { projectPath, config };
+  return { scenePath, config };
 }
 
 /** ffprobe one video-stream field (e.g. width, r_frame_rate, nb_frames). */
@@ -102,11 +102,11 @@ test('normalizeProxy: invalid values fail invalid_config and NAME the value', ()
 });
 
 test('renderComposition: rejects a bad proxy before launching anything', async () => {
-  const { projectPath, config } = await makeProject('proj-badproxy');
+  const { scenePath, config } = await makeProject('proj-badproxy');
   let launches = 0;
   await assert.rejects(
     renderComposition({
-      projectPath, config, outputPath: path.join(projectPath, 'out', 'output.mp4'),
+      scenePath, config, outputPath: path.join(scenePath, 'out', 'output.mp4'),
       proxy: { scale: 9 },
       browserFactory: makeFakeBrowserFactory({ onLaunch: () => launches++ }),
     }),
@@ -181,9 +181,9 @@ test('FfmpegFrameSink: a rational fps string reaches -framerate verbatim', () =>
 
 test('proxy render: scaled viewport, stepped frames, rational rate, no preflight, .proxy name', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { projectPath, config } = await makeProject('proj-proxy');
+  const { scenePath, config } = await makeProject('proj-proxy');
   assert.ok(config.durationInFrames >= MIN_FRAMES_FOR_PREFLIGHT, 'long enough that preflight would normally run');
-  const outputPath = path.join(projectPath, 'out', 'output.mp4');
+  const outputPath = path.join(scenePath, 'out', 'output.mp4');
 
   const pages = [];
   const captured = [];
@@ -191,13 +191,13 @@ test('proxy render: scaled viewport, stepped frames, rational rate, no preflight
   const progress = new ProgressEmitter(null, (m) => { if (m.type === 'phase') phases.push(m.phase); });
 
   const result = await renderComposition({
-    projectPath, config, outputPath, progress,
+    scenePath, config, outputPath, progress,
     proxy: { frameStep: 4 }, // scale defaults to 0.5
     browserFactory: spyingFactory({ onCapture: (n) => captured.push(n) }, pages),
   });
 
   // .proxy filename: the deliverable path is untouched, the draft is beside it
-  assert.equal(result.outputPath, path.join(projectPath, 'out', 'output.proxy.mp4'));
+  assert.equal(result.outputPath, path.join(scenePath, 'out', 'output.proxy.mp4'));
   await assert.rejects(fsp.stat(outputPath), 'the deliverable name must not be written');
 
   // frame list: 0, 4, 8, …, 88 — count and endpoints
@@ -226,9 +226,9 @@ test('proxy render: scaled viewport, stepped frames, rational rate, no preflight
 test('proxy render: odd scaled dims are floored to even and the mp4 encode succeeds', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   // 106×62 @ 0.5 → 53×31, both odd: without the even floor libx264 rejects it
-  const { projectPath, config } = await makeProject('proj-odd', { width: 106, height: 62 });
+  const { scenePath, config } = await makeProject('proj-odd', { width: 106, height: 62 });
   const result = await renderComposition({
-    projectPath, config, outputPath: path.join(projectPath, 'out', 'output.mp4'),
+    scenePath, config, outputPath: path.join(scenePath, 'out', 'output.mp4'),
     proxy: {},
     browserFactory: makeFakeBrowserFactory(),
   });
@@ -241,14 +241,14 @@ test('proxy render: audio tracks configured, but the proxy carries NO audio stre
   // The mux is skipped outright, so the referenced asset is deliberately
   // never created: if a regression re-enables the mux, the render fails loudly
   // here instead of the assertion below silently passing on a muxed file.
-  const { projectPath, config } = await makeProject('proj-audio', {
+  const { scenePath, config } = await makeProject('proj-audio', {
     audio: [{ src: 'assets/bed.wav', startInFrames: 0 }],
   });
   const phases = [];
   const progress = new ProgressEmitter(null, (m) => { if (m.type === 'phase') phases.push(m.phase); });
 
   const result = await renderComposition({
-    projectPath, config, outputPath: path.join(projectPath, 'out', 'output.mp4'),
+    scenePath, config, outputPath: path.join(scenePath, 'out', 'output.mp4'),
     proxy: {}, progress,
     browserFactory: makeFakeBrowserFactory(),
   });
@@ -264,10 +264,10 @@ test('proxy render: audio tracks configured, but the proxy carries NO audio stre
 
 test('renderParallel: a proxy delegates to ONE serial render, whatever workers says', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { projectPath, config } = await makeProject('proj-serial');
+  const { scenePath, config } = await makeProject('proj-serial');
   let launches = 0;
   const result = await renderParallel({
-    projectPath, config, outputPath: path.join(projectPath, 'out', 'output.mp4'),
+    scenePath, config, outputPath: path.join(scenePath, 'out', 'output.mp4'),
     workers: 4,
     proxy: {},
     browserFactory: makeFakeBrowserFactory({ onLaunch: () => launches++ }),
@@ -280,14 +280,14 @@ test('renderParallel: a proxy delegates to ONE serial render, whatever workers s
 
 test('proxy render: png-sequence writes the stepped frames contiguously into a .proxy dir', async () => {
   // No encode step, so this pipeline test needs no ffmpeg at all.
-  const { projectPath, config } = await makeProject('proj-seq');
+  const { scenePath, config } = await makeProject('proj-seq');
   config.output = { ...config.output, format: 'png-sequence', filename: 'frames' };
   const result = await renderComposition({
-    projectPath, config, outputPath: path.join(projectPath, 'out', 'frames'),
+    scenePath, config, outputPath: path.join(scenePath, 'out', 'frames'),
     proxy: { scale: 0.5, frameStep: 3 },
     browserFactory: makeFakeBrowserFactory(),
   });
-  assert.equal(result.outputPath, path.join(projectPath, 'out', 'frames.proxy'));
+  assert.equal(result.outputPath, path.join(scenePath, 'out', 'frames.proxy'));
   const files = (await fsp.readdir(result.outputPath)).sort();
   // frames 0,3,…,87 → 30 files, numbered 000000…000029 with no step-shaped gaps
   assert.equal(files.length, 30);

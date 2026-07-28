@@ -1,7 +1,7 @@
 /**
  * Cross-process render lock (v0.11).
  *
- * Two renders writing one project is silent corruption, not a loud failure:
+ * Two renders writing one scene is silent corruption, not a loud failure:
  * both processes write the same frame files and both run ffmpeg on the same
  * output path, so the survivor is whichever finished last and any torn frame in
  * between is invisible. Observed for real — an orphaned background render raced
@@ -11,10 +11,14 @@
  * `ErrorCodes.RENDER_ALREADY_IN_PROGRESS` has existed since v0.2 but was never
  * raised by anything; this is the guard it was reserved for.
  *
- * The lock is a `.render.lock` file in the project folder holding the owning
+ * The lock is a `.render.lock` file in the scene folder holding the owning
  * pid. Liveness, not age, decides staleness: a render may legitimately run for
  * hours, so a timeout would eventually evict a healthy job, whereas a crashed
  * owner's pid stops existing immediately.
+ *
+ * Scene-scoped is the right grain: two scenes of one film render concurrently
+ * by design (that is the whole point of splitting a film into scenes), and
+ * they touch disjoint folders.
  */
 
 import fsp from 'node:fs/promises';
@@ -24,8 +28,8 @@ import { EngineError, ErrorCodes } from './errors.js';
 
 export const LOCK_FILENAME = '.render.lock';
 
-export function lockPath(projectPath) {
-  return path.join(projectPath, LOCK_FILENAME);
+export function lockPath(scenePath) {
+  return path.join(scenePath, LOCK_FILENAME);
 }
 
 /**
@@ -52,20 +56,20 @@ async function readLock(file) {
 }
 
 /**
- * Take the render lock for a project.
+ * Take the render lock for a scene.
  *
- * @param {string} projectPath
+ * @param {string} scenePath
  * @param {object} [opts]
  * @param {number} [opts.pid]    owning pid (override for tests)
  * @param {string} [opts.label]  what is holding it, for the error message
  * @returns {Promise<{release: () => Promise<void>, path: string}>}
  * @throws {EngineError} RENDER_ALREADY_IN_PROGRESS if a live process holds it
  */
-export async function acquireRenderLock(projectPath, { pid = process.pid, label = 'render' } = {}) {
-  const file = lockPath(projectPath);
+export async function acquireRenderLock(scenePath, { pid = process.pid, label = 'render' } = {}) {
+  const file = lockPath(scenePath);
   const body = JSON.stringify({ pid, label, host: os.hostname(), startedAt: new Date().toISOString() });
 
-  await fsp.mkdir(projectPath, { recursive: true });
+  await fsp.mkdir(scenePath, { recursive: true });
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -86,9 +90,9 @@ export async function acquireRenderLock(projectPath, { pid = process.pid, label 
       if (held && isProcessAlive(held.pid)) {
         throw new EngineError(
           ErrorCodes.RENDER_ALREADY_IN_PROGRESS,
-          `another render (pid ${held.pid}${held.host ? ` on ${held.host}` : ''}) is already writing this project. ` +
-            'Wait for it to finish or cancel it — two renders writing one project corrupt each other\'s frames. ' +
-            `If that process is gone, delete ${LOCK_FILENAME} in the project folder.`,
+          `another render (pid ${held.pid}${held.host ? ` on ${held.host}` : ''}) is already writing this scene. ` +
+            'Wait for it to finish or cancel it — two renders writing one scene corrupt each other\'s frames. ' +
+            `If that process is gone, delete ${LOCK_FILENAME} in the scene folder.`,
           { pid: held.pid, startedAt: held.startedAt, host: held.host, lockPath: file },
         );
       }

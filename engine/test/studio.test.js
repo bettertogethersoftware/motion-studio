@@ -1,8 +1,8 @@
 /**
  * Studio web server tests: boot on an ephemeral port with the fake browser
- * injected, then drive the same flow the UI does — create project → fetch
- * config → preview file serving (incl. sandbox 403) → patch config → render →
- * poll job → download output → still export → remove project.
+ * injected, then drive the same flow the UI does — create film + scene →
+ * fetch config → preview file serving (incl. sandbox 403) → patch config →
+ * render → poll job → download output → still export → remove scene.
  */
 
 import { test, before, after } from 'node:test';
@@ -14,11 +14,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { createStudioServer } from '../src/studio/server.js';
-import { ProjectStore } from '../src/core/project.js';
 import { JobManager } from '../src/core/jobs.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
+import { makeStore, TEST_WS } from './helpers/workspace.mjs';
 
 const execFileP = promisify(execFile);
+const enc = encodeURIComponent;
 
 let server, base, haveFfmpeg = true;
 
@@ -26,7 +27,7 @@ before(async () => {
   try { await execFileP('ffmpeg', ['-version']); } catch { haveFfmpeg = false; }
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-studio-'));
   server = createStudioServer({
-    store: new ProjectStore(home),
+    store: await makeStore(home),
     jobs: new JobManager(),
     browserFactory: makeFakeBrowserFactory(),
   });
@@ -48,7 +49,7 @@ const j = async (p, opts = {}) => {
   return { status: res.status, data, res };
 };
 
-let projectId;
+let filmId, sceneId;
 
 test('studio: serves the UI shell and static assets', async () => {
   const home = await fetch(base + '/');
@@ -66,47 +67,55 @@ test('studio: prereqs endpoint reports engine state', async (t) => {
   assert.equal(data.ok, true);
 });
 
-test('studio: create project → list → get', async () => {
-  const created = await j('/api/projects', {
+test('studio: create film + scene → workspace tree → get scene', async () => {
+  const film = await j(`/api/workspaces/${TEST_WS}/films`, {
     method: 'POST',
     body: { name: 'Studio Demo', fps: 30, width: 320, height: 240, durationInFrames: 20 },
   });
+  assert.equal(film.status, 201, JSON.stringify(film.data));
+  filmId = film.data.film.id;
+
+  const created = await j(`/api/films/${enc(filmId)}/scenes`, { method: 'POST', body: { name: 'Main Shot' } });
   assert.equal(created.status, 201, JSON.stringify(created.data));
-  projectId = created.data.id;
+  sceneId = created.data.id;
+  assert.equal(sceneId, `${filmId}/main-shot`);
+  assert.equal(created.data.config.width, 320, 'film sceneDefaults inherited');
 
-  const list = await j('/api/projects');
-  assert.equal(list.data.projects.length, 1);
+  const tree = await j('/api/workspaces');
+  const ws = tree.data.workspaces.find((w) => w.id === TEST_WS);
+  assert.equal(ws.films.length, 1);
+  assert.equal(ws.films[0].scenes, 1);
 
-  const got = await j(`/api/projects/${projectId}`);
+  const got = await j(`/api/scenes/${enc(sceneId)}`);
   assert.equal(got.status, 200);
   assert.equal(got.data.config.output.format, 'mp4');
   assert.ok(got.data.files.some((f) => f.path === 'composition.js'));
 });
 
-test('studio: preview serves project files through the sandbox (403 on escape)', async () => {
-  const okRes = await fetch(`${base}/preview/${projectId}/composition.html`);
+test('studio: preview serves scene files through the sandbox (403 on escape)', async () => {
+  const okRes = await fetch(`${base}/preview/${enc(sceneId)}/composition.html`);
   assert.equal(okRes.status, 200);
   assert.match(okRes.headers.get('content-type'), /text\/html/);
   assert.match(await okRes.text(), /frame-api\.js/);
 
-  const jsRes = await fetch(`${base}/preview/${projectId}/frame-api.js`);
+  const jsRes = await fetch(`${base}/preview/${enc(sceneId)}/frame-api.js`);
   assert.equal(jsRes.status, 200);
 
-  const escape = await fetch(`${base}/preview/${projectId}/..%2F..%2Fregistry.json`);
+  const escape = await fetch(`${base}/preview/${enc(sceneId)}/..%2F..%2Ffilm.json`);
   assert.equal(escape.status, 403);
-  const escape2 = await fetch(`${base}/preview/${projectId}/${encodeURIComponent('../../../etc/passwd')}`);
+  const escape2 = await fetch(`${base}/preview/${enc(sceneId)}/${enc('../../../etc/passwd')}`);
   assert.equal(escape2.status, 403);
 });
 
 test('studio: PATCH config validates and normalizes the output filename', async () => {
-  const good = await j(`/api/projects/${projectId}/config`, {
+  const good = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: { patch: { output: { format: 'webm' } } },
   });
   assert.equal(good.status, 200, JSON.stringify(good.data));
   assert.equal(good.data.config.output.filename, 'output.webm');
 
-  const bad = await j(`/api/projects/${projectId}/config`, {
+  const bad = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: { patch: { output: { format: 'mp4', transparent: true } } },
   });
@@ -114,12 +123,12 @@ test('studio: PATCH config validates and normalizes the output filename', async 
   assert.equal(bad.data.code, 'invalid_config');
 
   // restore mp4
-  await j(`/api/projects/${projectId}/config`, { method: 'PATCH', body: { patch: { output: { format: 'mp4', transparent: false } } } });
+  await j(`/api/scenes/${enc(sceneId)}/config`, { method: 'PATCH', body: { patch: { output: { format: 'mp4', transparent: false } } } });
 });
 
 test('studio: render → poll to done → outputs list → download', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const started = await j(`/api/projects/${projectId}/render`, { method: 'POST', body: { workers: 1 } });
+  const started = await j(`/api/scenes/${enc(sceneId)}/render`, { method: 'POST', body: { workers: 1 } });
   assert.equal(started.status, 202, JSON.stringify(started.data));
   assert.equal(started.data.state, 'running');
   const { jobId } = started.data;
@@ -136,10 +145,10 @@ test('studio: render → poll to done → outputs list → download', async (t) 
   const logs = await j(`/api/jobs/${jobId}/logs`);
   assert.ok(logs.data.logs.some((l) => /encoding/.test(l.message)));
 
-  const outputs = await j(`/api/projects/${projectId}/outputs`);
+  const outputs = await j(`/api/scenes/${enc(sceneId)}/outputs`);
   assert.ok(outputs.data.files.some((f) => f.name === 'output.mp4'));
 
-  const dl = await fetch(`${base}/api/projects/${projectId}/output?file=output.mp4&download=1`);
+  const dl = await fetch(`${base}/api/scenes/${enc(sceneId)}/output?file=output.mp4&download=1`);
   assert.equal(dl.status, 200);
   assert.match(dl.headers.get('content-type'), /video\/mp4/);
   assert.match(dl.headers.get('content-disposition'), /attachment/);
@@ -147,22 +156,22 @@ test('studio: render → poll to done → outputs list → download', async (t) 
   assert.ok(bytes.length > 1000, `mp4 is ${bytes.length} bytes`);
 
   // Output download is sandboxed too.
-  const escape = await fetch(`${base}/api/projects/${projectId}/output?file=${encodeURIComponent('../project.json')}`);
+  const escape = await fetch(`${base}/api/scenes/${enc(sceneId)}/output?file=${enc('../scene.json')}`);
   assert.equal(escape.status, 403);
 });
 
 test('studio: still export writes a PNG into out/ and rejects bad names', async () => {
-  const ok = await j(`/api/projects/${projectId}/still`, { method: 'POST', body: { frame: 4 } });
+  const ok = await j(`/api/scenes/${enc(sceneId)}/still`, { method: 'POST', body: { frame: 4 } });
   assert.equal(ok.status, 200, JSON.stringify(ok.data));
   assert.ok(ok.data.outputPath.endsWith('still-4.png'));
-  const bad = await j(`/api/projects/${projectId}/still`, { method: 'POST', body: { frame: 0, outputFilename: '../x.png' } });
+  const bad = await j(`/api/scenes/${enc(sceneId)}/still`, { method: 'POST', body: { frame: 0, outputFilename: '../x.png' } });
   assert.equal(bad.status, 403);
 });
 
 test('studio: queue is visible over HTTP and cancel works', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const a = await j(`/api/projects/${projectId}/render`, { method: 'POST', body: {} });
-  const b = await j(`/api/projects/${projectId}/render`, { method: 'POST', body: {} });
+  const a = await j(`/api/scenes/${enc(sceneId)}/render`, { method: 'POST', body: {} });
+  const b = await j(`/api/scenes/${enc(sceneId)}/render`, { method: 'POST', body: {} });
   assert.equal(a.data.state, 'running');
   assert.equal(b.data.state, 'queued');
   assert.equal(b.data.queuePosition, 1);
@@ -180,7 +189,7 @@ test('studio: queue is visible over HTTP and cancel works', async (t) => {
 
 test('studio: SSE hot-reload stream emits a change event on file edits', async () => {
   const ctrl = new AbortController();
-  const res = await fetch(`${base}/api/projects/${projectId}/events`, { signal: ctrl.signal });
+  const res = await fetch(`${base}/api/scenes/${enc(sceneId)}/events`, { signal: ctrl.signal });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/event-stream/);
 
@@ -198,20 +207,24 @@ test('studio: SSE hot-reload stream emits a change event on file edits', async (
     return false;
   })();
 
-  // Touch a project file after the stream is up.
+  // Touch a scene file after the stream is up.
   await new Promise((r) => setTimeout(r, 300));
-  const proj = (await j(`/api/projects/${projectId}`)).data;
-  await fsp.writeFile(path.join(proj.path, 'styles.css'), `/* edited ${Date.now()} */\n`, { flag: 'a' });
+  const scene = (await j(`/api/scenes/${enc(sceneId)}`)).data;
+  await fsp.writeFile(path.join(scene.path, 'styles.css'), `/* edited ${Date.now()} */\n`, { flag: 'a' });
 
   assert.equal(await gotChange, true, 'expected an SSE change event within 8s');
   ctrl.abort();
 });
 
-test('studio: unknown routes and unknown projects are structured errors', async () => {
+test('studio: unknown routes and unknown ids are structured errors', async () => {
   assert.equal((await j('/api/nope')).status, 404);
-  const missing = await j('/api/projects/does-not-exist');
+  const missing = await j(`/api/scenes/${enc(`${TEST_WS}/no-film/no-scene`)}`);
   assert.equal(missing.status, 404);
-  assert.equal(missing.data.code, 'project_not_found');
+  assert.equal(missing.data.code, 'scene_not_found');
+  // A malformed id (not ws/film/scene) is a 400, not a 404.
+  const malformed = await j('/api/scenes/does-not-exist');
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.data.code, 'invalid_id');
 });
 
 test('studio: prereqs names the probed ffmpeg binary and its source (v0.15)', async () => {
@@ -234,7 +247,7 @@ test('studio: prereqs names the probed ffmpeg binary and its source (v0.15)', as
 });
 
 test('studio: config PATCH covers the whole output block and clears with null (v0.15)', async () => {
-  const full = await j(`/api/projects/${projectId}/config`, {
+  const full = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: {
       patch: {
@@ -256,7 +269,7 @@ test('studio: config PATCH covers the whole output block and clears with null (v
 
   // null removes a key so the format's own default applies again; an omitted
   // key keeps its current value.
-  const cleared = await j(`/api/projects/${projectId}/config`, {
+  const cleared = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: { patch: { output: { preset: null, pixFmt: null } } },
   });
@@ -266,14 +279,14 @@ test('studio: config PATCH covers the whole output block and clears with null (v
   assert.equal(cleared.data.config.output.crf, 20, 'omitted keys survive the merge');
 
   // Restore the defaults the later render tests expect.
-  await j(`/api/projects/${projectId}/config`, {
+  await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: { patch: { output: { dir: 'out', filename: 'output', crf: 18, audioLimiter: true } } },
   });
 });
 
 test('studio: audio tracks round-trip through config PATCH (v0.15)', async () => {
-  const withAudio = await j(`/api/projects/${projectId}/config`, {
+  const withAudio = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: {
       patch: {
@@ -288,7 +301,7 @@ test('studio: audio tracks round-trip through config PATCH (v0.15)', async () =>
   assert.equal(withAudio.data.config.audio.length, 2);
   assert.equal(withAudio.data.config.audio[1].startInFrames, 45);
 
-  const bad = await j(`/api/projects/${projectId}/config`, {
+  const bad = await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: { patch: { audio: [{ src: 'assets/x.wav', startInFrames: -3 }] } },
   });
@@ -296,7 +309,7 @@ test('studio: audio tracks round-trip through config PATCH (v0.15)', async () =>
   assert.equal(bad.data.code, 'invalid_config');
 
   // Empty array is how the UI says "no tracks".
-  const none = await j(`/api/projects/${projectId}/config`, { method: 'PATCH', body: { patch: { audio: [] } } });
+  const none = await j(`/api/scenes/${enc(sceneId)}/config`, { method: 'PATCH', body: { patch: { audio: [] } } });
   assert.equal(none.status, 200);
   assert.deepEqual(none.data.config.audio, []);
 });
@@ -304,19 +317,20 @@ test('studio: audio tracks round-trip through config PATCH (v0.15)', async () =>
 test('studio: settings — defaults, patch, validation, unknown keys (v0.15)', async () => {
   const got = await j('/api/settings');
   assert.equal(got.status, 200);
-  assert.equal(got.data.settings.newProjectDefaults.fps, 30);
+  assert.equal(got.data.settings.newSceneDefaults.fps, 30);
   assert.equal(got.data.settings.render.defaultWorkers, 1);
   assert.ok(got.data.environment.dataDir);
-  assert.ok(got.data.environment.projectsRoot);
+  assert.ok(got.data.environment.workspacesRoot);
   assert.ok('MOTION_STUDIO_TTS_EXE' in got.data.environment.env);
+  assert.ok('MOTION_STUDIO_WORKSPACE' in got.data.environment.env);
 
   const patched = await j('/api/settings', {
     method: 'PATCH',
-    body: { patch: { newProjectDefaults: { fps: 24, width: 1280, height: 720 }, render: { defaultWorkers: 2 } } },
+    body: { patch: { newSceneDefaults: { fps: 24, width: 1280, height: 720 }, render: { defaultWorkers: 2 } } },
   });
   assert.equal(patched.status, 200, JSON.stringify(patched.data));
-  assert.equal(patched.data.settings.newProjectDefaults.fps, 24);
-  assert.equal(patched.data.settings.newProjectDefaults.durationInFrames, 150); // untouched field survives
+  assert.equal(patched.data.settings.newSceneDefaults.fps, 24);
+  assert.equal(patched.data.settings.newSceneDefaults.durationInFrames, 150); // untouched field survives
 
   // Persisted: a fresh GET reads the file back.
   const again = await j('/api/settings');
@@ -330,7 +344,7 @@ test('studio: settings — defaults, patch, validation, unknown keys (v0.15)', a
   assert.equal(unknown.status, 400);
 });
 
-test('studio: ffmpeg settings — probe report, path override, encode defaults (v0.15)', async (t) => {
+test('studio: ffmpeg settings — probe report, path override, encode defaults (v0.15)', async () => {
   const got = await j('/api/settings');
   assert.deepEqual(got.data.settings.ffmpeg, { path: null, defaultCrf: null, defaultPreset: null });
   if (haveFfmpeg) {
@@ -355,37 +369,37 @@ test('studio: ffmpeg settings — probe report, path override, encode defaults (
   assert.equal(prereqs.data.ffmpeg.found, false);
   await j('/api/settings', { method: 'PATCH', body: { patch: { ffmpeg: { path: null } } } });
 
-  // Encode defaults seed newly created projects (and only new ones).
+  // Encode defaults seed newly created scenes (and only new ones).
   await j('/api/settings', { method: 'PATCH', body: { patch: { ffmpeg: { defaultCrf: 28, defaultPreset: 'fast' } } } });
-  const created = await j('/api/projects', { method: 'POST', body: { name: 'Encode Defaults Probe' } });
-  assert.equal(created.status, 201, JSON.stringify(created.data));
-  assert.equal(created.data.config.output.crf, 28);
-  assert.equal(created.data.config.output.preset, 'fast');
-  await j(`/api/projects/${created.data.id}?deleteFiles=1`, { method: 'DELETE' });
+  const scene = await j(`/api/films/${enc(filmId)}/scenes`, { method: 'POST', body: { name: 'Encode Defaults Probe' } });
+  assert.equal(scene.status, 201, JSON.stringify(scene.data));
+  assert.equal(scene.data.config.output.crf, 28);
+  assert.equal(scene.data.config.output.preset, 'fast');
+  await j(`/api/scenes/${enc(scene.data.id)}?deleteFiles=1`, { method: 'DELETE' });
   await j('/api/settings', { method: 'PATCH', body: { patch: { ffmpeg: { defaultCrf: null, defaultPreset: null } } } });
 });
 
-test('studio: new project inherits settings defaults for unset fields (v0.15)', async () => {
+test('studio: new film inherits settings defaults as sceneDefaults (v0.20)', async () => {
   // Settings currently hold fps 24 / 1280×720 from the previous test.
-  const created = await j('/api/projects', { method: 'POST', body: { name: 'Defaults Probe' } });
-  assert.equal(created.status, 201, JSON.stringify(created.data));
-  assert.equal(created.data.config.fps, 24);
-  assert.equal(created.data.config.width, 1280);
-  assert.equal(created.data.config.height, 720);
+  const film = await j(`/api/workspaces/${TEST_WS}/films`, { method: 'POST', body: { name: 'Defaults Probe' } });
+  assert.equal(film.status, 201, JSON.stringify(film.data));
+  assert.equal(film.data.film.sceneDefaults.fps, 24);
+  assert.equal(film.data.film.sceneDefaults.width, 1280);
+  const scene = await j(`/api/films/${enc(film.data.film.id)}/scenes`, { method: 'POST', body: { name: 'S' } });
+  assert.equal(scene.data.config.fps, 24);
+  assert.equal(scene.data.config.width, 1280);
 
   // Explicit fields still win over defaults.
-  const explicit = await j('/api/projects', { method: 'POST', body: { name: 'Explicit Probe', fps: 60 } });
+  const explicit = await j(`/api/films/${enc(film.data.film.id)}/scenes`, { method: 'POST', body: { name: 'S2', fps: 60 } });
   assert.equal(explicit.data.config.fps, 60);
   assert.equal(explicit.data.config.width, 1280);
 
-  // Clean up so the registry-count assertions below stay valid.
-  await j(`/api/projects/${created.data.id}?deleteFiles=1`, { method: 'DELETE' });
-  await j(`/api/projects/${explicit.data.id}?deleteFiles=1`, { method: 'DELETE' });
+  await j(`/api/films/${enc(film.data.film.id)}?deleteFiles=1`, { method: 'DELETE' });
 
   // Restore stock defaults for any later test.
   await j('/api/settings', {
     method: 'PATCH',
-    body: { patch: { newProjectDefaults: { fps: 30, width: 1920, height: 1080 }, render: { defaultWorkers: 1 } } },
+    body: { patch: { newSceneDefaults: { fps: 30, width: 1920, height: 1080 }, render: { defaultWorkers: 1 } } },
   });
 });
 
@@ -395,61 +409,61 @@ test('studio: asset upload → list → download → rename → delete (v0.15)',
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
     'base64',
   );
-  const up = await fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/dot.png')}`, {
+  const up = await fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/dot.png')}`, {
     method: 'PUT',
     body: png,
   });
   assert.equal(up.status, 201);
   assert.deepEqual(await up.json(), { path: 'assets/dot.png', bytes: png.length });
 
-  const list = await j(`/api/projects/${projectId}/assets`);
+  const list = await j(`/api/scenes/${enc(sceneId)}/assets`);
   assert.equal(list.status, 200);
   const entry = list.data.files.find((f) => f.path === 'assets/dot.png');
   assert.ok(entry, JSON.stringify(list.data));
   assert.equal(entry.kind, 'image');
   assert.equal(entry.bytes, png.length);
 
-  const dl = await fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/dot.png')}&download=1`);
+  const dl = await fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/dot.png')}&download=1`);
   assert.equal(dl.status, 200);
   assert.match(dl.headers.get('content-type'), /image\/png/);
   assert.match(dl.headers.get('content-disposition'), /attachment/);
   assert.equal(Buffer.from(await dl.arrayBuffer()).length, png.length);
 
-  const renamed = await j(`/api/projects/${projectId}/asset/rename`, {
+  const renamed = await j(`/api/scenes/${enc(sceneId)}/asset/rename`, {
     method: 'POST',
     body: { from: 'assets/dot.png', to: 'assets/img/pixel.png' },
   });
   assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
   assert.equal(renamed.data.to, 'assets/img/pixel.png');
-  const afterRename = await j(`/api/projects/${projectId}/assets`);
+  const afterRename = await j(`/api/scenes/${enc(sceneId)}/assets`);
   assert.ok(afterRename.data.files.some((f) => f.path === 'assets/img/pixel.png'));
   assert.ok(!afterRename.data.files.some((f) => f.path === 'assets/dot.png'));
 
   // Rename refuses to clobber an existing destination.
-  const again = await fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/dot.png')}`, {
+  const again = await fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/dot.png')}`, {
     method: 'PUT', body: png,
   });
   assert.equal(again.status, 201);
-  const clobber = await j(`/api/projects/${projectId}/asset/rename`, {
+  const clobber = await j(`/api/scenes/${enc(sceneId)}/asset/rename`, {
     method: 'POST',
     body: { from: 'assets/dot.png', to: 'assets/img/pixel.png' },
   });
   assert.equal(clobber.status, 400);
 
-  const del = await j(`/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/dot.png')}`, { method: 'DELETE' });
+  const del = await j(`/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/dot.png')}`, { method: 'DELETE' });
   assert.equal(del.status, 200);
   assert.equal(del.data.deleted, true);
-  const delMissing = await j(`/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/dot.png')}`, { method: 'DELETE' });
+  const delMissing = await j(`/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/dot.png')}`, { method: 'DELETE' });
   assert.equal(delMissing.status, 404);
 });
 
 test('studio: deleting/renaming an asset can fix the audio tracks that use it (v0.15)', async () => {
   const wav = Buffer.alloc(2048, 7);
   const put = (p) =>
-    fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent(p)}`, { method: 'PUT', body: wav });
+    fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc(p)}`, { method: 'PUT', body: wav });
   await put('assets/theme.wav');
   await put('assets/vo.wav');
-  await j(`/api/projects/${projectId}/config`, {
+  await j(`/api/scenes/${enc(sceneId)}/config`, {
     method: 'PATCH',
     body: {
       patch: {
@@ -462,67 +476,79 @@ test('studio: deleting/renaming an asset can fix the audio tracks that use it (v
   });
 
   // The listing reports the reference count, so the UI can warn before the click.
-  const listed = await j(`/api/projects/${projectId}/assets`);
+  const listed = await j(`/api/scenes/${enc(sceneId)}/assets`);
   assert.equal(listed.data.files.find((f) => f.path === 'assets/theme.wav').audioRefs, 1);
   assert.equal(listed.data.files.find((f) => f.path === 'assets/dot.png')?.audioRefs ?? 0, 0);
 
   // Rename with updateAudio rewrites the track's src.
-  const renamed = await j(`/api/projects/${projectId}/asset/rename`, {
+  const renamed = await j(`/api/scenes/${enc(sceneId)}/asset/rename`, {
     method: 'POST',
     body: { from: 'assets/theme.wav', to: 'assets/music/theme.wav', updateAudio: true },
   });
   assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
   assert.equal(renamed.data.audioRefs, 1);
   assert.equal(renamed.data.audioTracksUpdated, 1);
-  assert.equal(renamed.data.config.audio[0].src, 'assets/music/theme.wav');
-  assert.equal(renamed.data.config.audio[0].gainDb, -6, 'other track fields survive the rewrite');
+  assert.equal(renamed.data.audio[0].src, 'assets/music/theme.wav');
+  assert.equal(renamed.data.audio[0].gainDb, -6, 'other track fields survive the rewrite');
 
   // Delete without the flag leaves the reference dangling, but says so.
-  const kept = await j(`/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/vo.wav')}`, { method: 'DELETE' });
+  const kept = await j(`/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/vo.wav')}`, { method: 'DELETE' });
   assert.equal(kept.status, 200);
   assert.equal(kept.data.audioRefs, 1);
   assert.equal(kept.data.audioTracksRemoved, 0);
-  const stillThere = await j(`/api/projects/${projectId}`);
+  const stillThere = await j(`/api/scenes/${enc(sceneId)}`);
   assert.equal(stillThere.data.config.audio.length, 2);
 
   // Delete with the flag drops exactly the matching track.
   const cleaned = await j(
-    `/api/projects/${projectId}/asset?path=${encodeURIComponent('assets/music/theme.wav')}&updateAudio=1`,
+    `/api/scenes/${enc(sceneId)}/asset?path=${enc('assets/music/theme.wav')}&updateAudio=1`,
     { method: 'DELETE' },
   );
   assert.equal(cleaned.status, 200, JSON.stringify(cleaned.data));
   assert.equal(cleaned.data.audioTracksRemoved, 1);
-  assert.equal(cleaned.data.config.audio.length, 1);
-  assert.equal(cleaned.data.config.audio[0].src, 'assets/vo.wav');
+  assert.equal(cleaned.data.audio.length, 1);
+  assert.equal(cleaned.data.audio[0].src, 'assets/vo.wav');
 
-  await j(`/api/projects/${projectId}/config`, { method: 'PATCH', body: { patch: { audio: [] } } });
+  await j(`/api/scenes/${enc(sceneId)}/config`, { method: 'PATCH', body: { patch: { audio: [] } } });
 });
 
 test('studio: asset endpoints enforce the assets/ sandbox (v0.15)', async () => {
   const put = (p) =>
-    fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent(p)}`, { method: 'PUT', body: Buffer.from('x') });
+    fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc(p)}`, { method: 'PUT', body: Buffer.from('x') });
 
   assert.equal((await put('composition.js')).status, 403);         // outside assets/
-  assert.equal((await put('assets/../project.json')).status, 403); // traversal
+  assert.equal((await put('assets/../scene.json')).status, 403); // traversal
   assert.equal((await put('assets/tool.exe')).status, 403);        // extension not allow-listed
 
-  const read = await fetch(`${base}/api/projects/${projectId}/asset?path=${encodeURIComponent('project.json')}`);
+  const read = await fetch(`${base}/api/scenes/${enc(sceneId)}/asset?path=${enc('scene.json')}`);
   assert.equal(read.status, 403);
 
-  const del = await j(`/api/projects/${projectId}/asset?path=${encodeURIComponent('../registry.json')}`, { method: 'DELETE' });
+  const del = await j(`/api/scenes/${enc(sceneId)}/asset?path=${enc('../film.json')}`, { method: 'DELETE' });
   assert.equal(del.status, 403);
 
-  const rename = await j(`/api/projects/${projectId}/asset/rename`, {
+  const rename = await j(`/api/scenes/${enc(sceneId)}/asset/rename`, {
     method: 'POST',
     body: { from: 'assets/img/pixel.png', to: '../escape.png' },
   });
   assert.equal(rename.status, 403);
 });
 
-test('studio: DELETE unregisters the project', async () => {
-  const removed = await j(`/api/projects/${projectId}`, { method: 'DELETE' });
+test('studio: library file writes enforce the extension allow-list and path safety', async () => {
+  const put = (p) =>
+    fetch(`${base}/api/workspaces/${TEST_WS}/library/file?path=${enc(p)}`, { method: 'PUT', body: Buffer.from('x') });
+  assert.equal((await put('tool.exe')).status, 403);
+  assert.equal((await put('../escape.png')).status, 403);
+  assert.equal((await put('ok.png')).status, 201);
+  await j(`/api/workspaces/${TEST_WS}/library/file?path=${enc('ok.png')}`, { method: 'DELETE' });
+});
+
+test('studio: DELETE removes the scene from its film', async () => {
+  const removed = await j(`/api/scenes/${enc(sceneId)}?deleteFiles=1`, { method: 'DELETE' });
   assert.equal(removed.status, 200);
-  assert.equal(removed.data.unregistered, true);
-  const list = await j('/api/projects');
-  assert.equal(list.data.projects.length, 0);
+  assert.equal(removed.data.removed, true);
+  assert.equal(removed.data.filesDeleted, true);
+  const tree = await j('/api/workspaces');
+  const ws = tree.data.workspaces.find((w) => w.id === TEST_WS);
+  const film = ws.films.find((f) => f.id === filmId);
+  assert.equal(film.scenes, 0);
 });

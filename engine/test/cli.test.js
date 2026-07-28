@@ -14,7 +14,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { makeConfig } from '../src/core/project.js';
+import { makeConfig } from '../src/core/scene.js';
 import { ProgressStreamParser } from '../src/core/progress.js';
 
 const execFileP = promisify(execFile);
@@ -32,7 +32,7 @@ before(async () => {
 async function makeProject(durationInFrames = 30) {
   const dir = await fsp.mkdtemp(path.join(tmp, 'proj-'));
   const config = makeConfig({ name: 'CliTest', fps: 30, width: 320, height: 240, durationInFrames });
-  await fsp.writeFile(path.join(dir, 'project.json'), JSON.stringify(config));
+  await fsp.writeFile(path.join(dir, 'scene.json'), JSON.stringify(config));
   // entry file existence isn't checked by the fake browser, but keep it honest:
   await fsp.writeFile(path.join(dir, 'composition.html'), '<!doctype html><title>t</title>');
   return dir;
@@ -120,7 +120,7 @@ test('cli: parallel workers inherit the parent\'s binary, not their own environm
   const proj = await makeProject(20);
   const out = path.join(tmp, 'workers-inherit.mp4');
   const { code, messages } = await runCli(
-    ['--project', proj, '--output', out, '--workers', '2', '--ffmpeg', 'ffmpeg'],
+    ['--scene', proj, '--output', out, '--workers', '2', '--ffmpeg', 'ffmpeg'],
     { env: { MOTION_STUDIO_FFMPEG: BOGUS } },
   );
   assert.equal(code, 0, `exit ${code}: ${JSON.stringify(messages.at(-1))}`);
@@ -131,7 +131,7 @@ test('cli: serial render emits protocol and exits 0', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(30);
   const out = path.join(tmp, 'serial.mp4');
-  const { code, messages } = await runCli(['--project', proj, '--output', out]);
+  const { code, messages } = await runCli(['--scene', proj, '--output', out]);
   assert.equal(code, 0);
   assert.equal(messages[0].type, 'start');
   assert.equal(messages.at(-1).type, 'done');
@@ -143,7 +143,7 @@ test('cli: parallel render (3 workers, real processes) concats to exact frame co
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(50); // 50 frames / 3 workers → 17,17,16
   const out = path.join(tmp, 'parallel.mp4');
-  const { code, messages } = await runCli(['--project', proj, '--output', out, '--workers', '3']);
+  const { code, messages } = await runCli(['--scene', proj, '--output', out, '--workers', '3']);
   assert.equal(code, 0, JSON.stringify(messages.filter((m) => m.type === 'error')));
   assert.equal(await frameCount(out), 50);
   const phases = messages.filter((m) => m.type === 'phase').map((m) => m.phase);
@@ -158,7 +158,7 @@ test('cli: --frame-range renders a partial segment', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(100);
   const out = path.join(tmp, 'range.mp4');
-  const { code } = await runCli(['--project', proj, '--output', out, '--frame-range', '10', '19']);
+  const { code } = await runCli(['--scene', proj, '--output', out, '--frame-range', '10', '19']);
   assert.equal(code, 0);
   assert.equal(await frameCount(out), 10);
 });
@@ -167,7 +167,7 @@ test('cli: --capture-frame writes a PNG', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(30);
   const out = path.join(tmp, 'frame.png');
-  const { code } = await runCli(['--project', proj, '--capture-frame', '5', '--capture-out', out]);
+  const { code } = await runCli(['--scene', proj, '--capture-frame', '5', '--capture-out', out]);
   assert.equal(code, 0);
   const head = await fsp.readFile(out);
   assert.deepEqual([...head.subarray(1, 4)], [...Buffer.from('PNG')]);
@@ -176,15 +176,15 @@ test('cli: --capture-frame writes a PNG', async (t) => {
 test('cli: bad frame range → structured error, exit 1', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const proj = await makeProject(30);
-  const { code, messages } = await runCli(['--project', proj, '--output', path.join(tmp, 'x.mp4'), '--frame-range', '0', '999']);
+  const { code, messages } = await runCli(['--scene', proj, '--output', path.join(tmp, 'x.mp4'), '--frame-range', '0', '999']);
   assert.notEqual(code, 0);
   const err = messages.find((m) => m.type === 'error');
   assert.equal(err.code, 'invalid_config');
 });
 
-test('cli: missing project.json → exit 2 with invalid_config', async (t) => {
+test('cli: missing scene.json → exit 2 with invalid_config', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
-  const { code, messages } = await runCli(['--project', tmp, '--output', path.join(tmp, 'x.mp4')]);
+  const { code, messages } = await runCli(['--scene', tmp, '--output', path.join(tmp, 'x.mp4')]);
   assert.equal(code, 2);
   assert.equal(messages.find((m) => m.type === 'error')?.code, 'invalid_config');
 });
@@ -206,7 +206,7 @@ test('cli: SIGTERM mid-render cancels with exit code 4', async (t) => {
   const proj = await makeProject(500);
   const out = path.join(tmp, 'cancelled.mp4');
   let sent = false;
-  const { code, messages } = await runCli(['--project', proj, '--output', out], {
+  const { code, messages } = await runCli(['--scene', proj, '--output', out], {
     onMessage: (m, child) => {
       if (!sent && m.type === 'progress' && m.framesDone >= 3) {
         sent = true;

@@ -35,7 +35,7 @@ async function scene(root, id, config, { rendered = true, clip } = {}) {
   const out = sceneOutputPath(dir, config);
   if (clip) await fsp.copyFile(clip, out);
   else if (rendered) await fsp.writeFile(out, 'placeholder'); // existence is all validateScenes checks
-  return { projectId: id, path: dir, config };
+  return { sceneId: id, path: dir, config };
 }
 
 test('sceneSignature separates codec-determining params', () => {
@@ -60,9 +60,9 @@ test('validateScenes rejects an empty film', () => {
 test('filmLayout returns each scene\'s cumulative filmOffset', () => {
   // The real case: nine scenes whose offsets used to be accumulated by hand.
   const scenes = [
-    { projectId: 'a', config: cfg({ durationInFrames: 501, name: 'Islands' }) },
-    { projectId: 'b', config: cfg({ durationInFrames: 573 }) },
-    { projectId: 'c', config: cfg({ durationInFrames: 510 }) },
+    { sceneId: 'a', config: cfg({ durationInFrames: 501, name: 'Islands' }) },
+    { sceneId: 'b', config: cfg({ durationInFrames: 573 }) },
+    { sceneId: 'c', config: cfg({ durationInFrames: 510 }) },
   ];
   const layout = filmLayout(scenes);
   assert.deepEqual(layout.map((s) => s.filmOffset), [0, 501, 1074]);
@@ -103,7 +103,7 @@ test('validateScenes rejects mismatched scene dimensions', async () => {
     const b = await scene(root, 'b', cfg({ width: 640, height: 480 }));
     assert.throws(() => validateScenes([a, b]), (e) => {
       assert.equal(e.code, 'inconsistent_scenes');
-      assert.equal(e.detail.mismatched[0].projectId, 'b');
+      assert.equal(e.detail.mismatched[0].sceneId, 'b');
       return true;
     });
   });
@@ -166,7 +166,7 @@ test('assembleFilm lays a master audio track over the film', async (t) => {
     const bed = path.join(root, 'bed.wav');
     await execFileP('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-ac', '2', '-ar', '44100', bed]);
     const out = path.join(root, 'film.mp4');
-    const res = await assembleFilm({ scenes: [a, b], format: 'mp4', outputPath: out, audioTracks: [{ src: bed, gainDb: -6 }], projectRoot: root });
+    const res = await assembleFilm({ scenes: [a, b], format: 'mp4', outputPath: out, audioTracks: [{ src: bed, gainDb: -6 }], assetRoot: root });
     assert.equal(res.hasAudio, true);
     const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'default=noprint_wrappers=1:nokey=1', out]);
     assert.match(stdout.trim(), /audio/);

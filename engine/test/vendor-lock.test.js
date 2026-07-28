@@ -17,7 +17,7 @@ import {
   sha256, detectVersion, readLock, writeLock, describe as describeBuild,
   verifyOne, verifyVendoredLibraries, vendorLockPath,
 } from '../src/core/vendor-lock.js';
-import { ProjectStore } from '../src/core/project.js';
+import { makeSceneIn } from './helpers/workspace.mjs';
 import { LIBRARIES, addonFiles } from '../src/core/libraries.js';
 
 async function tmpDir(tag) {
@@ -166,11 +166,10 @@ test('addLibrary: stamps the exact build hashes into config.libraryBuilds', asyn
     await fsp.writeFile(path.join(libs, 'babylon', 'babylon.js'), core);
     await fsp.writeFile(path.join(libs, 'babylon', 'babylonjs.loaders.min.js'), addon);
 
-    const store = new ProjectStore(path.join(dir, 'home'));
-    const proj = await store.createProject({ name: 'Prov', fps: 30, width: 320, height: 240, durationInFrames: 30 });
-    const res = await store.addLibrary(proj.id, { library: 'babylon', addons: ['loaders'] });
+    const { store, scene } = await makeSceneIn(path.join(dir, 'home'), { name: 'Prov', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+    const res = await store.addLibrary(scene.id, { library: 'babylon', addons: ['loaders'] });
 
-    const cfg = await store.readConfig(proj.id);
+    const cfg = await store.readConfig(scene.id);
     assert.deepEqual(cfg.libraries, ['babylon']);
     // The provenance: what this project actually holds.
     assert.equal(cfg.libraryBuilds['babylon.js'].sha256, sha256(core));
@@ -183,22 +182,21 @@ test('addLibrary: stamps the exact build hashes into config.libraryBuilds', asyn
     assert.equal(res.copied.find((c) => c.path === 'babylon.js').sha256, sha256(core));
 
     // The stamp must survive a later, unrelated config update.
-    await store.updateConfig(proj.id, { durationInFrames: 60 });
-    const after = await store.readConfig(proj.id);
+    await store.updateConfig(scene.id, { durationInFrames: 60 });
+    const after = await store.readConfig(scene.id);
     assert.equal(after.libraryBuilds['babylon.js'].sha256, sha256(core));
   });
 });
 
 test('config: libraryBuilds is validated, and rejects a malformed entry', async () => {
   await sandbox('cfgval', async (dir) => {
-    const store = new ProjectStore(path.join(dir, 'home'));
-    const proj = await store.createProject({ name: 'CfgVal', fps: 30, width: 320, height: 240, durationInFrames: 30 });
+    const { store, scene } = await makeSceneIn(path.join(dir, 'home'), { name: 'CfgVal', fps: 30, width: 320, height: 240, durationInFrames: 30 });
     await assert.rejects(
-      () => store.updateConfig(proj.id, { libraryBuilds: { 'x.js': { version: '1' } } }),  // no sha256/bytes
+      () => store.updateConfig(scene.id, { libraryBuilds: { 'x.js': { version: '1' } } }),  // no sha256/bytes
       (e) => e.code === 'invalid_config' && /libraryBuilds\.x\.js/.test(e.message),
     );
     await assert.rejects(
-      () => store.updateConfig(proj.id, { libraryBuilds: ['nope'] }),
+      () => store.updateConfig(scene.id, { libraryBuilds: ['nope'] }),
       (e) => e.code === 'invalid_config',
     );
   });

@@ -1,37 +1,79 @@
 # Motion Studio — Long-form Films (`build_film`)
 
-Motion Studio renders **one composition per project**. A composition is a single
+Motion Studio renders **one composition per scene**. A composition is a single
 `frame → state` function, which is the right size for a shot or a scene — not for
-an hour of video. To build anything longer than a single composition, you author
-each **scene as its own project** and stitch the rendered scenes together with the
-`build_film` tool (added in v0.9).
+an hour of video. To build anything longer than a single composition, you create
+one **film** and give it **many scenes** — a scene is what used to be its own
+project — then stitch the rendered scenes together with the `build_film` tool
+(added in v0.9).
 
 ```
-scene-1 (project)  ─ render ─┐
-scene-2 (project)  ─ render ─┤→  build_film  →  one continuous film
-scene-3 (project)  ─ render ─┘   (+ optional master audio)
+film "my-film"
+  scene "intro"  ─ render ─┐
+  scene "body"   ─ render ─┤→  build_film  →  one continuous film (the film's out/)
+  scene "outro"  ─ render ─┘   (+ optional master audio, on the film itself)
 ```
 
 This is the same idea the parallel renderer already uses internally (it splits one
 render into frame-range segments and concatenates them losslessly); `build_film`
-applies it at the **scene** level, across projects.
+applies it at the **scene** level, across a film.
 
 ## The scene model
 
-- **One project per scene.** Author and render each scene with the normal tools
-  (`create_project` → `write_composition_file` → `capture_preview_frame` →
-  `render`). Nothing new to learn per scene.
-- **One dedicated project for the film.** Create an extra project (name it after
-  the film, e.g. `"My Film — Master"`) and pass it as `outputProjectId`; the
-  assembled film goes to its `out/` and master-audio assets live in its
-  `assets/`. If you omit `outputProjectId`, everything lands inside the **first
-  scene's** folder, tangled up with that scene's own render — avoid that. The
-  film project is never rendered itself; ignore its scaffolded composition.
+- **One film, many scenes.** Create the film once —
+  `create_film { name, fps?, width?, height?, durationInFrames? }` — then
+  scaffold each scene inside it with the normal tools: `create_scene { film, name }`
+  → `write_composition_file` → `capture_preview_frame` → `render`. Nothing new to
+  learn per scene; authoring one is identical to authoring the old one-composition
+  project.
+- **The film is its own dedicated container — there's nothing extra to create.**
+  Under the pre-v0.20 model you created a spare "output project" (often named
+  `"<film> — Master"`) just to hold the assembled film and its master audio,
+  because a project was the only thing with an `assets/`/`out/`. That workaround
+  is gone: the **film folder itself** has `assets/` (master audio, overlays) and
+  `out/` (the built deliverable). Put master-audio assets there by passing the
+  **film id** as `target` to `synthesize_speech`/`synthesize_music`/`write_asset_file`.
+  There is no `outputProjectId` to pass and nothing extra to remember to create.
 - **`build_film` assembles; it never renders.** Every scene must already be
-  rendered, or the call fails with `scene_not_rendered` naming the culprits.
+  rendered, or the call fails with `scene_not_rendered` naming the culprits —
+  and it must be rendered *at the settings the scene still has*, or the call
+  fails with `stale_render` (see below).
 - Because compositions are pure functions of frame, you can **preview scenes at
   720p and final-render at 1080p/4K with zero code change** — resolution and fps
-  live in each project's config, not in the composition.
+  live in each scene's config (inherited from the film's `sceneDefaults` unless a
+  scene overrides them), not in the composition.
+
+## Stale renders: the sidecar (v0.21)
+
+Existence of `out/output.mp4` used to be the whole of "is this scene rendered?".
+It cannot answer the question that actually matters — *is it rendered at the
+settings the scene has now?* Shorten a scene with `update_scene_config` after
+rendering it and nothing notices: the plan still says `rendered: true`, reports
+a `totalFrames` the concatenation cannot produce, and `build_film` stitches the
+old file. Every master-audio offset past that scene then drifts against the
+picture, silently, in the finished film.
+
+So each render that is **the whole scene, at its current settings, to its real
+destination** drops a small JSON sidecar beside its output:
+
+```
+scenes/<scene>/out/output.mp4
+scenes/<scene>/out/output.mp4.render.json   { frames, width, height, fps, format, renderedAt }
+```
+
+- `planFilm` / `build_film { plan: true }` compares it with the live config and
+  reports a `stale_render` **problem** naming the fields that diverged
+  (`frames 217 → 200`). Each scene in the layout also carries
+  `renderVerified: true | false | null`.
+- `build_film` **refuses** to assemble a stale scene, with `stale_render` and a
+  `detail.stale[]` listing every offender. Re-render those scenes.
+- Proxy renders, per-worker segments and partial `frameRange` renders do **not**
+  write a sidecar — none of them is the scene's canonical output.
+- A render made by an older build has no sidecar. That is *not* stale: it is
+  reported as `renderVerified: null` (unknown) and builds normally. Re-render
+  once and it becomes verifiable.
+- The sidecar is advisory metadata. If it cannot be written the render still
+  succeeds; deleting it only loses the check.
 
 ## The consistency invariant
 
@@ -44,42 +86,47 @@ must share the codec-determining parameters:
   cannot be concatenated — a mismatch or a bad format fails with
   `inconsistent_scenes`.
 
-Set these once and reuse them for every scene project. (`crf`/`preset` may differ
-between scenes — they affect encoding, not stream compatibility.)
+Set these once, on `create_film` — they become the film's **`sceneDefaults`** and
+every `create_scene` inherits them unless you explicitly override per scene, so
+scenes are consistent by construction instead of something you have to remember to
+repeat. (`crf`/`preset` may differ between scenes — set per scene with
+`update_scene_config`; they affect encoding, not stream compatibility.)
 
 ## Audio: two modes
 
-- **Per-scene audio (default).** With no `audio` argument, each scene's own audio
-  is preserved through the concat. All scenes must be **consistently audio or all
-  silent** (mixing the two breaks a stream copy → `inconsistent_scenes`).
-- **Master audio timeline.** Pass
-  `audio: [{ src, startInFrames?, gainDb?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }, …]`
-  (relative to the output project's `assets/`) to lay **one**
-  music-bed-plus-narration timeline over the *entire* film. This **replaces**
-  per-scene audio and is the clean choice for long-form — a score that spans
-  scene cuts, VO placed by absolute frame across the whole film.
+- **Per-scene audio (default).** With no master `audio` on the film, each scene's
+  own audio is preserved through the concat. All scenes must be **consistently
+  audio or all silent** (mixing the two breaks a stream copy → `inconsistent_scenes`).
+- **Master audio timeline.** Set it on the film with
+  `update_film { film, audio: [{ src, startInFrames?, gainDb?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }, …] }`
+  — or let `synthesize_speech` / `synthesize_music` / `synthesize_sfx` append to
+  it automatically by passing the **film id** as `target`. `src` is relative to
+  the **film's own** `assets/`. This lays **one** music-bed-plus-narration
+  timeline over the *entire* film, replacing per-scene audio — the clean choice
+  for long-form: a score that spans scene cuts, VO placed by absolute frame
+  across the whole film.
 
-  As of **v0.22** this is genuinely the same shape as `config.audio`: trims,
-  fades and `duck` all reach the mixer. Before that the tool accepted only
-  `src`/`startInFrames`/`gainDb` and silently dropped the rest, so a bed you
-  tuned and measured with `preview_audio` — ducked under the narration, faded
-  at the ends — could not be reproduced in the film and you were left guessing
-  a static gain. If you are following the "audition, then assemble" loop below,
-  pass the **same track objects** to both.
+  It is the same shape as a scene's `config.audio` — trims, fades and `duck` all
+  reach the mixer — so a bed you tuned and measured with `preview_audio`
+  reproduces exactly at build time. If you are following the "audition, then
+  assemble" loop below, attach (or set) the **same track objects** both places.
 
 ### Tiling a music loop across the film
 
 The score does not need to be as long as the film. Compose one short piece
-(32–64 beats is plenty), then list the **same `src` several times** at stepped
-`startInFrames`:
+(32–64 beats is plenty) targeting the film, then list the **same `src`** several
+times at stepped `startInFrames`:
 
 ```
-audio: [
-  { src: "assets/theme.wav", startInFrames: 0,    gainDb: -13 },
-  { src: "assets/theme.wav", startInFrames: 1440, gainDb: -13 },
-  { src: "assets/theme.wav", startInFrames: 2880, gainDb: -13 },
-  …
-]
+update_film {
+  film: "my-film",
+  audio: [
+    { src: "assets/theme.wav", startInFrames: 0,    gainDb: -13 },
+    { src: "assets/theme.wav", startInFrames: 1440, gainDb: -13 },
+    { src: "assets/theme.wav", startInFrames: 2880, gainDb: -13 },
+    …
+  ]
+}
 ```
 
 Step by the piece's **`musicalDurationSeconds` × fps**, not by its WAV length:
@@ -95,14 +142,15 @@ A scene that chains clips — narrator, a quotation in a second voice, narrator
 again — derives every offset from the **measured** clip lengths, never from the
 text.
 
-**Get `filmOffset` from the tool, never by adding up durations yourself**
-(v0.22): `build_film { scenes, plan: true }` returns `sceneLayout` — every
-scene's `filmOffset`, `durationInFrames` and `startSeconds` — and `plan` mode
-assembles nothing and does **not** require the scenes to be rendered, so you
-can call it as soon as the scene projects exist and their durations are set.
-That is exactly when you need the numbers, because narration and cue frames
-are derived from them. Accumulating the offsets by hand works right up until
-one slip silently desyncs audio from picture, and nothing downstream checks it.
+**Get `filmOffset` from the tool, never by adding up durations yourself**:
+`get_film { film }`, or `build_film { film, plan: true }`, returns the resolved
+`plan` — its `sceneLayout` carries every scene's `filmOffset`, `durationInFrames`
+and `startSeconds` — and `plan: true` assembles nothing and does **not** require
+the scenes to be rendered, so you can call it as soon as the scenes exist in the
+film and their durations are set. That is exactly when you need the numbers,
+because narration and cue frames are derived from them. Accumulating the offsets
+by hand works right up until one slip silently desyncs audio from picture, and
+nothing downstream checks it.
 
 For a scene starting at `filmOffset`:
 
@@ -111,9 +159,11 @@ a = filmOffset + LEAD                  # narr-a starts after the scene lead-in
 q = a + narrA.durationInFrames + GAP   # the quote voice
 b = q + quote.durationInFrames + GAP   # narr-a's voice resumes
 
-audio: [ { src: "assets/narr-a.wav", startInFrames: a },
-         { src: "assets/quote.wav",  startInFrames: q },
-         { src: "assets/narr-b.wav", startInFrames: b }, … ]
+update_film { film: "my-film", audio: [
+  { src: "assets/narr-a.wav", startInFrames: a },
+  { src: "assets/quote.wav",  startInFrames: q },
+  { src: "assets/narr-b.wav", startInFrames: b }, …
+] }
 ```
 
 `GAP` of 15–20 frames reads as a natural breath. Scene-local visuals (subtitle
@@ -124,10 +174,12 @@ the *last* clip must still end inside the scene.
 
 ## Levels: measure, never inherit
 
-When you pass a master `audio` timeline, the result carries an `audio` block with
-the **measured** peak/mean dBFS of the finished film and a `clipping` flag. Read
-it. A bad mix is the one defect you cannot see in a preview frame, and the render
-path has reported these numbers since v0.10 — as of v0.11 `build_film` does too.
+When the film has a master `audio` timeline, `build_film`'s finished job status
+carries an `audio` block with the **measured** peak/mean dBFS of the finished
+film and a `clipping` flag — read it via `get_render_status`/`wait_for_render`
+once the build job completes. A bad mix is the one defect you cannot see in a
+preview frame, and the render path has reported these numbers since v0.10 —
+`build_film` does too.
 
 **Do not copy a master gain from a previous film.** Levels are a property of the
 *voices and beds you actually used*, not of your taste. A worked example: an
@@ -144,7 +196,8 @@ The reliable procedure:
    good starting chain) and **measure the loudest one**.
 2. Set your *relative* balance from that — bed mean ~30 dB under the voice,
    transition cues peaking ~20 dB under it.
-3. Let `build_film` place the absolute level: pass **`audioTargetPeakDb: -2`**.
+3. Let `build_film` place the absolute level: pass **`audioTargetPeakDb: -2`**
+   (or persist it first with `update_film { film, audioTargetPeakDb: -2 }`).
    It measures the assembled mix, applies one offset to *every* track (so your
    balance is preserved exactly), re-muxes, and re-measures. The returned
    `audio.appliedOffsetDb` tells you what it moved.
@@ -152,82 +205,102 @@ The reliable procedure:
 Re-assembly is cheap — the concat is a stream copy, so a level correction on a
 ten-minute film costs seconds. Measure and fix; never ship a guess.
 
-`output.audioLimiter` (default true) still brick-walls the result at −1 dBFS, but
-treat it as a seatbelt, not a mixing tool: if the limiter is doing work, the mix
-is already wrong.
+`output.audioLimiter` (default true, set per scene via `update_scene_config`; the
+build reads it from the **first scene's** output config when mixing the master
+audio) still brick-walls the result at −1 dBFS, but treat it as a seatbelt, not a
+mixing tool: if the limiter is doing work, the mix is already wrong.
 
 **The SFX bed is calibrated the same way.** `synthesize_sfx` (v0.12) renders a
 whole cue list — chimes on cuts, a shimmer under a reveal, a thud on an impact —
 into one track, and by default it *leaves a quiet bed quiet* rather than
 normalizing it, so the `peakDb` it reports is a real level you can balance
-against. Attach it with a `gainDb` derived from that number, not from a previous
-film. See [sfx-setup.md](sfx-setup.md).
+against. Attach it (target the film for the master bed) with a `gainDb` derived
+from that number, not from a previous film. See [sfx-setup.md](sfx-setup.md).
 
 ## Highest quality
 
-The concat itself is lossless, so quality is set by how you **render the scenes**
-and **encode the final master**:
+The concat itself is lossless, so quality is set by how you **render the
+scenes** — and, only if the film needs one, an automatic **finishing pass**:
 
 1. Render scenes at a **high-quality setting** — either a low `output.crf` (14–16)
    or, best, `output.format: "prores"` (422 HQ, 10-bit) / `png-sequence` as lossless
-   intermediates. Set these via `update_project_config`'s `output` object.
-2. `build_film` to stitch (lossless).
-3. Do **one** final delivery encode of the assembled master (e.g. H.264 CRF 18–20,
-   `preset slow`, or H.265) — a single generation of lossy encoding instead of one
-   per scene.
+   intermediates. Set these via `update_scene_config`'s `output` object.
+2. `build_film` to stitch (`-c copy`, lossless, near-instant).
+3. **Only if the film has overlays or burns captions**, `build_film` itself runs
+   **one** finishing encode of the picture right after the concat, using the
+   crf/preset from the **first scene's** `output` config — still a single
+   generation of lossy video encoding, not one per scene. A film with only a
+   master audio timeline (no overlays, no burned captions) never re-encodes the
+   picture at all — the lossless concat *is* the delivery file's video, with the
+   master audio mixed onto it in the same pass.
 
 Pick resolution/fps deliberately: 1920×1080@30 is the sweet spot; 4K is ~4× the
 render cost; 60fps doubles frames. Even dimensions are required for mp4/webm/prores.
 
 ## Tool contract
 
-`build_film`:
+`build_film` is an **async job**: it validates and returns
+`{ jobId, state, queuePosition?, outputPath, totalFrames, filmId, hint }` immediately,
+before anything is assembled — poll with `get_render_status { jobId }` or block
+with `wait_for_render { jobIds: [jobId] }` until it reaches `done`. Master audio,
+overlays and captions are **not** arguments here — they live on the film document
+itself, set with `update_film`; `build_film` just builds whatever the film
+currently has.
 
 | arg | meaning |
 |---|---|
-| `scenes` (req) | ordered `[{ projectId }]` — the scenes, in play order, each already rendered |
-| `outputProjectId` | project that receives `out/<film>` and holds master-audio assets — **create a dedicated film project and pass it here** (defaulting to the first scene dumps the film into that scene's folder) |
-| `outputFilename` | bare filename; extension is forced to the scenes' format (default `film.<ext>`) |
-| `audio` | optional master timeline `[{ src (under assets/), startInFrames?, gainDb? }]` laid over the whole film |
-| `audioTargetPeakDb` **(v0.11)** | −60..0. Measure the mixed film and re-mux **once** so it peaks here (e.g. `-2`). Shifts every track by the same offset, preserving your balance. |
+| `film` (req) | the film id (slug) to build. Its `scenes` array (`update_film { scenes: [{slug}, …] }`) is the play order — every scene in it must already be rendered |
+| `plan` | return the resolved layout + `problems` **without building**, and without requiring the scenes to be rendered — nothing is assembled or written |
+| `outputFilename` | override + persist the film's output filename (bare; extension is forced to the scenes' format; default `film.<ext>`) |
+| `audioTargetPeakDb` | −60..0 or `null`. Override + persist the mastering target — measure the mixed film and re-mux **once** so it peaks here (e.g. `-2`), shifting every track by the same offset so the balance is preserved |
+| `burnCaptions` | override + persist caption burn-in (a `.srt` sidecar is written whenever the film has captions, whether or not this is set) |
 
-Returns `{ outputProjectId, sceneOrder, outputPath, scenes, totalFrames, durationSeconds, fps, format, hasAudio }`,
-plus — whenever a master timeline was supplied — **`audio: { tracks, limiter, peakDb, meanDb, clipping, targetPeakDb?, appliedOffsetDb? }`** (v0.11).
-Errors: `scene_not_rendered`, `inconsistent_scenes`, `path_outside_project`,
-`file_not_found`, `invalid_config` (bad `audioTargetPeakDb`), plus
-`prereqs_missing`/`ffmpeg_failed` from the encoder.
+`plan: true`'s response is `{ film, plan: true, totalFrames, durationSeconds, fps, format, sceneLayout, problems }` — no `jobId`, since nothing was submitted.
+
+The **finished** job's status (from `get_render_status`/`wait_for_render`) carries
+`{ outputPath, filmId, … }`, plus — whenever the film has a master timeline —
+**`audio: { tracks, limiter, peakDb, meanDb, clipping, targetPeakDb?, appliedOffsetDb? }`**.
+Errors from the initial call (before a job is even created): `scene_not_rendered`, `stale_render`,
+`inconsistent_scenes`, `invalid_film` (a malformed `audioTargetPeakDb`,
+`outputFilename` or other film field — `detail.problems` lists every one),
+`path_not_allowed`, `file_not_found` (a master-audio or overlay asset the
+film references is missing), `film_not_found`, `invalid_id` (malformed film id),
+plus `prereqs_missing`/`ffmpeg_failed` from the encoder once the job is running.
 
 ## Worked example
 
 ```
-# three scenes + one dedicated film project, identical video params
-create_project { name: "Scene 1 — Title",  width: 1920, height: 1080, fps: 30, durationInFrames: 150 }
-create_project { name: "Scene 2 — Body",   width: 1920, height: 1080, fps: 30, durationInFrames: 600 }
-create_project { name: "Scene 3 — Outro",  width: 1920, height: 1080, fps: 30, durationInFrames: 150 }
-create_project { name: "My Film — Master", width: 1920, height: 1080, fps: 30, durationInFrames: 1 }   # never rendered; holds the film + master audio
+# one film; every scene inherits its sceneDefaults automatically
+create_film  { name: "My Film", slug: "my-film", width: 1920, height: 1080, fps: 30 }
+  → film: "my-film"
+create_scene { film: "my-film", slug: "title", name: "Scene 1 — Title", durationInFrames: 150 }
+create_scene { film: "my-film", slug: "body",  name: "Scene 2 — Body",  durationInFrames: 600 }
+create_scene { film: "my-film", slug: "outro", name: "Scene 3 — Outro", durationInFrames: 150 }
+  → each create_scene appends itself to the film's play order automatically
 
 # author + render each scene (render nothing here that build_film will redo)
-write_composition_file … ; render { projectId: <scene1> } ; poll get_render_status → done
-… repeat for scene 2 and 3 …
+write_composition_file { scene: "my-film/title", path: "composition.js", content: … }
+render { scene: "my-film/title" } ; poll get_render_status → done
+… repeat for "my-film/body" and "my-film/outro" …
 
-# a master score in the film project's assets
-synthesize_music { projectId: <film>, mode: "asset-only" }   → assets/music-1.wav
+# a master score, written straight into the film's own assets/
+synthesize_music { target: "my-film", mode: "asset-only" }   → assets/music-1.wav
 
-# stitch, with the score over the whole 30s
-build_film {
-  scenes: [{ projectId: <scene1> }, { projectId: <scene2> }, { projectId: <scene3> }],
-  outputProjectId: <film>,
-  audio:  [{ src: "assets/music-1.wav", gainDb: -8 }],
-  outputFilename: "my-film"
-}
-→ <film>/out/my-film.mp4  (900 frames, 30s, one continuous film)
+# put it on the film's master timeline
+update_film { film: "my-film", audio: [{ src: "assets/music-1.wav", gainDb: -8 }] }
+
+# stitch — an async job
+build_film { film: "my-film", outputFilename: "my-film" }
+  → { jobId, state: "running", outputPath: "…/films/my-film/out/my-film.mp4", totalFrames: 900 }
+wait_for_render { jobIds: [jobId] }
+  → done — …/films/my-film/out/my-film.mp4  (900 frames, 30s, one continuous film)
 ```
 
 ## The pattern that scales: one engine, scenes as data
 
 For a film of more than a couple of scenes, don't write a bespoke composition per
 scene. Write **one** `composition.js` that reads a per-scene config object, and give
-each scene project its own tiny config file:
+each scene its own tiny config file:
 
 ```html
 <script src="frame-api.js"></script>
@@ -237,25 +310,26 @@ each scene project its own tiny config file:
 
 The engine turns `window.SCENE` (background, sprites with positions/entrances, a
 library of named effects, camera keyframes, dialogue timing, titles) into per-frame
-draws. Every scene project ships the **same** `composition.js`; only `scene.js`
-changes. This keeps `build_film`'s "one project per scene" model cheap to author — a
-new scene is a data file, not new code — and it's how a 7-scene, five-minute cutscene
-was built.
+draws. Every scene ships the **same** `composition.js`; only `scene.js`
+changes. This keeps the "one film, many scenes" model cheap to author — a
+new scene is a data file, not new code — and it's how a 7-scene, five-minute
+cutscene was built.
 
-**Iterate one scene at a time.** Because scenes are independent projects, fix a single
-scene's config, re-render *only that project*, and call `build_film` again — the other
-scenes' rendered outputs are reused untouched and the whole film re-stitches in
-seconds. That render-one / reassemble loop is what makes a long film tractable.
+**Iterate one scene at a time.** Because each scene is its own composition inside
+the film, fix a single scene's config, re-render *only that scene*, and call
+`build_film` again — the other scenes' rendered outputs are reused untouched and
+the whole film re-stitches in seconds. That render-one / reassemble loop is what
+makes a long film tractable.
 
-**Fixing the shared engine: use `sync_shared_files`.** Each project owns its own
+**Fixing the shared engine: use `sync_shared_files`.** Each scene owns its own
 *copy* of `composition.js`, so editing the one you authored first reaches nothing
 already scaffolded. On a 16-scene film a one-line art fix otherwise means sixteen
 `write_composition_file` calls. Instead:
 
 ```
 sync_shared_files {
-  sourceProjectId: <scene 1>,
-  targetProjectIds: [<every other scene>],
+  sourceScene: "my-film/title",
+  targetScenes: ["my-film/body", "my-film/outro", …],
   files: ["composition.js", "styles.css"]
 }
 ```
@@ -275,7 +349,7 @@ and let the audio decide `durationInFrames`:
 ```
 synthesize_speech(...)            → durationInFrames for the clip
 durationInFrames = LEAD + <narration frames> + TAIL     // e.g. LEAD 24, TAIL 38
-update_project_config { durationInFrames }
+update_scene_config { scene, patch: { durationInFrames } }
 ```
 
 Then the visuals cannot drift out of sync with the voice, because the picture is
@@ -287,12 +361,29 @@ overruns; the check is worth automating — assert
 `narrationStart + narrationFrames <= sceneStart + durationInFrames` for every
 scene before you render anything.
 
-## Using external image assets
+## Using external assets: images, footage, and the workspace library
 
-Backgrounds, sprites, and other images live under the project's `assets/` and are
-referenced as `assets/<name>`. Put them there **directly on disk** for anything large
-or numerous (`write_asset_file` is base64, capped at 25 MB). A few determinism rules
-learned the hard way:
+Backgrounds, sprites, and other images live under the target's `assets/` — a
+scene's for scene-local art, the film's for master-timeline overlays — and are
+referenced as `assets/<name>`. Ingest smaller files directly with
+`write_asset_file { target, path, contentBase64 }` (base64, capped at 25 MB).
+
+**For anything large or already provided by the human** — background plates, a
+shot's raw footage, a soundtrack, a whole photo set — reach for the **workspace
+library** instead of pushing bytes through a tool call:
+
+- The human drops files into `<workspace>/library` directly (or uses the
+  Studio's upload panel); `list_shared_assets` enumerates what's there — `path`,
+  `bytes`, `mtime`, `kind` — per file.
+- `use_shared_asset { target, path, as? }` links one into a scene's or film's
+  `assets/` (default destination `assets/library/<path>`) — hardlinked when the
+  filesystem allows (a 500 MB plate costs no extra disk), copied otherwise.
+  Pulling the same file again refreshes it, so an updated library asset
+  propagates on request.
+- This is exactly what `write_asset_file` points you at when a file trips its
+  25 MB cap (`asset_too_large`).
+
+A few determinism rules learned the hard way, whichever way the file arrived:
 
 - **Load images before you register.** Preload every image (`new Image()` +
   `Promise.all`) and only then call `registerComposition`, so `setFrame` isn't defined
@@ -319,7 +410,7 @@ learned the hard way:
 - **Assembly is cheap** — a stream copy of N files is near-instant regardless of
   total length.
 - **Authoring is the real cost.** For long-form, favor **templated / data-driven
-  scenes** (generate many similar scene projects from a manifest) and **asset
+  scenes** (generate many similar scenes from a manifest) and **asset
   compositing** (images/video as the base, code for motion/text/transitions) over
   hand-building every frame.
 - **Drive a long batch by frame count, and retry.** Chromium dies intermittently
@@ -345,43 +436,42 @@ learned the hard way:
   `capture_preview_frames`, pass `preflight: false` to `render` — the probe
   would re-check what you just looked at, at one Chromium launch per scene.
 
-## Saved films & the Studio film editor
+## The Studio film editor
 
-Everything above treats a film as the argument list of one `build_film` call.
-A **saved film** makes it a persistent document instead — reopenable,
-editable a track at a time, buildable many times — shared between the
-Studio's **visual film editor** and the MCP tools.
+A film is a **persistent document from the moment you `create_film` it** —
+reopenable, editable a track at a time, buildable many times — shared between the
+Studio's **visual film editor** and these MCP tools; both edit the exact same
+`film.json`.
 
 - **In the Studio:** the rail's **films** section (+ new → the editor at
-  `/film.html?id=…`). Timeline tracks for scenes (drag to reorder, per-scene
-  render buttons, compatibility flags), master audio (waveforms, drag/trim,
-  gain/fades/duck), captions and overlays; a preview that plays the real
-  rendered scenes with the build's exact ffmpeg mix; a build panel with live
-  job progress and measured levels. See the walkthrough in
-  [user-guide.md](user-guide.md#the-film-editor).
-- **Over MCP:** `save_film` / `list_films` / `remove_film` edit the same
-  documents; `build_saved_film` assembles as an async job (poll like a
-  render). See [mcp-setup.md](mcp-setup.md#saved-films-studio-film-editor-parity).
+  `/film.html?id=…`; `get_film`'s response includes this `editorUrl` directly).
+  Timeline tracks for scenes (drag to reorder, per-scene render buttons,
+  compatibility flags), master audio (waveforms, drag/trim, gain/fades/duck),
+  captions and overlays; a preview that plays the real rendered scenes with the
+  build's exact ffmpeg mix; a build panel with live job progress and measured
+  levels. See the walkthrough in [user-guide.md](user-guide.md#the-film-editor).
+- **Over MCP:** `get_film` / `update_film` / `list_films` / `remove_film` read
+  and edit the same document; `build_film` assembles it as an async job (poll
+  like a render). See [mcp-setup.md](mcp-setup.md) for the full tool reference.
 
-Two capabilities exist only on saved films, both applied by a **finishing
-pass** — one extra encode after the lossless concat, run only when used:
+Two capabilities are applied only by a **finishing pass** — one extra encode
+after the lossless concat, run only when used:
 
 - **Overlays** — images (logo, watermark, lower-third) or videos (a
   transparent `.webm` stinger keeps its alpha) composited over the film with
-  percent-of-frame geometry, opacity, and a frame-accurate window. Overlay
-  assets live in the output project's `assets/` (video extensions are
-  accepted there for this purpose).
-- **Captions** — text cues with frame-accurate in/out. A **`.srt` sidecar is
-  always written** next to the built film; `burnCaptions` additionally
-  renders them into the picture via a generated `.ass` (font size and
-  position are resolution-relative, set in `captionStyle`).
+  percent-of-frame geometry, opacity, and a frame-accurate window
+  (`update_film { overlays: [...] }`). Overlay assets live in the film's own
+  `assets/` (video extensions are accepted there for this purpose).
+- **Captions** — text cues with frame-accurate in/out (`update_film { captions: [...] }`).
+  A **`.srt` sidecar is always written** next to the built film; `burnCaptions`
+  additionally renders them into the picture via a generated `.ass` (font size
+  and position are resolution-relative, set in `captionStyle`).
 
-The finishing pass takes its encode settings (crf/preset) from the output
-project's `output` config — so the "one final delivery encode" from the
-quality pipeline above and the finishing pass can be the same single
-generation of loss.
+The finishing pass takes its encode settings (crf/preset) from the **first
+scene's** `output` config — so the "one final delivery encode" from the quality
+pipeline above and the finishing pass can be the same single generation of loss.
 
-## Current limits (v0.9)
+## Current limits
 
 - **No built-in transitions.** Cuts only. For crossfades, bake the transition into
   adjacent scene tails/heads, or run a separate `xfade` pass on the master (that

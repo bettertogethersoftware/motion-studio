@@ -1,5 +1,5 @@
 /*
- * Three.js starter — __PROJECT_NAME__ (__DURATION__ frames @ __FPS__ fps).
+ * Three.js starter — __SCENE_NAME__ (__DURATION__ frames @ __FPS__ fps).
  *
  * DETERMINISM (required by the frame-driven render): drive everything from the
  * injected `frame`. Do NOT use THREE.Clock/getDelta() or requestAnimationFrame.

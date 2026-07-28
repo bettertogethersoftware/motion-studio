@@ -1,4 +1,4 @@
-# Motion Studio — Architecture (v0.18)
+# Motion Studio — Architecture (v0.20)
 
 ## 1. System overview
 
@@ -11,8 +11,9 @@ Motion Studio is three thin entry points around one shared render engine.
    http://127.0.0.1:7345                            │  MCP over stdio
         │ HTTP/SSE (localhost only)                 ▼
         ▼                                   MCP server (engine/src/mcp/server.js)
- Studio server (engine/src/studio/)           33 tools, path sandbox
-   projects / assets / films / settings             │
+ Studio server (engine/src/studio/)           bound to ONE workspace
+   ALL workspaces / films / scenes                  │  path sandbox
+   library / assets / settings                      │
    preview / render / film-build API                │
    hot-reload SSE, output download                  │
         │            in-process calls               │
@@ -20,6 +21,9 @@ Motion Studio is three thin entry points around one shared render engine.
                        │            ┌── CLI (engine/src/cli/render.js)
                        ▼            ▼      scripts, CI, parallel workers
         Render Engine Core (engine/src/core/)
+          store.js     — workspace → film → scene storage (§11)
+          migrate.js   — one-shot pre-v0.20 layout migration (§11.1)
+          scene.js     — scene config schema, scaffolding, source lints
           renderer.js  — capture loop, parallel split, stills
           browser.js   — Puppeteer lifecycle (injectable)
           encoder.js   — FFmpeg pipe / sequence / concat / transcode / audio
@@ -29,11 +33,17 @@ Motion Studio is three thin entry points around one shared render engine.
           settings.js  — global user preferences (all entry points; see §11)
           vendors.js   — vendor kit: selection, status, errors (see §9.2)
           tts-vendors.js / music-vendors.js — per-capability dispatch
-          film.js      — one-shot scene assembly (lossless concat, see §13)
-          films.js     — saved films: store, planning, finishing pass (§13)
+          film.js      — scene assembly primitives (lossless concat, §13)
+          films.js     — film documents: validation, planning, build (§13)
                        ▼
         headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
 ```
+
+The asymmetry in that diagram is the point of v0.20: **an agent sees one
+workspace, the human sees them all.** Each MCP server is bound to a single
+workspace (`MOTION_STUDIO_WORKSPACE`), so two agents working at once cannot
+land in each other's films; the Studio browses every workspace, because the
+human owns the machine and needs one place to review what was made.
 
 The engine core is the *only* implementation of "launch Chromium / capture a
 frame / run FFmpeg". The CLI translates process arguments and signals into
@@ -50,7 +60,7 @@ fidelity since the browser preview drives the project's real entry HTML).
 
 ## 2. The frame model
 
-A composition is a folder with `project.json` (fps, dimensions, duration,
+A composition is a folder with `scene.json` (fps, dimensions, duration,
 output and audio settings), an HTML entry point, and JS that registers a
 per-frame function through the copied-in `frame-api.js` runtime. The engine
 loads the entry in headless Chromium, then for each frame: sets
@@ -131,8 +141,8 @@ queued.
 
 All cross-boundary failures are `EngineError`s with a stable
 machine-readable `code` (`engine/src/core/errors.js`): `prereqs_missing`,
-`project_not_found`, `project_already_exists`, `invalid_config`,
-`path_outside_project`, `file_not_found`, `syntax_error`, `job_not_found`,
+`scene_not_found`, `scene_already_exists`, `invalid_config`,
+`path_not_allowed`, `file_not_found`, `syntax_error`, `job_not_found`,
 `browser_launch_failed`, `composition_error`, `frame_timeout`,
 `ffmpeg_failed`, `cancelled`, `disk_error`, `internal_error`, and — new in
 v0.5 — `unsupported_format`, `asset_too_large`, `queue_full`. New in v0.11:
@@ -144,12 +154,19 @@ New with saved films: `film_not_found` and `invalid_film` (the latter carries
 the FULL `problems` list in `detail`, because an editor fixing a film wants
 every complaint at once)
 in place, and it only surfaces after the per-render relaunch budget (3) is
-spent. New in v0.19: `no_audio_tracks` — `preview_audio` on a project whose
-`config.audio` is empty.
+spent. New in v0.19: `no_audio_tracks` — `preview_audio` on a target whose
+audio timeline is empty. New in v0.20 (the storage model): `workspace_not_found`,
+`film_already_exists`, `invalid_id` (an id that is not a well-formed slug path
+— a different mistake from "that scene does not exist", and worth a different
+code), and `migration_failed`. `project_not_found` / `project_already_exists`
+were renamed `scene_not_found` / `scene_already_exists` with the concept;
+nothing had shipped, so there are no legacy aliases.
 The generated-audio and library features carry their own codes: v0.6–v0.7
 `tts_unavailable`, `tts_failed`, `unsupported_voice`, `library_unavailable`;
 v0.8 `music_unavailable`, `music_failed`, `invalid_music_spec`; v0.9
-`inconsistent_scenes`, `scene_not_rendered`, `film_failed`; v0.12
+`inconsistent_scenes`, `scene_not_rendered`, `film_failed`; v0.21 adds
+`stale_render` (the output exists but was rendered at settings the scene no
+longer has — distinct from `short_render`, where the file is incomplete); v0.12
 `invalid_sfx_spec`. The `*_unavailable` pair means "not configured on this
 machine — a setup problem, do not retry"; the `*_failed` pair means the
 configured tool itself failed. (There is deliberately no `sfx_unavailable`:
@@ -221,6 +238,32 @@ unmeasurable file is reported as `framesVerified: false`, never as a failure.
 This is what makes "the output exists and has the right length" a trustworthy
 resume condition for a long multi-scene batch.
 
+### 7.3 The render sidecar (v0.21)
+
+§7.2 verifies a file against **what was just rendered**. It cannot verify it
+against **what the scene says now** — and a config edit after a render is the
+common case, because narration length drives scene duration and the duration is
+the thing most likely to change late. Existence of the output was the only
+"rendered?" signal, so shortening a scene left the plan reporting
+`rendered: true` with a `totalFrames` the concatenation cannot produce, and
+`build_film` stitched the stale file: every master-audio offset past that scene
+then drifted against the picture, silently.
+
+So a render that is the **whole scene, at its current settings, to its real
+destination** writes `<output>.render.json` holding
+`{ frames, width, height, fps, format, renderedAt }` (`film.writeRenderMeta`).
+`film.renderStaleness` compares it with the live config;
+`films.planFilm` surfaces a `stale_render` problem plus a per-scene
+`renderVerified`, and `film.validateScenes` refuses the build with the
+`stale_render` error code. The guard in `renderer.isFullSceneRender` is what
+keeps a proxy, a per-worker segment or a partial `frameRange` from claiming to
+be the scene's canonical output.
+
+Two deliberate non-failures, matching §7.2's philosophy: writing the sidecar is
+best-effort (a render that already succeeded must not fail on metadata), and a
+**missing** sidecar is `renderVerified: null` — unknown, not stale — so output
+from an older build still assembles.
+
 ## 8. Parallel rendering
 
 `renderParallel` splits the frame range into contiguous chunks (remainder
@@ -249,7 +292,7 @@ pressure typically erases the speedup on desktop hardware.
 
 ## 9. Audio
 
-`project.json` may declare `audio: [{ src, startInFrames?, gainDb?,
+`scene.json` may declare `audio: [{ src, startInFrames?, gainDb?,
 trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }]` (the last four new
 in v0.19). After the silent video exists, a single FFmpeg pass builds a
 `-filter_complex` graph — per-track clip-relative `atrim`/`afade` (fade-out
@@ -423,21 +466,32 @@ always reported rather than assumed.
 ## 10. Security and sandboxing
 
 The agent-facing write surface is exactly composition source files and
-`assets/` content inside the target project. `resolveInProject` (used by
+`assets/` content inside the target scene or film. `resolveInTarget` (used by
 every file-touching tool and every Studio file route) rejects absolute and
 drive-letter paths, `..` escapes, null bytes, and symlink escapes (the
 deepest existing ancestor is `realpath`-ed and re-checked). Text writes are
 restricted to an extension allow-list (`.html .css .js .mjs .json .svg .txt
 .md`); binary asset writes are additionally confined to the `assets/` folder,
-allow-listed to image/audio/font types, and capped at 25 MB. The MCP tool
+allow-listed to image/audio/font/video types, and capped at 25 MB. The MCP tool
 (`write_asset_file`, base64) and the Studio's raw-body upload both funnel
-through one `ProjectStore.writeAssetBuffer`, so that confinement has a single
+through one `WorkspaceStore.writeAssetBuffer`, so that confinement has a single
 enforcement point rather than two implementations to keep in step; the
 Studio's asset delete/rename routes resolve through the same sandbox.
-`project.json` is deny-listed from raw writes so config invariants can only
-change through the validated `update_project_config` tool (the Studio's
-config PATCH calls the same `updateConfig`). `remove_project` deletes files
-only inside the managed projects root.
+`scene.json` is deny-listed from raw writes so config invariants can only
+change through the validated `update_scene_config` tool (the Studio's
+config PATCH calls the same `updateConfig`); v0.20 adds `film.json` and
+`workspace.json` to that denylist for the same reason — they are documents
+with validated schemas that `WorkspaceStore` owns.
+
+Two boundaries are new in v0.20. Ids are **slug paths**, and every id is
+parsed and validated before it is joined to a path (`a-z 0-9 - _` only, with
+a reserved-name list), so a caller cannot reach outside `workspaces/` through
+an id any more than through a file path. And an MCP server is confined to its
+own workspace: it qualifies every incoming id with its bound workspace slug
+before touching the store, so an agent cannot name another agent's film even
+by guessing its slug. Destructive verbs stay explicit — `remove_scene` and
+`remove_film` keep the folder unless `deleteFiles: true`.
+
 There is no shell tool and no arbitrary-path tool. The MCP server is
 stdio-only; the Studio server binds to `127.0.0.1` and has no authentication
 because it is never reachable off-machine — do not reverse-proxy it.
@@ -449,20 +503,120 @@ disk and processes* through the tool surface, not what the page can do
 inside Chromium. Treat composition code from untrusted sources like any
 other code you run.
 
-## 11. Shared project registry and global settings
+## 11. Storage: workspace → film → scene (v0.20)
 
-All paths read and write `~/.motion-studio/projects.json` (override with
-`MOTION_STUDIO_HOME`), and project folders are identical regardless of which
-side created them. Scaffolding is implemented once, in the engine's
-`ProjectStore`; the Studio UI and MCP `create_project` both call it. Config
-files written by v0.2 (schema v1) are migrated to schema v2 on read,
-non-destructively. Registry writes are atomic (temp file + rename).
-Human/agent concurrent edits remain last-write-wins on disk, surfaced to the
-human through the Studio's hot-reload watcher.
+**The filesystem is the registry.** Everything lives under one data dir
+(default `~/.motion-studio`, override `MOTION_STUDIO_HOME`):
+
+```
+<dataDir>/
+  settings.json
+  workspaces/
+    <workspace>/            one per AI (and any the human creates)
+      workspace.json        { name, createdAt } — display metadata only
+      library/              human-managed shared assets (large files)
+      films/
+        <film>/
+          film.json         the film document (core/films.js owns its schema)
+          assets/           master audio / overlay files for this film
+          out/              the built film (+ .srt sidecar)
+          scenes/
+            <scene>/        a composition folder (scene.json, composition.*)
+```
+
+Identity is the **slug path**: a workspace is `"<ws>"`, a film
+`"<ws>/<film>"`, a scene `"<ws>/<film>/<scene>"`. Slugs share one alphabet
+(`a-z 0-9 - _`), so every id is exactly its folder path relative to
+`workspaces/` — and slug validation doubles as path safety, since a valid
+slug cannot contain a separator, a dot, or a drive letter. Presence of
+`film.json` makes a film; presence of `scene.json` makes a scene. Copying a
+film folder into another workspace *is* moving the film.
+
+`core/store.js` (`WorkspaceStore`) owns discovery and persistence;
+`core/scene.js` keeps the scene config schema, the scaffolder and the
+source lints, and deliberately knows nothing about the hierarchy — it takes
+absolute scene paths. The config file is `scene.json`, named for the thing it
+configures; the one place the pre-v0.20 `project.json` name is still read is
+`core/migrate.js`, which renames it as it moves each folder.
+
+**Why this replaced the flat `projects/` + `projects.json` + `films.json`
+model.** Four things had gone wrong, and all four were the same mistake — the
+storage model did not match what people were actually making:
+
+- A "project" was really a *scene* of a film. Every long-form doc said so; the
+  storage did not, so the relationship lived in prose and in whoever's head
+  made the last `build_film` call.
+- A film needed a **by-convention** "`<name> — Master`" project to hold its
+  master audio and receive the build — a film wearing a project's clothes,
+  indistinguishable from a real scene in the UI, and easy to render by
+  mistake. The film folder now has its own `assets/` and `out/`, so the
+  convention is gone rather than documented.
+- Every agent dumped scenes into one shared folder. A fresh film started by
+  one AI appeared amid another's scenes; nothing scoped anything.
+- Both registries were a shared read-modify-write file — a lost-update hazard
+  whenever two writers were live.
+
+Concurrency is better but not free: writes are atomic (temp + rename) and the
+common case now touches disjoint files (each film document is its own file),
+so two agents in different workspaces cannot lose each other's writes. Two
+writers editing the *same* `film.json` remain last-write-wins, unchanged from
+the registry model and surfaced to the human by the Studio's refresh;
+cross-process render collisions are prevented by the render lock (§7.1), not
+by this store.
+
+**Scene defaults are where the concat invariant now lives.** A film records
+`sceneDefaults` (fps/width/height/durationInFrames) at creation, and
+`createScene` fills any dimension the caller left unset from it. The rule
+that every scene must share resolution/fps/format to concatenate losslessly
+(§13) used to be discipline enforced only at build time; it is now the
+default path, and diverging takes a deliberate override.
+
+`~/.motion-studio/settings.json` sits beside `workspaces/` and holds *user
+preferences*, with the same atomic write and a validated schema:
+`newSceneDefaults` (which seed a new film's `sceneDefaults`),
+`render.defaultWorkers`, an `ffmpeg` block (binary `path` override plus
+`defaultCrf`/`defaultPreset`), and `tts` / `music` blocks (the active vendor
+per capability, plus their non-secret options). Credentials are the one thing
+it will not hold — see §9.2.
+
+### 11.1 Migration from the pre-v0.20 layout
+
+`core/migrate.js` runs once, from `WorkspaceStore.ready()`, and only when
+`projects.json` exists — the last step moves that file into
+`<dataDir>/legacy-v019/`, so a completed migration can never re-run. The
+mapping:
+
+- Everything lands in the `default` workspace. The old layout had no notion
+  of who made what, so inventing an attribution would be a guess.
+- Each saved film becomes a film folder: its scene projects move into
+  `scenes/<slug>` (each folder's `project.json` renamed to `scene.json`), and
+  its output project's `assets/` and `out/` fold into the film's own — that
+  project stops existing, which is the whole point.
+- Projects in no film become **single-scene films** of the same name, so
+  nothing silently disappears from the Studio.
+- The old registries, and any leftover output-project files, move to
+  `legacy-v019/` together with a `migration-report.json` mapping every old
+  UUID to its new id. **Nothing is deleted.**
+
+A crash mid-way leaves `projects.json` in place and the migration resumes on
+the next start; folder moves that already happened are detected by their
+destination existing, and the report says so.
+
+### 11.2 The workspace library
+
+The 25 MB base64 cap on `write_asset_file` exists to keep large media out of
+the MCP channel, which left "the user gave me a 500 MB plate" with no good
+answer. Each workspace now has a `library/` the human fills through the
+Studio (or on disk); agents see it read-only via `list_shared_assets` and
+pull a file into any scene or film with `use_shared_asset`. The pull
+**hardlinks** when the filesystem allows and copies otherwise, so a huge
+asset costs no extra disk and the scene still renders hermetically from its
+own `assets/`. Pulling the same file again refreshes the link, so an updated
+library file propagates on request rather than silently.
 
 `~/.motion-studio/settings.json` (v0.15, `core/settings.js`) sits alongside it
 and holds *user preferences*, with the same atomic write and a validated
-schema: `newProjectDefaults`, `render.defaultWorkers`, an `ffmpeg` block
+schema: `newSceneDefaults`, `render.defaultWorkers`, an `ffmpeg` block
 (binary `path` override plus `defaultCrf`/`defaultPreset`), and `tts` / `music`
 blocks (v0.17: the active vendor per capability, plus their non-secret options —
 Azure region/voice/format, SoundFont path, sample rate, gain, target peak).
@@ -479,13 +633,19 @@ correctly-configured machine still failed every agent call with
 `prereqs_missing`. All front ends now honour the file.
 
 Two invariants keep the reproducibility concern answered. Globals **only fill
-gaps** — an explicit argument always wins, which is why MCP's `create_project`
+gaps** — an explicit argument always wins, which is why MCP's `create_film`
 takes `.optional()` fields rather than zod `.default()`s (a default is
 indistinguishable from a caller who meant it). And they apply **only at
-creation**: an existing `project.json` is never rewritten because a global
-changed, so a project renders identically tomorrow. Both front ends route
-through `withNewProjectDefaults` / `outputSeedFromSettings` in
+creation**: an existing `scene.json` is never rewritten because a global
+changed, so a scene renders identically tomorrow. Both front ends route
+through `withNewSceneDefaults` / `outputSeedFromSettings` in
 `core/settings.js` rather than merging locally, so they cannot drift.
+
+v0.20 adds one hop to that chain without changing the rule: the globals seed a
+**film's `sceneDefaults`** at `create_film`, and a scene created inside the
+film inherits from those. So "the user's default is 1280×720" reaches a scene
+through the film that owns it, and a film deliberately made at another size
+keeps its scenes consistent with *itself* rather than with the machine.
 
 `ffmpeg.path` is resolved by one function, `resolveFfmpegPath()`, which all
 three entry points call: explicit override (CLI `--ffmpeg`) →
@@ -545,29 +705,39 @@ itself, so a proxy can never overwrite the deliverable, and job status carries
 `proxy: { scale, frameStep }` so the Studio and agents can tell a draft from
 the real thing.
 
-## 13. Saved films and the film editor
+## 13. Films and the film editor
 
-`build_film` (core/film.js) is a one-shot verb; a human cutting a long video
-needs a *document*. `core/films.js` supplies it:
+A film is a folder (§11) and `film.json` is its document. `core/films.js`
+owns what that document *means*:
 
-- **`FilmStore`** persists film definitions — ordered scene refs, master
-  audio timeline, caption track, overlay track, mastering options — in
-  `films.json` beside `projects.json` (same atomic-rename write). A film
-  references SCENE projects (rendered video) and one OUTPUT project whose
-  `assets/` holds audio/overlay files and whose `out/` receives builds; audio
-  and overlay `src`s are project-relative under `assets/`, exactly like
-  `config.audio`.
+- **The document** is the ordered scene list (`scenes: [{slug}]` — play
+  order, resolved against the film's own `scenes/` folder), the master audio
+  timeline, the caption and overlay tracks, `sceneDefaults`, and the
+  mastering options. Audio and overlay `src`s are film-relative under
+  `assets/`, exactly the shape `config.audio` uses in a scene. Before v0.20 a
+  film referenced scene projects by UUID and needed a separate "output
+  project" to hold those assets; both are gone, and with them the class of
+  bug where a film pointed at a project someone had since deleted or
+  re-purposed.
 - **`validateFilm`** runs on every save and throws `invalid_film` with the
   complete `problems` list. **`planFilm`** resolves a film against reality
   *without throwing* — rendered state, signature mismatches, missing
-  projects/assets, out-of-range cues — because an editor must open a broken
+  scenes/assets, out-of-range cues — because an editor must open a broken
   document to let you repair it. The Studio's validation chip and the MCP
   tools' `problems` field are both this one function.
 - **Builds are jobs.** `submitFilmBuild` pre-resolves (so a bad film fails
   the submit call with a structured error) and then runs `buildFilmArtifact`
   as a `JobManager` job — same status/logs/cancel surface as renders, and
-  `build_saved_film` is async over MCP for the same reason `wait_for_render`
-  caps its wait: a finishing encode can outlive a request timeout.
+  `build_film` is async over MCP for the same reason `wait_for_render`
+  caps its wait: a finishing encode can outlive a request timeout. `plan: true`
+  short-circuits to `planFilm`, which is how an agent gets every scene's
+  `filmOffset` *before* rendering anything — the numbers narration and cues
+  are placed against.
+- **The encode voice comes from scene 1.** The finishing pass takes its
+  crf/preset (and the limiter default) from the first scene's `output`
+  config. Scenes already share the codec-determining parameters by
+  construction, so scene 1 speaks for the film — and the film document needs
+  no duplicate encode block that could drift from the scenes it describes.
 - **The finishing pass.** Assembly is still `assembleFilm`'s lossless concat
   (+ master-audio mux). Only when a film has overlays or burns captions does
   ONE extra encode run: `buildOverlayGraph` (pure, unit-tested) composes the
@@ -578,7 +748,7 @@ needs a *document*. `core/films.js` supplies it:
   runs with `cwd` at the temp dir because the subtitles filter cannot take a
   Windows absolute path without unmaintainable escaping). Captions always
   also write a `.srt` sidecar next to the output. Encode settings come from
-  the output project's `output` config via the same `buildVideoArgs` the
+  the first scene's `output` config via the same `buildVideoArgs` the
   renderer uses; `encoder.runFfmpeg` parses `-progress` so the job reports
   real frame progress.
 - **The editor lies as little as possible.** `/film.html` plays the scenes'
@@ -605,7 +775,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-535 tests across 27 suites; see `engine/test/`. A clean run has **zero
+546 tests across 28 suites; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

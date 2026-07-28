@@ -70,57 +70,83 @@ body {
   padding: 0 16px 8px;
   font: 11px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
 }
-.project-list { list-style: none; margin: 0; padding: 0; }
-.project-list li {
-  padding: 8px 16px;
-  cursor: pointer;
-  border-left: 2px solid transparent;
-  display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
-}
-.project-list li:hover { background: var(--ink-3); }
-.project-list li.active { border-left-color: var(--accent); background: var(--ink-3); }
-.project-list .p-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-list .p-meta { font: 10px var(--mono); color: var(--dim); flex-shrink: 0; }
-.project-list li.missing { opacity: 0.45; }
-
 .rail-foot {
   padding: 10px 16px;
   border-top: 1px solid var(--line);
   font: 11px var(--mono); color: var(--dim);
 }
 
-/* rail tabs: one list at a time — projects or films */
-.rail-tabs { display: flex; border-bottom: 1px solid var(--line); flex-shrink: 0; }
-.rail-tab {
-  flex: 1;
-  background: none; border: none; color: var(--dim);
-  font: 11px var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
-  padding: 9px 0; cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
+/* Workspace tree (v0.20): workspace → film → scene, one list. Indentation
+ * carries the hierarchy — a rail this narrow has no room for guides, and the
+ * three levels are visually distinct enough by weight and colour. */
+.ws-tree { list-style: none; margin: 0; padding: 0; }
+.ws-tree li {
+  display: flex; align-items: baseline; gap: 6px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
 }
-.rail-tab:hover { color: var(--text); }
-.rail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.rail-collapsed .rail-tabs { display: none; }
-.film-list .film-empty { padding: 4px 16px; font-size: 11px; cursor: default; }
+.ws-tree li:hover { background: var(--ink-3); }
+.ws-tree .p-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.ws-tree .p-meta { font: 10px var(--mono); color: var(--dim); flex-shrink: 0; }
+.ws-tree li.missing { opacity: 0.45; }
+.ws-tree .chev {
+  width: 12px; flex-shrink: 0; text-align: center;
+  font-size: 9px; color: var(--dim);
+}
+.chev-btn { background: none; border: none; padding: 0; cursor: pointer; }
+
+.tree-ws {
+  padding: 9px 12px 6px;
+  font: 11px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+.tree-ws:first-child { border-top: none; }
+.tree-ws .ws-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-add { visibility: hidden; font-size: 10px; padding: 1px 5px; }
+.tree-ws:hover .tree-add { visibility: visible; }
+
+.tree-film { padding: 7px 12px 7px 20px; }
+.tree-film.missing .p-meta { color: var(--err); }
+.tree-scene {
+  padding: 5px 12px 5px 46px;
+  font-size: 12px; color: var(--muted);
+}
+.tree-scene.active { border-left-color: var(--accent); background: var(--ink-3); color: var(--text); }
+.tree-lib { padding: 6px 12px 8px 20px; font-size: 12px; }
+.tree-lib.active { border-left-color: var(--accent); background: var(--ink-3); }
+.tree-note { padding: 3px 12px 3px 34px; font-size: 11px; cursor: default; }
+.tree-note:hover { background: none; }
+.tree-first-film { cursor: pointer; padding-top: 5px; padding-bottom: 7px; }
+.tree-first-film:hover { background: var(--ink-3); }
+.tree-first-film:hover .p-name { color: var(--accent); }
+.tree-note-scene { padding-left: 46px; }
+.scene-add .p-name { color: var(--dim); }
+.tree-actions { padding: 12px 12px 4px; }
+.tree-actions button { width: 100%; font-size: 11px; }
+
 .film-del {
   background: none; border: none; color: var(--dim);
   font-size: 11px; cursor: pointer; padding: 0 2px;
   visibility: hidden; flex-shrink: 0;
 }
-.film-list li:hover .film-del { visibility: visible; }
+.tree-film:hover .film-del { visibility: visible; }
 .film-del:hover { color: var(--err); }
 
-/* sort toggle (rail head) */
-.sort-toggle { display: inline-flex; border: 1px solid var(--line); margin-left: auto; margin-right: 8px; }
-.sort-btn {
-  background: none; border: none; color: var(--dim);
-  font: 10px var(--mono); letter-spacing: 0.08em;
-  padding: 3px 7px; cursor: pointer;
+/* Workspace library page */
+.library-intro { max-width: 70ch; }
+.library-upload-row { display: flex; align-items: center; gap: 12px; margin: 14px 0 10px; }
+.lib-folder { font: 11px var(--mono); color: var(--dim); }
+.lib-upload-btn { cursor: pointer; display: inline-block; }
+.library-table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+.library-table th {
+  text-align: left; padding: 6px 10px 6px 0;
+  font: 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  border-bottom: 1px solid var(--line);
 }
-.sort-btn + .sort-btn { border-left: 1px solid var(--line); }
-.sort-btn:hover { color: var(--text); }
-.sort-btn.active { color: var(--accent-ink); background: var(--accent); }
+.library-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
+.library-table .num { text-align: right; }
+.library-table .lib-path { color: var(--text); }
+.lib-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
 /* collapsible rail */
 .collapse-btn { margin-left: auto; padding: 2px 7px; font-size: 12px; align-self: start; }

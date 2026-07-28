@@ -1,63 +1,72 @@
 #!/usr/bin/env node
 /**
- * Motion Studio — Studio web server (new in v0.5).
+ * Motion Studio — Studio web server (new in v0.5; workspace model in v0.20).
  *
- * The human path. Replaces the v0.2 Windows-only WinForms app with a local,
- * cross-platform web UI served from this zero-dependency node:http server
- * (rationale in docs/CHANGELOG.md). It is a thin shell over the same Render
+ * The human path. A local, cross-platform web UI served from this
+ * zero-dependency node:http server. It is a thin shell over the same Render
  * Engine Core the CLI and the MCP server use — no render logic lives here.
  *
  *   npm run studio          # http://127.0.0.1:7345
  *   PORT=8000 npm run studio
  *
- * Security model: binds to 127.0.0.1 only. Every project-file read goes
- * through the same path sandbox as the MCP tools (path_outside_project →
+ * THE MODEL (v0.20): the Studio shows EVERY workspace (each AI's MCP server
+ * is bound to one; the human sees them all). A workspace holds films; a film
+ * holds scenes plus its own assets/ (master audio, overlays) and out/ (the
+ * built film); a workspace also holds a LIBRARY of shared assets the human
+ * uploads for that workspace's agent to use. Ids are slug paths —
+ * "ws", "ws/film", "ws/film/scene" — sent URL-encoded as ONE path segment
+ * (encodeURIComponent), so route shapes stay fixed-position.
+ *
+ * Security model: binds to 127.0.0.1 only. Every scene/film file read goes
+ * through the same path sandbox as the MCP tools (path_not_allowed →
  * HTTP 403). No shell, no arbitrary-path endpoints.
  *
- * Preview fidelity: the preview iframe loads the project's real entry HTML
- * (served from /preview/:id/), i.e. the exact file Chromium renders, and the
- * UI drives it through the same window.setFrame(n) contract. What you scrub
- * is what you ship.
+ * Preview fidelity: the preview iframe loads the scene's real entry HTML
+ * (served from /preview/:sceneId/), i.e. the exact file Chromium renders, and
+ * the UI drives it through the same window.setFrame(n) contract. What you
+ * scrub is what you ship.
  *
- * API (all JSON unless noted):
+ * API (all JSON unless noted; :fid = encoded "ws/film", :sid = encoded
+ * "ws/film/scene", :tid = either — the asset/output/tts routes serve both):
  *   GET    /api/prereqs
- *   GET    /api/settings                     global settings + environment report (v0.15)
- *   PATCH  /api/settings                     {patch} — newProjectDefaults / render / ffmpeg / tts
- *   GET    /api/vendors                      speech + music vendors: active + live status (v0.17)
- *   GET    /api/vendors/speech/:id/voices    ?locale=&search=&limit=&offset=  (v0.17)
- *   POST   /api/vendors/speech/:id/preview   {text,voice,…} → audio/wav sample (v0.17)
- *   POST   /api/vendors/music/:id/preview    {program,drums} → audio/wav sample (v0.17)
- *   GET    /api/projects
- *   POST   /api/projects                     {name,fps?,width?,height?,durationInFrames?}
- *                                            (unset fields fall back to settings.newProjectDefaults)
- *   GET    /api/projects/:id                 config + file list
- *   PATCH  /api/projects/:id/config          {patch}
- *   DELETE /api/projects/:id?deleteFiles=1
- *   GET    /api/projects/:id/events          SSE: {type:"change"} on file edits (hot reload)
- *   GET    /api/projects/:id/outputs         list files in the out dir
- *   GET    /api/projects/:id/output?file=    download a rendered output
- *   GET    /api/projects/:id/assets          list files under assets/ + audioRefs (v0.15)
- *   PUT    /api/projects/:id/asset?path=     raw-body upload into assets/ (v0.15)
- *   GET    /api/projects/:id/asset?path=     stream/download an asset (v0.15)
- *   DELETE /api/projects/:id/asset?path=     delete an asset; &updateAudio=1 also
- *                                            drops config.audio tracks using it (v0.15)
- *   POST   /api/projects/:id/asset/rename    {from,to,updateAudio?} within assets/ (v0.15)
- *   POST   /api/projects/:id/tts             {text,vendor?,voice?,sentenceTimings?,…}
- *                                            → narration WAV into assets/ (+ per-sentence timings)
- *   POST   /api/projects/:id/render          {frameRange?,workers?} → job
- *   POST   /api/projects/:id/still           {frame,outputFilename?}
- *   GET    /api/films                        saved films (film editor documents)
- *   POST   /api/films                        {name,scenes?,outputProjectId?|createOutputProject}
- *   GET    /api/films/:id                    film + resolved detail (layout, problems)
- *   PATCH  /api/films/:id                    {patch} — scenes/audio/overlays/captions/…
- *   DELETE /api/films/:id
- *   POST   /api/films/:id/build              {outputFilename?,audioTargetPeakDb?,burnCaptions?} → job
- *   POST   /api/films/:id/preview-audio      master mix as WAV (the build's exact ffmpeg graph)
+ *   GET    /api/settings                     global settings + environment report
+ *   PATCH  /api/settings                     {patch}
+ *   GET    /api/vendors                      speech + music vendors: active + live status
+ *   GET    /api/vendors/speech/:id/voices    ?locale=&search=&limit=&offset=
+ *   POST   /api/vendors/speech/:id/preview   {text,voice,…} → audio/wav sample
+ *   POST   /api/vendors/music/:id/preview    {program,drums} → audio/wav sample
+ *   GET    /api/workspaces                   all workspaces, each with its films
+ *   POST   /api/workspaces                   {name}
+ *   GET    /api/workspaces/:ws/library       shared-asset library listing
+ *   GET    /api/workspaces/:ws/library/file?path=          stream/download
+ *   PUT    /api/workspaces/:ws/library/file?path=          raw-body upload (no size cap beyond 2 GB guard)
+ *   DELETE /api/workspaces/:ws/library/file?path=
+ *   POST   /api/workspaces/:ws/films         {name,fps?,width?,height?,durationInFrames?,slug?}
+ *   GET    /api/films/:fid                   film document + resolved detail (layout, problems)
+ *   PATCH  /api/films/:fid                   {patch} — scenes order/audio/overlays/captions/…
+ *   DELETE /api/films/:fid?deleteFiles=1
+ *   POST   /api/films/:fid/build             {outputFilename?,audioTargetPeakDb?,burnCaptions?} → job
+ *   POST   /api/films/:fid/preview-audio     master mix as WAV (the build's exact ffmpeg graph)
+ *   POST   /api/films/:fid/scenes            {name,fps?,…} → scaffold a scene into the film
+ *   GET    /api/scenes/:sid                  config + file list
+ *   PATCH  /api/scenes/:sid/config           {patch}
+ *   DELETE /api/scenes/:sid?deleteFiles=1
+ *   GET    /api/scenes/:sid/events           SSE: {type:"change"} on file edits (hot reload)
+ *   POST   /api/scenes/:sid/render           {frameRange?,workers?} → job
+ *   POST   /api/scenes/:sid/still            {frame,outputFilename?}
+ *   GET    /api/{films|scenes}/:tid/outputs  list files in the out dir
+ *   GET    /api/{films|scenes}/:tid/output?file=            download a rendered output / built film
+ *   GET    /api/{films|scenes}/:tid/assets   list assets + audioRefs
+ *   PUT    /api/{films|scenes}/:tid/asset?path=             raw-body upload into assets/
+ *   GET    /api/{films|scenes}/:tid/asset?path=             stream/download an asset
+ *   DELETE /api/{films|scenes}/:tid/asset?path=&updateAudio=1
+ *   POST   /api/{films|scenes}/:tid/asset/rename            {from,to,updateAudio?}
+ *   POST   /api/{films|scenes}/:tid/tts      {text,vendor?,voice?,sentenceTimings?,…} → WAV into assets/
  *   GET    /api/jobs                         all jobs
  *   GET    /api/jobs/:id                     status (incl. etaMs, queuePosition)
  *   GET    /api/jobs/:id/logs?tail=
  *   POST   /api/jobs/:id/cancel
- *   GET    /preview/:id/<path>               sandboxed project file serving (iframe)
+ *   GET    /preview/:sid/<path>              sandboxed scene file serving (iframe)
  */
 
 import http from 'node:http';
@@ -67,9 +76,10 @@ import fsp from 'node:fs/promises';
 import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { ProjectStore, MAX_ASSET_BYTES } from '../core/project.js';
+import { MAX_ASSET_BYTES } from '../core/scene.js';
+import { WorkspaceStore } from '../core/store.js';
 import {
-  readSettings, updateSettings, resolveFfmpegPath, withNewProjectDefaults, outputSeedFromSettings,
+  readSettings, updateSettings, resolveFfmpegPath, withNewSceneDefaults, outputSeedFromSettings,
 } from '../core/settings.js';
 import {
   speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
@@ -87,11 +97,9 @@ import {
 import { JobManager } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
-import { resolveInProject } from '../core/sandbox.js';
+import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
-import {
-  FilmStore, planFilm, submitFilmBuild, toMixerTracks,
-} from '../core/films.js';
+import { planFilm, submitFilmBuild, toMixerTracks } from '../core/films.js';
 import { mixAudioOnly } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -126,11 +134,13 @@ const MIME = {
 };
 
 const STATUS_FOR_CODE = {
-  [ErrorCodes.PATH_OUTSIDE_PROJECT]: 403,
-  [ErrorCodes.PROJECT_NOT_FOUND]: 404,
+  [ErrorCodes.PATH_NOT_ALLOWED]: 403,
+  [ErrorCodes.SCENE_NOT_FOUND]: 404,
+  [ErrorCodes.WORKSPACE_NOT_FOUND]: 404,
   [ErrorCodes.JOB_NOT_FOUND]: 404,
   [ErrorCodes.FILE_NOT_FOUND]: 404,
   [ErrorCodes.INVALID_CONFIG]: 400,
+  [ErrorCodes.INVALID_ID]: 400,
   [ErrorCodes.SYNTAX_ERROR]: 400,
   [ErrorCodes.UNSUPPORTED_FORMAT]: 400,
   [ErrorCodes.ASSET_TOO_LARGE]: 413,
@@ -147,20 +157,25 @@ const STATUS_FOR_CODE = {
   [ErrorCodes.MUSIC_UNAVAILABLE]: 503,
   [ErrorCodes.INVALID_MUSIC_SPEC]: 400,
   [ErrorCodes.MUSIC_FAILED]: 502,
-  // Two states the UI can act on: another render owns the lock (retry later),
-  // and a project name that already exists (pick another).
+  // States the UI can act on: another render owns the lock (retry later), a
+  // name that already exists (pick another).
   [ErrorCodes.RENDER_ALREADY_IN_PROGRESS]: 409,
-  [ErrorCodes.PROJECT_ALREADY_EXISTS]: 409,
-  // Saved films (film editor).
+  [ErrorCodes.SCENE_ALREADY_EXISTS]: 409,
+  [ErrorCodes.FILM_ALREADY_EXISTS]: 409,
+  // Films.
   [ErrorCodes.FILM_NOT_FOUND]: 404,
   [ErrorCodes.INVALID_FILM]: 400,
   [ErrorCodes.SCENE_NOT_RENDERED]: 409,
   [ErrorCodes.INCONSISTENT_SCENES]: 409,
   [ErrorCodes.NO_AUDIO_TRACKS]: 400,
+  [ErrorCodes.MIGRATION_FAILED]: 500,
 };
 
 /** Preview clips are for auditioning a voice, not for rendering a script. */
 const MAX_PREVIEW_CHARS = 400;
+
+/** Library uploads are for large media; this is an abuse guard, not a policy. */
+const MAX_LIBRARY_BYTES = 2 * 1024 * 1024 * 1024;
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data, null, 2);
@@ -267,12 +282,11 @@ async function streamFile(res, absPath, { download = false, range = null } = {})
  * Create (but do not listen) the Studio HTTP server. Exported for tests.
  *
  * @param {object} [opts]
- * @param {ProjectStore} [opts.store]
+ * @param {WorkspaceStore} [opts.store]
  * @param {JobManager}  [opts.jobs]
  * @param {Function}    [opts.browserFactory]  DI for tests (fake Chromium)
  */
-export function createStudioServer({ store = new ProjectStore(), jobs = new JobManager(), films = null, browserFactory = null } = {}) {
-  const filmStore = films ?? new FilmStore(store.dataDir);
+export function createStudioServer({ store = new WorkspaceStore(), jobs = new JobManager(), browserFactory = null } = {}) {
   // Parallel renders need the factory too: workers inherit the env hook, but
   // the parent's preflight page does not — without it a fake-browser test that
   // asks for workers > 1 would reach for real Chromium (same rule as the MCP
@@ -283,11 +297,31 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
       : renderComposition({ ...o, browserFactory }))
     : null;
 
+  /**
+   * Resolve an asset/output target — a film ("ws/film") or a scene
+   * ("ws/film/scene") — to everything the shared routes need. Mirrors the
+   * MCP server's describeTarget so the two surfaces cannot disagree.
+   */
+  const describeTarget = async (targetId) => {
+    const t = await store.resolveAssetTarget(targetId);
+    if (t.kind === 'scene') {
+      const config = await store.readConfig(t.id);
+      return { ...t, config, fps: config.fps, outDir: config.output?.dir ?? 'out', output: config.output ?? {} };
+    }
+    const film = await store.getFilm(t.id);
+    const plan = await planFilm({ film, store });
+    return { ...t, film, plan, fps: plan.fps ?? film.sceneDefaults?.fps ?? 30, outDir: 'out', output: {} };
+  };
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
-    const parts = url.pathname.split('/').filter(Boolean);
+    const parts = url.pathname.split('/').filter(Boolean).map((p) => decodeURIComponent(p));
 
     try {
+      // One-time legacy migration; memoized inside the store, so this is a
+      // resolved promise on every request after the first.
+      await store.ready();
+
       /* ------------------------------ static UI ------------------------------ */
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
         return await streamFile(res, path.join(PUBLIC_DIR, 'index.html'));
@@ -298,12 +332,14 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
       }
 
       /* --------------------------- sandboxed preview ------------------------- */
-      // GET /preview/:id/<rel path> — serves the project's own files so the
-      // iframe renders the exact composition Chromium will render.
+      // GET /preview/:sceneId/<rel path> — serves the scene's own files so the
+      // iframe renders the exact composition Chromium will render. The scene id
+      // is one URL-encoded segment, so the composition's relative asset URLs
+      // resolve against /preview/<id>/ unchanged.
       if (req.method === 'GET' && parts[0] === 'preview' && parts.length >= 2) {
-        const entry = await store.getProjectEntry(parts[1]);
-        const rel = decodeURIComponent(parts.slice(2).join('/')) || 'composition.html';
-        const abs = resolveInProject(entry.path, rel); // throws path_outside_project on escape
+        const scene = await store.getScene(parts[1]);
+        const rel = parts.slice(2).join('/') || 'composition.html';
+        const abs = resolveInTarget(scene.path, rel); // throws path_not_allowed on escape
         return await streamFile(res, abs, { range: req.headers.range });
       }
 
@@ -338,6 +374,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             'MOTION_STUDIO_MIDI_EXE',
             'MOTION_STUDIO_FLUIDSYNTH', 'MOTION_STUDIO_SOUNDFONT', 'MOTION_STUDIO_LIBS_DIR',
             'MOTION_STUDIO_ALLOW_LOCAL_FETCH', 'MOTION_STUDIO_MAX_RENDERS',
+            'MOTION_STUDIO_WORKSPACE',
             'PUPPETEER_EXECUTABLE_PATH',
           ];
           const settings = await readSettings(store.dataDir);
@@ -347,8 +384,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             settings,
             environment: {
               dataDir: store.dataDir,
-              projectsRoot: store.projectsRoot,
-              registryPath: store.registryPath,
+              workspacesRoot: store.workspacesRoot,
               settingsPath: path.join(store.dataDir, 'settings.json'),
               ffmpeg: { effectivePath: effectiveFfmpeg, source, ...probe.ffmpeg },
               env: {
@@ -415,7 +451,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             );
           }
           // POST …/preview — render the demo phrase and stream the WAV back.
-          // Like the speech preview it writes nothing into a project: trying an
+          // Like the speech preview it writes nothing into a scene: trying an
           // instrument out must not litter assets/ with take-1 files.
           if (req.method === 'POST' && parts[4] === 'preview' && parts.length === 5) {
             const body = await readBody(req);
@@ -476,7 +512,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           }
 
           // POST …/preview — synthesize a sample and stream the WAV straight
-          // back. It is deliberately not written into a project: auditioning a
+          // back. It is deliberately not written into a scene: auditioning a
           // voice must not litter assets/ with take-1 files.
           if (req.method === 'POST' && parts[4] === 'preview' && parts.length === 5) {
             const body = await readBody(req);
@@ -502,8 +538,8 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               });
               const wav = await fsp.readFile(outPath);
               // Duration from the WAV header, not the vendor's self-report —
-              // the same rule synthesize_speech follows, so what the page
-              // prints matches what a render would mux.
+              // the same rule the MCP path follows, so what the page prints
+              // matches what a render would mux.
               const { dataSize, byteRate } = parseWavHeader(wav, outPath);
               res.writeHead(200, {
                 'Content-Type': 'audio/wav',
@@ -523,73 +559,130 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         }
       }
 
-      /* -------------------------------- films -------------------------------- */
-      // Saved films: the film editor's document model. A film is an ordered
-      // scene list + master audio/overlay/caption tracks, persisted in
-      // films.json and built through the same job manager as renders.
-      if (parts[1] === 'films') {
+      /* ------------------------------ workspaces ------------------------------ */
+      if (parts[1] === 'workspaces') {
+        // GET /api/workspaces — the whole tree in one call: every workspace
+        // with its films. This is what the rail renders from.
         if (parts.length === 2) {
           if (req.method === 'GET') {
-            const all = await filmStore.listFilms();
-            return sendJson(res, 200, {
-              films: all.map((f) => ({
-                id: f.id, name: f.name, createdAt: f.createdAt, updatedAt: f.updatedAt,
-                scenes: f.scenes.length, audioTracks: f.audio.length,
-                overlays: f.overlays.length, captions: f.captions.length,
-                outputProjectId: f.outputProjectId,
-              })),
-            });
+            const workspaces = [];
+            for (const ws of await store.listWorkspaces()) {
+              const films = await store.listFilms(ws.id).catch(() => []);
+              const library = await store.listLibrary(ws.id).catch(() => []);
+              workspaces.push({
+                id: ws.id, name: ws.name, path: ws.path,
+                films,
+                library: { files: library.length, bytes: library.reduce((n, f) => n + f.bytes, 0) },
+              });
+            }
+            return sendJson(res, 200, { workspaces });
           }
           if (req.method === 'POST') {
             const body = await readBody(req);
-            let outputProjectId = body.outputProjectId ?? null;
-            // The editor's default: scaffold a dedicated master project so the
-            // film and its audio/overlay assets never land inside a scene.
-            if (!outputProjectId && body.createOutputProject !== false) {
-              const settings = await readSettings(store.dataDir);
-              const first = body.scenes?.[0]?.projectId
-                ? await store.readConfig(body.scenes[0].projectId).catch(() => null)
-                : null;
-              const proj = await store.createProject(withNewProjectDefaults(settings, {
-                name: `${String(body.name ?? 'Film').trim()} — Master`,
-                width: first?.width, height: first?.height, fps: first?.fps,
-                durationInFrames: 1, // never rendered; holds assets + out/
-              }));
-              outputProjectId = proj.id;
+            if (!String(body.name ?? '').trim()) {
+              throw new EngineError(ErrorCodes.INVALID_CONFIG, 'a workspace needs a name');
             }
-            const film = await filmStore.createFilm({ ...body, outputProjectId });
-            return sendJson(res, 201, { film });
+            const ws = await store.ensureWorkspace(body.name);
+            return sendJson(res, ws.created ? 201 : 200, { workspace: ws });
           }
         }
-        const filmId = parts[2];
-        if (parts.length === 3) {
+
+        const wsId = parts[2];
+
+        // Library: the human's upload surface for large shared assets.
+        if (parts[3] === 'library') {
+          if (req.method === 'GET' && parts.length === 4) {
+            return sendJson(res, 200, { files: await store.listLibrary(wsId) });
+          }
+          if (parts[4] === 'file' && parts.length === 5) {
+            const rel = url.searchParams.get('path') ?? '';
+            if (req.method === 'GET') {
+              const abs = store.libraryFilePath(wsId, rel);
+              return await streamFile(res, abs, { download: url.searchParams.get('download') === '1', range: req.headers.range });
+            }
+            if (req.method === 'PUT') {
+              const buf = await readRawBody(req, MAX_LIBRARY_BYTES);
+              return sendJson(res, 201, await store.writeLibraryBuffer(wsId, rel, buf));
+            }
+            if (req.method === 'DELETE') {
+              return sendJson(res, 200, await store.deleteLibraryFile(wsId, rel));
+            }
+          }
+        }
+
+        // POST /api/workspaces/:ws/films — create a film. Unset dimensions
+        // fall back to global settings and become the film's sceneDefaults.
+        if (req.method === 'POST' && parts[3] === 'films' && parts.length === 4) {
+          const body = await readBody(req);
+          const settings = await readSettings(store.dataDir);
+          const { name: _n, ...sceneDefaults } = withNewSceneDefaults(settings, {
+            name: body.name,
+            fps: body.fps, width: body.width, height: body.height, durationInFrames: body.durationInFrames,
+          });
+          const film = await store.createFilm(wsId, {
+            name: body.name, slug: body.slug, sceneDefaults,
+            outputFilename: body.outputFilename,
+          });
+          return sendJson(res, 201, { film });
+        }
+      }
+
+      /* ----------------------- films and scenes ------------------------------ */
+      // The two resource families share their asset/output/tts routes: a film
+      // id is "ws/film", a scene id "ws/film/scene", both sent as one encoded
+      // path segment. parts[2] is the decoded id either way.
+      const isFilmRoute = parts[1] === 'films';
+      const isSceneRoute = parts[1] === 'scenes';
+
+      if ((isFilmRoute || isSceneRoute) && parts.length >= 3) {
+        const targetId = parts[2];
+        const sub = parts[3];
+
+        /* ---- film document routes ---- */
+        if (isFilmRoute && parts.length === 3) {
           if (req.method === 'GET') {
-            const film = await filmStore.getFilm(filmId);
+            const film = await store.getFilm(targetId);
             const detail = await planFilm({ film, store });
-            return sendJson(res, 200, { film, detail });
+            const scenes = await store.listScenes(film.id);
+            return sendJson(res, 200, { film, detail, sceneFolders: scenes });
           }
           if (req.method === 'PATCH') {
             const { patch } = await readBody(req);
-            const film = await filmStore.updateFilm(filmId, patch ?? {});
+            const film = await store.updateFilm(targetId, patch ?? {});
             const detail = await planFilm({ film, store });
             return sendJson(res, 200, { film, detail });
           }
           if (req.method === 'DELETE') {
-            return sendJson(res, 200, await filmStore.removeFilm(filmId));
+            const deleteFiles = url.searchParams.get('deleteFiles') === '1';
+            return sendJson(res, 200, await store.removeFilm(targetId, { deleteFiles }));
           }
+        }
+
+        // POST /api/films/:id/scenes — scaffold a scene into the film (the
+        // editor's "+ scene"). Same defaults path as the MCP create_scene.
+        if (isFilmRoute && req.method === 'POST' && sub === 'scenes' && parts.length === 4) {
+          const body = await readBody(req);
+          const scene = await store.createScene(targetId, {
+            name: body.name, slug: body.slug,
+            fps: body.fps, width: body.width, height: body.height, durationInFrames: body.durationInFrames,
+          });
+          const settings = await readSettings(store.dataDir).catch(() => null);
+          const seed = settings && outputSeedFromSettings(settings, scene.config.output);
+          if (seed) scene.config = await store.updateConfig(scene.id, { output: seed });
+          return sendJson(res, 201, scene);
         }
 
         // POST /api/films/:id/build — persist any last-minute mastering knobs,
         // then submit the assembly as a job (poll /api/jobs/:id like a render).
-        if (req.method === 'POST' && parts[3] === 'build' && parts.length === 4) {
+        if (isFilmRoute && req.method === 'POST' && sub === 'build' && parts.length === 4) {
           const body = await readBody(req);
           const patch = {};
           for (const k of ['outputFilename', 'audioTargetPeakDb', 'burnCaptions']) {
             if (body[k] !== undefined) patch[k] = body[k];
           }
           const film = Object.keys(patch).length
-            ? await filmStore.updateFilm(filmId, patch)
-            : await filmStore.getFilm(filmId);
+            ? await store.updateFilm(targetId, patch)
+            : await store.getFilm(targetId);
           const submitted = await submitFilmBuild({ film, store, jobs, ffmpegPath: await ffmpegPath() });
           return sendJson(res, 202, submitted);
         }
@@ -598,22 +691,17 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
         // fades, trims, ducking, limiter — the same ffmpeg graph the build
         // uses) as one WAV, so the editor auditions exactly what ships.
         // A WebAudio approximation cannot reproduce sidechain ducking.
-        if (req.method === 'POST' && parts[3] === 'preview-audio' && parts.length === 4) {
-          const film = await filmStore.getFilm(filmId);
+        if (isFilmRoute && req.method === 'POST' && sub === 'preview-audio' && parts.length === 4) {
+          const film = await store.getFilm(targetId);
           if (!film.audio.length) {
             throw new EngineError(ErrorCodes.NO_AUDIO_TRACKS, 'This film has no master audio tracks to preview');
           }
-          if (!film.outputProjectId) {
-            throw new EngineError(ErrorCodes.INVALID_FILM, 'The film needs an output project — its assets/ holds the audio files');
-          }
-          const outEntry = await store.getProjectEntry(film.outputProjectId);
-          const outCfg = await store.readConfig(film.outputProjectId);
           const detail = await planFilm({ film, store });
           if (!detail.totalFrames || !detail.fps) {
             throw new EngineError(ErrorCodes.INVALID_FILM, 'Add at least one scene first — the mix length is the film length');
           }
           const tracks = toMixerTracks(film.audio).map((t) => {
-            const abs = resolveInProject(outEntry.path, t.src.replace(/\\/g, '/'));
+            const abs = resolveInTarget(film.path, t.src.replace(/\\/g, '/'));
             if (!fs.existsSync(abs)) {
               throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `audio not found: ${t.src}`, { path: t.src });
             }
@@ -626,8 +714,8 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               audioTracks: tracks,
               outputPath: outPath,
               fps: detail.fps,
-              projectRoot: outEntry.path,
-              output: { audioLimiter: outCfg.output?.audioLimiter !== false },
+              assetRoot: film.path,
+              output: { audioLimiter: true },
               ffmpegPath: await ffmpegPath(),
               videoDurationSec: detail.totalFrames / detail.fps,
             });
@@ -645,41 +733,24 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
           }
         }
-      }
 
-      // /api/projects...
-      if (parts[1] === 'projects') {
-        if (parts.length === 2) {
-          if (req.method === 'GET') return sendJson(res, 200, { projects: await store.listProjects() });
-          if (req.method === 'POST') {
-            const body = await readBody(req);
-            // Unset fields fall back to the user's global defaults. Shared with
-            // the MCP server so the two cannot disagree about what "global" means.
-            const settings = await readSettings(store.dataDir);
-            const proj = await store.createProject(withNewProjectDefaults(settings, body));
-            const seed = outputSeedFromSettings(settings, proj.config.output);
-            if (seed) proj.config = await store.updateConfig(proj.id, { output: seed });
-            return sendJson(res, 201, proj);
-          }
-        }
-        const projectId = parts[2];
-
-        if (parts.length === 3) {
+        /* ---- scene document routes ---- */
+        if (isSceneRoute && parts.length === 3) {
           if (req.method === 'GET') {
-            const entry = await store.getProjectEntry(projectId);
-            const config = await store.readConfig(projectId);
-            const files = await store.listFiles(projectId);
-            return sendJson(res, 200, { id: entry.id, name: entry.name, path: entry.path, config, files });
+            const scene = await store.getScene(targetId);
+            const config = await store.readConfig(scene.id);
+            const files = await store.listFiles(scene.id);
+            return sendJson(res, 200, { id: scene.id, name: config.name, path: scene.path, config, files });
           }
           if (req.method === 'DELETE') {
             const deleteFiles = url.searchParams.get('deleteFiles') === '1';
-            return sendJson(res, 200, await store.removeProject(projectId, { deleteFiles }));
+            return sendJson(res, 200, await store.removeScene(targetId, { deleteFiles }));
           }
         }
 
-        if (req.method === 'PATCH' && parts[3] === 'config') {
+        if (isSceneRoute && req.method === 'PATCH' && sub === 'config') {
           const { patch } = await readBody(req);
-          const cur = await store.readConfig(projectId);
+          const cur = await store.readConfig(targetId);
           const merged = { ...patch };
           if (merged.output) {
             merged.output = { ...cur.output, ...merged.output };
@@ -690,13 +761,13 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               if (v === null) delete merged.output[k];
             }
           }
-          const config = await store.updateConfig(projectId, merged);
+          const config = await store.updateConfig(targetId, merged);
           return sendJson(res, 200, { config });
         }
 
         // SSE hot-reload events
-        if (req.method === 'GET' && parts[3] === 'events') {
-          const entry = await store.getProjectEntry(projectId);
+        if (isSceneRoute && req.method === 'GET' && sub === 'events') {
+          const scene = await store.getScene(targetId);
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-store',
@@ -706,7 +777,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           let timer = null;
           let watcher;
           try {
-            watcher = fs.watch(entry.path, { recursive: true }, (_ev, filename) => {
+            watcher = fs.watch(scene.path, { recursive: true }, (_ev, filename) => {
               if (filename && (filename.startsWith('out') || filename.includes('.tmp-'))) return; // ignore render outputs
               clearTimeout(timer);
               timer = setTimeout(() => {
@@ -725,11 +796,51 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           return;
         }
 
-        // outputs listing / download
-        if (req.method === 'GET' && parts[3] === 'outputs') {
-          const entry = await store.getProjectEntry(projectId);
-          const config = await store.readConfig(projectId);
-          const outDir = path.join(entry.path, config.output.dir);
+        // render / still (scenes only)
+        if (isSceneRoute && req.method === 'POST' && sub === 'render') {
+          const body = await readBody(req);
+          const scene = await store.getScene(targetId);
+          const config = await store.readConfig(scene.id);
+          const outputPath = path.join(scene.path, config.output.dir, config.output.filename);
+          const submitted = jobs.startRender({
+            targetId: scene.id,
+            scenePath: scene.path,
+            config,
+            outputPath,
+            frameRange: body.frameRange,
+            // The UI seeds its form from the global default, but a direct API
+            // caller may omit it — fall back here so both paths agree with MCP.
+            workers: body.workers ?? (await readSettings(store.dataDir)).render.defaultWorkers,
+            ffmpegPath: await ffmpegPath(),
+            ...(renderFn ? { renderFn } : {}),
+          });
+          return sendJson(res, 202, { ...submitted, outputPath });
+        }
+        if (isSceneRoute && req.method === 'POST' && sub === 'still') {
+          const body = await readBody(req);
+          const scene = await store.getScene(targetId);
+          const config = await store.readConfig(scene.id);
+          const frame = body.frame ?? 0;
+          const name = body.outputFilename ?? `still-${frame}.png`;
+          if (name.includes('/') || name.includes('\\') || name.includes('..') || !name.endsWith('.png')) {
+            throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, 'outputFilename must be a bare .png filename');
+          }
+          const result = await renderStill({
+            scenePath: scene.path,
+            config,
+            frame,
+            outputPath: path.join(scene.path, config.output.dir, name),
+            ...(browserFactory ? { browserFactory } : {}),
+          });
+          return sendJson(res, 200, result);
+        }
+
+        /* ---- shared target routes: outputs, assets, tts ---- */
+
+        // outputs listing / download (a film's out/ holds its builds)
+        if (req.method === 'GET' && sub === 'outputs') {
+          const t = await describeTarget(targetId);
+          const outDir = path.join(t.path, t.outDir);
           let files = [];
           try {
             const names = await fsp.readdir(outDir);
@@ -744,58 +855,57 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             ).filter(Boolean);
           } catch { /* out dir not created yet */ }
           files.sort((a, b) => (a.mtime < b.mtime ? 1 : -1));
-          return sendJson(res, 200, { dir: config.output.dir, files });
+          return sendJson(res, 200, { dir: t.outDir, files });
         }
-        if (req.method === 'GET' && parts[3] === 'output') {
-          const entry = await store.getProjectEntry(projectId);
-          const config = await store.readConfig(projectId);
+        if (req.method === 'GET' && sub === 'output') {
+          const t = await describeTarget(targetId);
           const file = url.searchParams.get('file') ?? '';
           // Confine strictly to the out dir: path.join would collapse ".."
           // segments before the sandbox could see them.
           if (!file || file.split(/[\\/]/).some((seg) => seg === '..' || seg === '') || path.isAbsolute(file)) {
-            throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'file must be a plain name inside the out dir');
+            throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, 'file must be a plain name inside the out dir');
           }
-          const abs = resolveInProject(entry.path, path.posix.join(config.output.dir, file));
+          const abs = resolveInTarget(t.path, path.posix.join(t.outDir, file));
           return await streamFile(res, abs, { download: url.searchParams.get('download') === '1', range: req.headers.range });
         }
 
-        // assets CRUD (v0.15) — all paths are project-relative and confined
-        // to assets/ by ProjectStore/sandbox; the UI previews images through
-        // the existing /preview/:id/ route.
-        if (req.method === 'GET' && parts[3] === 'assets') {
-          return sendJson(res, 200, { files: await store.listAssets(projectId) });
+        // assets CRUD — all paths are target-relative and confined to assets/
+        // by WorkspaceStore/sandbox; the UI previews scene images through the
+        // /preview/:id/ route and film assets through GET …/asset.
+        if (req.method === 'GET' && sub === 'assets') {
+          return sendJson(res, 200, { files: await store.listAssets(targetId) });
         }
-        if (parts[3] === 'asset' && parts.length === 4) {
+        if (sub === 'asset' && parts.length === 4) {
           const rel = url.searchParams.get('path') ?? '';
           if (req.method === 'GET') {
-            const entry = await store.getProjectEntry(projectId);
+            const t = await store.resolveAssetTarget(targetId);
             if (!rel.replace(/\\/g, '/').startsWith('assets/')) {
-              throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Assets must live under assets/ (got "${rel}")`);
+              throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, `Assets must live under assets/ (got "${rel}")`);
             }
-            const abs = resolveInProject(entry.path, rel);
+            const abs = resolveInTarget(t.path, rel);
             return await streamFile(res, abs, { download: url.searchParams.get('download') === '1', range: req.headers.range });
           }
           if (req.method === 'PUT') {
             const buf = await readRawBody(req, MAX_ASSET_BYTES);
-            const result = await store.writeAssetBuffer(projectId, rel, buf);
+            const result = await store.writeAssetBuffer(targetId, rel, buf);
             return sendJson(res, 201, result);
           }
           if (req.method === 'DELETE') {
             const updateAudio = url.searchParams.get('updateAudio') === '1';
-            return sendJson(res, 200, await store.deleteAsset(projectId, rel, { updateAudio }));
+            return sendJson(res, 200, await store.deleteAsset(targetId, rel, { updateAudio }));
           }
         }
-        if (req.method === 'POST' && parts[3] === 'asset' && parts[4] === 'rename') {
+        if (req.method === 'POST' && sub === 'asset' && parts[4] === 'rename') {
           const { from, to, updateAudio = false } = await readBody(req);
-          return sendJson(res, 200, await store.renameAsset(projectId, from, to, { updateAudio }));
+          return sendJson(res, 200, await store.renameAsset(targetId, from, to, { updateAudio }));
         }
 
-        // POST /api/projects/:id/tts — synthesize narration straight into the
-        // project's assets/ (asset-only; the caller decides where it sits on a
+        // POST …/tts — synthesize narration straight into the target's
+        // assets/ (asset-only; the caller decides where it sits on a
         // timeline). The film editor's "+ narration" runs through here. With
         // sentenceTimings the per-sentence offsets come back too, which is
         // what turns one narration take into a synced caption track.
-        if (req.method === 'POST' && parts[3] === 'tts' && parts.length === 4) {
+        if (req.method === 'POST' && sub === 'tts' && parts.length === 4) {
           const body = await readBody(req);
           const text = String(body.text ?? '').trim();
           if (!text) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'tts needs text to speak');
@@ -805,9 +915,8 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           const probe = resolved.status ?? await checkSpeechVendor(resolved.vendor, { dataDir: store.dataDir });
           if (!probe.available) throw await unavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
 
-          const entry = await store.getProjectEntry(projectId);
-          const config = await store.readConfig(projectId);
-          const assetsDir = path.join(entry.path, 'assets');
+          const t = await describeTarget(targetId);
+          const assetsDir = path.join(t.path, 'assets');
           await fsp.mkdir(assetsDir, { recursive: true });
 
           let rel = body.assetPath;
@@ -819,9 +928,9 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
           }
           const normalized = String(rel).replace(/\\/g, '/');
           if (!normalized.startsWith('assets/')) {
-            throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, `Narration must be written under assets/ (got "${rel}")`);
+            throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, `Narration must be written under assets/ (got "${rel}")`);
           }
-          const abs = resolveInProject(entry.path, normalized, { forWrite: true, asAsset: true });
+          const abs = resolveInTarget(t.path, normalized, { forWrite: true, asAsset: true });
 
           const common = {
             voice: body.voice || undefined, rate: body.rate ?? undefined,
@@ -847,9 +956,9 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
               timings = joined.segments.map((seg, i) => ({
                 text: sentences[i],
                 startSeconds: seg.startSeconds,
-                startInFrames: Math.round(seg.startSeconds * config.fps),
+                startInFrames: Math.round(seg.startSeconds * t.fps),
                 durationSeconds: seg.durationSeconds,
-                durationInFrames: framesForDuration(seg.durationSeconds, config.fps),
+                durationInFrames: framesForDuration(seg.durationSeconds, t.fps),
               }));
             } finally {
               await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -863,7 +972,7 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             throw new EngineError(ErrorCodes.TTS_FAILED, `Speech engine reported success but no audio was written to ${normalized}`);
           }
           const durationSeconds = await wavDurationSeconds(abs);
-          const durationInFrames = framesForDuration(durationSeconds, config.fps);
+          const durationInFrames = framesForDuration(durationSeconds, t.fps);
           const levels = await measureWavLevels(abs).catch(() => ({ peakDb: null, meanDb: null }));
           if (sentences && !timings) {
             timings = [{
@@ -877,51 +986,12 @@ export function createStudioServer({ store = new ProjectStore(), jobs = new JobM
             voice: result.voice ?? body.voice ?? null,
             durationSeconds,
             durationInFrames,
-            fps: config.fps,
+            fps: t.fps,
             bytes: stat.size,
             peakDb: levels.peakDb,
             meanDb: levels.meanDb,
             ...(timings ? { timings } : {}),
           });
-        }
-
-        // render / still
-        if (req.method === 'POST' && parts[3] === 'render') {
-          const body = await readBody(req);
-          const entry = await store.getProjectEntry(projectId);
-          const config = await store.readConfig(projectId);
-          const outputPath = path.join(entry.path, config.output.dir, config.output.filename);
-          const submitted = jobs.startRender({
-            projectId,
-            projectPath: entry.path,
-            config,
-            outputPath,
-            frameRange: body.frameRange,
-            // The UI seeds its form from the global default, but a direct API
-            // caller may omit it — fall back here so both paths agree with MCP.
-            workers: body.workers ?? (await readSettings(store.dataDir)).render.defaultWorkers,
-            ffmpegPath: await ffmpegPath(),
-            ...(renderFn ? { renderFn } : {}),
-          });
-          return sendJson(res, 202, { ...submitted, outputPath });
-        }
-        if (req.method === 'POST' && parts[3] === 'still') {
-          const body = await readBody(req);
-          const entry = await store.getProjectEntry(projectId);
-          const config = await store.readConfig(projectId);
-          const frame = body.frame ?? 0;
-          const name = body.outputFilename ?? `still-${frame}.png`;
-          if (name.includes('/') || name.includes('\\') || name.includes('..') || !name.endsWith('.png')) {
-            throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare .png filename');
-          }
-          const result = await renderStill({
-            projectPath: entry.path,
-            config,
-            frame,
-            outputPath: path.join(entry.path, config.output.dir, name),
-            ...(browserFactory ? { browserFactory } : {}),
-          });
-          return sendJson(res, 200, result);
         }
       }
 

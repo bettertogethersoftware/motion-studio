@@ -1,9 +1,11 @@
 /* Motion Studio — Film Editor (vanilla JS, no build step).
  *
- * Edits ONE saved film (/film.html?id=<filmId>): an ordered scene list plus
- * master audio / caption / overlay tracks, persisted through PATCH
- * /api/films/:id. The timeline is the document; every block is data first
- * (film.audio[n], film.captions[n], …) and pixels second.
+ * Edits ONE saved film (/film.html?id=<filmId>, the id a "ws/film" slug path
+ * sent URL-encoded as one segment): an ordered scene list plus master audio /
+ * caption / overlay tracks, persisted through PATCH /api/films/:id. Scenes
+ * and assets belong to the film's own folder (scenes/, assets/, out/); a
+ * scene's full id is `${filmId}/${slug}`. The timeline is the document; every
+ * block is data first (film.audio[n], film.captions[n], …) and pixels second.
  *
  * Preview honesty:
  *  - Video plays the scenes' REAL rendered outputs back to back (two <video>
@@ -77,7 +79,7 @@ const filmId = new URLSearchParams(location.search).get('id');
 const state = {
   film: null,        // the editable document (what PATCH sends)
   detail: null,      // server-resolved reality: scene layout, problems, fps…
-  assets: [],        // output project assets (media bin)
+  assets: [],        // the film's own assets (media bin)
   pxf: 1,            // pixels per frame (zoom)
   pxfFit: 1,
   snap: true,
@@ -92,20 +94,22 @@ const state = {
   waves: new Map(),  // src -> {loading} | {duration, peaks}
   audioCtx: null,
   mix: { el: null, url: null, dirty: true, building: false, active: false },
-  sceneJobs: new Map(), // projectId -> {jobId, percent, state}
+  sceneJobs: new Map(), // scene slug -> {jobId, percent, state}
   buildJobId: null,
   buildPoll: null,
   lastBuild: null,       // {status, logs} — refills the build panel on re-open
   inspectorMode: null,   // null = selection properties | 'build'
-  projectsCache: null,   // projects rail (drag sources)
+  sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
 };
 
 const fps = () => state.detail?.fps || 30;
 const totalFrames = () => state.detail?.totalFrames || 0;
-const outId = () => state.film?.outputProjectId;
-const assetUrl = (rel) => `/api/projects/${outId()}/asset?path=${encodeURIComponent(rel)}`;
-const sceneSrc = (s) => `/api/projects/${s.projectId}/output?file=${encodeURIComponent(s.outputFile)}`;
+// Ids are slug paths ("ws/film", "ws/film/scene") sent as ONE encoded segment.
+const fid = encodeURIComponent(filmId ?? '');
+const sceneApi = (slug) => `/api/scenes/${encodeURIComponent(`${filmId}/${slug}`)}`;
+const assetUrl = (rel) => `/api/films/${fid}/asset?path=${encodeURIComponent(rel)}`;
+const sceneSrc = (s) => `${sceneApi(s.slug)}/output?file=${encodeURIComponent(s.outputFile)}`;
 const isVideoAsset = (p) => /\.(mp4|webm|mov)$/i.test(p);
 
 function timecode(frame) {
@@ -145,7 +149,7 @@ async function doSave() {
   setSaveState('saving…', 'dirty');
   const sent = JSON.stringify(snapshot());
   try {
-    const { film, detail } = await api(`/api/films/${filmId}`, { method: 'PATCH', body: { patch: JSON.parse(sent) } });
+    const { film, detail } = await api(`/api/films/${fid}`, { method: 'PATCH', body: { patch: JSON.parse(sent) } });
     // Only adopt the server's film if nothing changed while the PATCH was in
     // flight — otherwise the response would clobber keystrokes.
     if (JSON.stringify(snapshot()) === sent) {
@@ -231,8 +235,9 @@ function adoptDetail(detail) {
 }
 
 async function refresh() {
-  const { film, detail } = await api(`/api/films/${filmId}`);
+  const { film, detail, sceneFolders } = await api(`/api/films/${fid}`);
   state.film = film;
+  state.sceneFolders = sceneFolders ?? [];
   lastAudioJson = JSON.stringify(film.audio ?? []);
   adoptDetail(detail);
   $('#film-name').value = film.name;
@@ -242,9 +247,8 @@ async function refresh() {
 }
 
 async function loadAssets() {
-  if (!outId()) { state.assets = []; return; }
   try {
-    const { files } = await api(`/api/projects/${outId()}/assets`);
+    const { files } = await api(`/api/films/${fid}/assets`);
     state.assets = files;
   } catch { state.assets = []; }
 }
@@ -261,7 +265,7 @@ function renderHeader() {
   const btn = $('#btn-problems');
   btn.classList.toggle('hidden', !problems.length);
   btn.textContent = `⚠ ${problems.length} issue${problems.length === 1 ? '' : 's'}`;
-  const HARD = new Set(['scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'output_project_missing', 'asset_missing', 'mixed_scene_audio']);
+  const HARD = new Set(['scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'asset_missing', 'mixed_scene_audio']);
   const ul = $('#problems-list');
   ul.innerHTML = '';
   for (const p of problems) {
@@ -362,7 +366,7 @@ function updateLayers(frame) {
   // Overlays — keyed elements so a playing video overlay isn't recreated per frame.
   const live = new Set();
   for (const o of film.overlays ?? []) {
-    const visible = frame >= o.fromFrame && frame < o.toFrame && outId();
+    const visible = frame >= o.fromFrame && frame < o.toFrame;
     if (!visible) continue;
     live.add(o.id);
     let el = state.overlayEls.get(o.id);
@@ -419,7 +423,7 @@ async function buildMix() {
   state.mix.building = true;
   updateMixChip();
   try {
-    const res = await fetch(`/api/films/${filmId}/preview-audio`, { method: 'POST' });
+    const res = await fetch(`/api/films/${fid}/preview-audio`, { method: 'POST' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw Object.assign(new Error(data.message || res.statusText), { data });
@@ -525,7 +529,7 @@ $('#btn-step-fwd').addEventListener('click', () => { stopPlayback(); setPlayhead
 /* ------------------------------- waveforms ------------------------------ */
 
 function loadWave(src) {
-  if (!outId() || state.waves.has(src)) return;
+  if (state.waves.has(src)) return;
   state.waves.set(src, { loading: true });
   (async () => {
     try {
@@ -695,8 +699,8 @@ function renderTimeline() {
     const add = document.createElement('button');
     add.className = 'lane-add';
     add.textContent = '+';
-    add.title = 'add scenes — drag a project from the left panel onto the timeline';
-    add.addEventListener('click', revealProjectsRail);
+    add.title = 'add scenes — drag one from the left rail, or create a new one there';
+    add.addEventListener('click', revealScenesRail);
     head.appendChild(add);
     addCutlines(lane);
     (state.detail?.scenes ?? []).forEach((s, i) => lane.appendChild(sceneBlock(s, i)));
@@ -848,18 +852,18 @@ function sceneBlock(s, index) {
   const w = (s.durationInFrames || 1) * state.pxf;
   const el = baseBlock('scene', index, x, w, 'blk-scene');
   if (!s.rendered) el.classList.add('unrendered');
-  const mismatch = (state.detail.problems ?? []).some((p) => p.code === 'signature_mismatch' && p.projectId === s.projectId);
+  const mismatch = (state.detail.problems ?? []).some((p) => p.code === 'signature_mismatch' && p.sceneId === s.sceneId);
   if (mismatch) el.classList.add('mismatch');
 
   const dot = document.createElement('span');
   dot.className = 'sc-status';
-  dot.title = s.missing ? 'project missing' : s.rendered ? 'rendered' : 'not rendered yet';
+  dot.title = s.missing ? 'scene folder missing' : s.rendered ? 'rendered' : 'not rendered yet';
   const label = document.createElement('span');
   label.className = 'blk-label';
-  label.textContent = s.missing ? `⚠ missing (${s.projectId.slice(0, 8)}…)` : s.name;
+  label.textContent = s.missing ? `⚠ missing (${s.slug})` : s.name;
   const dur = document.createElement('span');
   dur.className = 'sc-dur';
-  const job = state.sceneJobs.get(s.projectId);
+  const job = state.sceneJobs.get(s.slug);
   dur.textContent = job && !['done', 'error', 'cancelled'].includes(job.state)
     ? `render ${job.percent ?? 0}%`
     : `${s.durationInFrames ?? 0}f`;
@@ -1225,7 +1229,7 @@ function renderFilmInspector(box) {
   fact('audio tracks', String(f.audio.length));
   fact('captions', String(f.captions.length));
   fact('overlays', String(f.overlays.length));
-  fact('output project', d.outputProject ? (d.outputProject.name ?? d.outputProject.id) : '(first scene)');
+  fact('workspace', f.workspace ?? '—');
   fact('output file', `${f.outputFilename}.${d.format === 'prores' ? 'mov' : d.format ?? 'mp4'}`);
   box.appendChild(dl);
 
@@ -1258,7 +1262,7 @@ function renderSceneInspector(box, index) {
   const dl = el('dl', { class: 'insp-facts' });
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
   fact('name', s.name ?? '(missing)');
-  fact('status', s.missing ? 'project missing' : s.rendered ? 'rendered ✓' : 'NOT rendered');
+  fact('status', s.missing ? 'scene folder missing' : s.rendered ? 'rendered ✓' : 'NOT rendered');
   if (!s.missing) {
     fact('video', `${s.width}×${s.height} @ ${s.fps}fps`);
     fact('length', `${s.durationInFrames}f · ${(s.durationInFrames / s.fps).toFixed(2)}s`);
@@ -1269,15 +1273,15 @@ function renderSceneInspector(box, index) {
 
   const row1 = el('div', { class: 'insp-row' });
   if (!s.missing) {
-    const job = state.sceneJobs.get(s.projectId);
+    const job = state.sceneJobs.get(s.slug);
     const rendering = job && !['done', 'error', 'cancelled'].includes(job.state);
     const btnRender = el('button', {
       class: 'ghost', text: rendering ? `rendering ${job.percent ?? 0}%…` : (s.rendered ? 're-render scene' : 'render scene'),
-      onclick: () => renderScene(s.projectId),
+      onclick: () => renderScene(s.slug),
     });
     if (rendering) btnRender.disabled = true;
     row1.appendChild(btnRender);
-    row1.appendChild(el('a', { class: 'ghost', href: `/?project=${s.projectId}`, target: '_blank', text: 'open project ↗', style: 'text-decoration:none' }));
+    row1.appendChild(el('a', { class: 'ghost', href: `/?scene=${encodeURIComponent(s.sceneId)}`, target: '_blank', text: 'open scene ↗', style: 'text-decoration:none' }));
   }
   box.appendChild(row1);
   const row2 = el('div', { class: 'insp-row' });
@@ -1291,7 +1295,7 @@ function renderSceneInspector(box, index) {
   }));
   row2.appendChild(el('button', { class: 'ghost danger', text: 'remove', onclick: deleteSelection }));
   box.appendChild(row2);
-  box.appendChild(el('p', { class: 'dim note', text: 'Scenes are separate projects stitched losslessly — edit the composition in its own project, re-render, and the film picks the new output up automatically.' }));
+  box.appendChild(el('p', { class: 'dim note', text: 'Each scene is its own folder inside the film, stitched losslessly — open it, edit the composition, re-render, and the film picks the new output up automatically. Removing a scene only drops it from the play order; the folder stays in the rail as unlisted.' }));
 }
 
 function moveScene(from, to) {
@@ -1309,10 +1313,10 @@ function moveScene(from, to) {
   setPlayhead(state.playhead);
 }
 
-async function renderScene(projectId) {
+async function renderScene(slug) {
   try {
-    const job = await api(`/api/projects/${projectId}/render`, { method: 'POST', body: {} });
-    state.sceneJobs.set(projectId, { jobId: job.jobId, state: job.state, percent: 0 });
+    const job = await api(`${sceneApi(slug)}/render`, { method: 'POST', body: {} });
+    state.sceneJobs.set(slug, { jobId: job.jobId, state: job.state, percent: 0 });
     pollSceneJobs();
     renderTimeline();
     renderInspector();
@@ -1324,12 +1328,12 @@ function pollSceneJobs() {
   if (scenePollTimer) return;
   scenePollTimer = setInterval(async () => {
     let activeCount = 0;
-    for (const [pid, j] of state.sceneJobs) {
+    for (const [slug, j] of state.sceneJobs) {
       if (['done', 'error', 'cancelled'].includes(j.state)) continue;
       activeCount++;
       try {
         const s = await api(`/api/jobs/${j.jobId}`);
-        state.sceneJobs.set(pid, { jobId: j.jobId, state: s.state, percent: s.percent });
+        state.sceneJobs.set(slug, { jobId: j.jobId, state: s.state, percent: s.percent });
         if (s.state === 'done') {
           toast(`Scene rendered ✓`, { kind: 'info' });
           await refresh();
@@ -1540,66 +1544,71 @@ for (const btn of document.querySelectorAll('[data-close]')) {
 
 /* ---- scenes ---- */
 
-/* The projects rail: every project is one drag away from being a scene.
- * Replaces the old add-scenes dialog — a film is assembled by dragging
- * projects onto the timeline (or the row's + button, which appends). */
+/* The scenes rail: every scene folder in the film, one drag away from the
+ * play order. Folders the document lists are flagged "in film" (a scene
+ * plays once, so they are inert); folders on disk the play order does not
+ * reference are `unlisted` and can be dragged in (or appended with +).
+ * "+ new scene" scaffolds a fresh folder — the server appends it. */
 
-async function loadProjectsRail() {
-  try {
-    const { projects } = await api('/api/projects');
-    state.projectsCache = projects.filter((p) => !p.missing);
-    renderProjectsRail();
-  } catch { /* rail is re-tried on next refresh */ }
-}
-
-function projectCompat(p) {
+function sceneCompat(f) {
   // Compatibility against the film's established signature (first scene wins).
   const d = state.detail;
-  if (!d?.signature) return { ok: true };
-  const s = d.scenes.find((x) => x.projectId === p.id);
+  if (!d?.signature || f.missing) return { ok: true };
+  const s = d.scenes.find((x) => x.slug === f.slug && !x.missing);
   if (s) return { ok: s.signature === d.signature, sig: s.signature };
-  return { ok: null }; // unknown until its config is read server-side — flagged after adding if wrong
+  // Unlisted folder: resolution/fps/format are known; alpha and pixFmt only
+  // resolve server-side after adding — flagged then if wrong.
+  return { ok: d.signature.startsWith(`${f.width}x${f.height}@${f.fps}/${f.format}/`) ? null : false };
 }
 
-function renderProjectsRail() {
-  const ul = $('#fe-project-list');
-  if (!ul || !state.projectsCache) return;
+function renderScenesRail() {
+  const ul = $('#fe-scene-list');
+  if (!ul || !state.film) return;
   ul.innerHTML = '';
-  const rows = state.projectsCache.filter((p) => p.id !== outId());
+  const rows = state.sceneFolders ?? [];
   if (!rows.length) {
-    ul.innerHTML = '<li class="pick-empty">no projects yet — create scene projects in the Studio first</li>';
+    ul.innerHTML = '<li class="pick-empty">no scenes yet — start with “+ new scene” below</li>';
     return;
   }
-  for (const p of rows) {
+  const listedSlugs = new Set(state.film.scenes.map((s) => s.slug));
+  for (const f of rows) {
     const li = document.createElement('li');
-    li.title = 'drag onto the timeline to place, or + to append';
-    const inFilm = state.film.scenes.filter((s) => s.projectId === p.id).length;
-    const compat = projectCompat(p);
-    if (compat.ok === false) li.classList.add('incompat');
-    const name = el('span', { class: 'pr-name', text: p.name });
-    const add = el('button', {
-      class: 'pr-add', text: '+', title: 'append as the last scene',
-      onclick: (ev) => { ev.stopPropagation(); insertSceneAt(p.id, state.film.scenes.length); },
-    });
-    add.addEventListener('pointerdown', (ev) => ev.stopPropagation());
-    const meta = el('span', {
-      class: 'pr-meta',
-      text: (compat.ok === false ? `≠ film format` : '') || (inFilm ? '' : ' '),
-    });
-    if (inFilm) {
-      meta.appendChild(el('span', { class: 'pr-count', text: `in film ×${inFilm}` }));
+    const listed = listedSlugs.has(f.slug);
+    if (listed) li.classList.add('listed');
+    li.title = listed
+      ? 'in the play order — select its block on the timeline'
+      : 'drag onto the timeline to place, or + to append';
+    const compat = sceneCompat(f);
+    if (compat.ok === false || f.missing) li.classList.add('incompat');
+    const name = el('span', { class: 'sr-name', text: f.name ?? f.slug });
+    li.appendChild(name);
+    if (!listed && !f.missing) {
+      const add = el('button', {
+        class: 'sr-add', text: '+', title: 'append as the last scene',
+        onclick: (ev) => { ev.stopPropagation(); insertSceneAt(f.slug, state.film.scenes.length); },
+      });
+      add.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+      li.appendChild(add);
     }
-    li.append(name, add, meta);
-    li.addEventListener('pointerdown', (ev) => dragProjectFromRail(ev, p));
+    const meta = el('span', {
+      class: 'sr-meta',
+      text: (f.missing ? 'unreadable ' : compat.ok === false ? '≠ film format ' : '') || ' ',
+    });
+    meta.appendChild(el('span', {
+      class: `sr-flag${listed ? '' : ' unlisted'}`,
+      text: listed ? 'in film' : 'unlisted',
+    }));
+    li.appendChild(meta);
+    if (!listed && !f.missing) li.addEventListener('pointerdown', (ev) => dragSceneFromRail(ev, f));
     ul.appendChild(li);
   }
 }
 
-/** Pointer-drag a project row onto the timeline: a chip follows the cursor,
- *  an insert marker shows where the scene will land, release drops it. */
-function dragProjectFromRail(ev, p) {
+/** Pointer-drag an unlisted scene row onto the timeline: a chip follows the
+ *  cursor, an insert marker shows where the scene will land, release drops it. */
+function dragSceneFromRail(ev, p) {
   ev.preventDefault();
-  const chip = el('div', { class: 'drag-chip', text: `▶ ${p.name}` });
+  const chip = el('div', { class: 'drag-chip', text: `▶ ${p.name ?? p.slug}` });
   let started = false;
   let dropIndex = null;
   const startX = ev.clientX, startY = ev.clientY;
@@ -1631,27 +1640,42 @@ function dragProjectFromRail(ev, p) {
     window.removeEventListener('pointerup', up);
     chip.remove();
     $('#tl-insert')?.remove();
-    if (started && dropIndex !== null) insertSceneAt(p.id, dropIndex);
+    if (started && dropIndex !== null) insertSceneAt(p.slug, dropIndex);
   };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
 }
 
-async function insertSceneAt(projectId, index) {
-  mutate((film) => film.scenes.splice(index, 0, { projectId }), { structural: true, silent: true });
+async function insertSceneAt(slug, index) {
+  if (state.film.scenes.some((s) => s.slug === slug)) {
+    return toast('That scene is already in the play order — a scene plays once.', { kind: 'error' });
+  }
+  mutate((film) => film.scenes.splice(index, 0, { slug }), { structural: true, silent: true });
   await waitForSaved(); // the save returns the recomputed layout
   renderAll();
 }
 
-function revealProjectsRail() {
-  document.querySelector('.fe-frame').classList.remove('projects-collapsed');
-  const rail = $('#fe-projects');
+async function createNewScene() {
+  const name = prompt('Name for the new scene:');
+  if (!name || !name.trim()) return;
+  try {
+    await waitForSaved(); // the server appends to the play order it reads from disk
+    await api(`/api/films/${fid}/scenes`, { method: 'POST', body: { name: name.trim() } });
+    await refresh();
+    toast('Scene created ✓ — appended to the play order', { kind: 'info' });
+  } catch (err) { toastError(err); }
+}
+$('#btn-new-scene').addEventListener('click', createNewScene);
+
+function revealScenesRail() {
+  document.querySelector('.fe-frame').classList.remove('rail-collapsed');
+  const rail = $('#fe-scenes');
   rail.classList.remove('pulse');
   void rail.offsetWidth; // restart the animation
   rail.classList.add('pulse');
 }
-$('#btn-projects-collapse').addEventListener('click', () => {
-  document.querySelector('.fe-frame').classList.toggle('projects-collapsed');
+$('#btn-scenes-collapse').addEventListener('click', () => {
+  document.querySelector('.fe-frame').classList.toggle('rail-collapsed');
 });
 
 /* ---- audio ---- */
@@ -1661,7 +1685,7 @@ function pickListForAssets(ulSel, kinds, onPick) {
   ul.innerHTML = '';
   const files = state.assets.filter((a) => kinds.includes(a.kind));
   if (!files.length) {
-    ul.innerHTML = `<li class="pick-empty">nothing here yet — upload a file above${outId() ? '' : ' (the film needs an output project first)'}</li>`;
+    ul.innerHTML = '<li class="pick-empty">nothing here yet — upload a file above</li>';
     return;
   }
   for (const a of files) {
@@ -1677,7 +1701,6 @@ function pickListForAssets(ulSel, kinds, onPick) {
 }
 
 function openAudioDialog() {
-  if (!outId()) return toast('The film has no output project to hold audio assets — set one first.', { kind: 'error' });
   pickListForAssets('#audio-pick', ['audio'], (a) => {
     mutate((film) => film.audio.push({
       id: uuid(), src: a.path, startInFrames: Math.round(state.playhead), gainDb: 0,
@@ -1693,7 +1716,7 @@ async function uploadInto(files, msgSel, afterUpload) {
   for (const file of files) {
     msg.textContent = `uploading ${file.name}…`;
     try {
-      const res = await fetch(`/api/projects/${outId()}/asset?path=${encodeURIComponent('assets/' + file.name)}`, { method: 'PUT', body: file });
+      const res = await fetch(`/api/films/${fid}/asset?path=${encodeURIComponent('assets/' + file.name)}`, { method: 'PUT', body: file });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.message || res.statusText);
@@ -1719,7 +1742,6 @@ $('#btn-add-audio').addEventListener('click', openAudioDialog);
 /* ---- overlays ---- */
 
 function openOverlayDialog() {
-  if (!outId()) return toast('The film has no output project to hold overlay assets — set one first.', { kind: 'error' });
   pickListForAssets('#overlay-pick', ['image', 'video'], (a) => {
     mutate((film) => film.overlays.push({
       id: uuid(), src: a.path,
@@ -1756,7 +1778,6 @@ $('#btn-add-caption').addEventListener('click', addCaptionAtPlayhead);
 /* ---- narration (TTS) ---- */
 
 $('#btn-add-tts').addEventListener('click', async () => {
-  if (!outId()) return toast('The film has no output project to hold narration — set one first.', { kind: 'error' });
   $('#tts-msg').textContent = '';
   try {
     const rep = await api('/api/vendors?probe=0');
@@ -1800,7 +1821,7 @@ $('#tts-form').addEventListener('submit', async (e) => {
       rate: Number($('#tts-rate').value) || undefined,
       sentenceTimings: $('#tts-captions').checked,
     };
-    const res = await api(`/api/projects/${outId()}/tts`, { method: 'POST', body });
+    const res = await api(`/api/films/${fid}/tts`, { method: 'POST', body });
     const at = Math.round(state.playhead);
     const label = text.split(/\s+/).slice(0, 4).join(' ');
     mutate((film) => {
@@ -1831,7 +1852,7 @@ $('#tts-form').addEventListener('submit', async (e) => {
   }
 });
 
-$('#btn-add-scene').addEventListener('click', revealProjectsRail);
+$('#btn-add-scene').addEventListener('click', revealScenesRail);
 
 /* --------------------------------- build -------------------------------- */
 
@@ -1905,7 +1926,7 @@ async function startBuild() {
       audioTargetPeakDb: $('#bi-target').value === '' ? null : Number($('#bi-target').value),
       burnCaptions: $('#bi-burn').checked,
     };
-    const submitted = await api(`/api/films/${filmId}/build`, { method: 'POST', body });
+    const submitted = await api(`/api/films/${fid}/build`, { method: 'POST', body });
     state.film.outputFilename = body.outputFilename;
     state.film.audioTargetPeakDb = body.audioTargetPeakDb;
     state.film.burnCaptions = body.burnCaptions;
@@ -1935,7 +1956,7 @@ function updateBuildUI(s, logs) {
     bset('#bj-download', (e) => {
       e.classList.remove('hidden');
       e.textContent = `⤓ ${file}`;
-      e.href = `/api/projects/${outId() ?? state.film.scenes[0]?.projectId}/output?file=${encodeURIComponent(file)}&download=1`;
+      e.href = `/api/films/${fid}/output?file=${encodeURIComponent(file)}&download=1`;
     });
     if (s.audio) {
       bset('#bj-levels', (e) => {
@@ -1998,7 +2019,7 @@ function renderAll() {
   }
   renderTimeline();
   renderInspector();
-  renderProjectsRail();
+  renderScenesRail();
   fitPlayerBox();
   setPlayhead(state.playhead);
   updateMixChip();
@@ -2011,7 +2032,6 @@ function renderAll() {
   }
   try {
     await refresh();
-    await loadProjectsRail();
   } catch (err) {
     toastError(err);
     document.body.innerHTML = `<p style="padding:40px" class="dim">Could not load film: ${err.message} (<a href="/">back to the Studio</a>)</p>`;

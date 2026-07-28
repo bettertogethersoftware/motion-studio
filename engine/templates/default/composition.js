@@ -1,5 +1,5 @@
 /*
- * __PROJECT_NAME__ — Motion Studio composition
+ * __SCENE_NAME__ — Motion Studio composition
  *
  * Everything below is a pure function of `frame`. Never read the clock,
  * never use setTimeout/setInterval or CSS transitions/animations with

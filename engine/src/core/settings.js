@@ -10,18 +10,18 @@
  * per-app preference wearing the wrong label.
  *
  * What that means in practice:
- *   newProjectDefaults   fill in the fields a create-project call left unset
+ *   newSceneDefaults   fill in the fields a create-film/create-scene call left unset
  *   render.defaultWorkers  the default worker count for a render that does not
  *                        name one
  *   ffmpeg.path          the binary used for the prereq check AND every encode
- *   ffmpeg.crf/preset    seed a newly scaffolded project's output config
+ *   ffmpeg.crf/preset    seed a newly scaffolded scene's output config
  *   tts.vendor           which speech vendor narration goes through (v0.17)
  *   tts.azure.*          the Azure vendor's non-secret options (region, default
  *                        voice, output format, style) — never the API key
  *
  * Two invariants hold throughout. An explicit argument always beats a global
  * default — these fill gaps, they do not override a caller who spoke up. And
- * they only ever apply at project *creation*: an existing project.json is
+ * they only ever apply at scene *creation*: an existing scene.json is
  * never rewritten because a global changed. See resolveFfmpegPath() below for
  * the one full precedence chain (CLI flag > env > this file > PATH).
  *
@@ -34,7 +34,7 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
-import { defaultDataDir } from './project.js';
+import { defaultDataDir } from './scene.js';
 import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
 import { ELEVENLABS_WAV_FORMATS, ELEVENLABS_DEFAULT_FORMAT } from './tts-elevenlabs.js';
 
@@ -55,11 +55,11 @@ export const MUSIC_VENDORS = Object.freeze(['node', 'fluidsynth']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
-  newProjectDefaults: Object.freeze({ fps: 30, width: 1920, height: 1080, durationInFrames: 150 }),
+  newSceneDefaults: Object.freeze({ fps: 30, width: 1920, height: 1080, durationInFrames: 150 }),
   render: Object.freeze({ defaultWorkers: 1 }),
   // path: null → "ffmpeg" on PATH. defaultCrf/defaultPreset: null → the
-  // engine's per-format defaults; when set they seed newly created projects'
-  // output config (existing projects are untouched — same rule as everything
+  // engine's per-format defaults; when set they seed newly created scenes'
+  // output config (existing scenes are untouched — same rule as everything
   // else in this file).
   ffmpeg: Object.freeze({ path: null, defaultCrf: null, defaultPreset: null }),
   // Which speech vendor narration goes through, and the non-secret half of the
@@ -129,13 +129,13 @@ export function validateSettings(s) {
   };
   if (!s || typeof s !== 'object') problems.push('settings must be an object');
   else {
-    const d = s.newProjectDefaults;
-    if (!d || typeof d !== 'object') problems.push('newProjectDefaults: object required');
+    const d = s.newSceneDefaults;
+    if (!d || typeof d !== 'object') problems.push('newSceneDefaults: object required');
     else {
-      if (!isPosInt(d.fps) || d.fps > 240) problems.push('newProjectDefaults.fps: integer in 1..240 required');
-      if (!isPosInt(d.width) || d.width > 7680) problems.push('newProjectDefaults.width: integer in 1..7680 required');
-      if (!isPosInt(d.height) || d.height > 4320) problems.push('newProjectDefaults.height: integer in 1..4320 required');
-      if (!isPosInt(d.durationInFrames)) problems.push('newProjectDefaults.durationInFrames: positive integer required');
+      if (!isPosInt(d.fps) || d.fps > 240) problems.push('newSceneDefaults.fps: integer in 1..240 required');
+      if (!isPosInt(d.width) || d.width > 7680) problems.push('newSceneDefaults.width: integer in 1..7680 required');
+      if (!isPosInt(d.height) || d.height > 4320) problems.push('newSceneDefaults.height: integer in 1..4320 required');
+      if (!isPosInt(d.durationInFrames)) problems.push('newSceneDefaults.durationInFrames: positive integer required');
     }
     const r = s.render;
     if (!r || typeof r !== 'object') problems.push('render: object required');
@@ -309,21 +309,41 @@ export async function resolveFfmpegPath({ dataDir = defaultDataDir(), override }
 }
 
 /**
- * Apply the global new-project defaults to a create-project request. Only
+ * Resolve ffprobe by following whatever ffmpeg resolved to (v0.21).
+ *
+ * ffprobe has no setting of its own because it is never configured separately
+ * in practice — it ships beside ffmpeg in every distribution. So when ffmpeg
+ * was found by an absolute path (env/settings/flag), look for its sibling;
+ * only fall back to bare "ffprobe" on PATH when ffmpeg came from PATH too.
+ * Without this, `probe_asset` would be unusable in exactly the case
+ * MOTION_STUDIO_FFMPEG exists for: an MCP server with a minimal PATH.
+ *
+ * @returns {Promise<{path: string, source: 'sibling'|'PATH'}>}
+ */
+export async function resolveFfprobePath({ dataDir = defaultDataDir(), override } = {}) {
+  const { path: ffmpeg, source } = await resolveFfmpegPath({ dataDir, override });
+  if (source === 'PATH' || !ffmpeg.includes(path.sep)) return { path: 'ffprobe', source: 'PATH' };
+  const dir = path.dirname(ffmpeg);
+  const base = path.basename(ffmpeg).replace(/ffmpeg/i, (m) => (m === 'FFMPEG' ? 'FFPROBE' : m === 'Ffmpeg' ? 'Ffprobe' : 'ffprobe'));
+  return { path: path.join(dir, base), source: 'sibling' };
+}
+
+/**
+ * Apply the global new-scene defaults to a create request. Only
  * fields the caller actually left out are filled in — an explicit value always
  * wins, and `undefined` is stripped first so it cannot clobber a default by
  * spreading over it (MCP hands unset optional fields through as undefined).
  */
-export function withNewProjectDefaults(settings, body = {}) {
+export function withNewSceneDefaults(settings, body = {}) {
   const explicit = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
-  return { ...settings.newProjectDefaults, ...explicit };
+  return { ...settings.newSceneDefaults, ...explicit };
 }
 
 /**
  * The output-config patch implied by the global encode defaults, or null when
- * neither is set. Applied when scaffolding a project so a user who set
- * crf/preset once gets them on every new project, whichever front end created
- * it; existing projects keep their own (same rule as everything else here).
+ * neither is set. Applied when scaffolding a scene so a user who set
+ * crf/preset once gets them on every new scene, whichever front end created
+ * it; existing scenes keep their own (same rule as everything else here).
  */
 export function outputSeedFromSettings(settings, currentOutput = {}) {
   const { defaultCrf, defaultPreset } = settings.ffmpeg;
@@ -361,7 +381,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
   // hand-edited partial one) still yields a complete object.
   const merged = {
     schemaVersion: SETTINGS_SCHEMA_VERSION,
-    newProjectDefaults: { ...DEFAULT_SETTINGS.newProjectDefaults, ...(raw.newProjectDefaults ?? {}) },
+    newSceneDefaults: { ...DEFAULT_SETTINGS.newSceneDefaults, ...(raw.newSceneDefaults ?? {}) },
     render: { ...DEFAULT_SETTINGS.render, ...(raw.render ?? {}) },
     ffmpeg: { ...DEFAULT_SETTINGS.ffmpeg, ...(raw.ffmpeg ?? {}) },
     // Only known fields survive the read. A hand-edited file that parked an
@@ -395,7 +415,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
  * atomically. Unknown top-level keys are rejected so typos fail loudly.
  */
 export async function updateSettings(patch, dataDir = defaultDataDir()) {
-  const ALLOWED = new Set(['newProjectDefaults', 'render', 'ffmpeg', 'tts', 'music']);
+  const ALLOWED = new Set(['newSceneDefaults', 'render', 'ffmpeg', 'tts', 'music']);
   for (const k of Object.keys(patch ?? {})) {
     if (!ALLOWED.has(k)) {
       throw new EngineError(ErrorCodes.INVALID_CONFIG, `Settings field "${k}" cannot be updated`, { field: k });
@@ -404,7 +424,7 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
   const cur = await readSettings(dataDir);
   const next = validateSettings({
     schemaVersion: SETTINGS_SCHEMA_VERSION,
-    newProjectDefaults: { ...cur.newProjectDefaults, ...(patch.newProjectDefaults ?? {}) },
+    newSceneDefaults: { ...cur.newSceneDefaults, ...(patch.newSceneDefaults ?? {}) },
     render: { ...cur.render, ...(patch.render ?? {}) },
     ffmpeg: { ...cur.ffmpeg, ...(patch.ffmpeg ?? {}) },
     // tts.azure merges one level deeper so a patch may set just the region

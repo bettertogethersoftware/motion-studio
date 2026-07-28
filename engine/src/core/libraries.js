@@ -1,9 +1,9 @@
-﻿/**
- * Optional 3D libraries an agent can attach to a project (v0.7).
+/**
+ * Optional 3D libraries an agent can attach to a scene (v0.7).
  *
- * Motion Studio compositions are self-contained HTML/CSS/JS. A project can opt
+ * Motion Studio compositions are self-contained HTML/CSS/JS. A scene can opt
  * in to a heavier rendering library (Three.js / Babylon.js) that gets vendored
- * *locally* into the project — never a CDN at render time, so renders stay
+ * *locally* into the scene — never a CDN at render time, so renders stay
  * hermetic and reproducible. The builds live in engine/vendor/libs, which IS
  * committed (~9 MB, MIT / Apache-2.0), so add_library works on a fresh clone with
  * no setup step; engine/vendor.lock.json records which upstream build each file
@@ -12,7 +12,7 @@
  * stays out of git — see .gitignore for why each one.
  *
  * This registry is the single source of truth for both `add_library` (the MCP
- * tool / ProjectStore.addLibrary) and scripts/fetch-libs.mjs.
+ * tool / WorkspaceStore.addLibrary) and scripts/fetch-libs.mjs.
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

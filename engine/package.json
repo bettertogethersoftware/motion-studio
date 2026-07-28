@@ -1,6 +1,6 @@
 {
   "name": "motion-studio-engine",
-  "version": "0.19.0",
+  "version": "0.21.0",
   "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, MCP server, and pluggable speech/music vendors (Windows voices or Azure AI Speech; in-process SoundFont synth or FluidSynth).",
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

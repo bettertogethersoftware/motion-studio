@@ -19,10 +19,10 @@ import { promisify } from 'node:util';
 import { acquireRenderLock, releaseRenderLock, lockPath, isProcessAlive, LOCK_FILENAME } from '../src/core/lock.js';
 import { probeFrameCount, measureAudioLevels } from '../src/core/encoder.js';
 import { verifyFrameCount, renderComposition } from '../src/core/renderer.js';
-import { makeConfig, validateConfig } from '../src/core/project.js';
+import { makeConfig, validateConfig } from '../src/core/scene.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
 import { assembleFilm, sceneOutputPath } from '../src/core/film.js';
-import { ProjectStore } from '../src/core/project.js';
+import { makeStore, makeScene } from './helpers/workspace.mjs';
 import { ErrorCodes } from '../src/core/errors.js';
 
 const execFileP = promisify(execFile);
@@ -63,7 +63,7 @@ test('lock: a second process cannot take a lock a live process holds', async () 
     // acquiring as ourselves and asking as someone else.
     await assert.rejects(
       () => acquireRenderLock(dir, { pid: process.pid + 100000 }),
-      (e) => e.code === ErrorCodes.RENDER_ALREADY_IN_PROGRESS && /already writing this project/.test(e.message),
+      (e) => e.code === ErrorCodes.RENDER_ALREADY_IN_PROGRESS && /already writing this scene/.test(e.message),
     );
   } finally {
     await held.release();
@@ -171,7 +171,7 @@ test('render: a completed render reports framesVerified against the real file', 
   const out = path.join(dir, 'out', 'output.mp4');
 
   const res = await renderComposition({
-    projectPath: dir, config, outputPath: out,
+    scenePath: dir, config, outputPath: out,
     browserFactory: makeFakeBrowserFactory(),
     preflight: false,
   });
@@ -199,7 +199,7 @@ test('render: refuses to start while another live process holds the lock', async
 
     await assert.rejects(
       () => renderComposition({
-        projectPath: dir, config, outputPath: path.join(dir, 'out', 'o.mp4'),
+        scenePath: dir, config, outputPath: path.join(dir, 'out', 'o.mp4'),
         browserFactory: makeFakeBrowserFactory(), preflight: false,
       }),
       (e) => e.code === ErrorCodes.RENDER_ALREADY_IN_PROGRESS && e.detail.pid === squatter.pid,
@@ -225,7 +225,7 @@ async function twoScenes(root) {
     };
     await fsp.mkdir(path.join(d, 'out'), { recursive: true });
     await makeClip(sceneOutputPath(d, cfg), 15, colour);
-    return { projectId: id, path: d, config: cfg };
+    return { sceneId: id, path: d, config: cfg };
   };
   return [await mk('s1', 'red'), await mk('s2', 'blue')];
 }
@@ -241,7 +241,7 @@ test('assembleFilm: reports measured peak/mean and a clipping flag', async (t) =
   const out = path.join(root, 'film.mp4');
   const res = await assembleFilm({
     scenes, format: 'mp4', outputPath: out,
-    audioTracks: [{ src: bed, gainDb: -6 }], projectRoot: root,
+    audioTracks: [{ src: bed, gainDb: -6 }], assetRoot: root,
   });
 
   assert.ok(res.audio, 'a master timeline must come back with an audio report');
@@ -265,7 +265,7 @@ test('assembleFilm: audioTargetPeakDb lands the film on the requested peak', asy
   const res = await assembleFilm({
     scenes, format: 'mp4', outputPath: out,
     // Deliberately far off target, so a correction has to happen.
-    audioTracks: [{ src: bed, gainDb: -30 }], projectRoot: root,
+    audioTracks: [{ src: bed, gainDb: -30 }], assetRoot: root,
     audioTargetPeakDb: TARGET,
   });
 
@@ -293,7 +293,7 @@ test('assembleFilm: a target shifts every track equally, preserving the balance'
   const tracks = [{ src: loud, gainDb: -10 }, { src: quiet, gainDb: -25 }];
   const res = await assembleFilm({
     scenes, format: 'mp4', outputPath: path.join(root, 'film.mp4'),
-    audioTracks: tracks, projectRoot: root, audioTargetPeakDb: -3,
+    audioTracks: tracks, assetRoot: root, audioTargetPeakDb: -3,
   });
   // The caller's 15 dB spread must survive: the offset is applied to both, and
   // the input array itself must not be mutated.
@@ -309,7 +309,7 @@ test('assembleFilm: rejects an out-of-range target', async (t) => {
   await assert.rejects(
     () => assembleFilm({
       scenes, format: 'mp4', outputPath: path.join(root, 'f.mp4'),
-      audioTracks: [{ src: path.join(root, 'nope.wav') }], projectRoot: root,
+      audioTracks: [{ src: path.join(root, 'nope.wav') }], assetRoot: root,
       audioTargetPeakDb: 6,
     }),
     (e) => e.code === ErrorCodes.INVALID_CONFIG,
@@ -326,43 +326,43 @@ test('assembleFilm: no master audio means no audio report', async (t) => {
 
 /* ------------------------------------------------- syncSharedFiles ------- */
 
-async function storeWithProjects(name, ids) {
+async function storeWithScenes(name, ids) {
   const root = await dirFor(name);
-  const store = new ProjectStore(root);
+  const store = await makeStore(root);
   const made = {};
   for (const id of ids) {
-    const p = await store.createProject({ name: id, fps: 30, width: 160, height: 120, durationInFrames: 10 });
-    made[id] = p.id;
+    const { scene } = await makeScene(store, { name: id, fps: 30, width: 160, height: 120, durationInFrames: 10 });
+    made[id] = scene.id;
   }
   return { store, made };
 }
 
 test('syncSharedFiles: pushes to every target and skips the source', async () => {
-  const { store, made } = await storeWithProjects('sync-basic', ['a', 'b', 'c']);
+  const { store, made } = await storeWithScenes('sync-basic', ['a', 'b', 'c']);
   const shared = 'var SHARED = 1;\n';
   await store.writeFile(made.a, 'composition.js', shared);
   await store.writeFile(made.b, 'composition.js', 'var OLD = 0;\n');
 
   const res = await store.syncSharedFiles({
-    sourceProjectId: made.a,
-    targetProjectIds: [made.a, made.b, made.c],     // source listed on purpose
+    sourceSceneId: made.a,
+    targetSceneIds: [made.a, made.b, made.c],     // source listed on purpose
     files: ['composition.js'],
   });
 
-  assert.equal(res.projectsUpdated, 2, 'the source must not be written to itself');
+  assert.equal(res.scenesUpdated, 2, 'the source must not be written to itself');
   assert.equal(await store.readFile(made.b, 'composition.js'), shared);
   assert.equal(await store.readFile(made.c, 'composition.js'), shared);
 });
 
 test('syncSharedFiles: a missing source file fails before anything is written', async () => {
-  const { store, made } = await storeWithProjects('sync-missing', ['a', 'b']);
+  const { store, made } = await storeWithScenes('sync-missing', ['a', 'b']);
   await store.writeFile(made.a, 'composition.js', 'var OK = 1;\n');
   await store.writeFile(made.b, 'composition.js', 'var UNTOUCHED = 1;\n');
 
   await assert.rejects(
     () => store.syncSharedFiles({
-      sourceProjectId: made.a,
-      targetProjectIds: [made.b],
+      sourceSceneId: made.a,
+      targetSceneIds: [made.b],
       files: ['composition.js', 'nope.js'],          // second one does not exist
     }),
     (e) => e.code === ErrorCodes.FILE_NOT_FOUND,
@@ -373,23 +373,23 @@ test('syncSharedFiles: a missing source file fails before anything is written', 
 });
 
 test('syncSharedFiles: syntax errors and determinism warnings still apply per target', async () => {
-  const { store, made } = await storeWithProjects('sync-lint', ['a', 'b']);
+  const { store, made } = await storeWithScenes('sync-lint', ['a', 'b']);
   await store.writeFile(made.a, 'composition.js', 'var t = Date.now();\n');   // lints, but writes
   const res = await store.syncSharedFiles({
-    sourceProjectId: made.a, targetProjectIds: [made.b], files: ['composition.js'],
+    sourceSceneId: made.a, targetSceneIds: [made.b], files: ['composition.js'],
   });
   const warned = res.results[0].written[0].warnings;
   assert.ok(warned?.some((w) => w.rule === 'date-now'), 'determinism warnings must survive the sync');
 });
 
 test('syncSharedFiles: rejects an empty file list or an empty target list', async () => {
-  const { store, made } = await storeWithProjects('sync-empty', ['a', 'b']);
+  const { store, made } = await storeWithScenes('sync-empty', ['a', 'b']);
   await assert.rejects(
-    () => store.syncSharedFiles({ sourceProjectId: made.a, targetProjectIds: [made.b], files: [] }),
+    () => store.syncSharedFiles({ sourceSceneId: made.a, targetSceneIds: [made.b], files: [] }),
     (e) => e.code === ErrorCodes.INVALID_CONFIG,
   );
   await assert.rejects(
-    () => store.syncSharedFiles({ sourceProjectId: made.a, targetProjectIds: [], files: ['composition.js'] }),
+    () => store.syncSharedFiles({ sourceSceneId: made.a, targetSceneIds: [], files: ['composition.js'] }),
     (e) => e.code === ErrorCodes.INVALID_CONFIG,
   );
 });

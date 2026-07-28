@@ -1,20 +1,14 @@
 /**
- * Saved films — a persistent film definition the Studio film editor and the
- * MCP tools share.
+ * Film documents — validation, planning, and builds.
  *
- * `build_film` (core/film.js) is a one-shot verb: hand it scenes + a master
- * audio list and it assembles once, remembering nothing. That is the right
- * shape for an agent driving a scripted build, and the wrong shape for a
- * human iterating in an editor — a film you are still cutting needs to be a
- * *document*: reopenable, patchable a track at a time, buildable many times.
+ * A film IS a folder (v0.20): `<workspace>/films/<film>/` holds `film.json`
+ * (this module owns its schema), `assets/` (master audio and overlay files),
+ * `out/` (built output) and `scenes/<scene>/` (the compositions, in
+ * core/scene.js shape). WorkspaceStore (core/store.js) owns discovery and
+ * persistence of the document; this module owns what the document *means*:
  *
- * This module is that document layer:
- *
- *   FilmStore        — films.json registry in the data dir (same pattern as
- *                      ProjectStore's projects.json; the definitions are small
- *                      and belong beside the project registry, not inside any
- *                      one project folder)
  *   validateFilm     — every save goes through it; a broken film never persists
+ *   normalizeFilm    — fill defaults, stamp editor ids on timeline items
  *   planFilm         — non-throwing resolution: layout, per-scene status and a
  *                      `problems` list the editor can render as warnings
  *   captionsToSrt/Ass — caption track → sidecar / burn-in subtitle documents
@@ -24,11 +18,12 @@
  *   submitFilmBuild  — the same build as a JobManager job, so the Studio and
  *                      MCP callers poll film builds exactly like renders
  *
- * A film references two kinds of projects: SCENE projects (rendered video, in
- * play order) and one OUTPUT project whose assets/ holds the master audio and
- * overlay files and whose out/ receives the built film. Audio/overlay `src`
- * paths are project-relative under the output project's assets/, identical to
- * config.audio and build_film's master timeline.
+ * Before v0.20 a film referenced scene projects by UUID and needed a separate
+ * "output project" (the "— Master" convention) to hold master audio and
+ * receive builds. Both are gone: scenes are referenced by slug within the
+ * film folder, and the film folder itself is the output location. Audio and
+ * overlay `src` paths are film-relative under `assets/`, identical in shape
+ * to a scene's config.audio.
  */
 
 import path from 'node:path';
@@ -38,13 +33,13 @@ import fsp from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 import { EngineError, ErrorCodes } from './errors.js';
-import { defaultDataDir } from './project.js';
 import { getFormat } from './formats.js';
 import {
   sceneSignature, sceneOutputPath, sceneHasAudio, validateScenes, assembleFilm,
+  readRenderMeta, renderStaleness, describeStaleness,
 } from './film.js';
 import { buildVideoArgs, runFfmpeg } from './encoder.js';
-import { resolveInProject } from './sandbox.js';
+import { resolveInTarget } from './sandbox.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits — generous for real work, bounded against runaway callers.   */
@@ -73,11 +68,13 @@ export function toMixerTracks(tracks) {
 const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
 const isPosInt = (v) => Number.isInteger(v) && v > 0;
 
+const SCENE_SLUG_RE = /^[a-z0-9_][a-z0-9-_]*$/;
+
 function checkTrack(t, i, problems) {
   const at = `audio[${i}]`;
   if (!t || typeof t !== 'object') { problems.push(`${at} must be an object`); return; }
   if (typeof t.src !== 'string' || !t.src.replace(/\\/g, '/').startsWith('assets/')) {
-    problems.push(`${at}.src must be a project-relative path under assets/`);
+    problems.push(`${at}.src must be a film-relative path under assets/`);
   }
   if (t.startInFrames !== undefined && !isNonNegInt(t.startInFrames)) problems.push(`${at}.startInFrames must be a non-negative integer`);
   if (t.gainDb !== undefined && typeof t.gainDb !== 'number') problems.push(`${at}.gainDb must be a number`);
@@ -92,7 +89,7 @@ function checkOverlay(o, i, problems) {
   const at = `overlays[${i}]`;
   if (!o || typeof o !== 'object') { problems.push(`${at} must be an object`); return; }
   if (typeof o.src !== 'string' || !o.src.replace(/\\/g, '/').startsWith('assets/')) {
-    problems.push(`${at}.src must be a project-relative path under assets/`);
+    problems.push(`${at}.src must be a film-relative path under assets/`);
   }
   if (!isNonNegInt(o.fromFrame)) problems.push(`${at}.fromFrame must be a non-negative integer`);
   if (!isPosInt(o.toFrame) || (isNonNegInt(o.fromFrame) && o.toFrame <= o.fromFrame)) {
@@ -134,21 +131,40 @@ export function validateFilm(film) {
   }
   if (typeof film.name !== 'string' || !film.name.trim()) problems.push('name must be a non-empty string');
 
-  if (!Array.isArray(film.scenes)) problems.push('scenes must be an array of { projectId }');
+  if (!Array.isArray(film.scenes)) problems.push('scenes must be an array of { slug }');
   else {
     if (film.scenes.length > MAX_FILM_SCENES) problems.push(`scenes exceeds ${MAX_FILM_SCENES}`);
+    const seen = new Set();
     film.scenes.forEach((s, i) => {
-      if (!s || typeof s.projectId !== 'string' || !s.projectId) problems.push(`scenes[${i}].projectId must be a string`);
+      if (!s || typeof s.slug !== 'string' || !SCENE_SLUG_RE.test(s.slug)) {
+        problems.push(`scenes[${i}].slug must be a scene slug (lowercase a-z, 0-9, "-", "_")`);
+      } else if (seen.has(s.slug)) {
+        problems.push(`scenes[${i}].slug "${s.slug}" appears more than once — a scene plays once; ` +
+          'to reuse footage, render it into two scenes');
+      } else {
+        seen.add(s.slug);
+      }
     });
   }
 
-  if (film.outputProjectId !== null && film.outputProjectId !== undefined && typeof film.outputProjectId !== 'string') {
-    problems.push('outputProjectId must be a project id string or null');
-  }
   if (film.outputFilename !== undefined) {
     const base = String(film.outputFilename);
     if (base.includes('/') || base.includes('\\') || base.includes('..') || !base.trim()) {
       problems.push('outputFilename must be a bare filename');
+    }
+  }
+
+  const sd = film.sceneDefaults;
+  if (sd !== null && sd !== undefined) {
+    if (typeof sd !== 'object' || Array.isArray(sd)) problems.push('sceneDefaults must be an object or null');
+    else {
+      if (sd.fps !== undefined && (!isPosInt(sd.fps) || sd.fps > 240)) problems.push('sceneDefaults.fps: integer in 1..240');
+      if (sd.width !== undefined && (!isPosInt(sd.width) || sd.width > 7680)) problems.push('sceneDefaults.width: integer in 1..7680');
+      if (sd.height !== undefined && (!isPosInt(sd.height) || sd.height > 4320)) problems.push('sceneDefaults.height: integer in 1..4320');
+      if (sd.durationInFrames !== undefined && !isPosInt(sd.durationInFrames)) problems.push('sceneDefaults.durationInFrames: positive integer');
+      for (const k of Object.keys(sd)) {
+        if (!['fps', 'width', 'height', 'durationInFrames'].includes(k)) problems.push(`sceneDefaults.${k} is not a scene default`);
+      }
     }
   }
 
@@ -196,11 +212,15 @@ export function validateFilm(film) {
 /** Fill defaults and stamp ids on timeline items so editors can address them. */
 export function normalizeFilm(input = {}) {
   const stampIds = (arr) => (Array.isArray(arr) ? arr.map((x) => (x && typeof x === 'object' && !x.id ? { ...x, id: randomUUID() } : x)) : arr);
+  const sd = input.sceneDefaults;
+  const pickInts = (obj, keys) => Object.fromEntries(keys.filter((k) => obj?.[k] !== undefined).map((k) => [k, obj[k]]));
   return {
     name: typeof input.name === 'string' ? input.name.trim() : input.name,
-    scenes: Array.isArray(input.scenes) ? input.scenes.map((s) => ({ projectId: s?.projectId })) : [],
-    outputProjectId: input.outputProjectId ?? null,
+    scenes: Array.isArray(input.scenes) ? input.scenes.map((s) => ({ slug: s?.slug })) : [],
     outputFilename: input.outputFilename ?? 'film',
+    sceneDefaults: sd && typeof sd === 'object'
+      ? pickInts(sd, ['fps', 'width', 'height', 'durationInFrames'])
+      : null,
     audio: stampIds(input.audio ?? []),
     overlays: stampIds(input.overlays ?? []),
     captions: stampIds(input.captions ?? []),
@@ -208,88 +228,6 @@ export function normalizeFilm(input = {}) {
     audioTargetPeakDb: input.audioTargetPeakDb ?? null,
     burnCaptions: input.burnCaptions ?? false,
   };
-}
-
-/* ------------------------------------------------------------------ */
-/* FilmStore — films.json beside projects.json                         */
-/* ------------------------------------------------------------------ */
-
-export class FilmStore {
-  constructor(dataDir = defaultDataDir()) {
-    this.dataDir = dataDir;
-    this.registryPath = path.join(dataDir, 'films.json');
-  }
-
-  async _load() {
-    try {
-      const reg = JSON.parse(await fsp.readFile(this.registryPath, 'utf8'));
-      return Array.isArray(reg.films) ? reg : { films: [] };
-    } catch {
-      return { films: [] };
-    }
-  }
-
-  async _save(reg) {
-    await fsp.mkdir(this.dataDir, { recursive: true });
-    const tmp = this.registryPath + '.tmp';
-    await fsp.writeFile(tmp, JSON.stringify(reg, null, 2));
-    await fsp.rename(tmp, this.registryPath); // atomic on same volume
-  }
-
-  async listFilms() {
-    return (await this._load()).films;
-  }
-
-  async getFilm(filmId) {
-    const film = (await this._load()).films.find((f) => f.id === filmId);
-    if (!film) throw new EngineError(ErrorCodes.FILM_NOT_FOUND, `No film with id "${filmId}"`, { filmId });
-    return film;
-  }
-
-  async createFilm(input) {
-    const film = validateFilm({ ...normalizeFilm(input), id: randomUUID() });
-    const now = new Date().toISOString();
-    film.createdAt = now;
-    film.updatedAt = now;
-    const reg = await this._load();
-    reg.films.push(film);
-    await this._save(reg);
-    return film;
-  }
-
-  /**
-   * Merge a patch into an existing film. Only film fields are accepted, and
-   * array fields REPLACE (a timeline edit is a statement of the whole track —
-   * merging item-by-item would need addressing semantics no caller wants).
-   */
-  async updateFilm(filmId, patch) {
-    const ALLOWED = new Set(['name', 'scenes', 'outputProjectId', 'outputFilename',
-      'audio', 'overlays', 'captions', 'captionStyle', 'audioTargetPeakDb', 'burnCaptions']);
-    for (const k of Object.keys(patch ?? {})) {
-      if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_FILM, `Film field "${k}" cannot be updated`, { field: k });
-    }
-    const reg = await this._load();
-    const idx = reg.films.findIndex((f) => f.id === filmId);
-    if (idx < 0) throw new EngineError(ErrorCodes.FILM_NOT_FOUND, `No film with id "${filmId}"`, { filmId });
-    const cur = reg.films[idx];
-    const merged = validateFilm({
-      ...normalizeFilm({ ...cur, ...patch }),
-      id: cur.id, createdAt: cur.createdAt,
-    });
-    merged.updatedAt = new Date().toISOString();
-    reg.films[idx] = merged;
-    await this._save(reg);
-    return merged;
-  }
-
-  async removeFilm(filmId) {
-    const reg = await this._load();
-    const idx = reg.films.findIndex((f) => f.id === filmId);
-    if (idx < 0) throw new EngineError(ErrorCodes.FILM_NOT_FOUND, `No film with id "${filmId}"`, { filmId });
-    const [removed] = reg.films.splice(idx, 1);
-    await this._save(reg);
-    return { removed: removed.id, name: removed.name };
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -301,8 +239,10 @@ export class FilmStore {
  * shows `problems` as a validation chip; a film with problems can still be
  * edited (that is the point of an editor), it just cannot BUILD.
  *
- * @returns {{ scenes, totalFrames, durationSeconds, fps, format, signature,
- *             outputProject, problems }}
+ * @param {object} opts
+ * @param {object} opts.film   a film from WorkspaceStore.getFilm (id + path + doc)
+ * @param {object} opts.store  the WorkspaceStore
+ * @returns {{ scenes, totalFrames, durationSeconds, fps, format, signature, problems }}
  */
 export async function planFilm({ film, store }) {
   const problems = [];
@@ -310,25 +250,39 @@ export async function planFilm({ film, store }) {
   let signature = null, fps = null, format = null;
 
   for (const [i, ref] of (film.scenes ?? []).entries()) {
-    const base = { projectId: ref.projectId, index: i };
+    const sceneId = `${film.id}/${ref.slug}`;
+    const base = { sceneId, slug: ref.slug, index: i };
     let entry = null, config = null;
     try {
-      entry = await store.getProjectEntry(ref.projectId);
-      config = await store.readConfig(ref.projectId);
+      entry = await store.getScene(sceneId);
+      config = await store.readConfig(sceneId);
     } catch {
-      problems.push({ code: 'scene_missing', projectId: ref.projectId, message: `Scene ${i + 1}: project ${ref.projectId} is missing or unreadable` });
+      problems.push({ code: 'scene_missing', sceneId, message: `Scene ${i + 1}: "${ref.slug}" is missing or unreadable` });
       scenes.push({ ...base, missing: true, durationInFrames: 0 });
       continue;
     }
     const sig = sceneSignature(config);
     if (signature === null) { signature = sig; fps = config.fps; format = config.output?.format ?? 'mp4'; }
     else if (sig !== signature) {
-      problems.push({ code: 'signature_mismatch', projectId: ref.projectId, message: `Scene "${config.name}" is ${sig} — the film is ${signature}. Scenes must share resolution/fps/format to concatenate losslessly.` });
+      problems.push({ code: 'signature_mismatch', sceneId, message: `Scene "${config.name}" is ${sig} — the film is ${signature}. Scenes must share resolution/fps/format to concatenate losslessly.` });
     }
     const outFile = sceneOutputPath(entry.path, config);
     const rendered = fs.existsSync(outFile);
     if (!rendered) {
-      problems.push({ code: 'scene_not_rendered', projectId: ref.projectId, message: `Scene "${config.name}" has no rendered output yet` });
+      problems.push({ code: 'scene_not_rendered', sceneId, message: `Scene "${config.name}" has no rendered output yet` });
+    }
+    // Rendered, but at settings that have since changed (v0.21). Reported
+    // here so the caller sees it while planning, not after a build produced a
+    // film whose length disagrees with this very plan.
+    const meta = rendered ? readRenderMeta(entry.path, config) : null;
+    const stale = rendered ? renderStaleness(meta, config) : null;
+    if (stale) {
+      problems.push({
+        code: 'stale_render',
+        sceneId,
+        message: `Scene "${config.name}" was rendered at different settings (${describeStaleness(stale)}) — re-render it`,
+        changed: stale.changed,
+      });
     }
     scenes.push({
       ...base,
@@ -341,6 +295,10 @@ export async function planFilm({ film, store }) {
       format: config.output?.format ?? 'mp4',
       signature: sig,
       rendered,
+      // false = rendered but stale; null = rendered by a build that predates
+      // the sidecar, so it cannot be checked either way.
+      renderVerified: rendered ? (meta ? !stale : null) : false,
+      ...(stale ? { staleRender: { changed: stale.changed, recorded: stale.recorded, current: stale.current } } : {}),
       hasAudio: sceneHasAudio(config),
       outputFile: config.output?.filename ?? 'output.mp4',
     });
@@ -365,29 +323,17 @@ export async function planFilm({ film, store }) {
   }
   const totalFrames = offset;
 
-  // Output project + asset references.
-  let outputProject = null;
-  if (film.outputProjectId) {
-    try {
-      const entry = await store.getProjectEntry(film.outputProjectId);
-      outputProject = { id: entry.id, name: entry.name, path: entry.path, missing: false };
-      const checkAsset = (src, what) => {
-        const rel = String(src ?? '').replace(/\\/g, '/');
-        let ok = rel.startsWith('assets/');
-        if (ok) {
-          try { ok = fs.existsSync(resolveInProject(entry.path, rel)); } catch { ok = false; }
-        }
-        if (!ok) problems.push({ code: 'asset_missing', message: `${what} references ${src}, which does not exist in ${entry.name}'s assets` });
-      };
-      (film.audio ?? []).forEach((t, i) => checkAsset(t.src, t.label ? `Audio "${t.label}"` : `Audio track ${i + 1}`));
-      (film.overlays ?? []).forEach((o, i) => checkAsset(o.src, `Overlay ${i + 1}`));
-    } catch {
-      outputProject = { id: film.outputProjectId, missing: true };
-      problems.push({ code: 'output_project_missing', message: 'The film\'s output project is missing — master audio and overlays have nowhere to live' });
+  // Master audio / overlay assets live in the film's own assets/ folder.
+  const checkAsset = (src, what) => {
+    const rel = String(src ?? '').replace(/\\/g, '/');
+    let ok = rel.startsWith('assets/');
+    if (ok) {
+      try { ok = fs.existsSync(resolveInTarget(film.path, rel)); } catch { ok = false; }
     }
-  } else if ((film.audio ?? []).length || (film.overlays ?? []).length) {
-    problems.push({ code: 'no_output_project', message: 'Master audio / overlays need an output project to hold their assets' });
-  }
+    if (!ok) problems.push({ code: 'asset_missing', message: `${what} references ${src}, which does not exist in the film's assets` });
+  };
+  (film.audio ?? []).forEach((t, i) => checkAsset(t.src, t.label ? `Audio "${t.label}"` : `Audio track ${i + 1}`));
+  (film.overlays ?? []).forEach((o, i) => checkAsset(o.src, `Overlay ${i + 1}`));
 
   for (const [i, c] of (film.captions ?? []).entries()) {
     if (totalFrames && c.fromFrame >= totalFrames) {
@@ -407,7 +353,6 @@ export async function planFilm({ film, store }) {
     fps,
     format,
     signature,
-    outputProject,
     problems,
   };
 }
@@ -529,7 +474,7 @@ export function buildOverlayGraph(overlays, { width, height, fps, subtitlesFile 
 function sanitizeBase(outputFilename) {
   const base = String(outputFilename ?? 'film').replace(/\.[a-z0-9]+$/i, '');
   if (base.includes('/') || base.includes('\\') || base.includes('..') || !base.trim()) {
-    throw new EngineError(ErrorCodes.PATH_OUTSIDE_PROJECT, 'outputFilename must be a bare filename');
+    throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, 'outputFilename must be a bare filename');
   }
   return base;
 }
@@ -545,19 +490,17 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
   }
   const sceneData = [];
   for (const s of film.scenes) {
-    const entry = await store.getProjectEntry(s.projectId);
-    const config = await store.readConfig(s.projectId);
-    sceneData.push({ projectId: s.projectId, path: entry.path, config });
+    const sceneId = `${film.id}/${s.slug}`;
+    const entry = await store.getScene(sceneId);
+    const config = await store.readConfig(sceneId);
+    sceneData.push({ sceneId, slug: s.slug, path: entry.path, config });
   }
   const hasMasterAudio = !!(film.audio ?? []).length;
   const info = validateScenes(sceneData, { hasMasterAudio, requireRendered });
 
-  const outId = film.outputProjectId ?? film.scenes[0].projectId;
-  const outEntry = await store.getProjectEntry(outId);
-  const outCfg = await store.readConfig(outId);
   const base = sanitizeBase(film.outputFilename);
   const ext = getFormat(info.format).ext;
-  const outDir = path.join(outEntry.path, outCfg.output?.dir ?? 'out');
+  const outDir = path.join(film.path, 'out');
   const outputPath = path.join(outDir, base + ext);
 
   let audioTracks;
@@ -565,9 +508,9 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
     audioTracks = [];
     for (const t of film.audio) {
       const rel = t.src.replace(/\\/g, '/');
-      const abs = resolveInProject(outEntry.path, rel, { asAsset: true });
+      const abs = resolveInTarget(film.path, rel, { asAsset: true });
       if (!fs.existsSync(abs)) {
-        throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `master audio not found: ${rel} in project ${outId}`, { path: rel });
+        throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `master audio not found: ${rel} in film ${film.id}`, { path: rel });
       }
       audioTracks.push({ ...toMixerTracks([t])[0], src: abs });
     }
@@ -576,16 +519,16 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
   const overlays = [];
   for (const o of film.overlays ?? []) {
     const rel = o.src.replace(/\\/g, '/');
-    const abs = resolveInProject(outEntry.path, rel, { asAsset: true });
+    const abs = resolveInTarget(film.path, rel, { asAsset: true });
     if (!fs.existsSync(abs)) {
-      throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `overlay not found: ${rel} in project ${outId}`, { path: rel });
+      throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `overlay not found: ${rel} in film ${film.id}`, { path: rel });
     }
     const ext2 = path.extname(abs).toLowerCase();
     overlays.push({ ...o, abs, isVideo: ['.mp4', '.webm', '.mov'].includes(ext2), isWebm: ext2 === '.webm' });
   }
 
   const totalFrames = sceneData.reduce((n, s) => n + s.config.durationInFrames, 0);
-  return { sceneData, info, outEntry, outCfg, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames };
+  return { sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames };
 }
 
 /**
@@ -594,6 +537,11 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
  * ONE finishing encode that composites them. Captions always also produce a
  * .srt sidecar next to the output, burned or not: players and platforms take
  * sidecars, and the sidecar survives a re-cut without re-encoding.
+ *
+ * The finishing encode's crf/preset (and the limiter default) come from the
+ * FIRST scene's output config: scenes already share the codec-determining
+ * parameters (validateScenes enforces it), so scene 1 is the film's encode
+ * voice — and the film document needs no duplicate encode block to drift.
  */
 export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', onSpawn, progress, signal }) {
   const checkCancel = () => {
@@ -607,6 +555,7 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
   const captions = film.captions ?? [];
   const burn = !!film.burnCaptions && captions.length > 0;
   const finishing = overlays.length > 0 || burn;
+  const firstOutput = sceneData[0].config.output ?? {};
   const width = sceneData[0].config.width;
   const height = sceneData[0].config.height;
 
@@ -622,8 +571,8 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
       format: info.format,
       outputPath: assembleTarget,
       audioTracks,
-      projectRoot: r.outEntry.path,
-      audioLimiter: r.outCfg.output?.audioLimiter !== false,
+      assetRoot: film.path,
+      audioLimiter: firstOutput.audioLimiter !== false,
       audioTargetPeakDb: film.audioTargetPeakDb ?? undefined,
       ffmpegPath,
       onSpawn,
@@ -654,7 +603,7 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
       args.push(
         '-filter_complex', filterComplex,
         '-map', `[${outLabel}]`, '-map', '0:a?', '-c:a', 'copy',
-        ...buildVideoArgs({ ...r.outCfg.output, format: info.format, transparent: sceneData[0].config.output?.transparent }),
+        ...buildVideoArgs({ ...firstOutput, format: info.format, transparent: firstOutput.transparent }),
         '-r', String(fps),
         outputPath,
       );
@@ -674,6 +623,7 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
 
     return {
       ...result,
+      filmId: film.id,
       outputPath,
       overlaysApplied: overlays.length,
       captions: captions.length,
@@ -692,13 +642,13 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
  * up front so bad films fail the SUBMIT call with a structured error instead
  * of a job that dies a second later.
  *
- * @returns {{ jobId, state, queuePosition?, outputPath, totalFrames }}
+ * @returns {{ jobId, state, queuePosition?, outputPath, totalFrames, filmId }}
  */
 export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg' }) {
   const r = await resolveFilmForBuild({ film, store });
   const submitted = jobs.startRender({
-    projectId: film.outputProjectId ?? film.scenes[0].projectId,
-    projectPath: r.outEntry.path,
+    targetId: film.id,
+    scenePath: film.path,
     config: { durationInFrames: r.totalFrames, fps: r.info.fps },
     outputPath: r.outputPath,
     renderFn: (o) => buildFilmArtifact({

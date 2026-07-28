@@ -1,4 +1,4 @@
-﻿/**
+/**
  * FFmpeg encoder (format-aware since v0.5).
  *
  * DEFAULT frame delivery = stream PNG buffers straight into FFmpeg's stdin
@@ -118,7 +118,7 @@ export class FfmpegFrameSink {
    *   "30/2" is passed to -framerate verbatim — FFmpeg takes rationals — which
    *   is how proxy frame-step renders (v0.21) keep wall-clock duration exact
    *   at fractional rates no float could represent cleanly (e.g. 30/4 = 7.5).
-   * @param {object} [opts.output]   { format, crf, preset, pixFmt, transparent, intermediate } from project config
+   * @param {object} [opts.output]   { format, crf, preset, pixFmt, transparent, intermediate } from scene config
    * @param {string} [opts.ffmpegPath]
    * @param {(pid:number)=>void} [opts.onSpawn]  report pid for process-tree cleanup
    */
@@ -501,13 +501,132 @@ export async function probeFrameCount({ filePath, ffprobePath = 'ffprobe', onSpa
   return Number.isInteger(m) && m > 0 ? m : null;
 }
 
+/** Parse ffprobe's "30000/1001" rational into a rounded-to-3dp number. */
+function parseRational(str) {
+  if (typeof str !== 'string' || !str.includes('/')) return null;
+  const [n, d] = str.split('/').map(Number);
+  if (!Number.isFinite(n) || !Number.isFinite(d) || d === 0) return null;
+  return Number((n / d).toFixed(3));
+}
+
+const numOrNull = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Codecs headless Chromium cannot decode (v0.21).
+ *
+ * Chromium's bundled build ships without the proprietary codecs, so an
+ * `<video src="clip.mp4">` inside a composition fails with a MEDIA_ELEMENT
+ * format error while `canPlayType()` still answers "probably" — the feature
+ * check lies, and the render either hangs or draws nothing. Naming it at
+ * probe time is the whole point of the tool: it is the one property of a
+ * media file that decides whether a composition can use it at all.
+ */
+const BROWSER_UNDECODABLE = new Set(['h264', 'hevc', 'h265', 'mpeg4', 'aac', 'mp3']);
+const BROWSER_OK_VIDEO = 'vp8, vp9 or av1 in .webm';
+
+/**
+ * Turn raw `ffprobe -show_format -show_streams -of json` output into the tidy
+ * shape the tool surface returns. Pure, so it is unit-testable without ffprobe.
+ */
+export function summarizeMedia(raw) {
+  const streams = Array.isArray(raw?.streams) ? raw.streams : [];
+  const fmt = raw?.format ?? {};
+  const v = streams.find((s) => s.codec_type === 'video') ?? null;
+  const a = streams.find((s) => s.codec_type === 'audio') ?? null;
+
+  // A cover-art JPEG inside an mp3 is a video stream by ffprobe's reckoning;
+  // treating it as one would report a "1-frame video" for an audio file.
+  const isCoverArt = !!v && (v.disposition?.attached_pic === 1);
+
+  const video = v && !isCoverArt ? {
+    codec: v.codec_name ?? null,
+    width: numOrNull(v.width),
+    height: numOrNull(v.height),
+    fps: parseRational(v.avg_frame_rate) ?? parseRational(v.r_frame_rate),
+    frames: numOrNull(v.nb_frames),
+    pixFmt: v.pix_fmt ?? null,
+    durationSeconds: numOrNull(v.duration),
+  } : null;
+
+  const audio = a ? {
+    codec: a.codec_name ?? null,
+    channels: numOrNull(a.channels),
+    sampleRate: numOrNull(a.sample_rate),
+    durationSeconds: numOrNull(a.duration),
+  } : null;
+
+  const notes = [];
+  if (video && BROWSER_UNDECODABLE.has(String(video.codec).toLowerCase())) {
+    notes.push(
+      `Video codec "${video.codec}" cannot be decoded by the render browser — a <video> element using this ` +
+      `file will fail at render time even though canPlayType() claims otherwise. Transcode to ${BROWSER_OK_VIDEO} ` +
+      'before referencing it from a composition. (It is still fine as a film overlay, which ffmpeg composites.)',
+    );
+  }
+  if (video && video.fps && video.fps % 1 !== 0) {
+    notes.push(`Frame rate is fractional (${video.fps}); scenes render at integer fps, so seeking will not land on source frames exactly.`);
+  }
+
+  return {
+    container: fmt.format_name ?? null,
+    durationSeconds: numOrNull(fmt.duration),
+    bitRate: numOrNull(fmt.bit_rate),
+    streams: streams.length,
+    video,
+    audio,
+    hasAudio: !!audio,
+    ...(notes.length ? { notes } : {}),
+  };
+}
+
+/**
+ * Probe any media file for duration / dimensions / fps / codecs (v0.21).
+ *
+ * Returns null when ffprobe is unavailable or the file is not media, exactly
+ * like probeFrameCount(): ffprobe is not a declared prerequisite (see
+ * core/prereqs.js), so "cannot tell" is a normal answer, never a failure.
+ */
+export async function probeMedia({ filePath, ffprobePath = 'ffprobe', onSpawn, signal }) {
+  if (signal?.aborted) return null;
+  let proc;
+  try {
+    proc = spawn(ffprobePath, [
+      '-v', 'error', '-show_format', '-show_streams', '-of', 'json', filePath,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
+  }
+  if (onSpawn && proc.pid) onSpawn(proc.pid);
+  const onAbort = () => { try { proc.kill('SIGKILL'); } catch { /* already gone */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    let stdout = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    const code = await new Promise((resolve) => {
+      proc.on('error', () => resolve(-1));
+      proc.on('close', resolve);
+    });
+    if (code !== 0 || !stdout.trim()) return null;
+    try {
+      return summarizeMedia(JSON.parse(stdout));
+    } catch {
+      return null;
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * Mux audio tracks into a silent video. Video stream is copied (no
  * re-encode); audio codec comes from the format registry. Output trimmed to
  * video duration (-shortest is wrong here — a short music bed would truncate
  * the video — so we trim the mixed audio to the video length with apad+atrim).
  */
-export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projectRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
+export async function muxAudio({ videoPath, audioTracks, outputPath, fps, assetRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
   const fmt = getFormat(output.format ?? 'mp4');
   if (!fmt.audioArgs) {
     throw new EngineError(ErrorCodes.UNSUPPORTED_FORMAT, `Format "${output.format}" does not carry audio`, {
@@ -515,7 +634,7 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projec
     });
   }
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath];
-  for (const t of audioTracks) args.push('-i', path.resolve(projectRoot, t.src));
+  for (const t of audioTracks) args.push('-i', path.resolve(assetRoot, t.src));
 
   // apad is BOUNDED (whole_dur): with the duck branches also padded to the
   // composition length, an unbounded apad into atrim can busy-spin forever
@@ -546,13 +665,13 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, projec
  * buildAudioFilter graph (whose audio inputs start at 1) is reused verbatim —
  * what you hear is what the render will mux.
  */
-export async function mixAudioOnly({ audioTracks, outputPath, fps, projectRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
+export async function mixAudioOnly({ audioTracks, outputPath, fps, assetRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-y',
     // dummy input 0 (the "video" slot in the shared filter graph)
     '-f', 'lavfi', '-t', videoDurationSec.toFixed(3), '-i', 'anullsrc=r=44100:cl=stereo',
   ];
-  for (const t of audioTracks) args.push('-i', path.resolve(projectRoot, t.src));
+  for (const t of audioTracks) args.push('-i', path.resolve(assetRoot, t.src));
 
   // Bounded pad — see muxAudio for why apad must carry whole_dur here.
   const filter =

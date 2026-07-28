@@ -51,6 +51,38 @@ function asCrash(err, frame) {
   );
 }
 
+/** Keep diagnostics bounded — a broken composition can log in a loop. */
+const MAX_DIAGNOSTICS = 10;
+
+/**
+ * Render page diagnostics into the error MESSAGE (v0.21).
+ *
+ * These were already collected into `detail`, but the thing that actually
+ * reaches a human or an agent first is the message — and a caller whose tool
+ * call timed out at the transport may never see `detail` at all. The
+ * motivating failure: a <video> whose src does not exist never fires
+ * `seeked`, so the frame promise never settles and the render dies on a
+ * frame timeout naming nothing. A failed request is not an error event and
+ * was invisible; now it is the first thing the message says.
+ */
+export function formatPageDiagnostics({ pageErrors = [], failedRequests = [] } = {}) {
+  const parts = [];
+  if (failedRequests.length) {
+    const list = failedRequests.slice(0, MAX_DIAGNOSTICS)
+      .map((r) => `  ${r.url} (${r.error})`).join('\n');
+    const more = failedRequests.length > MAX_DIAGNOSTICS ? `\n  …and ${failedRequests.length - MAX_DIAGNOSTICS} more` : '';
+    parts.push(
+      `${failedRequests.length} asset${failedRequests.length === 1 ? '' : 's'} failed to load — ` +
+      'a missing <video>/<img>/<script> is the usual cause of a frame that never becomes ready:\n' +
+      list + more,
+    );
+  }
+  if (pageErrors.length) {
+    parts.push('Page errors:\n' + pageErrors.slice(0, MAX_DIAGNOSTICS).map((e) => `  ${e}`).join('\n'));
+  }
+  return parts.length ? '\n' + parts.join('\n') : '';
+}
+
 export async function createPuppeteerBrowser({
   headless = true,
   executablePath = undefined,
@@ -75,7 +107,7 @@ export async function createPuppeteerBrowser({
         '--disable-lcd-text',              // subpixel AA varies per display; grayscale AA is stable
         '--hide-scrollbars',
         '--font-render-hinting=none',
-        // Opt-in (v0.7): let a composition fetch its own project assets over
+        // Opt-in (v0.7): let a composition fetch its own scene assets over
         // file:// — e.g. glTF/GLB models via a loader, or JSON data. Off by
         // default (file:// XHR is CORS-blocked); enable per render with
         // MOTION_STUDIO_ALLOW_LOCAL_FETCH=1. <img>/<audio>/CSS assets never need it.
@@ -102,6 +134,27 @@ export async function createPuppeteerBrowser({
       page.on('pageerror', (err) => pageErrors.push(String(err?.stack || err)));
       page.on('console', (msg) => {
         if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`);
+      });
+
+      // Assets that never arrived (v0.21). A 404 is not a page error and not a
+      // console error, so without this listener a composition referencing a
+      // missing file fails with no clue as to which file. Paths are reported
+      // relative to the composition so they read like the src that produced
+      // them ("assets/host.webm"), not a 200-character file:// URL.
+      const baseUrl = url.slice(0, url.lastIndexOf('/') + 1);
+      const failedRequests = [];
+      const seenFailures = new Set();
+      const noteFailure = (reqUrl, error) => {
+        const short = reqUrl.startsWith(baseUrl) ? decodeURIComponent(reqUrl.slice(baseUrl.length)) : reqUrl;
+        if (seenFailures.has(short)) return;
+        seenFailures.add(short);
+        failedRequests.push({ url: short, error });
+      };
+      page.on('requestfailed', (req) => {
+        noteFailure(req.url(), req.failure()?.errorText ?? 'request failed');
+      });
+      page.on('response', (res) => {
+        if (res.status() >= 400) noteFailure(res.url(), `HTTP ${res.status()}`);
       });
 
       await page.goto(url, { waitUntil: 'load', timeout: COMPOSITION_READY_TIMEOUT_MS });
@@ -136,7 +189,8 @@ export async function createPuppeteerBrowser({
           ErrorCodes.COMPOSITION_ERROR,
           'Composition never defined window.setFrame. Make sure composition.js calls ' +
             'MotionStudio.registerComposition(fn) (or assigns window.setFrame) and that frame-api.js loads first.' +
-            (pageErrors.length ? `\nPage errors:\n${pageErrors.join('\n')}` : ''),
+            formatPageDiagnostics({ pageErrors, failedRequests }),
+          { pageErrors, failedRequests },
         );
       }
 
@@ -152,10 +206,11 @@ export async function createPuppeteerBrowser({
             }, n);
           } catch (e) {
             if (isBrowserCrash(e)) throw asCrash(e, n);
-            throw new EngineError(ErrorCodes.COMPOSITION_ERROR, `setFrame(${n}) threw: ${e.message}`, {
-              frame: n,
-              pageErrors,
-            });
+            throw new EngineError(
+              ErrorCodes.COMPOSITION_ERROR,
+              `setFrame(${n}) threw: ${e.message}` + formatPageDiagnostics({ pageErrors, failedRequests }),
+              { frame: n, pageErrors, failedRequests },
+            );
           }
 
           try {
@@ -168,8 +223,9 @@ export async function createPuppeteerBrowser({
             throw new EngineError(
               ErrorCodes.FRAME_TIMEOUT,
               `Frame ${n} never became ready within ${frameTimeoutMs}ms. ` +
-                'Check that frameReady is set true after all async work (fonts/images) resolves.',
-              { frame: n, pageErrors },
+                'Check that frameReady is set true after all async work (fonts/images/video seeks) resolves.' +
+                formatPageDiagnostics({ pageErrors, failedRequests }),
+              { frame: n, pageErrors, failedRequests },
             );
           }
 
@@ -181,9 +237,11 @@ export async function createPuppeteerBrowser({
             throw e;
           }
           if (frameError) {
-            throw new EngineError(ErrorCodes.COMPOSITION_ERROR, `Composition error at frame ${n}: ${frameError}`, {
-              frame: n,
-            });
+            throw new EngineError(
+              ErrorCodes.COMPOSITION_ERROR,
+              `Composition error at frame ${n}: ${frameError}` + formatPageDiagnostics({ pageErrors, failedRequests }),
+              { frame: n, pageErrors, failedRequests },
+            );
           }
 
           try {
