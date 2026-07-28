@@ -17,5 +17,7 @@ motion-studio\motion-studio\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe
 motion-studio\motion-studio\ffmpeg-8.1.2-full_build\bin\ffplay.exe
 motion-studio\motion-studio\ffmpeg-8.1.2-full_build\bin\ffprobe.exe
 
+Bugs: the bundled ffmpeg-8.1.2-full_build segfaults on the drawtext filter (no fontconfig) — only affects scratch tooling.
+
 # When you are working with sfx
 Don't use synthesize_sfx cue types chime and shimmer (plus whoosh/thud)
