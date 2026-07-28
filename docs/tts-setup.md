@@ -41,7 +41,7 @@ voices save as `tts.favoriteVoices` and are reported to agents via
 auditioning directly steers what narration sounds like.
 
 **Everywhere else:** the choice is global — it lives in
-`~/.motion-studio/settings.json` as `tts.vendor` and applies to the Studio *and*
+`<dataDir>/settings.json` as `tts.vendor` and applies to the Studio *and*
 to every agent connected over MCP. Precedence, as everywhere else in Motion
 Studio:
 

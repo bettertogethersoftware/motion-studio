@@ -58,6 +58,11 @@
  *                               vendors (music, v0.8)
  *   MOTION_STUDIO_MIDI_EXE      MotionStudioMidi.exe (fluidsynth vendor, v0.8)
  *   MOTION_STUDIO_FLUIDSYNTH    fluidsynth.exe (fluidsynth vendor, v0.8)
+ *   MOTION_STUDIO_WHISPER_BIN   whisper-cli.exe, and the ggml model (a file, or
+ *   MOTION_STUDIO_WHISPER_MODEL a folder of them, or a bare name like
+ *   MOTION_STUDIO_WHISPER_MODELS "small.en") that transcribe_asset reads speech
+ *   MOTION_STUDIO_WHISPER_THREADS with — v0.22, local and offline, NO API key.
+ *                               See docs/transcribe-setup.md.
  */
 
 import path from 'node:path';
@@ -94,11 +99,21 @@ import {
   resolveMusicVendor, checkMusicVendor, synthesizeMusicWithVendor, musicVendorReport,
   musicUnavailableWithAlternatives, MUSIC_VENDORS,
 } from '../core/music-vendors.js';
+import {
+  resolveTranscriptionVendor, checkTranscriptionVendor, transcriptionVendorReport,
+  unavailableWithAlternatives as transcriptionUnavailableWithAlternatives,
+  TRANSCRIPTION_VENDORS,
+} from '../core/transcribe-vendors.js';
+import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
+import {
+  transcodeAsset, validateTranscode, formatForExtension, MAX_SPANS, MAX_CROSSFADE_MS,
+} from '../core/transcode.js';
 import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { planFilm, submitFilmBuild } from '../core/films.js';
 import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings, probeMedia } from '../core/encoder.js';
+import { ensureStableDataDir } from '../core/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -110,6 +125,12 @@ if (process.env.MOTION_STUDIO_BROWSER_MODULE) {
   const mod = await import(pathToFileURL(path.resolve(process.env.MOTION_STUDIO_BROWSER_MODULE)).href);
   injectedBrowserFactory = mod.createBrowser;
 }
+
+// Record a data dir inherited from a pre-v0.22 install before the store reads
+// it, so this server and the Studio cannot disagree about which tree is "the"
+// one (see core/paths.js). A no-op on a fresh install and whenever the
+// environment or paths.json already decided.
+await ensureStableDataDir();
 
 const store = new WorkspaceStore();
 // Migrates a pre-v0.20 flat layout on first start; a no-op forever after.
@@ -187,6 +208,45 @@ async function describeTarget(target) {
 }
 
 /**
+ * Locate ONE media file the way the read-only media tools address it: a path
+ * inside a target under `assets/` (supplied material) or `out/` (something the
+ * engine rendered), or a workspace-library path when `target` is omitted.
+ *
+ * Shared by `probe_asset` and `transcribe_asset` because they answer the two
+ * questions you have about a file you did not make — "what is it?" and "what
+ * does it say?" — and reaching them differently would be a trap.
+ *
+ * `out/` is readable here and nowhere else: verifying a finished cut means
+ * probing or re-transcribing `out/film.mp4`, which both tools advertise. Writes
+ * stay confined to assets/.
+ */
+async function locateMedia(relPath, target) {
+  if (target === undefined || target === null || target === '') {
+    const abs = store.libraryFilePath(WORKSPACE, relPath);
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st || !st.isFile()) {
+      throw new EngineError(
+        ErrorCodes.FILE_NOT_FOUND,
+        `No such library file "${relPath}" (list_shared_assets shows what is there)`,
+        { path: relPath },
+      );
+    }
+    return {
+      source: 'library',
+      path: String(relPath).replace(/\\/g, '/'),
+      abs,
+      bytes: st.size,
+      mtime: st.mtime.toISOString(),
+    };
+  }
+  const a = await store.resolveMediaFile(qualifyTarget(target), relPath);
+  return {
+    source: a.target.kind, target: localId(a.target.id), path: a.path,
+    abs: a.abs, bytes: a.bytes, mtime: a.mtime, kind: a.kind,
+  };
+}
+
+/**
  * The ffmpeg binary this server uses — for the prereq probe AND for every
  * render/film it runs, so the check can never pass on one binary while the
  * encode reaches for another. Shared with the Studio and the CLI.
@@ -215,7 +275,10 @@ async function vendorNoteFor(capability, resolved) {
     const fallback = chainFallbackNote(capability, resolved);
     if (fallback) notes.push(fallback);
     if (resolved.source === 'argument') {
-      const resolveDefault = capability === 'music' ? resolveMusicVendor : resolveSpeechVendor;
+      const resolveDefault = {
+        music: resolveMusicVendor,
+        transcription: resolveTranscriptionVendor,
+      }[capability] ?? resolveSpeechVendor;
       const dflt = await resolveDefault({ dataDir: store.dataDir });
       if (dflt.vendor !== resolved.vendor) {
         notes.push(
@@ -306,15 +369,46 @@ function planSummary(plan) {
     durationSeconds: plan.durationSeconds,
     fps: plan.fps,
     format: plan.format,
-    sceneLayout: plan.scenes.map((s) => ({
-      scene: localId(s.sceneId), slug: s.slug, name: s.name, filmOffset: s.filmOffset,
-      durationInFrames: s.durationInFrames, startSeconds: s.startSeconds,
-      // rendered = a file is there; renderVerified = it still matches the
-      // scene's settings (null when it predates the render sidecar).
-      rendered: s.rendered, renderVerified: s.renderVerified ?? null,
-      ...(s.staleRender ? { staleRender: s.staleRender } : {}),
-      ...(s.missing ? { missing: true } : {}),
-    })),
+    // The film's encode contract (v0.22) — what a file must look like to join
+    // this film. planFilm computed the comparison string long before this, and
+    // this projection dropped it, so no agent could see the one thing only the
+    // engine knows. One edit here covers get_film, list_films, update_film and
+    // build_film { plan: true }.
+    signature: plan.signature,
+    sceneLayout: plan.scenes.map((s) => (s.kind === 'footage'
+      // Footage segments (v0.22) report the same placement fields as scenes, so
+      // "where does segment 6 start" is one question regardless of kind — plus
+      // what the probe measured, since a supplied file's truth is the file.
+      ? {
+        kind: 'footage',
+        footage: s.footage,
+        name: s.name,
+        filmOffset: s.filmOffset,
+        durationInFrames: s.durationInFrames,
+        startSeconds: s.startSeconds,
+        ...(s.label ? { label: s.label } : {}),
+        ...(s.probed
+          ? {
+            width: s.width, height: s.height, fps: s.fps, codec: s.codec, pixFmt: s.pixFmt,
+            signature: s.signature, hasAudio: s.hasAudio,
+            actualFrames: s.actualFrames,
+            // true = the declaration matches the file; false = it does not;
+            // null = ffprobe could not say, which is NOT "matches".
+            framesVerified: s.framesVerified,
+          }
+          : { probed: false, framesVerified: null }),
+        ...(s.missing ? { missing: true } : {}),
+      }
+      : {
+        kind: 'scene',
+        scene: localId(s.sceneId), slug: s.slug, name: s.name, filmOffset: s.filmOffset,
+        durationInFrames: s.durationInFrames, startSeconds: s.startSeconds,
+        // rendered = a file is there; renderVerified = it still matches the
+        // scene's settings (null when it predates the render sidecar).
+        rendered: s.rendered, renderVerified: s.renderVerified ?? null,
+        ...(s.staleRender ? { staleRender: s.staleRender } : {}),
+        ...(s.missing ? { missing: true } : {}),
+      })),
     problems: plan.problems,
   };
 }
@@ -482,8 +576,23 @@ server.registerTool(
     inputSchema: {
       film: z.string(),
       name: z.string().min(1).optional(),
-      scenes: z.array(z.object({ slug: z.string() })).optional()
-        .describe('Play order, e.g. [{slug:"intro"},{slug:"body"}]. Reorder/drop scenes here; create with create_scene'),
+      // A union, not an object with optional keys: zod strips unknown keys, so a
+      // single loose shape would silently discard whichever half the caller sent
+      // — which for footage means the entry vanishes before the handler runs.
+      scenes: z.array(z.union([
+        z.object({ slug: z.string() }),
+        z.object({
+          footage: z.string(),
+          durationInFrames: z.number().int().positive(),
+          label: z.string().optional(),
+        }),
+      ])).optional()
+        .describe('Play order — a heterogeneous list of SEGMENTS. A scene is {slug:"intro"}; a piece of FOOTAGE is ' +
+          '{footage:"assets/clip.mp4", durationInFrames:231} (v0.22), which puts real video on the timeline beside ' +
+          'the rendered scenes — that is how you build "footage, then a scene, then footage". Footage must be silent ' +
+          'and must match the film signature (get_film reports it); `durationInFrames` is verified against the file, ' +
+          'because every later offset derives from it. Reorder or drop segments here; create scenes with create_scene ' +
+          'and put footage in the film\'s assets/ first (use_shared_asset or write_asset_file).'),
       outputFilename: z.string().optional().describe('Bare output filename (default "film")'),
       sceneDefaults: z.object({
         fps: z.number().int().min(1).max(240).optional(),
@@ -1009,7 +1118,9 @@ server.registerTool(
       'if it failed. Wait for a terminal state before reporting completion. When the render carried audio, the ' +
       'done status also has `audio` with the measured peakDb/meanDb of the final mix and a `clipping` flag. ' +
       'Proxy jobs carry `proxy: { scale, frameStep }` so a draft is never mistaken for the deliverable. ' +
-      'To wait for one or more jobs without a polling loop, use wait_for_render instead.',
+      'Non-render jobs share this surface (v0.22): `kind` says which — "render" or e.g. "transcribe" — they have no ' +
+      'frames (percent stays 0, watch `phase`), and a finished one carries its whole answer in `result`, which for ' +
+      'transcribe_asset is the transcript. To wait for one or more jobs without a polling loop, use wait_for_render.',
     inputSchema: { jobId: z.string() },
   },
   wrap(async ({ jobId }) => {
@@ -1028,8 +1139,9 @@ server.registerTool(
     description:
       'Block until every listed job is done/error/cancelled, or until timeoutMs elapses — one call instead of a ' +
       'get_render_status polling loop (new in v0.14). Returns { timedOut, jobs } where each jobs[] entry has the ' +
-      'same shape as get_render_status, including the structured error for failed jobs and the measured `audio` ' +
-      'block for finished ones — check states individually, since one failed scene does not stop the others. ' +
+      'same shape as get_render_status, including the structured error for failed jobs, the measured `audio` ' +
+      'block for finished renders, and `result` for a finished non-render job (a transcribe_asset job\'s transcript ' +
+      'arrives this way) — check states individually, since one failed scene does not stop the others. ' +
       'Waiting on queued jobs is fine; they complete in FIFO order. A timeout is NOT an error: the jobs keep ' +
       'running and you get the current snapshots with timedOut: true — CALL IT AGAIN to keep watching, which is the ' +
       'normal way to wait out a long render. The ceiling is deliberately below the typical 60s MCP client request ' +
@@ -1056,8 +1168,8 @@ server.registerTool(
   {
     title: 'Cancel a render job',
     description:
-      'Abort a job. Running jobs have their whole process tree killed (Chromium workers + FFmpeg); ' +
-      'queued jobs are dequeued without ever starting. Idempotent.',
+      'Abort a job in either lane. Running jobs have their whole process tree killed (Chromium workers + FFmpeg, ' +
+      'or whisper-cli for a transcription); queued jobs are dequeued without ever starting. Idempotent.',
     inputSchema: { jobId: z.string() },
   },
   wrap(async ({ jobId }) => ok(jobs.cancel(jobId))),
@@ -1067,7 +1179,10 @@ server.registerTool(
   'list_render_jobs',
   {
     title: 'List render jobs',
-    description: 'List active and recent render jobs with their states.',
+    description:
+      'List active and recent jobs with their states. Both lanes appear here: renders/film builds (`kind: ' +
+      '"render"`, one at a time) and non-render jobs such as transcriptions, which run in their own lane and never ' +
+      'wait behind a render.',
     inputSchema: {},
   },
   wrap(async () => ok({ jobs: jobs.listJobs() })),
@@ -1269,7 +1384,8 @@ server.registerTool(
       'video (codec, width, height, fps, frame count, pixel format) and audio (codec, channels, sample rate). ' +
       'list_assets and list_shared_assets only report bytes/mtime/kind — this is how you find out how LONG a clip ' +
       'is, what size it is, and whether it has an audio track, before building a scene around it. ' +
-      'Probe an asset by passing its target ("<film>" or "<film>/<scene>") with an assets/-relative path; OMIT ' +
+      'Probe an asset by passing its target ("<film>" or "<film>/<scene>") with an assets/-relative path — or an ' +
+      'out/-relative one to probe what the engine rendered, e.g. out/film.mp4 after build_film; OMIT ' +
       'target to probe a workspace-library file by its library-relative path (from list_shared_assets). ' +
       'Also returns `notes` for properties that will bite at render time — most importantly that H.264/HEVC ' +
       'cannot be decoded by the render browser, so a <video> using such a file fails even though the page\'s own ' +
@@ -1277,41 +1393,369 @@ server.registerTool(
       'file is not media; ffprobe is not a declared prerequisite.',
     inputSchema: {
       path: z.string()
-        .describe('assets/-relative path when `target` is given, else a library-relative path from list_shared_assets'),
+        .describe('assets/ or out/-relative path when `target` is given (out/ reads what the engine rendered), else a library-relative path from list_shared_assets'),
       target: z.string().optional()
         .describe('Scene id "<film>/<scene>" or film id "<film>". Omit to probe a workspace-library file.'),
     },
   },
   wrap(async ({ path: relPath, target }) => {
     const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
-    let located;
-    if (target === undefined || target === null || target === '') {
-      const abs = store.libraryFilePath(WORKSPACE, relPath);
-      const st = await fsp.stat(abs).catch(() => null);
-      if (!st || !st.isFile()) {
-        throw new EngineError(
-          ErrorCodes.FILE_NOT_FOUND,
-          `No such library file "${relPath}" (list_shared_assets shows what is there)`,
-          { path: relPath },
-        );
-      }
-      located = {
-        source: 'library',
-        path: String(relPath).replace(/\\/g, '/'),
-        abs,
-        bytes: st.size,
-        mtime: st.mtime.toISOString(),
-      };
-    } else {
-      const a = await store.resolveAssetFile(qualifyTarget(target), relPath);
-      located = {
-        source: a.target.kind, target: a.target.id, path: a.path,
-        abs: a.abs, bytes: a.bytes, mtime: a.mtime, kind: a.kind,
-      };
-    }
+    const located = await locateMedia(relPath, target);
     const { abs, ...rest } = located;
     const media = await probeMedia({ filePath: abs, ffprobePath });
     return ok({ ...rest, probed: media !== null, ...(media ?? {}) });
+  }),
+);
+
+server.registerTool(
+  'transcribe_asset',
+  {
+    title: 'Transcribe speech in a media asset (text + sentence/word timing)',
+    description:
+      'Read the speech in a supplied recording — audio OR video — and get back the words WITH TIMING. Addressed ' +
+      'exactly like probe_asset: pass a target ("<film>" or "<film>/<scene>") with an assets/-relative path — or an ' +
+      'out/-relative one to hear what the engine rendered, which is how you verify a finished cut (out/film.mp4) — ' +
+      'or OMIT target to transcribe a workspace-library file by its library-relative path (from list_shared_assets). Video ' +
+      'is accepted directly; the 16 kHz mono extraction happens internally and leaves nothing behind. ' +
+      'DO THIS BEFORE CHOOSING SCENE DURATIONS when a film is built around a recording — the same way narration is ' +
+      'synthesized before durations are chosen. Without it every in-point is arithmetic against the clip length, ' +
+      'and you cannot know what the person is saying. ' +
+      'Returns: `text` (everything said), `sentences[]` — REBUILT on sentence boundaries, mirroring ' +
+      'synthesize_speech\'s `timings` field-for-field ({text, startSeconds, startInFrames, durationSeconds, ' +
+      'durationInFrames}) so recorded and generated narration are handled by one code path — `words[]` with ' +
+      'per-word start/end frames (this is how you cue a graphic to a spoken word inside a sentence), ' +
+      '`speechRanges[]` + `leadingSilenceFrames`/`trailingSilenceFrames` (where you can cut without clipping a ' +
+      'word), and `rawSegments[]` (the vendor\'s own decode windows, for debugging only — they start mid-clause ' +
+      'and are NOT edit points). ' +
+      'CONFIDENCE IS REPORTED, NOT HIDDEN: per-sentence `minTokenP`/`meanTokenP` and per-word `p`. A low minTokenP ' +
+      'means the model guessed — never put such a sentence on screen verbatim without the user reading it. Proper ' +
+      'nouns and technical terms come back wrong often enough to matter; TIMING is far more reliable than spelling. ' +
+      'Vendor: whisper.cpp, local and offline, NO API key. An unconfigured machine fails with ' +
+      'transcription_unavailable naming the fix — that is for the user to fix, do not retry. Check availability ' +
+      'with list_vendors (capability "transcription"). ' +
+      'It is a JOB in its own lane, so it never waits behind a render: the call blocks up to `waitMs` and returns ' +
+      'the transcript if it finished, otherwise a jobId to poll with get_render_status / wait_for_render (the ' +
+      'transcript arrives as the job\'s `result`). Results are cached per (file, model, language), so asking again ' +
+      'is free — including after a render, which is how you verify a finished cut by re-transcribing it. ' +
+      `Bounded at ${MAX_TRANSCRIBE_SECONDS / 60} minutes of audio per call: cut the span you care about first ` +
+      'rather than reading a whole conference recording.',
+    inputSchema: {
+      path: z.string()
+        .describe('assets/ or out/-relative path when `target` is given (out/ reads what the engine rendered), else a library-relative path from list_shared_assets'),
+      target: z.string().optional()
+        .describe('Scene id "<film>/<scene>" or film id "<film>". Omit to transcribe a workspace-library file.'),
+      fps: z.number().positive().max(240).optional()
+        .describe('Frame rate every *InFrames field is reported at (default: the target\'s fps, else 30)'),
+      language: z.string().optional()
+        .describe('Spoken language, e.g. "en" — omit to auto-detect (naming it is faster and more accurate)'),
+      model: z.string().optional()
+        .describe('Vendor model name, e.g. "small.en" / "large-v3" (see list_vendors); omit for the configured default'),
+      vendor: z.enum(TRANSCRIPTION_VENDORS).optional()
+        .describe('Transcription vendor; omit to use the configured default'),
+      words: z.boolean().default(true)
+        .describe('Include the per-word array. Leave true unless you only need sentences — words are what let a graphic land on a spoken word.'),
+      wordsMatching: z.string().optional()
+        .describe('Only return words containing this text (case-insensitive) — the direct way to find the frame a given name is spoken on'),
+      maxWords: z.number().int().min(1).max(20000).default(3000)
+        .describe('Cap on returned words (a long recording is thousands); reports wordsTruncated when it bites'),
+      pauseSeconds: z.number().min(0.1).max(10).default(1)
+        .describe('Silence this long or longer splits speechRanges — i.e. what counts as a pause you could cut on'),
+      refresh: z.boolean().default(false)
+        .describe('Ignore the cached transcript and run the model again'),
+      waitMs: z.number().int().min(0).max(600000).default(45000)
+        .describe('Block up to this long for the job; past it you get a jobId to poll instead of a timed-out call'),
+    },
+  },
+  wrap(async ({
+    path: relPath, target, fps, language, model, vendor, words, wordsMatching, maxWords,
+    pauseSeconds, refresh, waitMs,
+  }) => {
+    // ffmpeg does the extraction, so the same prereq every render needs applies
+    // here — and failing on it now beats failing inside a queued job.
+    await requirePrereqs();
+    const located = await locateMedia(relPath, target);
+    if (!looksTranscribable(located.path)) {
+      throw new EngineError(
+        ErrorCodes.TRANSCRIPTION_INPUT_UNSUPPORTED,
+        `"${located.path}" is not an audio or video file, so there is no speech in it to read. ` +
+          'Pass a recording (wav/mp3/m4a/flac/ogg or mp4/mov/mkv/webm).',
+        { path: located.path },
+      );
+    }
+
+    // Probe before queueing: an unconfigured vendor should fail immediately with
+    // the fix, not sit in a queue and then fail. The job re-resolves (cheaply,
+    // one-entry chains probe nothing) so the two cannot disagree.
+    const resolved = await resolveTranscriptionVendor({ vendor, dataDir: store.dataDir, probe: true });
+    const probe = resolved.status ?? await checkTranscriptionVendor(resolved.vendor, { dataDir: store.dataDir });
+    if (!probe.available) {
+      throw await transcriptionUnavailableWithAlternatives(resolved.vendor, probe, { dataDir: store.dataDir });
+    }
+
+    const effectiveFps = fps ?? (target ? (await describeTarget(target)).fps : 30);
+    const ffmpegPath = await ffmpegPathOnly();
+    const submitted = jobs.startTask({
+      kind: 'transcribe',
+      targetId: located.path,
+      run: ({ signal, onPhase }) => transcribeMedia({
+        filePath: located.abs,
+        fps: effectiveFps,
+        vendor, model, language,
+        silenceGapSeconds: pauseSeconds,
+        dataDir: store.dataDir,
+        ffmpegPath,
+        refresh,
+        signal,
+        onPhase,
+      }),
+    });
+
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      // Re-raise the job's failure as this call's failure: the caller asked a
+      // question and a jobId it must poll to learn "your vendor is missing" is
+      // strictly worse than the error itself.
+      throw new EngineError(status.error?.code ?? ErrorCodes.TRANSCRIPTION_FAILED,
+        status.error?.message ?? 'transcription failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId,
+        state: status.state,
+        phase: status.phase,
+        path: located.path,
+        ...(located.target ? { target: located.target } : {}),
+        vendor: resolved.vendor,
+        model: probe.config?.activeModel ?? model ?? null,
+        fps: effectiveFps,
+        stillRunning: true,
+        hint: `Still transcribing (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — ` +
+          'the transcript comes back as the job\'s `result`. Nothing is blocking a render; this runs in its own lane.',
+      });
+    }
+
+    const t = status.result;
+    const matched = wordsMatching
+      ? t.words.filter((w) => w.text.toLowerCase().includes(wordsMatching.toLowerCase()))
+      : t.words;
+    const page = words ? matched.slice(0, maxWords) : [];
+    return ok({
+      jobId: submitted.jobId,
+      source: located.source,
+      ...(located.target ? { target: located.target } : {}),
+      path: located.path,
+      vendor: t.vendor,
+      vendorSource: t.vendorSource,
+      ...(resolved.chain.length > 1 ? { vendorChain: resolved.chain } : {}),
+      ...(await vendorNoteFor('transcription', resolved)),
+      model: t.model,
+      language: t.language,
+      cached: t.cached,
+      elapsedMs: t.elapsedMs,
+      durationSeconds: t.durationSeconds,
+      durationInFrames: t.durationInFrames,
+      fps: t.fps,
+      text: t.text,
+      sentences: t.sentences,
+      wordCount: t.words.length,
+      ...(wordsMatching ? { wordsMatching, matchedWords: matched.length } : {}),
+      ...(words ? { words: page } : {}),
+      ...(words && page.length < matched.length
+        ? { wordsTruncated: true, hint: `Showing ${page.length} of ${matched.length} words — raise maxWords, or use wordsMatching to find the one you need.` }
+        : {}),
+      speechRanges: t.speechRanges,
+      leadingSilenceSeconds: t.leadingSilenceSeconds,
+      leadingSilenceFrames: t.leadingSilenceFrames,
+      trailingSilenceSeconds: t.trailingSilenceSeconds,
+      trailingSilenceFrames: t.trailingSilenceFrames,
+      // Verbatim decode windows: useful when a derived sentence looks wrong, and
+      // never an edit point — they start mid-clause by construction.
+      rawSegments: t.rawSegments,
+    });
+  }),
+);
+
+server.registerTool(
+  'transcode_asset',
+  {
+    title: 'Prepare a media asset (conform, trim, crop, scale, extract audio)',
+    description:
+      'CHANGE a media file, inside the tool surface. probe_asset reads a file and transcribe_asset hears one; this ' +
+      'is the one that produces a new file, which every real job with supplied footage needs. The output lands under ' +
+      'the target\'s assets/ and is reported by MEASURING it, never by echoing the request. ' +
+      'THREE MODES. mode="video" (default): conform footage — trim to an EXACT frame count, crop a tighter framing, ' +
+      'scale, change fps, pick a codec by the `to` extension (.mp4/.webm/.mov). This is how you fix the H.264 trap: ' +
+      'the render browser cannot decode H.264, so a clip a composition will play must become VP9/WebM first ' +
+      '(probe_asset warns about it; this acts on the warning). mode="audio": cut N spans out of one source and JOIN ' +
+      'them into a PCM WAV — a talk becomes a spine — with a bounded crossfade so the joins do not click. ' +
+      'mode="frames": a PNG sequence under assets/<dir>/. ' +
+      'matchFilm="<film>" is the option that prevents the common disaster: it conforms the output to that film\'s ' +
+      'encode signature using the film\'s OWN encoder arguments, so the result can be stream-copied onto its ' +
+      'timeline as a footage segment (update_film { scenes: [{footage, durationInFrames}] }). Without it you are ' +
+      'hand-matching an invariant, and the failure is a broken concat much later. ' +
+      'TRIM IN FRAMES, not seconds: `durationInFrames` maps to ffmpeg\'s -frames:v, which guarantees the count; a ' +
+      'seconds-based duration does not, and one frame of drift shifts every subsequent scene, caption and cue. ' +
+      '`trim.durationInFrames` always means frames OF SOURCE. ' +
+      'NO ARBITRARY FFMPEG ARGUMENTS exist here and none will be added — every operation is a named, validated ' +
+      'field, because a passthrough would be a shell wearing a hat and would take the path sandbox with it. If you ' +
+      'need something absent from the field list, say so; do not look for an escape hatch. ' +
+      'Idempotent: a sidecar beside the output records the source identity and every parameter, so repeating an ' +
+      'unchanged call returns skipped:true and costs nothing. It NEVER overwrites its source. ' +
+      'Runs as a job in the same lane as transcribe_asset, so it never waits behind a render: the call blocks up ' +
+      'to `waitMs` and returns the result, otherwise a jobId to poll with wait_for_render.',
+    inputSchema: {
+      target: z.string().describe('Where the OUTPUT lands: scene id "<film>/<scene>" or film id "<film>"'),
+      from: z.string()
+        .describe('Source path. Library-relative when `fromTarget` is omitted (the usual case — no need to copy a 500 MB source in first); else assets/-relative inside `fromTarget`'),
+      fromTarget: z.string().optional()
+        .describe('Read the source from this scene/film\'s assets/ instead of the workspace library'),
+      to: z.string()
+        .describe('Destination under the target\'s assets/ — e.g. "assets/host-pip.webm". The extension picks the codec (.mp4 H.264, .webm VP9, .mov ProRes); mode="frames" treats it as a directory'),
+      mode: z.enum(['video', 'audio', 'frames']).default('video')
+        .describe('video = a video file; audio = a WAV from spans[]; frames = a PNG sequence'),
+      matchFilm: z.string().optional()
+        .describe('Conform the output to this film\'s encode signature, using the film\'s own ffmpegArgs — makes it concat-compatible by construction'),
+      trim: z.object({
+        startSeconds: z.number().min(0).optional(),
+        startInFrames: z.number().int().min(0).optional(),
+        durationInFrames: z.number().int().positive().optional().describe('PREFER THIS — an exact frame count of source'),
+        durationSeconds: z.number().positive().optional(),
+      }).optional().describe('Cut a span out of the source. Pass exactly one of startSeconds|startInFrames and one of durationInFrames|durationSeconds'),
+      crop: z.object({
+        x: z.number().int().min(0).default(0), y: z.number().int().min(0).default(0),
+        width: z.number().int().positive(), height: z.number().int().positive(),
+      }).optional().describe('Source-pixel rectangle, applied BEFORE scale'),
+      scale: z.object({
+        width: z.number().int().positive().optional(), height: z.number().int().positive().optional(),
+      }).optional().describe('Give one dimension to keep the aspect ratio. Dimensions floor to even for video (chroma subsampling); the response reports what you actually got'),
+      fps: z.number().positive().max(240).optional().describe('Output frame rate'),
+      video: z.object({
+        quality: z.number().int().min(0).max(63).optional().describe('CRF — lower is better; ~18 for mp4, ~32 for webm'),
+        gop: z.number().int().positive().optional().describe('Keyframe interval. Use ~10 for footage a composition will seekVideo() through — it makes per-frame seeking much faster. NOT needed to concatenate.'),
+      }).optional(),
+      audio: z.boolean().optional()
+        .describe('video mode: keep the source audio (default false — footage on a film timeline must be silent, and a composition PIP has no use for it)'),
+      spans: z.array(z.object({
+        startSeconds: z.number().min(0),
+        durationInFrames: z.number().int().positive().optional(),
+        durationSeconds: z.number().positive().optional(),
+      })).max(MAX_SPANS).optional()
+        .describe('audio mode: spans to cut and join, in SOURCE order. Building a spine from a talk is N trims joined, not one'),
+      crossfadeMs: z.number().min(0).max(MAX_CROSSFADE_MS).default(12)
+        .describe('audio mode: triangular crossfade at each join. A hard butt-join between two spans of speech CLICKS; 12ms fixes it. 0 = hard join. Note a crossfade consumes time: the result is sum(spans) − (N−1)×crossfade'),
+      sampleRate: z.number().int().optional().describe('audio mode: 48000 default; use 16000 mono for a file you will transcribe'),
+      channels: z.number().int().min(1).max(2).optional().describe('audio mode: 1 or 2 (default 2)'),
+      frames: z.object({ every: z.number().int().positive().optional() }).optional()
+        .describe('frames mode: keep every Nth frame of the trimmed span'),
+      refresh: z.boolean().default(false).describe('Re-run even if the sidecar says nothing changed'),
+      waitMs: z.number().int().min(0).max(600000).default(45000)
+        .describe('Block up to this long; past it you get a jobId to poll instead of a timed-out call'),
+    },
+  },
+  wrap(async ({
+    target, from, fromTarget, to, mode, matchFilm, trim, crop, scale, fps, video, audio,
+    spans, crossfadeMs, sampleRate, channels, frames, refresh, waitMs,
+  }) => {
+    await requirePrereqs();
+    // Everything shell-shaped is refused before a process is spawned, and every
+    // complaint comes back at once.
+    validateTranscode({ mode, to, trim, crop, scale, fps, video, spans, crossfadeMs, sampleRate, channels, frames });
+
+    const source = await locateMedia(from, fromTarget);
+    const t = await describeTarget(target);
+
+    const normalized = String(to).replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/')) {
+      throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED,
+        `Output must be written under assets/ (got "${to}")`, { path: to });
+    }
+    if (mode === 'video' && !formatForExtension(normalized)) {
+      throw new EngineError(ErrorCodes.UNSUPPORTED_FORMAT,
+        `Cannot tell the output format from "${normalized}" — use .mp4, .webm or .mov`, { path: to });
+    }
+    // The same write guards write_asset_file uses. A frames directory is not an
+    // asset filename, so only the single-file modes go through the extension
+    // allow-list; the directory itself is still confined to assets/.
+    const outAbs = mode === 'frames'
+      ? resolveInTarget(t.path, normalized)
+      : resolveInTarget(t.path, normalized, { forWrite: true, asAsset: true });
+
+    // matchFilm resolves from the film's stated signature — never from a second
+    // derivation of the encode table.
+    let signature = null;
+    if (matchFilm) {
+      const doc = await store.getFilm(qualifyFilm(matchFilm));
+      signature = (await planFilm({ film: doc, store })).signature;
+      if (!signature?.ffmpegArgs) {
+        throw new EngineError(ErrorCodes.INVALID_FILM,
+          `Film "${matchFilm}" has no encode signature to match yet — it needs at least one scene whose format ` +
+          'has an encode step. get_film reports the signature once it does.',
+          { film: matchFilm });
+      }
+    }
+
+    const ffmpegPath = await ffmpegPathOnly();
+    const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
+    const submitted = jobs.startTask({
+      kind: 'transcode',
+      targetId: normalized,
+      run: ({ signal, onPhase, onChildPid }) => transcodeAsset({
+        sourceAbs: source.abs, outPath: outAbs, mode,
+        trim, crop, scale, fps, video: video ?? {}, audio,
+        spans, crossfadeMs, sampleRate, channels, frames,
+        signature,
+        // Frame counts in a trim or a span are converted with the TARGET's rate,
+        // so "90 frames" means the same thing here as everywhere else in the film.
+        fpsForFrames: t.fps,
+        ffmpegPath, ffprobePath, refresh, signal,
+        onSpawn: onChildPid, onPhase,
+      }),
+    });
+
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.TRANSCODE_FAILED,
+        status.error?.message ?? 'transcode failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, state: status.state, phase: status.phase,
+        target: localId(t.id), path: normalized, mode, stillRunning: true,
+        hint: `Still transcoding (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — ` +
+          'the result comes back as the job\'s `result`. Nothing is blocking a render; this runs in its own lane.',
+      });
+    }
+
+    const r = status.result;
+    return ok({
+      jobId: submitted.jobId,
+      target: localId(t.id),
+      path: normalized,
+      source: `${source.source}:${source.path}`,
+      mode,
+      bytes: r.bytes,
+      skipped: r.skipped,
+      elapsedMs: r.elapsedMs,
+      applied: r.applied,
+      ...(signature ? { matchedFilm: matchFilm, signature: signature.id } : {}),
+      // Measured on the RESULT — the same block probe_asset returns, including
+      // `notes` if the output still is not browser-decodable.
+      probed: r.probed,
+      ...(r.container ? { container: r.container } : {}),
+      ...(r.durationSeconds !== undefined ? { durationSeconds: r.durationSeconds } : {}),
+      ...(r.video !== undefined ? { video: r.video } : {}),
+      ...(r.audio !== undefined ? { audio: r.audio } : {}),
+      ...(r.hasAudio !== undefined ? { hasAudio: r.hasAudio } : {}),
+      ...(r.frames ? { frames: r.frames } : {}),
+      ...(r.notes ? { notes: r.notes } : {}),
+      hint: mode === 'audio'
+        ? `Put it on a timeline with ${t.kind === 'scene' ? 'update_scene_config' : 'update_film'} { audio: [{ src: "${normalized}" }] }, then check the mix with preview_audio.`
+        : mode === 'video' && signature
+          ? `Place it on the film timeline with update_film { scenes: [..., { footage: "${normalized}", durationInFrames: ${r.frames ?? '<frames>'} }] }.`
+          : `Reference it from a composition as "${normalized}" — drive video with seekVideo(), never play().`,
+    });
   }),
 );
 
@@ -1661,11 +2105,15 @@ server.registerTool(
   {
     title: 'List generator vendors and their status',
     description:
-      'Report what this machine can actually generate, per capability: "speech" (narration — synthesize_speech / ' +
-      'list_voices) and "music" (synthesize_music). For each vendor: whether it is available right now, whether it ' +
+      'Report what this machine can actually do, per capability: "speech" (narration — synthesize_speech / ' +
+      'list_voices), "music" (synthesize_music) and "transcription" (transcribe_asset — READING speech out of ' +
+      'supplied media, v0.22). For each vendor: whether it is available right now, whether it ' +
       'is the one that will be used when no vendor is named, and — if it is not available — exactly what the user ' +
-      'must configure. Call this when a generator returns tts_unavailable / music_unavailable, so you can tell the ' +
+      'must configure. Call this when a generator returns tts_unavailable / music_unavailable / ' +
+      'transcription_unavailable, so you can tell the ' +
       'user which vendor to fix, or switch to one that is already working. ' +
+      'The transcription capability also lists the ggml `models` installed and which one is `active`, so a call ' +
+      'that wants better accuracy can name a bigger one. ' +
       'Each capability reports `chain` — the user\'s ordered vendor preference (v0.19) — with `preferred` as its ' +
       'head, `active` as the vendor that will ACTUALLY run (the first one in the chain that is available), and ' +
       '`fellBack: true` when those differ; each vendor carries its 1-based `priority` in the chain, or null when ' +
@@ -1675,7 +2123,7 @@ server.registerTool(
       '`favoriteVoices` (vendor → starred voice names) — prefer them when narrating. Reports credential ' +
       '*sources* only; never a key itself.',
     inputSchema: {
-      capability: z.enum(['speech', 'music']).optional().describe('Omit to report both'),
+      capability: z.enum(['speech', 'music', 'transcription']).optional().describe('Omit to report all three'),
       probe: z.boolean().default(true)
         .describe('false = report configuration only, skipping the exe spawn / network round-trip'),
     },
@@ -1732,6 +2180,35 @@ server.registerTool(
           offline: v.offline,
           ...(v.error ? { error: v.error } : {}),
           ...(v.config?.soundfont ? { soundfont: v.config.soundfont } : {}),
+        })),
+      };
+    }
+    if (want('transcription')) {
+      const report = await transcriptionVendorReport({ dataDir: store.dataDir, probe });
+      out.transcription = {
+        active: report.active,
+        activeSource: report.activeSource,
+        chain: report.chain,
+        preferred: report.preferred,
+        fellBack: report.fellBack,
+        settings: report.settings,
+        allVendors: TRANSCRIPTION_VENDORS,
+        vendors: report.vendors.map((v) => ({
+          id: v.id,
+          label: v.label,
+          active: v.active,
+          priority: v.priority ?? null,
+          available: v.available,
+          requires: v.requires,
+          offline: v.offline,
+          ...(v.error ? { error: v.error } : {}),
+          // Which model will run, and what else is installed — the one thing a
+          // transcribing agent may legitimately want to override per call.
+          ...(v.config?.activeModel ? { activeModel: v.config.activeModel } : {}),
+          ...(v.modelCount != null ? { modelCount: v.modelCount } : {}),
+          ...(v.models?.length
+            ? { models: v.models.map((m) => ({ name: m.name, bytes: m.bytes, englishOnly: m.englishOnly })) }
+            : {}),
         })),
       };
     }

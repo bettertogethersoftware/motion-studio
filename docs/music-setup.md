@@ -36,7 +36,7 @@ instrument: starred programs save as `music.favoritePrograms` and are
 reported to agents via `list_vendors`, which are instructed to prefer them
 when composing — auditioning directly steers generated music.
 
-**Everywhere else:** the choice is global (`~/.motion-studio/settings.json`,
+**Everywhere else:** the choice is global (`<dataDir>/settings.json`,
 `music.vendor`) and applies to the Studio and to every agent over MCP:
 
 ```

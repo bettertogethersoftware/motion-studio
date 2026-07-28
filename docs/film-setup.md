@@ -58,8 +58,16 @@ destination** drops a small JSON sidecar beside its output:
 
 ```
 scenes/<scene>/out/output.mp4
-scenes/<scene>/out/output.mp4.render.json   { frames, width, height, fps, format, renderedAt }
+scenes/<scene>/out/output.mp4.render.json
+  { frames, width, height, fps, format, pixFmt, transparent, renderedAt }
 ```
+
+Those are exactly the fields the concat signature is built from, plus the frame
+count. `pixFmt` and `transparent` joined the list in v0.22 — they were always part
+of the signature, so leaving them unrecorded meant a film-wide change to either
+broke the concat contract with nothing reporting it. A sidecar written before that
+release simply has less to say: it stays *unverified* on those two fields rather
+than turning up stale.
 
 - `planFilm` / `build_film { plan: true }` compares it with the live config and
   reports a `stale_render` **problem** naming the fields that diverged
@@ -74,6 +82,91 @@ scenes/<scene>/out/output.mp4.render.json   { frames, width, height, fps, format
   once and it becomes verifiable.
 - The sidecar is advisory metadata. If it cannot be written the render still
   succeeds; deleting it only loses the check.
+
+## Footage on the timeline (v0.22)
+
+A film's play order is **heterogeneous**: a segment is either a rendered scene or
+a piece of **footage** — a video file that joins as-is.
+
+```jsonc
+"scenes": [
+  { "slug": "title" },                                      // a rendered scene
+  { "footage": "assets/f1.mp4", "durationInFrames": 231 },   // supplied video
+  { "slug": "lamb" },
+  { "footage": "assets/f2.mp4", "durationInFrames": 320, "label": "B-roll" }
+]
+```
+
+This is what lets a film say *"footage, then a scene, then footage"* — the shape
+almost every film built around someone's own recording actually is. Before it,
+`film.scenes[]` could hold only rendered scenes, so a session that interleaved
+four footage segments with five rendered scenes **never called `build_film`** —
+not because it failed, but because it could not be asked. The assembly was a
+nine-part `ffmpeg concat` in a shell, and the film document still described a film
+that was never built.
+
+The key stays `scenes[]` and `schemaVersion` stays 1: an entry with `footage` and
+no `slug` is unambiguous, so **every film written before this release remains
+valid with no migration**.
+
+### The rules footage obeys
+
+- **`assets/`-relative, under the film** — same path rule and same sandbox as
+  `audio[]` and `overlays[]`. Put it there with `use_shared_asset` (for a library
+  file) or `write_asset_file`.
+- **It must match the film signature.** Footage is never re-encoded — a film that
+  quietly re-encoded one segment would have stopped being losslessly assembled, so
+  a mismatch is `footage_signature_mismatch` naming the fix. Read the target from
+  [`get_film`'s `signature`](#reading-the-contract-get_films-signature-v022) and
+  conform the file to it.
+- **It must be silent.** All sound comes from the master audio timeline. Dropping
+  an audio stream silently would be worse than refusing it: the user's own voice
+  would vanish from a film they can hear it in. Extract it to a WAV and put it on
+  `film.audio` instead — which also means **a film mixing footage with
+  audio-carrying scenes needs a master timeline**, because footage counts as a
+  silent segment and `-c copy` cannot join a mix of the two.
+- **`durationInFrames` is declared *and* verified.** You state the frame count so
+  `planFilm` can compute offsets without probing every file on every call — but
+  every downstream offset derives from it, so one wrong number would silently shift
+  every later scene, caption and cue while the render still succeeded. The engine
+  probes and reports `footage_duration_mismatch` (`declared 231 → actual 230`)
+  before a build is paid for. Same contract as the render sidecar: declare, then
+  verify, never trust. Each segment reports `framesVerified` — `true`, `false`, or
+  `null` when ffprobe could not say, which is **not** "matches".
+- **Footage may repeat**; a scene may not. A scene plays once because it has one
+  rendered output; the same plate can be a recurring cutaway.
+
+### What you get back
+
+`get_film`'s plan reports every segment with `kind` (`"scene"` | `"footage"`) and
+the same `filmOffset` / `durationInFrames` / `startSeconds` fields either way, so
+*"where does segment 6 start"* is one question regardless of what segment 6 is.
+Footage additionally carries what the probe measured — `width`, `height`, `fps`,
+`codec`, `pixFmt`, `signature`, `actualFrames`, `hasAudio`, and `color`
+(`{ primaries, transfer, matrix, range }`, each `null` when the file does not say).
+`color` is reported but **not** enforced: it is the one segment property that
+differs visibly without failing anything, and this is the only place you can see
+it. The scenes have no counterpart to compare it against — see the colour bullet
+under [the consistency invariant](#the-consistency-invariant).
+
+### Lip sync is yours, and should stay that way
+
+When a footage segment's picture and the master audio come from the same source,
+sync holds only if you derive both from the **same source offset**. Cut the picture
+and its audio span from identical in-points and sync is exact by construction
+within a segment. The engine cannot verify this and does not pretend to; what it
+does is make the arithmetic expressible — `transcribe_asset`'s sentence and word
+frames are how you find those in-points.
+
+### Deliberately not supported
+
+- **Trimming footage on the timeline** (`srcIn`/`srcOut` per segment). It would
+  make `-c copy` impossible at arbitrary in-points. Prepare the file to length,
+  then place it.
+- **Transitions between segments.** Every dissolve re-encodes across a seam. A
+  rendered scene between two footage segments is the supported answer — and a
+  better one: it is how the prototype hid all three of its audio splices.
+- **Speed changes, reversal, freeze frames.** Asset preparation, not timeline work.
 
 ## The consistency invariant
 
@@ -91,6 +184,111 @@ every `create_scene` inherits them unless you explicitly override per scene, so
 scenes are consistent by construction instead of something you have to remember to
 repeat. (`crf`/`preset` may differ between scenes — set per scene with
 `update_scene_config`; they affect encoding, not stream compatibility.)
+
+### Reading the contract: `get_film`'s `signature` (v0.22)
+
+The engine computes and enforces the invariant above. Since v0.22 it also **states**
+it, as `plan.signature` on every film tool that returns a plan:
+
+```jsonc
+{ "id": "1920x1080@30/mp4/opaque/yuv420p",
+  "width": 1920, "height": 1080, "fps": 30, "format": "mp4", "container": "mp4",
+  "pixFmt": "yuv420p", "transparent": false,
+  "video": { "codec": "libx264", "crf": 18, "preset": "medium" },
+  "audio": { "codec": "aac", "bitrate": "192k" },
+  "ffmpegArgs": ["-c:v","libx264","-preset","medium","-crf","18",
+                 "-pix_fmt","yuv420p","-movflags","+faststart"],
+  "copyConcat": true,
+  "color": { "stated": false, "primaries": null, "transfer": null,
+             "matrix": null, "range": null },
+  "mustMatch": ["codec","width","height","fps","pixFmt","container"],
+  "neednotMatch": ["gopSize","profile","level","bitrate"],
+  "matchForLooks": ["crf","preset","colorPrimaries","colorTransfer",
+                    "colorMatrix","colorRange"],
+  "warnings": [] }
+```
+
+Everything in it is derived at call time from the code that already computes it —
+`sceneSignature()` for `id`, the first scene's `output` for the values, and
+`buildVideoArgs()` for `ffmpegArgs`, which is the *same call* the finishing encode
+makes. There is no second copy of the encode table to drift.
+
+Why it exists: while the engine renders every segment, nobody needs to know this.
+The moment a file arrives from outside — supplied footage, a clip, a transcode — a
+caller has to produce something matching an invariant it cannot read, and its only
+options were to guess or to render a file first and probe it. Guessing is what
+actually happened: a real session pinned `-profile:v high -level 4.0` (which
+libx264 selects for 1080p30 anyway) and a custom GOP that disagreed with the
+engine's, and the concat succeeded *despite* it.
+
+- **Scene 1 is the film's encode voice.** `crf`/`preset` are reported from it,
+  because that is what the finishing pass uses; when scenes disagree, `warnings`
+  says so rather than letting the block read as uniform.
+- **`neednotMatch` is measured, not assumed.** A segment encoded at a deliberately
+  different profile and GOP concatenates and decodes back bit-identically — each
+  segment is its own encode and therefore opens on a keyframe, which is all
+  `concat -c copy` requires.
+- **`video.codec` is the encoder id** (`libx264`); `probe_asset` reports the codec
+  name (`h264`). They are not comparable directly.
+- **`signature: null`** for a film with no resolvable scenes — nothing is enforced
+  yet, so nothing is claimed.
+- **Three lists, not two.** `mustMatch` breaks the join; `neednotMatch` is the
+  cargo cult that does not; **`matchForLooks`** is the third answer, for
+  parameters that do not affect the join at all but where the joined file keeps
+  only segment 1's — so a mismatch is a look difference rather than an error.
+  `crf`/`preset` live there (the category the bullet above described in prose and
+  had nowhere to put), and so do the colour tags.
+- **Colour is reported as *unstated*, and that is the honest answer.** The engine
+  passes no colour arguments at all, so a scene's tags are whatever Chromium's
+  PNGs and ffmpeg's default conversion happen to produce — which is why
+  `signature.color.stated` is `false` and every value beside it is `null`. Naming
+  a value there would mean probing a rendered file: a second copy of the truth,
+  available only after a render, and describing the installed Chromium/ffmpeg
+  pair rather than a decision anyone made.
+
+  Measured on a real build (`motion-studio-promo`, ffmpeg 8.1.1):
+
+  | | primaries | transfer | matrix | range |
+  |---|---|---|---|---|
+  | scene render | `bt709` | `iec61966-2-1` (sRGB) | *unset* | `tv` |
+  | camera footage | `bt709` | `bt709` | `bt709` | `tv` |
+
+  Both are `yuv420p`, so they stream-copy and every frame decodes — but the joined
+  file advertises only segment 1's tags. `ffmpeg -i film.mp4 -f null -` logs
+  *"Reconfiguring filter graph because video parameters changed"* at the footage
+  boundary, and a player honouring transfer characteristics renders those frames
+  at a slightly different gamma. **A look difference, never a broken concat.**
+
+- **`matchFilm` deliberately carries no colour arguments,** and the reason is
+  measured rather than assumed:
+  - **`-color_primaries` and `-color_trc` are silently ignored here.** Re-encoding
+    `bt709` footage with `-color_trc iec61966-2-1` produced a file still tagged
+    `transfer=bt709`: frame properties from the decoder win over the output
+    option. Passing them would make the tool *report* a conform it did not
+    perform, which is worse than carrying nothing.
+  - **The one flag that does take, `-colorspace`, changes pixels.** It re-matrixes
+    the picture (different `framemd5`, ~+3% bitrate) — a re-encode of the image,
+    not a tag. Only `-vf setparams=…` sets all three, and it converts too.
+  - **The scenes are not a coherent target yet.** A render forced to
+    `setparams=colorspace=smpte170m` is *byte-identical* to today's output, which
+    means the engine converts RGB→YUV with the **bt601** matrix while tagging the
+    result `bt709`/sRGB with the matrix left unset. The file does not agree with
+    itself, so conforming footage to it would replicate an accident — and freeze
+    it into a `.transcode.json` identity that survives the next ffmpeg upgrade.
+
+  Making colour part of the contract therefore starts at the *render* encode, not
+  at `transcode_asset`: state it once there and it becomes config-derived, so the
+  signature reports it under the same rule as everything else and `matchFilm`
+  inherits it. That change alters rendered pixels, so it is a deliberate decision
+  rather than a fix to slip in — it is planned, not done:
+  [todo_task/film-colour-plan.md](todo_task/film-colour-plan.md).
+
+**Do not confuse this with the render-browser codec rule.** Video played *inside a
+composition* must be VP8/VP9/AV1 in `.webm`, because the render browser is
+Chromium without proprietary codecs ([frame-api.md](frame-api.md) §11). Video
+*concatenated onto the film timeline* must match this signature, which for a
+default film means H.264/mp4. Same source file, two destinations, opposite codec
+requirements.
 
 ## Audio: two modes
 

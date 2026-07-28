@@ -203,8 +203,8 @@ MotionStudio.registerComposition(async (frame) => {
 
 **Two things to settle before you author the scene**, both invisible in a still frame:
 
-- **Codec.** The render browser is Chromium *without* proprietary codecs: an **H.264/HEVC** file fails at render time even though the page's own `canPlayType()` answers `"probably"`. Use **VP8/VP9/AV1 in `.webm`**. Check with the `probe_asset` tool before writing any code — it reports the codec and warns about exactly this.
-- **Length and frame rate.** `probe_asset` also gives you `durationSeconds` and `fps`, which is what the scene's `durationInFrames` and your in-points have to be built around. A short GOP in the source (`-g 10` when transcoding) makes per-frame seeking much faster.
+- **Codec.** The render browser is Chromium *without* proprietary codecs: an **H.264/HEVC** file fails at render time even though the page's own `canPlayType()` answers `"probably"`. Use **VP8/VP9/AV1 in `.webm`**. Check with the `probe_asset` tool before writing any code — it reports the codec and warns about exactly this. **You can fix it yourself:** `transcode_asset { target, from, to: "assets/clip.webm", mode: "video" }` produces a file the browser can decode, and the response measures the result so you know it worked.
+- **Length and frame rate.** `probe_asset` also gives you `durationSeconds` and `fps`, which is what the scene's `durationInFrames` and your in-points have to be built around. A short GOP makes per-frame seeking much faster, so pass `video: { gop: 10 }` when you transcode — and while you are there, `crop`/`scale` down to the size the scene actually shows, because footage costs render time per frame.
 
 Footage costs real render time — each frame is a seek plus a decode. If you only need a plain rectangular overlay with no masking or 3D, a film-level **overlay track** composites it with ffmpeg at build time instead, and never touches the browser.
 

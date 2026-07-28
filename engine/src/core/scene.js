@@ -21,7 +21,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
@@ -42,9 +41,12 @@ export const CONFIG_SCHEMA_VERSION = 2;
  */
 export const SCENE_CONFIG = 'scene.json';
 
-export function defaultDataDir() {
-  return process.env.MOTION_STUDIO_HOME || path.join(os.homedir(), '.motion-studio');
-}
+/**
+ * Re-exported so the many modules that already import their data dir from here
+ * keep working; core/paths.js owns the answer (and, since v0.22, the fact that
+ * it is configurable rather than a fixed ~/.motion-studio).
+ */
+export { defaultDataDir } from './paths.js';
 
 /**
  * Lowercase a display name into a filesystem/id slug. Shared by every layer

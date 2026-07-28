@@ -35,6 +35,7 @@
     <footer class="rail-foot">
       <button id="btn-tts" class="ghost foot-btn" title="tts vendors">🗣<span class="foot-label"> tts</span></button>
       <button id="btn-music" class="ghost foot-btn" title="music vendors">♫<span class="foot-label"> music</span></button>
+      <button id="btn-transcribe" class="ghost foot-btn" title="transcription vendors — reading speech out of a recording">✎<span class="foot-label"> transcribe</span></button>
       <button id="btn-settings" class="ghost foot-btn" title="global settings">⚙<span class="foot-label"> settings</span></button>
     </footer>
   </aside>
@@ -330,6 +331,91 @@
       <p class="section-label">environment <span class="dim">(read-only)</span></p>
       <dl id="music-env" class="env-list mono"></dl>
       </div><!-- /cap-music -->
+
+      <!-- Transcription (v0.22): the capability that READS speech instead of
+           writing it. Same card grammar as tts/music on purpose — a vendor is a
+           vendor — but the test row is inverted: you hand it a recording and
+           read what came back, instead of typing a line and hearing it. -->
+      <div id="cap-transcription" class="hidden">
+      <p class="chain-note mono" id="transcription-chain-note"></p>
+      <nav class="vendor-tabs" id="transcription-tabs"></nav>
+      <div class="vendor-cards tabbed">
+        <!-- ---------------------------- whisper.cpp ---------------------------- -->
+        <article class="vendor-card" data-vendor="whisper-cpp">
+          <header class="vendor-head">
+            <label class="radio">
+              <input type="checkbox" name="transcription-vendor" value="whisper-cpp">
+              <span class="v-title">whisper.cpp</span>
+            </label>
+            <span class="rank mono hidden" data-rank="whisper-cpp"></span>
+            <button class="ghost tiny" data-up="whisper-cpp" title="higher priority">▲</button>
+            <button class="ghost tiny" data-down="whisper-cpp" title="lower priority">▼</button>
+            <span class="pill" data-status="whisper-cpp">probing…</span>
+          </header>
+          <p class="dim v-summary">
+            OpenAI's Whisper running entirely on this machine — no account, no API key, no network, any OS. One
+            self-contained binary (<code>whisper-cli</code>) plus one <code>ggml-*.bin</code> model you download.
+            Measured ≈6.5× realtime on <code>ggml-small.en</code> with 8 threads and no GPU, which is cheap enough
+            to read a clip on ingest <em>and</em> re-read the finished cut to check it.
+          </p>
+          <dl class="env-list mono" data-facts="whisper-cpp"></dl>
+          <p class="v-error err-line hidden" data-error="whisper-cpp"></p>
+
+          <div class="config-grid vendor-grid">
+            <label class="wide">executable
+              <input id="wh-exe" placeholder="(whisper-cli on PATH)" spellcheck="false">
+            </label>
+            <label>model
+              <select id="wh-model"></select>
+            </label>
+            <label class="wide">models folder
+              <input id="wh-models" placeholder="(a &quot;models&quot; folder beside the binary)" spellcheck="false">
+            </label>
+            <label>threads
+              <input id="wh-threads" type="number" min="1" max="64" placeholder="4">
+            </label>
+            <label>language
+              <input id="wh-language" placeholder="(auto-detect)" spellcheck="false" size="8">
+            </label>
+          </div>
+
+          <div class="fieldrow vendor-test">
+            <input type="file" id="wh-file" accept="audio/*,video/*" hidden>
+            <label class="ghost lib-upload-btn" for="wh-file">choose a recording…</label>
+            <span id="wh-file-name" class="dim mono grow">no file chosen</span>
+            <button class="ghost test-btn" data-test="whisper-cpp" disabled>▶ read it</button>
+            <span class="dim mono" data-test-msg="whisper-cpp"></span>
+          </div>
+          <p class="dim note" id="wh-limits"></p>
+
+          <div id="wh-result" class="transcript-out hidden">
+            <p class="section-label">transcript <span class="dim" id="wh-result-stats"></span></p>
+            <p id="wh-result-text" class="transcript-text"></p>
+            <table class="transcript-table">
+              <thead><tr><th class="num">start</th><th class="num">frames</th><th class="num">min p</th><th>sentence</th></tr></thead>
+              <tbody id="wh-result-rows"></tbody>
+            </table>
+            <p class="dim note">
+              <code>start</code> and <code>frames</code> are what an agent places a caption or a cut with — the same
+              fields generated narration reports. <code>min p</code> is the least confident token in the sentence:
+              a low number means the model guessed, so read it before putting those words on screen.
+            </p>
+          </div>
+
+          <p class="dim note">
+            Download a prebuilt whisper.cpp release (or build it), point <strong>executable</strong> at
+            <code>whisper-cli</code>, and put a model such as <code>ggml-small.en.bin</code> from
+            <span class="mono">huggingface.co/ggerganov/whisper.cpp</span> in a <code>models</code> folder beside
+            it — that is the whole setup, and the folder is found automatically. Bigger models are more accurate
+            and proportionally slower; <code>.en</code> models beat the multilingual model of the same size on
+            English. Nothing here is a secret, so it all lives in <code>settings.json</code>.
+          </p>
+        </article>
+      </div>
+
+      <p class="section-label">environment <span class="dim">(read-only)</span></p>
+      <dl id="transcription-env" class="env-list mono"></dl>
+      </div><!-- /cap-transcription -->
     </section>
 
     <!-- Global settings (v0.22): an inline stage page like the vendor pages,
@@ -384,6 +470,36 @@
         used for every render and the prereq check; new-scene defaults and crf/preset fill in whatever a new
         scene (or film) doesn't specify, and an agent that asks for a specific size or codec still gets it.
         <em>Newly created</em> scenes only — existing scenes keep their own.</p>
+
+        <!-- Storage (v0.22): the three locations were read-only here until the
+             engine grew somewhere to record them that isn't settings.json —
+             settings.json being one of the three. See core/paths.js. -->
+        <p class="section-label">storage <span class="dim">· where films, scenes and settings live on disk</span></p>
+        <div class="storage-fields" id="storage-fields">
+          <label class="storage-field" data-key="dataDir">
+            <span class="storage-name">data dir</span>
+            <input name="dataDir" spellcheck="false" autocapitalize="off" autocorrect="off">
+            <span class="storage-hint dim mono"></span>
+          </label>
+          <label class="storage-field" data-key="workspacesRoot">
+            <span class="storage-name">workspaces root</span>
+            <input name="workspacesRoot" spellcheck="false" autocapitalize="off" autocorrect="off">
+            <span class="storage-hint dim mono"></span>
+          </label>
+          <label class="storage-field" data-key="settingsFile">
+            <span class="storage-name">settings file</span>
+            <input name="settingsFile" spellcheck="false" autocapitalize="off" autocorrect="off">
+            <span class="storage-hint dim mono"></span>
+          </label>
+        </div>
+        <p class="dim note">Leave a box empty for its default (shown greyed in the box). Relative paths are taken
+        from the Motion Studio folder, so <code>data</code> keeps the install portable. Folders are created on
+        save, and <strong>nothing is moved</strong> — point these at an existing tree, or copy your files across
+        yourself first. The Studio switches over immediately; <em>connected agents keep using the old location
+        until their MCP server is restarted</em>. A field the environment already sets
+        (<code>MOTION_STUDIO_HOME</code>, <code>_WORKSPACES</code>, <code>_SETTINGS</code>) is shown locked —
+        change it where that variable is set.</p>
+
         <div class="fieldrow">
           <button type="submit" class="primary">save</button>
         </div>

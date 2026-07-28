@@ -109,7 +109,11 @@ const totalFrames = () => state.detail?.totalFrames || 0;
 const fid = encodeURIComponent(filmId ?? '');
 const sceneApi = (slug) => `/api/scenes/${encodeURIComponent(`${filmId}/${slug}`)}`;
 const assetUrl = (rel) => `/api/films/${fid}/asset?path=${encodeURIComponent(rel)}`;
-const sceneSrc = (s) => `${sceneApi(s.slug)}/output?file=${encodeURIComponent(s.outputFile)}`;
+const sceneSrc = (s) => (s.kind === 'footage'
+  // Footage is served by the film's own asset route (Range-capable already), not
+  // from a scene's out/ dir — it was never rendered.
+  ? assetUrl(s.footage)
+  : `${sceneApi(s.slug)}/output?file=${encodeURIComponent(s.outputFile)}`);
 const isVideoAsset = (p) => /\.(mp4|webm|mov)$/i.test(p);
 
 function timecode(frame) {
@@ -265,7 +269,12 @@ function renderHeader() {
   const btn = $('#btn-problems');
   btn.classList.toggle('hidden', !problems.length);
   btn.textContent = `⚠ ${problems.length} issue${problems.length === 1 ? '' : 's'}`;
-  const HARD = new Set(['scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'asset_missing', 'mixed_scene_audio']);
+  const HARD = new Set([
+    'scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'asset_missing', 'mixed_scene_audio',
+    // Footage problems block a build exactly as their scene equivalents do, so
+    // they must not render as soft warnings (v0.22).
+    'footage_missing', 'footage_duration_mismatch', 'footage_signature_mismatch',
+  ]);
   const ul = $('#problems-list');
   ul.innerHTML = '';
   for (const p of problems) {
@@ -308,12 +317,15 @@ function sceneAt(frame) {
 function syncVideo(frame) {
   const { scene, index } = sceneAt(frame);
   const ph = $('#scene-placeholder');
-  if (!scene || !scene.rendered) {
+  const playable = scene && (scene.kind === 'footage' ? !scene.missing : scene.rendered);
+  if (!playable) {
     videoEls.forEach((v) => { v.classList.remove('active'); v.pause(); });
     activeVideo = null;
     ph.classList.remove('hidden');
     ph.querySelector('.ph-name').textContent = scene ? scene.name : (totalFrames() ? 'gap' : 'no scenes yet');
-    ph.querySelector('.ph-note').textContent = scene ? 'scene not rendered — render it to preview' : 'add scenes with “+ scene”';
+    ph.querySelector('.ph-note').textContent = !scene ? 'add scenes with “+ scene”'
+      : scene.kind === 'footage' ? 'footage file missing from the film’s assets/'
+        : 'scene not rendered — render it to preview';
     return;
   }
   ph.classList.add('hidden');
@@ -850,20 +862,42 @@ function pointerDrag(ev, { onMove, onDone }) {
 function sceneBlock(s, index) {
   const x = s.filmOffset * state.pxf;
   const w = (s.durationInFrames || 1) * state.pxf;
-  const el = baseBlock('scene', index, x, w, 'blk-scene');
-  if (!s.rendered) el.classList.add('unrendered');
-  const mismatch = (state.detail.problems ?? []).some((p) => p.code === 'signature_mismatch' && p.sceneId === s.sceneId);
-  if (mismatch) el.classList.add('mismatch');
+  const footage = s.kind === 'footage';
+  const el = baseBlock('scene', index, x, w, footage ? 'blk-scene blk-footage' : 'blk-scene');
+  // Footage is never "rendered" — it is a file the user supplied — so the
+  // unrendered styling would read as a problem that does not exist. What CAN be
+  // wrong with it is a signature or frame-count disagreement, both of which
+  // planFilm reports against the segment path.
+  if (footage) {
+    const bad = (state.detail.problems ?? []).some((p) => p.segment === s.footage);
+    if (bad || s.missing) el.classList.add('mismatch');
+  } else {
+    if (!s.rendered) el.classList.add('unrendered');
+    const mismatch = (state.detail.problems ?? []).some((p) => p.code === 'signature_mismatch' && p.sceneId === s.sceneId);
+    if (mismatch) el.classList.add('mismatch');
+  }
 
   const dot = document.createElement('span');
   dot.className = 'sc-status';
-  dot.title = s.missing ? 'scene folder missing' : s.rendered ? 'rendered' : 'not rendered yet';
+  if (footage) {
+    dot.title = s.missing ? 'footage file missing'
+      : s.framesVerified === false ? 'declared frame count disagrees with the file'
+        : s.framesVerified === null ? 'frame count unverified (ffprobe unavailable)'
+          : 'footage, verified';
+  } else {
+    dot.title = s.missing ? 'scene folder missing' : s.rendered ? 'rendered' : 'not rendered yet';
+  }
   const label = document.createElement('span');
   label.className = 'blk-label';
-  label.textContent = s.missing ? `⚠ missing (${s.slug})` : s.name;
+  if (footage) {
+    label.textContent = s.missing ? `⚠ missing (${s.footage})` : `▣ ${s.label ?? s.name}`;
+    label.title = s.footage;
+  } else {
+    label.textContent = s.missing ? `⚠ missing (${s.slug})` : s.name;
+  }
   const dur = document.createElement('span');
   dur.className = 'sc-dur';
-  const job = state.sceneJobs.get(s.slug);
+  const job = footage ? null : state.sceneJobs.get(s.slug);
   dur.textContent = job && !['done', 'error', 'cancelled'].includes(job.state)
     ? `render ${job.percent ?? 0}%`
     : `${s.durationInFrames ?? 0}f`;
@@ -1258,6 +1292,7 @@ function renderFilmInspector(box) {
 function renderSceneInspector(box, index) {
   const s = state.detail.scenes[index];
   if (!s) return renderFilmInspector(box);
+  if (s.kind === 'footage') return renderFootageInspector(box, index, s);
   box.appendChild(el('h3', { text: `scene ${index + 1}` }));
   const dl = el('dl', { class: 'insp-facts' });
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
@@ -1296,6 +1331,48 @@ function renderSceneInspector(box, index) {
   row2.appendChild(el('button', { class: 'ghost danger', text: 'remove', onclick: deleteSelection }));
   box.appendChild(row2);
   box.appendChild(el('p', { class: 'dim note', text: 'Each scene is its own folder inside the film, stitched losslessly — open it, edit the composition, re-render, and the film picks the new output up automatically. Removing a scene only drops it from the play order; the folder stays in the rail as unlisted.' }));
+}
+
+/**
+ * Footage segments (v0.22): a supplied file on the timeline. Almost none of the
+ * scene inspector applies — there is nothing to render, no folder to open, and
+ * the file's own properties are the truth — so it gets its own facts rather than
+ * a scene panel with half its rows blank or wrong.
+ */
+function renderFootageInspector(box, index, s) {
+  box.appendChild(el('h3', { text: `footage ${index + 1}` }));
+  const dl = el('dl', { class: 'insp-facts' });
+  const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
+  fact('file', s.footage);
+  if (s.label) fact('label', s.label);
+  if (s.missing) {
+    fact('status', '⚠ missing from the film’s assets/');
+  } else if (s.probed === false) {
+    fact('status', 'unverified (ffprobe unavailable)');
+  } else {
+    fact('video', `${s.width}×${s.height} @ ${s.fps}fps · ${s.codec} · ${s.pixFmt}`);
+    // The declared count is what every later offset is built on, so a
+    // disagreement is the headline, not a footnote.
+    fact('frames', s.framesVerified === false
+      ? `⚠ declared ${s.durationInFrames} → actual ${s.actualFrames}`
+      : `${s.durationInFrames}f verified ✓`);
+    if (s.hasAudio) fact('audio', '⚠ has an audio stream (footage must be silent)');
+    fact('signature', s.signature ?? '(unknown)');
+  }
+  fact('film offset', `${s.filmOffset}f · ${timecode(s.filmOffset)}`);
+  box.appendChild(dl);
+
+  const row = el('div', { class: 'insp-row' });
+  row.appendChild(el('button', { class: 'ghost', text: '◀ move earlier', onclick: () => moveScene(index, index - 1) }));
+  row.appendChild(el('button', { class: 'ghost', text: 'move later ▶', onclick: () => moveScene(index, index + 1) }));
+  row.appendChild(el('button', { class: 'ghost danger', text: 'remove', onclick: deleteSelection }));
+  box.appendChild(row);
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: 'Footage joins the film as-is — no re-encode, so it must already match the film signature and carry no '
+      + 'audio (put its sound on the master audio timeline instead). Removing it only drops it from the play order; '
+      + 'the file stays in the film’s assets/.',
+  }));
 }
 
 function moveScene(from, to) {
@@ -1552,13 +1629,18 @@ for (const btn of document.querySelectorAll('[data-close]')) {
 
 function sceneCompat(f) {
   // Compatibility against the film's established signature (first scene wins).
-  const d = state.detail;
-  if (!d?.signature || f.missing) return { ok: true };
-  const s = d.scenes.find((x) => x.slug === f.slug && !x.missing);
-  if (s) return { ok: s.signature === d.signature, sig: s.signature };
+  // `detail.signature` is the structured contract (v0.22); `.id` is the string
+  // each scene's own signature is compared against.
+  const sig = state.detail?.signature;
+  if (!sig || f.missing) return { ok: true };
+  const s = state.detail.scenes.find((x) => x.slug === f.slug && !x.missing);
+  if (s) return { ok: s.signature === sig.id, sig: s.signature };
   // Unlisted folder: resolution/fps/format are known; alpha and pixFmt only
-  // resolve server-side after adding — flagged then if wrong.
-  return { ok: d.signature.startsWith(`${f.width}x${f.height}@${f.fps}/${f.format}/`) ? null : false };
+  // resolve server-side after adding — flagged then if wrong. Compared field by
+  // field now that the contract is data, instead of re-parsing its string form.
+  const known = f.width === sig.width && f.height === sig.height
+    && f.fps === sig.fps && f.format === sig.format;
+  return { ok: known ? null : false };
 }
 
 function renderScenesRail() {
@@ -1740,6 +1822,50 @@ $('#audio-file-input').addEventListener('change', (e) => {
 $('#btn-add-audio').addEventListener('click', openAudioDialog);
 
 /* ---- overlays ---- */
+
+/**
+ * Add footage to the play order (v0.22).
+ *
+ * The frame count is READ FROM THE FILE rather than typed: it is what every
+ * later offset is built on, and probe_asset already knows it. The user picking a
+ * clip should not have to know its frame count, and a guessed one would shift
+ * every subsequent scene, caption and cue.
+ */
+async function openFootageDialog() {
+  pickListForAssets('#footage-pick', ['video'], async (a) => {
+    const msg = $('#footage-upload-msg');
+    msg.textContent = 'reading the file…';
+    let frames = null;
+    try {
+      const probed = await api(`/api/films/${fid}/probe?path=${encodeURIComponent(a.path)}`);
+      frames = probed?.video?.frames ?? null;
+      if (!frames && probed?.video?.fps && probed?.durationSeconds) {
+        frames = Math.round(probed.durationSeconds * probed.video.fps);
+      }
+    } catch { /* fall through to the note below */ }
+    if (!frames) {
+      msg.textContent = 'could not read the frame count — check ffprobe, or add it over MCP with an explicit durationInFrames';
+      return;
+    }
+    msg.textContent = '';
+    // Insert AFTER the segment the playhead is in, which is what "add here" means
+    // on a timeline the user is scrubbing.
+    const at = sceneAt(Math.round(state.playhead));
+    const index = at.index >= 0 ? at.index + 1 : state.film.scenes.length;
+    mutate((film) => {
+      film.scenes.splice(index, 0, { footage: a.path, durationInFrames: frames });
+    });
+    $('#footage-dialog').close();
+    select({ kind: 'scene', index });
+  });
+  $('#footage-dialog').showModal();
+}
+$('#btn-footage-upload').addEventListener('click', () => $('#footage-file-input').click());
+$('#footage-file-input').addEventListener('change', (e) => {
+  if (e.target.files.length) uploadInto([...e.target.files], '#footage-upload-msg', openFootageDialog);
+  e.target.value = '';
+});
+$('#btn-add-footage').addEventListener('click', openFootageDialog);
 
 function openOverlayDialog() {
   pickListForAssets('#overlay-pick', ['image', 'video'], (a) => {

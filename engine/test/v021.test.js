@@ -70,6 +70,44 @@ test('summarizeMedia extracts video + audio properties', () => {
   assert.equal(s.hasAudio, true);
 });
 
+test('summarizeMedia reports colour tags, and "unknown" as null rather than as a value', () => {
+  // v0.22. An untagged matrix is exactly the case a player resolves by GUESSING,
+  // so passing ffprobe's literal "unknown" through as if it were a colour would
+  // hide the one fact worth knowing. Both files below are real measurements: a
+  // Motion Studio scene render, and ordinary camera footage.
+  const scene = summarizeMedia({
+    format: { format_name: 'mov,mp4' },
+    streams: [{
+      codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080, avg_frame_rate: '30/1',
+      pix_fmt: 'yuv420p', color_primaries: 'bt709', color_transfer: 'iec61966-2-1',
+      color_space: 'unknown', color_range: 'tv',
+    }],
+  });
+  assert.deepEqual(scene.video.color, {
+    primaries: 'bt709', transfer: 'iec61966-2-1', matrix: null, range: 'tv',
+  });
+
+  const footage = summarizeMedia({
+    format: { format_name: 'mov,mp4' },
+    streams: [{
+      codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080, avg_frame_rate: '30/1',
+      pix_fmt: 'yuv420p', color_primaries: 'bt709', color_transfer: 'bt709',
+      color_space: 'bt709', color_range: 'tv',
+    }],
+  });
+  // The pair that motivated the field: identical pixel format (so they
+  // stream-copy together fine) and a different transfer function.
+  assert.equal(footage.video.pixFmt, scene.video.pixFmt);
+  assert.notEqual(footage.video.color.transfer, scene.video.color.transfer);
+});
+
+test('summarizeMedia: a file with no colour tags at all reports nulls, not absence', () => {
+  const s = summarizeMedia({
+    format: {}, streams: [{ codec_type: 'video', codec_name: 'vp9', width: 8, height: 8, avg_frame_rate: '30/1' }],
+  });
+  assert.deepEqual(s.video.color, { primaries: null, transfer: null, matrix: null, range: null });
+});
+
 test('summarizeMedia warns that H.264 cannot be decoded by the render browser', () => {
   const withH264 = summarizeMedia({
     format: {}, streams: [{ codec_type: 'video', codec_name: 'h264', width: 8, height: 8, avg_frame_rate: '30/1' }],
@@ -297,6 +335,30 @@ test('a real render stamps the sidecar; proxy and partial renders do not', { ski
     name: 'Sidecar', fps: 30, width: 160, height: 120, durationInFrames: 12,
   }));
   assert.equal(describeStaleness(renderStaleness(readRenderMeta(dir, shortened), shortened)), 'frames 24 → 12');
+
+  // v0.22: pixFmt and transparent are part of the concat signature, so they are
+  // recorded too. Before this they were not, which left a hole — change either
+  // after rendering and the contract was broken with nothing reporting it.
+  assert.equal(recorded.pixFmt, 'yuv420p');
+  assert.equal(recorded.transparent, false);
+  // makeConfig() owns the output block, so the pixel format is changed on the
+  // config it produced rather than passed in — the same edit a user makes.
+  const repixed = { ...config, output: { ...config.output, pixFmt: 'yuv444p' } };
+  assert.equal(describeStaleness(renderStaleness(readRenderMeta(dir, repixed), repixed)), 'pixFmt yuv420p → yuv444p');
+});
+
+test('an older sidecar without pixFmt stays unverified rather than turning up stale', () => {
+  // The backward-compatibility story for the two fields added in v0.22:
+  // renderStaleness only compares what a sidecar actually recorded, so renders
+  // from before this release are not retroactively condemned.
+  const base = validateConfig(makeConfig({
+    name: 'Old', fps: 30, width: 160, height: 120, durationInFrames: 24,
+  }));
+  const config = { ...base, output: { ...base.output, pixFmt: 'yuv444p' } };
+  const preV022 = { frames: 24, width: 160, height: 120, fps: 30, format: 'mp4' };
+  assert.equal(renderStaleness(preV022, config), null);
+  // …while a v0.22 sidecar recording the old value does catch it.
+  assert.deepEqual(renderStaleness({ ...preV022, pixFmt: 'yuv420p' }, config).changed, ['pixFmt']);
 });
 
 /* ------------------------------------------------------------------ */

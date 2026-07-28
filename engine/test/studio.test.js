@@ -552,3 +552,110 @@ test('studio: DELETE removes the scene from its film', async () => {
   const film = ws.films.find((f) => f.id === filmId);
   assert.equal(film.scenes, 0);
 });
+
+/* ------------------------------------------------------------------ */
+/* v0.22 — the transcription vendor page                               */
+/* ------------------------------------------------------------------ */
+
+test('studio: /api/vendors reports transcription beside speech and music', async () => {
+  const { status, data } = await j('/api/vendors?probe=0');
+  assert.equal(status, 200);
+  assert.equal(data.transcription.capability, 'transcription');
+  assert.equal(data.transcription.active, 'whisper-cpp');
+  assert.deepEqual(data.transcription.chain, ['whisper-cpp']);
+  // The page needs the env-hook names and the bound it will be held to.
+  assert.ok(data.whisper.env.bin.includes('MOTION_STUDIO_WHISPER_BIN'));
+  assert.ok(data.whisper.maxPreviewSeconds > 0);
+  assert.ok(data.whisper.modelPreference.includes('small.en'));
+});
+
+test('studio: the transcription section saves and round-trips through settings', async () => {
+  const patch = {
+    transcription: { vendor: 'whisper-cpp', vendors: ['whisper-cpp'], whisper: { threads: 6, language: 'en' } },
+  };
+  const saved = await j('/api/settings', { method: 'PATCH', body: { patch } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.settings.transcription.whisper.threads, 6);
+  assert.equal(saved.data.settings.transcription.whisper.language, 'en');
+
+  const read = await j('/api/settings');
+  assert.equal(read.data.settings.transcription.whisper.threads, 6);
+  // The env report carries the whisper hooks, so the page can show where the
+  // binary came from without the server holding a secret (there are none here).
+  assert.ok('MOTION_STUDIO_WHISPER_BIN' in read.data.environment.env);
+
+  const bad = await j('/api/settings', {
+    method: 'PATCH', body: { patch: { transcription: { whisper: { threads: 0 } } } },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.data.message, /threads/);
+});
+
+test('studio: an unknown transcription vendor is refused', async () => {
+  const res = await fetch(`${base}/api/vendors/transcription/faster-whisper/preview?name=a.wav`, {
+    method: 'POST', body: Buffer.from('x'),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('studio: the transcription preview refuses a non-media file by name', async () => {
+  const res = await fetch(`${base}/api/vendors/transcription/whisper-cpp/preview?name=notes.json`, {
+    method: 'POST', body: Buffer.from('{}'),
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.code, 'transcription_input_unsupported');
+});
+
+test('studio: the transcription preview reads a recording and reports frames + speed', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const models = path.join(os.tmpdir(), `ms-studio-whisper-${process.pid}`);
+  await fsp.mkdir(models, { recursive: true });
+  await fsp.writeFile(path.join(models, 'ggml-small.en.bin'), Buffer.alloc(64, 1));
+  const saved = { bin: process.env.MOTION_STUDIO_WHISPER_BIN, models: process.env.MOTION_STUDIO_WHISPER_MODELS };
+  process.env.MOTION_STUDIO_WHISPER_BIN = path.resolve('test/helpers/fake-whisper.mjs');
+  process.env.MOTION_STUDIO_WHISPER_MODELS = models;
+  try {
+    // 48 kHz stereo in; the engine resamples to the 16 kHz mono whisper needs.
+    const seconds = 20, sampleRate = 48000, channels = 2;
+    const bytes = sampleRate * channels * 2 * seconds;
+    const wav = Buffer.alloc(44 + bytes);
+    wav.write('RIFF', 0, 'ascii');
+    wav.writeUInt32LE(36 + bytes, 4);
+    wav.write('WAVE', 8, 'ascii');
+    wav.write('fmt ', 12, 'ascii');
+    wav.writeUInt32LE(16, 16);
+    wav.writeUInt16LE(1, 20);
+    wav.writeUInt16LE(channels, 22);
+    wav.writeUInt32LE(sampleRate, 24);
+    wav.writeUInt32LE(sampleRate * channels * 2, 28);
+    wav.writeUInt16LE(channels * 2, 32);
+    wav.writeUInt16LE(16, 34);
+    wav.write('data', 36, 'ascii');
+    wav.writeUInt32LE(bytes, 40);
+
+    const res = await fetch(`${base}/api/vendors/transcription/whisper-cpp/preview?name=take.wav&fps=30`, {
+      method: 'POST', body: wav,
+    });
+    // Read the body once: `await res.text()` as an assertion message would
+    // consume it before the parse below (it is evaluated eagerly).
+    const body = await res.text();
+    assert.equal(res.status, 200, body);
+    const data = JSON.parse(body);
+    assert.equal(data.vendor, 'whisper-cpp');
+    assert.equal(data.model, 'small.en');
+    // The page shows the actual product of the tool: re-segmented sentences
+    // with the frame numbers a caption would be placed at.
+    assert.equal(data.sentences.length, 3);
+    assert.equal(data.sentences[0].startInFrames, 258);
+    assert.ok(data.wordCount >= 12);
+    assert.ok(data.realtimeFactor > 0, 'how fast this machine reads speech');
+    assert.ok(data.durationSeconds > 19);
+  } finally {
+    if (saved.bin === undefined) delete process.env.MOTION_STUDIO_WHISPER_BIN;
+    else process.env.MOTION_STUDIO_WHISPER_BIN = saved.bin;
+    if (saved.models === undefined) delete process.env.MOTION_STUDIO_WHISPER_MODELS;
+    else process.env.MOTION_STUDIO_WHISPER_MODELS = saved.models;
+    await fsp.rm(models, { recursive: true, force: true }).catch(() => {});
+  }
+});

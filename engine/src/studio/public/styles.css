@@ -497,6 +497,20 @@ dialog .fieldrow { margin-bottom: 10px; }
 }
 .env-list dt { color: var(--dim); white-space: nowrap; }
 .env-list dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Storage locations (v0.22). One per row rather than a .fieldrow: these are
+   long absolute paths that need the full width, and each carries a hint line
+   under it saying where the value came from. */
+.storage-fields { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+.storage-field { display: grid; grid-template-columns: 120px 1fr; gap: 2px 12px; align-items: center; }
+.storage-field .storage-name { justify-self: start; }
+.storage-field input { width: 100%; }
+.storage-field .storage-hint {
+  grid-column: 2; font-size: 10px; letter-spacing: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Locked by an env var: still readable, visibly not yours to edit here. */
+.storage-field.locked input { opacity: 0.55; cursor: not-allowed; }
 #delete-summary { font-size: 13px; margin: 0 0 10px; }
 #asset-delete-dialog { max-width: 520px; }
 #asset-delete-summary { font-size: 13px; margin: 0 0 10px; }
@@ -606,6 +620,31 @@ label.radio input { accent-color: var(--accent); }
 .vendor-test [data-test-msg] { font-size: 11px; padding-bottom: 7px; }
 .vendor-test [data-test-msg].err { color: var(--err); }
 #vendors-env { max-width: 760px; }
+
+/* Transcription result (v0.22). The speech page auditions a voice by playing
+   it; there is nothing to play here, so the read-back IS the audition — the
+   text plus the frame numbers an agent would actually place a cut with. */
+.transcript-out { margin: 14px 0 6px; max-width: 900px; }
+.transcript-text {
+  font: 12px/1.7 var(--mono);
+  color: var(--text);
+  background: var(--ink-3);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  max-height: 180px; overflow-y: auto;
+}
+.transcript-table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+.transcript-table th {
+  text-align: left; padding: 6px 10px 6px 0;
+  font: 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+.transcript-table td { padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.transcript-table .num { text-align: right; white-space: nowrap; }
+/* A sentence the model was unsure of is the one thing on this page that must
+   not be skimmed past — it is the caption that would be wrong on screen. */
+.transcript-table .err { color: var(--err); }
 
 /* ------------------------------- banner -------------------------------- */
 

@@ -1,7 +1,7 @@
 /**
  * Global (per-user) settings for the Studio UI — v0.15.
  *
- *   <dataDir>/settings.json      (dataDir default: ~/.motion-studio)
+ *   <dataDir>/settings.json      (both halves configurable — see core/paths.js)
  *
  * This file is the machine's single source of truth: the Studio UI presents it
  * as "Global Settings", so every front end honours it — the Studio, the MCP
@@ -18,6 +18,8 @@
  *   tts.vendor           which speech vendor narration goes through (v0.17)
  *   tts.azure.*          the Azure vendor's non-secret options (region, default
  *                        voice, output format, style) — never the API key
+ *   transcription.*      which vendor READS speech out of supplied media, and
+ *                        where its binary and models live (v0.22)
  *
  * Two invariants hold throughout. An explicit argument always beats a global
  * default — these fill gaps, they do not override a caller who spoke up. And
@@ -25,16 +27,21 @@
  * never rewritten because a global changed. See resolveFfmpegPath() below for
  * the one full precedence chain (CLI flag > env > this file > PATH).
  *
- * Other machine-level knobs (data dir, TTS/music exes) and every credential
- * stay env vars (MOTION_STUDIO_*, AZURE_SPEECH_KEY); the Studio settings
- * endpoint reports them read-only — secrets masked — so the UI can show where
- * everything lives without this file ever holding one.
+ * The remaining machine-level knobs (TTS/music exes) and every credential stay
+ * env vars (MOTION_STUDIO_*, AZURE_SPEECH_KEY); the Studio settings endpoint
+ * reports them read-only — secrets masked — so the UI can show where everything
+ * lives without this file ever holding one.
+ *
+ * The three STORAGE locations — data dir, workspaces root, and the path to this
+ * very file — are the exception, and they live in core/paths.js rather than
+ * here. They cannot live here: this file's own location is one of them. They are
+ * editable from the same settings page all the same (v0.22).
  */
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
-import { defaultDataDir } from './scene.js';
+import { defaultDataDir, settingsFileFor } from './paths.js';
 import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
 import { ELEVENLABS_WAV_FORMATS, ELEVENLABS_DEFAULT_FORMAT } from './tts-elevenlabs.js';
 
@@ -52,6 +59,7 @@ export const FFMPEG_PRESETS = Object.freeze([
  */
 export const TTS_VENDORS = Object.freeze(['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram']);
 export const MUSIC_VENDORS = Object.freeze(['node', 'fluidsynth']);
+export const TRANSCRIPTION_VENDORS = Object.freeze(['whisper-cpp']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
@@ -104,6 +112,30 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // user actually likes instead of defaulting to piano-and-strings.
     favoritePrograms: null,
     node: Object.freeze({ soundfont: null, sampleRate: 44100, gain: 1.575 }),
+  }),
+  // Which vendor READS speech out of supplied media (v0.22) — the transcription
+  // capability behind `transcribe_asset`. Local and offline like piper, so the
+  // same rule applies: paths and knobs here, no credentials, because there is
+  // no account to have. See core/transcribe-vendors.js and
+  // docs/transcribe-setup.md.
+  transcription: Object.freeze({
+    vendor: 'whisper-cpp',
+    vendors: null,          // ordered preference chain (v0.19) — see tts.vendors
+    whisper: Object.freeze({
+      // The whisper-cli executable, the ggml model (a file path or a bare name
+      // like "small.en"), and the folder holding several of them. null = follow
+      // the resolution chain in core/transcribe-whisper.js.
+      exe: null,
+      model: null,
+      modelsDir: null,
+      // null = whisper.cpp's own default (4). Threads is the one knob that
+      // changes wall-clock by more than noise: the measured 6.5× realtime in
+      // docs/transcribe-setup.md is at 8.
+      threads: null,
+      // null = auto-detect per file. A film in one language is the normal case,
+      // and naming it is both faster and more accurate than detection.
+      language: null,
+    }),
   }),
 });
 
@@ -265,6 +297,32 @@ export function validateSettings(s) {
         if (!isNum(n.gain) || n.gain <= 0 || n.gain > 4) problems.push('music.node.gain: number in 0..4 required');
       }
     }
+    // Transcription (v0.22). Absent is fine — every settings.json written before
+    // this release omits it, and readSettings() merges the defaults in.
+    const tr = s.transcription;
+    if (tr !== null && tr !== undefined) {
+      if (typeof tr !== 'object' || Array.isArray(tr)) problems.push('transcription: object or absent required');
+      else {
+        if (!TRANSCRIPTION_VENDORS.includes(tr.vendor)) {
+          problems.push(`transcription.vendor: one of ${TRANSCRIPTION_VENDORS.join(', ')}`);
+        }
+        vendorChain(tr.vendors, 'transcription.vendors', TRANSCRIPTION_VENDORS);
+        const w = tr.whisper;
+        if (!w || typeof w !== 'object') problems.push('transcription.whisper: object required');
+        else {
+          for (const k of ['exe', 'model', 'modelsDir', 'language']) {
+            if (w[k] !== null && (typeof w[k] !== 'string' || !w[k].trim())) {
+              problems.push(`transcription.whisper.${k}: non-empty string or null required`);
+            }
+          }
+          // 64 is well past any consumer core count; a typo like 800 would just
+          // thrash. null = let whisper.cpp choose.
+          if (w.threads !== null && (!Number.isInteger(w.threads) || w.threads < 1 || w.threads > 64)) {
+            problems.push('transcription.whisper.threads: integer in 1..64 or null required');
+          }
+        }
+      }
+    }
   }
   if (problems.length) {
     throw new EngineError(ErrorCodes.INVALID_CONFIG, `Invalid settings: ${problems.join('; ')}`, { problems });
@@ -272,8 +330,13 @@ export function validateSettings(s) {
   return s;
 }
 
+/**
+ * Where this data dir's settings.json lives. Usually right inside it — but the
+ * file is separately configurable since v0.22, so core/paths.js gets the last
+ * word (and only for the machine's configured data dir; see settingsFileFor).
+ */
 function settingsPath(dataDir) {
-  return path.join(dataDir, 'settings.json');
+  return settingsFileFor(dataDir);
 }
 
 /** Copy just the named keys that are actually present on `obj`. */
@@ -402,6 +465,14 @@ export async function readSettings(dataDir = defaultDataDir()) {
       ...pick(raw.music, ['vendor', 'vendors', 'targetPeakDb', 'favoritePrograms']),
       node: { ...DEFAULT_SETTINGS.music.node, ...pick(raw.music?.node, ['soundfont', 'sampleRate', 'gain']) },
     },
+    transcription: {
+      ...DEFAULT_SETTINGS.transcription,
+      ...pick(raw.transcription, ['vendor', 'vendors']),
+      whisper: {
+        ...DEFAULT_SETTINGS.transcription.whisper,
+        ...pick(raw.transcription?.whisper, ['exe', 'model', 'modelsDir', 'threads', 'language']),
+      },
+    },
   };
   try {
     return validateSettings(merged);
@@ -415,7 +486,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
  * atomically. Unknown top-level keys are rejected so typos fail loudly.
  */
 export async function updateSettings(patch, dataDir = defaultDataDir()) {
-  const ALLOWED = new Set(['newSceneDefaults', 'render', 'ffmpeg', 'tts', 'music']);
+  const ALLOWED = new Set(['newSceneDefaults', 'render', 'ffmpeg', 'tts', 'music', 'transcription']);
   for (const k of Object.keys(patch ?? {})) {
     if (!ALLOWED.has(k)) {
       throw new EngineError(ErrorCodes.INVALID_CONFIG, `Settings field "${k}" cannot be updated`, { field: k });
@@ -443,9 +514,16 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
       ...(patch.music ?? {}),
       node: { ...cur.music.node, ...(patch.music?.node ?? {}) },
     },
+    transcription: {
+      ...cur.transcription,
+      ...(patch.transcription ?? {}),
+      whisper: { ...cur.transcription.whisper, ...(patch.transcription?.whisper ?? {}) },
+    },
   });
-  await fsp.mkdir(dataDir, { recursive: true });
   const abs = settingsPath(dataDir);
+  // The settings file need not live inside the data dir (v0.22), so create the
+  // folder it is actually going into rather than assuming the two agree.
+  await fsp.mkdir(path.dirname(abs), { recursive: true });
   const tmp = abs + '.tmp';
   await fsp.writeFile(tmp, JSON.stringify(next, null, 2));
   await fsp.rename(tmp, abs); // atomic on same volume

@@ -11,12 +11,13 @@ two kinds of users through one shared render engine:
   that drives your *actual* composition, scrub/play transport, hot reload,
   render queue with progress + ETA, and full scene management — create,
   configure and delete scenes, manage `assets/` (upload, audition, rename,
-  delete), edit the audio timeline, pick and audition the **speech and music
-  vendors** (one, or an ordered fallback chain), and set global preferences
-  including an FFmpeg binary override. The **film editor** cuts a film on a
+  delete), edit the audio timeline, pick and audition the **speech, music and
+  transcription vendors** (one, or an ordered fallback chain), and set global
+  preferences including an FFmpeg binary override. The **film editor** cuts a film on a
   visual timeline — drag-to-reorder scenes, multi-lane master audio with
   waveforms, fades and auto-ducking, captions (burn-in and/or `.srt`
-  sidecar), image and transparent-video overlays, in-editor narration with
+  sidecar), **footage segments** on the timeline beside rendered scenes,
+  image and transparent-video overlays, in-editor narration with
   auto-synced captions, a preview that plays the real rendered scenes with
   the build's exact audio mix, and one-click assembly with measured
   mastering. Each workspace also has a **shared-asset library** for the large
@@ -33,17 +34,24 @@ two kinds of users through one shared render engine:
   (in-process SoundFont synth or FluidSynth) and sound effects, audition the
   audio mix without a render (`preview_audio`), pull in the human's
   library files (`use_shared_asset`), read a media file's duration /
-  dimensions / codecs (`probe_asset`), attach 3D libraries
+  dimensions / codecs (`probe_asset`) **and the speech inside it**
+  (`transcribe_asset` — local whisper.cpp, sentence *and* word timing in
+  frames), **prepare it** (`transcode_asset` — conform footage to a film's
+  encode signature, trim to an exact frame count, crop/scale, or cut and join
+  spans of someone's voice into one WAV; named fields only, never a shell),
+  attach 3D libraries
   (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as
   images, render — including cheap **proxy motion drafts**
   (`proxy: { scale, frameStep }`) — poll, cancel, and assemble the film
-  (`build_film`, async, with master audio, captions and overlays). No shell,
+  (`build_film`, async, with master audio, captions and overlays) — whose
+  timeline now holds **real footage beside the rendered scenes** (v0.22), so a
+  film can be "footage, then a scene, then footage". No shell,
   no arbitrary file access.
 
 ### The model: workspace → film → scene
 
 ```
-~/.motion-studio/workspaces/<workspace>/     one per AI; the human sees them all
+<dataDir>/workspaces/<workspace>/            one per AI; the human sees them all
   library/                                   shared assets the human provides
   films/<film>/
     film.json  assets/  out/                 the film owns its audio and output
@@ -58,6 +66,12 @@ re-cutting costs seconds. Ids are just the slug path — `"my-film"`,
 `"my-film/opening"` — and the filesystem is the registry. Data from before
 v0.20 migrates automatically on first start (old registries are kept under
 `legacy-v019/`; nothing is deleted).
+
+`<dataDir>` is the `data` folder beside the app by default (v0.22), and it,
+the workspaces root and the settings file are all editable in the Studio's
+**Global Settings** — or per process via `MOTION_STUDIO_HOME`,
+`MOTION_STUDIO_WORKSPACES` and `MOTION_STUDIO_SETTINGS`. An install from
+before v0.22 keeps using its existing `~/.motion-studio` until you change it.
 
 Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 (.mov), and **PNG sequences** — including **true alpha-channel renders**
@@ -133,9 +147,18 @@ what lets you tell in the Studio who made what. The workspace's `library/`
 folder is where you drop large files for that agent to use.
 
 Full walkthrough and tool reference: [docs/mcp-setup.md](docs/mcp-setup.md).
-A ready-to-use agent skill is in [docs/SKILL.md](docs/SKILL.md) (pair it
-with `docs/frame-api.md`, which the skill expects as `references/frame-api.md`
-when installed).
+
+**There are two ready-to-use agent skills — install the one that matches how the
+agent is deployed**, and pair either with `docs/frame-api.md`, which both expect
+as `references/frame-api.md` when installed:
+
+| Agent has | Install | For |
+|---|---|---|
+| MCP tools only, no shell | [docs/SKILL.md](docs/SKILL.md) | Motion graphics authored from HTML/CSS/JS |
+| MCP **+** a shell with ffmpeg | [docs/SKILL-shell.md](docs/SKILL-shell.md) | Films built around footage the user recorded |
+
+Why the split, and which design questions turn on it:
+[docs/agent-environments.md](docs/agent-environments.md).
 
 ## Repository layout
 
@@ -192,8 +215,12 @@ motion-studio/
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music vendors: in-process synth (v0.17) + FluidSynth (v0.8)
     ├── sfx-setup.md               sound effects: cue spec + synthesis (v0.12)
+    ├── transcribe-setup.md        reading supplied speech: whisper.cpp, sentence + word timing (v0.22)
     ├── film-setup.md              long-form: films, scenes, master audio, the film editor
-    ├── SKILL.md                   drop-in agent skill
+    ├── agent-environments.md      Env A / Env B: what an agent can reach, and why it matters
+    ├── SKILL.md                   drop-in agent skill — MCP only (Env A)
+    ├── SKILL-shell.md             drop-in agent skill — MCP + ffmpeg/whisper.cpp (Env B)
+    ├── todo_task/                 planned work, scoped against the two environments
     └── spec-changes.md            historical v0.2-era decision log
 ```
 

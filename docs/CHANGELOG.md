@@ -1,5 +1,621 @@
 # Motion Studio — Changelog
 
+## Unreleased
+
+### Where everything lives is a setting, and the default moved into the app
+
+The Studio's Global Settings page listed the data dir, the workspaces root and
+the settings file under **environment (read-only · set via env vars)**. They are
+fields now. Alongside that the default data dir moved from `~/.motion-studio` to
+**`<app>/data`** — the folder beside `engine/` — so a checkout carries its own
+library and is one folder to copy, back up, or move to another drive.
+
+**Why they were read-only, and what changed.** Not caution: there was nowhere to
+write them. A setting's home is `settings.json`, and `settings.json` is one of
+the three things being located. `core/paths.js` gives them a bootstrap file of
+their own —
+
+```
+<app>/paths.json    { dataDir, workspacesRoot, settingsFile }   any may be null
+```
+
+— resolved per key as **env → `paths.json` → default**, with
+`MOTION_STUDIO_WORKSPACES` and `MOTION_STUDIO_SETTINGS` joining the existing
+`MOTION_STUDIO_HOME`. Env stays on top for the reason it already outranks
+settings for the ffmpeg binary: an MCP server is spawned by its client with
+whatever environment that client chose. A field the environment has decided is
+shown **locked** rather than accepting an edit that would do nothing.
+
+App-relative values are *stored* relatively (`{"dataDir": "data"}`), so moving
+the folder moves the install intact.
+
+**Your existing library does not move, and does not vanish.** When nothing is
+configured, `<app>/data` does not exist yet and `~/.motion-studio` does, the old
+directory wins — reported as source `legacy` — and both servers record it in
+`paths.json` at startup so the answer stops depending on which folders happen to
+exist. A fresh install never takes that branch. Switching afterwards is a field
+edit; the Studio prints the path it settled on at startup either way.
+
+**The running Studio follows without a restart.** `PATCH /api/settings` takes a
+`paths` patch beside the usual `patch` and rebuilds the server's
+`WorkspaceStore` in place, because "changed the data dir, saw no change" is
+indistinguishable from a broken setting. Sending both in one request writes the
+settings to the *new* file, not a parting write to the old one.
+
+Three things it deliberately does not do:
+
+- **Move any files.** Point the fields at a tree that already exists, or copy
+  yours across first. A save that silently relocated gigabytes of renders is not
+  a save.
+- **Proceed while work is in flight** — `storage_busy` (HTTP 409) until the
+  queue drains. A render holds absolute paths into the old tree and writes
+  frames there for minutes; swapping underneath it produces a corrupted result
+  rather than an error, and waiting is cheap.
+- **Reach into other processes.** Connected MCP servers resolved their paths
+  when their client spawned them, so they keep using the old location until
+  restarted. The response says so (`relocated.restartAgents`) instead of
+  pretending otherwise.
+
+A configured override applies to the **configured** data dir only — name any
+other directory and you get the conventional layout inside it. That is what
+keeps a caller passing an explicit `dataDir` (a test over a temp dir, a CLI run
+against a copy) from silently borrowing the machine's real workspaces.
+
+`MOTION_STUDIO_PATHS_FILE` redirects the bootstrap file itself. It exists so the
+suite can cover the write path without rewriting the developer's real
+`paths.json` — a test that can repoint your film library is a test nobody runs.
+
+New error code: **`storage_busy`**. Details in
+[architecture.md §11.1](architecture.md).
+
+### Colour is measured and reported, and the signature grows a third list
+
+Found by reading a real build back: a film's rendered scenes and its footage segment
+carry different colour tags, the joined file advertises only segment 1's, and nothing
+in the tool surface said so.
+
+**`signature.matchForLooks`** joins `mustMatch`/`neednotMatch`. Two lists could not
+classify everything, and the leftovers were what a caller actually gets wrong:
+`crf`/`preset` were in neither and existed only in prose, and the colour tags are the
+same shape of fact — no effect on the join, but the joined file keeps only segment
+1's, so a mismatch is a **look difference rather than an error**.
+
+**`signature.color` reports `stated: false`**, which is the honest answer rather than
+a gap. The engine passes no colour arguments, so a scene's tags are whatever
+Chromium's PNGs and ffmpeg's default conversion produce. Naming a value would mean
+probing a rendered file — a second copy of the truth, available only after a render,
+describing the installed encoder rather than a decision anyone made.
+
+**`probe_asset` and footage plan entries now report `color`**
+(`{ primaries, transfer, matrix, range }`). ffprobe's literal `"unknown"` becomes
+`null`, because an untagged matrix is precisely the case a player resolves by
+guessing, and passing the string through would hide the one fact worth knowing.
+`matrix` is ffprobe's `color_space`, renamed: the field is only the YUV↔RGB
+coefficients, while "colour space" reads as the whole colorimetry everywhere else.
+
+Measured (`motion-studio-promo`, ffmpeg 8.1.1) — scene render
+`primaries=bt709, transfer=iec61966-2-1, matrix` unset; camera footage `bt709`
+throughout. Both `yuv420p`, so they stream-copy and decode; a decoder logs a filter
+reconfiguration at the cut and those frames may play at a slightly different gamma.
+
+#### Why `matchFilm` still carries no colour arguments
+
+Not caution — three measurements:
+
+- **`-color_primaries`/`-color_trc` are silently ignored** on this pipeline.
+  Re-encoding `bt709` footage with `-color_trc iec61966-2-1` yields a file still
+  tagged `transfer=bt709`; decoder frame properties win over the output option.
+  Emitting them would make the tool *report a conform it did not perform*.
+- **`-colorspace`, the one flag that takes, changes pixels** — it re-matrixes the
+  picture (different `framemd5`, ~+3% bitrate). A re-encode, not a tag. Only
+  `-vf setparams=…` sets all three, and it converts too.
+- **The scenes are not a coherent target yet.** A render forced to
+  `setparams=colorspace=smpte170m` is byte-identical to today's output: the engine
+  converts RGB→YUV with the **bt601** matrix while tagging the result `bt709`/sRGB
+  with the matrix unset, so the file does not agree with itself and any player
+  assuming bt709 for HD already decodes it with the wrong matrix. Conforming footage
+  to that would replicate the accident and freeze it into a `.transcode.json`
+  identity that survives the next ffmpeg upgrade.
+
+#### Open decision: stating colour at the render encode
+
+Filed as [todo_task/film-colour-plan.md](todo_task/film-colour-plan.md).
+
+Making colour part of the contract starts at the **render** encode, not at
+`transcode_asset`. Stated there (via `setparams`, the only mechanism that works) it
+becomes config-derived, so `filmSignature()` reports it under the same
+derived-at-call-time rule as everything else and `matchFilm` inherits it. Two
+candidates, both self-consistent, neither taken yet because both are decisions about
+how films look rather than fixes:
+
+- **bt709 end-to-end** — conventional and correct for HD, and it makes scenes agree
+  with `bt709` footage on the matrix so only the transfer needs reconciling. Changes
+  every future render's pixels, so already-rendered scenes differ from re-renders;
+  would want colour in the render sidecar so `renderStaleness` flags a half-re-rendered
+  film.
+- **Tag what already happens (`smpte170m`)** — verified byte-identical, so zero pixel
+  change and every existing render stays valid. But 601 on 1080p is unconventional,
+  some hardware paths force 709 for HD regardless, and `matchFilm` would then convert
+  real bt709 footage *down* to 601 — making the footage side worse, not better.
+
+### The read-only media tools can reach `out/`
+
+`transcribe_asset`'s own description says re-transcribing a render is how you verify
+a finished cut — and then the path guard refused `out/film.mp4`, because reading was
+confined to `assets/` alongside writing. The documented workflow was impossible.
+
+Found by building a real 30-second film end-to-end: everything up to the last check
+worked, and the last check could not be expressed.
+
+`probe_asset`, `transcribe_asset` and the Studio's `GET …/probe` now accept an
+`out/`-relative path as well as an `assets/`-relative one (`store.resolveMediaFile`).
+**Reading is all it grants**: writes, deletes and renames still go through
+`_assetRelPath` and stay confined to `assets/`, so a deliverable cannot be
+overwritten through the tool surface, and the sandbox escape checks apply to the new
+prefix exactly as before. A missing file under `out/` says "render it first" instead
+of pointing at `list_assets`.
+
+### `transcode_asset` — preparing media inside the tool surface
+
+`probe_asset` let an agent *read* a media file; `transcribe_asset` let it *hear*
+one. Neither can **change** one, and every real job with supplied footage needs to.
+An agent on the MCP surface stopped at exactly that line: it could report that a
+clip's codec cannot be decoded by the render browser, and then had no way to act on
+its own advice.
+
+The evidence was a session where a user dropped a 7.7 MB OBS recording in the
+library and asked for a promo built around it. It completed only because the agent
+had a shell outside the MCP surface and used it seven times — H.264 → VP9, a PIP
+crop, a logo removal, and an audio extraction that was simply never attempted
+because it was unreachable. The user's voice was unusable, and that was forced by
+tooling, not chosen for the film.
+
+```
+transcode_asset { target: 'my-film', from: 'talk.mp4', to: 'assets/segment.mp4',
+                  mode: 'video', matchFilm: 'my-film',
+                  trim: { startSeconds: 2.0, durationInFrames: 186 },
+                  crop: { x: 384, y: 110, width: 1152, height: 648 },
+                  scale: { width: 640 }, video: { gop: 10 } }
+→ measured on the RESULT: { video: {codec,width,height,pixFmt}, frames, bytes, notes? }
+```
+
+**Three modes.** `video` conforms footage — trim to an exact frame count, crop,
+scale, fps, codec from the `to` extension. `audio` cuts N `spans` out of one source
+and **joins** them into a PCM WAV, because building a spine from a talk is *N*
+trims joined, not one. `frames` writes a PNG sequence.
+
+**One architectural rule: no arbitrary ffmpeg arguments.** Not `args`, not
+`filter`, not an escape hatch. The premise of this surface is "no shell"; a
+passthrough is a shell wearing a hat and it takes the path sandbox with it. Every
+operation is a named, validated field, and the two functions that build the filter
+graph are pure and unit-tested without ffmpeg — they are the entire surface that can
+ever run, which makes the claim checkable rather than aspirational. A test asserts
+that passing `args`/`filter` has no effect, because the schema strips them.
+
+**`matchFilm` is the option that prevents the common disaster**, and it is where all
+four v0.22 plans close a loop: it splices the film's own `signature.ffmpegArgs` into
+the command, so the output agrees with the film by construction instead of by an
+agent's arithmetic. The film *states* its contract, this *conforms* a file to it,
+and the timeline *holds* the result — proved end to end by a test that takes a raw
+640×480 H.264 clip from the library, conforms it, places it between two rendered
+scenes, builds the film, and counts every frame in the output.
+
+Four properties, each replacing a way a wrapper usually goes wrong:
+
+- **Report by measuring, never by echoing.** The response is the `probe_asset`
+  block on the *output*, including a `notes` warning if the result still is not
+  browser-decodable. A caller who asked for 640×360 and got 640×358 (even
+  dimensions, chroma subsampling) learns it here, not from a render three steps
+  later.
+- **Frames, not seconds.** `durationInFrames` maps to `-frames:v`, which guarantees
+  the count; `-t seconds` does not, and one frame of drift breaks a concat seam.
+  **Corrected during implementation:** `-frames:v` counts *output* frames, so
+  "12 frames, every 3rd" originally read 36 source frames. `trim.durationInFrames`
+  now means frames *of source* in every mode — a trim describes the span being read
+  — so that call yields 4 images.
+- **Idempotent and never destructive.** A `*.transcode.json` sidecar records the
+  source identity and every parameter, so repeating an unchanged call returns
+  `skipped: true` at zero cost. The destination may never equal the source.
+- **Bounded**, with the refusal stated as a measurement rather than a silent
+  40-minute encode.
+
+Span-joining lives in an asset tool rather than on the audio timeline for a
+measured reason: the mixer's fades are frame-quantized, and 12 ms at 30 fps is 0.36
+frames — inexpressible there. A hard butt-join between two spans of speech **clicks
+audibly**, so `crossfadeMs` defaults to 12 with a triangular shape. `acrossfade`
+overlaps its inputs, so the joined length is `sum(spans) − (N−1) × crossfade`; the
+fade consumes time, which is what makes it a crossfade rather than a gap, and the
+tests assert that arithmetic against a real encode.
+
+Two decisions worth recording. `gop` was **kept** despite the plan's own retraction
+of the GOP-matching cargo cult — not because a concat needs it (it does not; that
+was measured for the film signature) but because a short GOP makes the per-frame
+`seekVideo()` seeking inside a composition much faster, which `frame-api.md` §11
+already documented. And `.gif` is **refused** as a destination with a message
+explaining why: gif's own encode arguments *are* a `-filter_complex`, which cannot
+be combined with a crop/scale chain — render a gif scene instead.
+
+Docs: the tool row in [mcp-setup.md](mcp-setup.md), a new
+[architecture.md](architecture.md) §9.4, and the two that mattered most —
+[frame-api.md](frame-api.md) §11 and [SKILL.md](SKILL.md) both told the agent to
+have **the human** run ffmpeg for the H.264 trap. That instruction is now wrong, and
+both say so.
+
+### Footage on the film timeline — the thing that was inexpressible
+
+`film.scenes[]` could hold exactly one kind of thing: a rendered scene. So a film
+was *only* rendered graphics, and there was no way to say **"footage, then a scene,
+then footage"** — which is what almost every film built around a person's own
+recording actually is.
+
+The evidence was blunt. A session built a 65 s film interleaving four footage
+segments with five rendered scenes, and **`build_film` was never called.** Not
+because it failed — because it could not be asked. The assembly was a nine-part
+`ffmpeg concat` plus a separate audio mux, done in a shell, and the resulting
+`film.json` still read `"audio": []` with five scenes, describing a film that was
+never built. The workspace kept no record of the actual cut.
+
+A film's play order is now **heterogeneous**:
+
+```jsonc
+"scenes": [
+  { "slug": "title" },                                      // a rendered scene
+  { "footage": "assets/f1.mp4", "durationInFrames": 231 },   // NEW
+  { "slug": "lamb" },
+  { "footage": "assets/f2.mp4", "durationInFrames": 320, "label": "B-roll" }
+]
+```
+
+The key stays `scenes[]` and **`schemaVersion` stays 1**: an entry with `footage`
+and no `slug` is unambiguous, so every film written before this release remains
+valid with no migration.
+
+**This is one new kind of entry in an ordered list, not new machinery.**
+`assembleFilm` already concatenated a list of signature-matched files and laid the
+master audio over the result; it could not take footage only because the file path
+could only be produced from a scene ref. Four segment accessors (`isFootage`,
+`segmentFrames`, `segmentPath`, `segmentName`) are now the only code that knows the
+difference, so layout, validation and assembly read one vocabulary. The audio side
+needed nothing at all — a single `film.audio[]` track at `startInFrames: 0` spanning
+the whole film was always expressible, and the mixer always handled it. Only the
+*picture* order was missing.
+
+**Declared, then verified.** `durationInFrames` is stated in the document so
+`planFilm` can compute offsets without probing every file on every call — the same
+reason scenes declare theirs in config. But a declaration that is never checked is
+worse than none, because every downstream offset derives from it: one wrong count
+silently shifts every later scene, caption and cue while the render still
+"succeeds". So `planFilm` probes and reports `footage_duration_mismatch`
+(`declared 231 → actual 230`) at plan time, beside `scene_not_rendered` and
+`stale_render`. **Measured:** an mp4 reports `nb_frames` in its header but a webm
+reports nothing, so the count falls back to `probeFrameCount`'s packet scan — which
+costs ~46 ms even on a 30 s 1080p file, cheap enough to always take. ffprobe is not
+a declared prerequisite, so `framesVerified` has three states and `null` is **not**
+"matches".
+
+**Never re-encoded.** Footage that does not match the film's signature is
+`footage_signature_mismatch` naming the fix — not a silent transcode. A film that
+quietly re-encodes one segment has stopped being losslessly assembled, which is the
+whole reason scenes share a signature. The comparison is possible because
+`probeSignature()` rebuilds the same fingerprint `sceneSignature()` produces, which
+required stating a mapping that did not exist: ffprobe reports a **codec name**
+(`h264`) and a comma-separated container list (`mov,mp4,m4a,…`) where the engine
+names a **format** (`mp4`) whose encoder is `libx264`.
+
+**Footage is silent, by contract.** All sound comes from the master timeline, and a
+footage file carrying an audio stream is refused with the fix. Silently dropping it
+would be worse: the user's own voice would vanish from a film they can hear it in.
+One consequence, corrected from the plan that proposed this: a film mixing footage
+with audio-carrying scenes **does** trip `mixed_scene_audio` and needs a master
+timeline. That is the normal shape for such a film, not a workaround.
+
+Also in this change:
+
+- **`normalizeFilm` was the real blocker**, more than the Studio drag the plan
+  warned about. It projected every entry to `{slug}` on *every* save — and
+  `createScene`, `removeScene`, `update_film` and the Studio's 700 ms autosave all
+  route through it — so footage would have validated, persisted once, and then
+  vanished on the next unrelated edit. `update_film`'s zod schema stripped it even
+  earlier; it is now a union, because a loose object shape silently discards
+  whichever half the caller sent.
+- **A film can now open on footage.** `planFilm`, `validateScenes` and
+  `buildFilmArtifact` all seeded fps/format/signature from the first *scene*, so an
+  all-footage film had none. The contract is now established by whichever kind of
+  segment resolves first, with `sceneDefaults` as the fallback.
+- **Deleting or renaming referenced footage is no longer silent.** The
+  dangling-reference machinery was audio-only, so deleting a clip a film plays
+  reported `audioRefs: 0` and succeeded — then the build failed on a missing input.
+  `footageRefs()` is the twin of `audioRefs()`: a delete is refused naming the
+  segments, and a rename repoints them (unconditionally — there is no version of
+  "keep the old path" a caller could want).
+- **The Studio film editor** shows footage as a distinct block (warmer fill, ▣
+  label, no render dot — it was never rendered and cannot be stale), gives it its
+  own inspector (file, probed video properties, verified frame count, signature)
+  instead of a scene panel with half its rows wrong, previews it from the film's
+  asset route, and adds **+ footage**, which reads the frame count *from the file*
+  rather than asking the user to type the one number everything else depends on.
+  A new `GET /api/{films|scenes}/:tid/probe?path=` backs that.
+- Tests: the accessors; interleaved `filmLayout` offsets; `validateScenes` skipping
+  render/staleness for footage; an all-footage film; `probeSignature` round-tripping
+  against `sceneSignature`; a real `-c copy` assembly of footage between two scenes
+  measured by frame count and clean decode; declared-vs-actual mismatch; a file with
+  an audio stream refused; a signature mismatch naming the fix; **an old
+  `slug`-only `film.json` still loading unchanged**; and the end-to-end case — a
+  film alternating footage and scenes built through `build_film`, with every frame
+  measured in the output.
+
+### The film signature — stating the encode contract instead of hiding it
+
+Motion Studio's long-form guarantee is that scenes share an encode signature and
+therefore concatenate losslessly. `sceneSignature()` computed it,
+`validateScenes()` enforced it, `assembleFilm()` depended on it — and **nothing
+told a caller what it was.**
+
+That is fine while the engine renders every segment. The moment a file arrives
+from outside — footage, a supplied clip, a transcode — the caller has to produce
+something matching an invariant it cannot read, and it had two options, both bad:
+guess, or render a file first and probe it to discover a constant that lives in a
+hard-coded table.
+
+A real session guessed. It pinned `-profile:v high -level 4.0` (libx264 selects
+exactly those for 1080p30 anyway) and `-x264-params keyint=60:min-keyint=30` while
+the engine uses libx264's default 250. The concat succeeded *despite* the
+mismatch, because each segment is its own encode and therefore opens on a
+keyframe, which is all `concat -c copy` requires. It worked, and the author could
+not have told you why.
+
+`get_film` — and every film tool that returns a plan — now carries it:
+
+```jsonc
+"signature": {
+  "id": "1920x1080@30/mp4/opaque/yuv420p",
+  "width": 1920, "height": 1080, "fps": 30,
+  "format": "mp4", "container": "mp4", "pixFmt": "yuv420p", "transparent": false,
+  "video": { "codec": "libx264", "crf": 18, "preset": "medium" },
+  "audio": { "codec": "aac", "bitrate": "192k" },
+  "ffmpegArgs": ["-c:v","libx264","-preset","medium","-crf","18",
+                 "-pix_fmt","yuv420p","-movflags","+faststart"],
+  "copyConcat": true,
+  "mustMatch": ["codec","width","height","fps","pixFmt","container"],
+  "neednotMatch": ["gopSize","profile","level","bitrate"],
+  "warnings": []
+}
+```
+
+**Derived, never duplicated.** `id` is `sceneSignature()`'s own output; the values
+come from the first scene's `output` (the film's encode voice — what the finishing
+pass already uses); `ffmpegArgs` is `buildVideoArgs()`, the *same call* that
+finishing pass makes. `video`/`audio` are then read back out of those argument
+arrays by flag lookup rather than restated, because the format registry holds
+codec identity only inside the arrays — a declarative copy would be the second
+table that drifts, and the *reported* one is the one that would be wrong. A test
+asserts byte-identity against both the renderer's call and the finishing pass's
+differently-spelled one.
+
+**`neednotMatch` is now measured, not inherited.** The plan asserted that GOP,
+profile and level need not agree, but nothing had ever tested it — libx264 chose
+the same profile for every segment, so they always happened to agree. A test now
+encodes a segment at a deliberately different profile *and* GOP, concatenates, and
+asserts the frames come back **bit-identical** across the seam. They do. That is
+what makes the second list safe to publish, and it is what stops the next author
+inheriting the cargo cult.
+
+**It is a job for `get_film`, not a new tool.** "What must a file match to join
+this film" is a property of the film, and the failure mode here is not knowing
+something exists. One edit to `planSummary` covers `get_film`, `list_films`,
+`update_film` and `build_film { plan: true }`; the Studio's `GET /api/films/:fid`
+already returned the raw plan, so both surfaces came from one implementation.
+
+Also in this change:
+
+- **The render sidecar was blind on two of the signature's own fields.** It
+  recorded `frames/width/height/fps/format` but not `pixFmt`/`transparent`, both of
+  which *are* part of the concat contract — so a film-wide change to either broke
+  that contract with nothing reporting it, and `build_film` would stitch files
+  encoded at the old pixel format. Both are recorded and compared now. No
+  migration: staleness only compares what a sidecar actually recorded, so renders
+  from before this release stay *unverified* on the new fields rather than turning
+  up stale.
+- **`plan.signature` changed type**, from the bare comparison string to the block
+  above; that string is now `signature.id`. Exactly one consumer existed — the
+  Studio film editor's scene-rail compatibility check — and it got simpler: it
+  compared by re-parsing the id as a string prefix, and now compares named fields,
+  which also fixes a latent bug where an unreadable scene folder interpolated
+  `"undefined"` into the prefix and reported a false incompatibility.
+- **`crf`/`preset` are in neither match list.** They are not required for the
+  concat (they affect quality, not stream compatibility) but footage ignoring them
+  looks different from the scenes beside it; using `ffmpegArgs` verbatim gets them
+  right for free, and a `warnings` entry appears when a film's own scenes disagree.
+- **`video.codec` is the ffmpeg encoder id** (`libx264`) while `probe_asset`
+  reports the codec *name* (`h264`) — documented, because comparing them directly
+  is a guaranteed false mismatch for anything checking footage against a film.
+- An end-to-end test proves **sufficiency**, not just correctness: it encodes an
+  outside clip from the reported block alone — no guessed flags — then asserts the
+  engine's own `validateScenes` accepts it, `concat -c copy` joins it with a real
+  rendered scene, the result decodes with an empty stderr, the frame count is
+  exactly the sum of the parts, and the external segment's pixels survive the seam.
+- Docs: `mcp-setup.md` (the block, field by field), `film-setup.md` (a new section
+  under the consistency invariant, plus the sidecar's field list and the
+  don't-confuse-this-with-the-render-browser-codec-rule warning),
+  `architecture.md` §13, `agent-environments.md`, `SKILL.md`, and
+  **`SKILL-shell.md`** — which told agents "**Ask, do not infer** — `get_film`
+  reports the film's `sceneDefaults`" while hard-coding the flag list, because
+  `get_film` did not in fact report it. That instruction is now true, and the
+  hard-coded copy of the encode table is gone.
+
+### `transcribe_asset` — reading the speech in supplied media (whisper.cpp)
+
+The engine could always **write** speech and knew exactly where every word
+landed. It could not **read** speech, so everything about a recording a user
+supplied was a guess. That asymmetry decided how good a film built around a
+recording could be, and it is now closed.
+
+`synthesize_speech` returns `timings` — each sentence's start and duration in
+seconds *and frames* — and that one field is why generated narration is easy to
+build against. A user's own recording had no equivalent, and the cost was visible
+in real sessions: one had to **stop and ask the user what was in their own clip**,
+and its four cut-in points (2.0 s, 5.0 s, 0.6 s, 4.6 s) encoded exactly one fact —
+the clip is 12.4 s long and the scene must not run past its end. Not "cut in on
+the gesture". Arithmetic.
+
+```
+transcribe_asset { path: "takes/interview.mp4", fps: 30 }        # a library file
+transcribe_asset { target: "my-film/intro", path: "assets/vo.wav" }
+→ { text, sentences[], words[], speechRanges[], leadingSilenceFrames,
+    trailingSilenceFrames, rawSegments[], durationInFrames, fps,
+    vendor, model, language, cached, elapsedMs }
+```
+
+Addressed exactly like `probe_asset`, because the two answer the two questions you
+have about a file you did not make: *what is it* and *what does it say*.
+
+**Four derivations are the product, not conveniences.**
+
+- **Sentences are rebuilt.** whisper.cpp's `transcription[]` entries are *decode
+  windows* — ~7.5 s chunks bounded by the model's context — and nothing about them
+  respects grammar. A real one: `[00:00:27.120 → 00:00:32.720] " Why choose our
+  device? Unmatched accuracy at 98 percent."` — one segment, two sentences, and in
+  the general case a window starts mid-clause. Splicing audio there is the audible
+  mid-word cut this tool exists to prevent, so the engine re-segments from token
+  offsets. `rawSegments` is returned for debugging and is explicitly **not** an
+  edit point.
+- **`sentences[]` mirrors `timings[]` field-for-field** (`text`, `startSeconds`,
+  `startInFrames`, `durationSeconds`, `durationInFrames`), so recorded and
+  generated narration are one code path. Vendor offsets are integer milliseconds,
+  converted once, in the engine — everything that places anything in this engine
+  speaks frames, and a tool that returns only seconds forces a hand division at
+  exactly the spot where an off-by-one hides.
+- **`words[]` is what makes graphics land on speech.** Four on-screen labels cued
+  to four spoken names, all inside *one* sentence, is not something sentence-level
+  timing can do. `wordsMatching: "acme"` returns just the words you are hunting.
+- **`speechRanges` + leading/trailing silence answer a different question.** The
+  text says what was said; these say *where you can cut* — trim the dead head, cut
+  on a pause instead of a syllable, find the gap for a cutaway.
+
+**Confidence is derived and always reported.** whisper.cpp emits no
+`no_speech_prob` (an earlier draft of the plan promised to pass one through; the
+vendor does not have one), so `minTokenP`/`meanTokenP` per sentence and `p` per
+word are computed from token probabilities. Two measured misreads from real runs:
+`small.en` rendered "cutting-edge OLED" as **"cutting, HOLED"** and "24/7" as
+**"20/47"**, both flagged by a low `minTokenP`. A caption generated blind from
+either would have been wrong on screen. **Timing is far more reliable than
+spelling** — which is fortunate, because timing is the part the engine consumes.
+
+**Vendor: whisper.cpp, and no API keys.** A single self-contained binary plus one
+`ggml-*.bin` model — the same shape as the Piper speech vendor, so it costs nothing
+new to document, install or reason about. faster-whisper was considered and
+rejected: Python + pip + a CTranslate2 wheel is three moving parts on a user's
+machine to read a WAV. Configuration is environment-only
+(`MOTION_STUDIO_WHISPER_BIN` / `_MODEL` / `_MODELS` / `_THREADS`) plus a
+`transcription` section in `settings.json`; there is nothing secret to withhold,
+because there is no account. **Models sitting in a `models` folder beside the
+binary are found automatically**, which is the layout every prebuilt release ships
+— pointing one env var at the exe is a complete setup. Measured: `ggml-small.en`,
+8 CPU threads, no GPU → **6.5–7.7× realtime**, which is what makes it cheap enough
+to read a clip on ingest *and* re-read the finished render to check it.
+
+**It is a job, in a second lane.** Transcription is what you do *while* deciding
+what to render, so `core/jobs.js` grew a **task lane** with its own concurrency
+limit (2) and queue, sharing the id space and every polling tool
+(`get_render_status`, `wait_for_render`, `get_logs`, `cancel_render`). Jobs report
+`kind`, have no frames (watch `phase`), and carry their whole answer in `result` —
+because a transcription's result *is* the answer, where a render's is the file it
+wrote. The lanes never borrow each other's slots, and `MOTION_STUDIO_MAX_RENDERS`
+does not apply to tasks: it bounds an agent's *renders*. The call itself blocks up
+to `waitMs` (default 45 s, inside a client's request timeout) and returns the
+transcript inline when it finishes, which at ~7× realtime covers anything under
+about five minutes of audio.
+
+**Cached, so asking twice is free.** Keyed on (file identity, model, language) with
+a derivation version, in `~/.motion-studio/cache/transcripts/`. The cache stores
+*seconds*, so one entry serves a 24 fps film and a 30 fps one. Not beside the file
+on purpose: a sidecar in the workspace library is debris in a folder the human
+curates, and one in `assets/` invites someone to put it on a timeline. This is
+what makes the verification loop — build the cut, then re-transcribe the render —
+cheap enough to actually run.
+
+Also in this change:
+
+- **A third capability in the vendor kit.** `core/vendors.js` gains
+  `transcription` beside `speech` and `music`, with one vendor today and the same
+  selection rule, chain walk, report shape and "not configured" sentence. A
+  capability with one provider costs nothing extra to run through the kit; a
+  second near-identical resolution path is what the kit exists to prevent.
+  `list_vendors { capability: "transcription" }` reports availability, the fix,
+  and which `models` are installed.
+- **Its own Studio page.** **✎ transcribe** in the sidebar footer, with the same
+  grammar as the tts and music pages and one inversion: instead of typing a line
+  and hearing it, you hand it a recording and **read what came back** — the
+  re-segmented sentences with the frame numbers an agent would place a caption at,
+  the least-confident token in each (low values in red), and how many times
+  realtime *this* machine reads speech.
+- **Three new error codes**: `transcription_unavailable` (a setup problem — do not
+  retry), `transcription_failed`, and `transcription_input_unsupported` — a third
+  category the generators never needed: the vendor is fine and the setup is fine,
+  but the *file* has no readable speech. The fix is a different file, so conflating
+  it with either of the others would send the caller to the wrong place. Bounds (60
+  minutes, 2 GB) report `asset_too_large` with the measurement rather than becoming
+  a twenty-minute silent job.
+- **`probe_asset` now reports a workspace-local target id** (`"my-film/intro"`),
+  not the internal workspace-qualified one. Every other tool in the surface speaks
+  workspace-local ids; this one leaked the prefix.
+- Tests run against a **fake whisper-cli** (`helpers/fake-whisper.mjs`) serving the
+  verbatim `-ojf` sample from the plan, so the suite never downloads a 466 MB
+  model. The load-bearing case has its own test: a decode window spanning three
+  sentences must re-segment.
+- Docs: **[transcribe-setup.md](transcribe-setup.md)** (new), rows in
+  [mcp-setup.md](mcp-setup.md), [architecture.md](architecture.md) §5 (two lanes),
+  §6 (error model) and a new §9.3, the Studio page in
+  [user-guide.md](user-guide.md), and both skills — [SKILL.md](SKILL.md) gains
+  "transcribe before choosing durations", and [SKILL-shell.md](SKILL-shell.md) now
+  says to prefer the tool over hand-rolling `whisper-cli`, because the derivation
+  is the part that bites.
+
+**What it does not solve**, stated so it is not oversold: it gives text and
+timing, not judgement (choosing which four spans of a 94 s talk make an argument
+is still the agent's work); it does not answer intent (whether the user wants that
+audio kept, replaced or muted stays their question); and accuracy is not free —
+anything quoted verbatim on screen needs a human read. Diarization, translation,
+cloud ASR vendors and `-dtw` alignment are deliberately out of scope.
+
+### Two agent environments, two skills
+
+**Docs and guidance only; no engine behaviour changed.**
+
+A session built a 65 s film from a 94 s talk using `ffmpeg` + `whisper.cpp` +
+Motion Studio, and the accounting was instructive: **31 shell calls against 17
+MCP calls**, `probe_asset` (shipped in v0.21) used **zero times**, and
+`build_film` never called at all — the film model cannot express "footage, then a
+scene, then footage", so the assembly was an ffmpeg concat.
+
+That produced a distinction worth naming, because advice that is right in one
+environment is wrong in the other:
+
+- **[agent-environments.md](agent-environments.md)** (new) — **maintainer-facing
+  design vocabulary.** **Env A** is MCP tools only; **Env B** adds a shell. Env A's
+  bottleneck is *capability* (whole classes of film are impossible); Env B's is
+  *correctness* (everything is possible, subtle things go silently wrong). The rule
+  that falls out: **tools that only report lose to the shell; tools that report
+  what only the engine knows do not.** Also records the rules for editing the two
+  skills — self-contained, and the four things they share.
+- **[SKILL-shell.md](SKILL-shell.md)** (new) — a second drop-in skill,
+  `motion-studio-video-shell`, for an agent that has a shell. The workflow inverts:
+  the recording is the spine, so you read it before choosing a single duration.
+- **[SKILL.md](SKILL.md)** — states plainly that it has no shell, so its "hand the
+  command to the user" guidance reads as required rather than optional.
+
+  **Neither skill uses the Env A / Env B terms.** An agent needs the workflow for
+  the setup it is in, not a taxonomy; a human decides which skill to copy where.
+  Both skills are also now free of markdown links, since an install directory
+  receives only `SKILL.md` + `references/frame-api.md` and any other link breaks on
+  install.
+- **[todo_task/](todo_task/README.md)** (new) — four plans scoped against the two
+  environments, in ship order, with the acceptance test *"Env A can reproduce the
+  prototype film."* An audit against that test found the blocker is **not** asset
+  tooling but the film timeline: [footage segments on the film
+  timeline](task_completed/footage-segment-plan.md) was filed as "out of scope" in an
+  earlier draft and is in fact the prerequisite for everything else.
+
 ## v0.21 — Seeing the media, and catching a stale render
 
 Three fixes for failures that were invisible from the tool surface: an agent

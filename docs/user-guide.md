@@ -59,8 +59,11 @@ over MCP (`create_scene`, `create_film`, `update_film`, …) appear in the
 same tree, because it's the same thing on disk — presence of `film.json` or
 `scene.json` is what makes a folder a film or a scene, so there's no
 separate registry to fall out of sync. Data lives under
-`~/.motion-studio/workspaces/<workspace>/films/<film>/scenes/<scene>/` by
-default (override with `MOTION_STUDIO_HOME`).
+`<dataDir>/workspaces/<workspace>/films/<film>/scenes/<scene>/`, where
+`<dataDir>` is the `data` folder beside the app by default — change it in
+⚙ settings, or override it for one process with `MOTION_STUDIO_HOME`. If you
+used Motion Studio before v0.22 your existing `~/.motion-studio` keeps being
+used, and the settings page shows it.
 
 Clicking a film's row opens the [film editor](#the-film-editor); clicking a
 scene opens the workbench below. The film row's ✕ deletes it — a confirm
@@ -148,18 +151,29 @@ workbench while open; close restores it), no longer a popup dialog:
   agent's. `MOTION_STUDIO_FFMPEG` overrides it for a single process, and the
   CLI's `--ffmpeg <path>` overrides both (`render.js --doctor` prints which
   binary it settled on and where that came from).
-- a read-only **environment** report: where the data dir and **workspaces
-  root** live (there's no separate registry file — the folder tree under
-  `workspaces/` is authoritative), plus the current values of the
-  `MOTION_STUDIO_*` env hooks (including which **workspace** each connected
-  agent is bound to), `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor
-  variables (API keys shown masked, never in full).
+- **storage** (v0.22): where the **data dir**, the **workspaces root** and the
+  **settings file** live — editable, not just reported. Leave a box empty for
+  its default (shown greyed inside it); a relative path is taken from the
+  Motion Studio folder, so `data` keeps the install portable. Under each box is
+  the resolved path and where it came from. Folders are created on save and
+  **nothing is moved** — point these at a tree that already exists, or copy
+  your files across yourself first. The Studio switches over immediately (it
+  reloads); connected agents keep using the old location until their MCP server
+  is restarted. A field that `MOTION_STUDIO_HOME` / `_WORKSPACES` / `_SETTINGS`
+  already sets is shown locked, because editing it here would change nothing.
+  Moving is refused while a render or build is running (`storage_busy`) — let
+  it finish first.
+- a read-only **environment** report: the bootstrap file that records the
+  locations above, plus the current values of the `MOTION_STUDIO_*` env hooks
+  (including which **workspace** each connected agent is bound to),
+  `PUPPETEER_EXECUTABLE_PATH`, and the speech-vendor variables (API keys shown
+  masked, never in full).
 
 Narration and music vendors each live on their own page — **🗣 tts** and
 **♫ music** in the sidebar footer, next to ⚙ settings; see
 [Generated narration](#generated-narration-text-to-speech) below.
 
-Settings persist in `~/.motion-studio/settings.json` and are genuinely global:
+Settings persist in `<dataDir>/settings.json` and are genuinely global:
 the Studio, the CLI, and agents working over MCP all honour them. They fill in
 what a new scene or render didn't specify — an explicit choice always wins,
 so an agent told to make a 4K vertical video still gets one — and they apply
@@ -432,6 +446,54 @@ sounds you like directly steers what generated music uses, instead of every
 piece defaulting to piano and strings. An explicit instrument in your request
 still wins.
 
+### Reading a recording you supplied (transcription, v0.22)
+
+The two pages above make audio. The **✎ transcribe** page in the sidebar footer
+configures the one thing that *reads* it: `transcribe_asset` turns a recording you
+supplied — audio or video — into text with per-sentence and per-word timing, which
+is what lets an agent cut your talk on sentence boundaries and land a caption on
+the word being spoken.
+
+It runs **whisper.cpp** entirely on this machine: one binary plus one model file,
+no account, no API key, no network. Point `MOTION_STUDIO_WHISPER_BIN` at
+`whisper-cli`, keep a `ggml-*.bin` model in a `models` folder beside it (the layout
+every prebuilt release already has, and the page finds it automatically), and
+restart. Until then the page says exactly what is missing and every transcription
+call fails with `transcription_unavailable` rather than half-working.
+
+The page's test is the inverse of the tts page's: instead of typing a line and
+hearing it, you **choose a recording and read what came back**. It shows the
+re-segmented sentences with the `start` and `frames` numbers an agent would place a
+caption at, the confidence of the least certain word in each (low values in red —
+those are the captions that would be wrong on screen), and how many times realtime
+*this* machine reads speech. That last number is the one worth knowing before you
+build a film around a long recording. See
+[transcribe-setup.md](transcribe-setup.md).
+
+Transcriptions run in their own job lane, so one never waits behind a render — and
+results are cached, so an agent asking the same question twice costs nothing.
+
+### Footage a connected agent can prepare and place (v0.22)
+
+Two things an agent could not do before this release, both about video *you*
+supplied rather than animation it wrote:
+
+- **Put your footage on the film timeline.** A film's play order can now hold
+  footage segments beside rendered scenes, so a film can be "your clip, then a
+  graphic, then your clip". The film editor shows them as distinct blocks (▣, a
+  warmer fill, no render dot — they were never rendered), and **+ footage** puts one
+  on the timeline, reading its frame count from the file rather than asking anyone
+  to type it. Footage joins without re-encoding, so it has to match the film's
+  resolution/fps/format and must be silent — its sound belongs on the master audio
+  timeline.
+- **Conform a clip so it can.** `transcode_asset` trims to an exact frame count,
+  crops, scales, and re-encodes to the film's own settings; it also extracts and
+  joins spans of audio into a single WAV. It has no ffmpeg-argument passthrough by
+  design — every operation is a named field — and it never overwrites your source.
+
+Together these mean a film built around your own recording no longer needs anyone
+to run ffmpeg by hand. See [film-setup.md](film-setup.md#footage-on-the-timeline-v022).
+
 ## Long-form films (multiple scenes)
 
 A single composition is the right size for a shot, not for minutes of video.
@@ -505,7 +567,7 @@ pipeline, and how it scales to arbitrary length.
 
 Everything the Studio does is scriptable. `<folder>` is any scene folder —
 for example one under
-`~/.motion-studio/workspaces/<workspace>/films/<film>/scenes/<scene>/`, or a
+`<dataDir>/workspaces/<workspace>/films/<film>/scenes/<scene>/`, or a
 standalone composition folder like the ones under `examples/`:
 
 ```bash

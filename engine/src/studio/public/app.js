@@ -1223,6 +1223,75 @@ async function loadSettings() {
 }
 $('#rd-workers').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
 
+/* ----------------------------- storage paths ---------------------------- */
+
+/* v0.22. The data dir, the workspaces root and the settings file were listed
+ * read-only in the environment block below, because there was nowhere to write
+ * them to — settings.json cannot record its own location. core/paths.js gave
+ * them a bootstrap file of their own, so they are fields now.
+ *
+ * Two things the markup can't say on its own, and both matter: which layer
+ * decided each value (an env var wins, and then editing here would do nothing —
+ * so the input is disabled and says why), and that an empty box means "the
+ * default", which the placeholder spells out rather than leaving blank. */
+
+const STORAGE_SOURCE_NOTE = {
+  env: 'set by the environment',
+  configured: 'configured here',
+  default: 'default',
+  legacy: 'carried over from your earlier install',
+};
+
+const storageFields = () => Array.from(document.querySelectorAll('#storage-fields .storage-field'));
+
+function fillStorageFields(storage) {
+  for (const el of storageFields()) {
+    const info = storage?.locations?.[el.dataset.key];
+    const input = el.querySelector('input');
+    const hint = el.querySelector('.storage-hint');
+    if (!info) { input.value = ''; hint.textContent = ''; continue; }
+    // Only what the user actually chose goes in the box. Pre-filling the
+    // resolved default would turn every save into a pin, and the next time the
+    // default moved this install would silently not follow it.
+    input.value = info.source === 'env' ? info.value : (info.stored ?? '');
+    input.placeholder = info.default;
+    input.disabled = !info.editable;
+    el.classList.toggle('locked', !info.editable);
+    const notes = [STORAGE_SOURCE_NOTE[info.source] ?? info.source];
+    if (info.source === 'env') notes.push(info.env.name);
+    if (!info.exists) notes.push(el.dataset.key === 'settingsFile' ? 'not written yet' : 'created on save');
+    hint.textContent = `${info.value} · ${notes.join(' · ')}`;
+  }
+}
+
+/**
+ * The storage half of a save, or null when nothing was touched. All three
+ * editable keys ride along once any of them changed, so clearing a box back to
+ * the default is a change like any other rather than a no-op.
+ */
+function collectStorageChanges() {
+  const locations = state.environment?.storage?.locations;
+  if (!locations) return null;
+  const patch = {};
+  let changed = false;
+  for (const el of storageFields()) {
+    const info = locations[el.dataset.key];
+    if (!info?.editable) continue;
+    const value = el.querySelector('input').value.trim();
+    patch[el.dataset.key] = value || null;
+    if (value !== (info.stored ?? '')) changed = true;
+  }
+  return changed ? patch : null;
+}
+
+/** Show a notice that outlived the reload a relocation triggers. */
+const RELOCATE_NOTICE = 'ms.relocateNotice';
+const pendingNotice = sessionStorage.getItem(RELOCATE_NOTICE);
+if (pendingNotice) {
+  sessionStorage.removeItem(RELOCATE_NOTICE);
+  toast(pendingNotice, { kind: 'info', timeoutMs: 12000 });
+}
+
 /** Show/hide the inline settings page (v0.22 — was a modal dialog). Mirrors
  *  showVendorsPage: it owns the stage while open, and closing restores
  *  whatever the scene state says should be there. */
@@ -1260,6 +1329,7 @@ $('#btn-settings').addEventListener('click', async () => {
     $('#ffmpeg-probe').innerHTML = fp?.found
       ? `<span class="ok">✓ ${fp.version}</span> via ${fp.source}`
       : `<span class="err">✗ not found</span> (${fp?.effectivePath ?? 'ffmpeg'})`;
+    fillStorageFields(environment.storage);
     const dl = $('#settings-env');
     dl.innerHTML = '';
     const row = (k, v) => {
@@ -1270,9 +1340,10 @@ $('#btn-settings').addEventListener('click', async () => {
       dd.classList.toggle('dim', v == null);
       dl.append(dt, dd);
     };
-    row('data dir', environment.dataDir);
-    row('workspaces root', environment.workspacesRoot);
-    row('settings file', environment.settingsPath);
+    // The three storage paths used to head this list; they have their own
+    // editable section now, and repeating them here would leave two answers to
+    // the same question with only one of them writable.
+    row('bootstrap file', environment.storage?.locationsFile);
     for (const [k, v] of Object.entries(environment.env)) row(k, v);
     showSettingsPage(true);
   } catch (err) {
@@ -1300,8 +1371,23 @@ $('#settings-form').addEventListener('submit', async (e) => {
         defaultPreset: f.ffmpegPreset.value || null,
       },
     };
-    const { settings } = await api('/api/settings', { method: 'PATCH', body: { patch } });
+    const paths = collectStorageChanges();
+    const body = { patch, ...(paths ? { paths } : {}) };
+    const { settings, environment, relocated } = await api('/api/settings', { method: 'PATCH', body });
     state.settings = settings;
+    if (environment) state.environment = environment;
+    if (relocated?.moved) {
+      // Everything on screen — the workspace tree, the open scene, its preview
+      // iframe and its SSE watcher — is bound to the tree that just stopped
+      // being the current one. A reload is the only honest way to re-derive it.
+      msg.textContent = 'storage moved — reloading…';
+      sessionStorage.setItem(RELOCATE_NOTICE,
+        `Storage is now ${relocated.to.dataDir}. Nothing was moved — files still in the old location `
+        + 'stay there. Restart any connected MCP agents so they follow.');
+      setTimeout(() => location.reload(), 600);
+      return;
+    }
+    if (environment) fillStorageFields(environment.storage);
     msg.textContent = 'saved ✓';
     // The binary may have changed — refresh the footer status/banner and the
     // probe line in place.
@@ -1342,7 +1428,8 @@ $('#settings-form').addEventListener('submit', async (e) => {
 const vendorState = {
   report: null,        // the speech report
   music: null,         // the music report
-  openCapability: null, // which page is showing: 'speech' | 'music' | null
+  transcription: null, // the transcription report (v0.22)
+  openCapability: null, // which page is showing: 'speech' | 'music' | 'transcription' | null
   voices: { system: [], azure: [], piper: [] },
   preview: null,       // the <audio> auditioning a voice/instrument sample
   formatsFilled: false,
@@ -1350,17 +1437,31 @@ const vendorState = {
   gmPrograms: [],      // GM program names, for favorite-chip labels
   favoritePrograms: [], // starred GM programs (v0.22); seeded from settings
   favoriteVoices: {},  // starred voices per vendor (v0.22); seeded from settings
+  whisperFile: null,   // the recording picked for the transcription test
+  whisperMeta: null,   // env hooks, model preference order, and the page's bounds
   // One visible vendor card per capability (v0.22 tabs); touched = user clicked.
-  tab: { speech: null, music: null },
-  tabTouched: { speech: false, music: false },
+  tab: { speech: null, music: null, transcription: null },
+  tabTouched: { speech: false, music: false, transcription: false },
   // Edited preference order per capability; seeded from each report's `chain`.
-  chain: { speech: [], music: [] },
+  chain: { speech: [], music: [], transcription: [] },
 };
 
 /** The card ids belonging to a capability, in the DOM order they appear. */
 const CAP_VENDORS = {
   speech: ['system', 'azure', 'piper', 'elevenlabs', 'openai', 'deepgram'],
   music: ['node', 'fluidsynth'],
+  transcription: ['whisper-cpp'],
+};
+
+/** Page title + one line of what the capability decides. */
+const CAP_LABELS = {
+  speech: { title: 'tts vendors', subtitle: 'who narrates — for the Studio and every connected agent', noun: 'narration' },
+  music: { title: 'music vendors', subtitle: 'who renders a note spec — for the Studio and every connected agent', noun: 'music' },
+  transcription: {
+    title: 'transcription vendors',
+    subtitle: 'who reads speech out of a recording — for the Studio and every connected agent',
+    noun: 'transcription',
+  },
 };
 
 /**
@@ -1449,8 +1550,8 @@ function buildCloudVendorCards() {
     piperCard.parentElement.appendChild(card);
   }
 }
-const capOf = (vendor) => (CAP_VENDORS.music.includes(vendor) ? 'music' : 'speech');
-const capReport = (cap) => (cap === 'music' ? vendorState.music : vendorState.report);
+const capOf = (vendor) => Object.keys(CAP_VENDORS).find((c) => CAP_VENDORS[c].includes(vendor)) ?? 'speech';
+const capReport = (cap) => (cap === 'speech' ? vendorState.report : vendorState[cap]);
 
 const vendorEl = {
   status: (v) => $(`[data-status="${v}"]`),
@@ -1534,8 +1635,8 @@ function paintChain(cap) {
     down.disabled = !enrolled || idx === chain.length - 1;
   }
 
-  const note = $(cap === 'music' ? '#music-chain-note' : '#speech-chain-note');
-  const label = cap === 'music' ? 'music' : 'narration';
+  const note = $(`#${cap}-chain-note`);
+  const label = CAP_LABELS[cap].noun;
   // An env var outranks settings.json, so saving this page would change nothing
   // — the one case where the page must admit it is not in charge.
   const envOverride = report?.activeSource === 'env'
@@ -1582,10 +1683,12 @@ function moveChainVendor(vendor, delta) {
 }
 
 /**
- * Show one capability's vendor page ('speech' | 'music'), or close with null.
- * v0.18: the page holds a single capability at a time — 🗣 tts and ♫ music in
- * the footer each open their own view — so narration settings never render
- * under a music heading, and saving one page cannot touch the other's config.
+ * Show one capability's vendor page ('speech' | 'music' | 'transcription'), or
+ * close with null.
+ * v0.18: the page holds a single capability at a time — 🗣 tts, ♫ music and
+ * ✎ transcribe in the footer each open their own view — so narration settings
+ * never render under a music heading, and saving one page cannot touch
+ * another's config.
  */
 function showVendorsPage(capability) {
   vendorState.openCapability = capability ?? null;
@@ -1597,18 +1700,18 @@ function showVendorsPage(capability) {
     state.settingsOpen = false;
   }
   $('#vendors-page').classList.toggle('hidden', !open);
-  $('#cap-speech').classList.toggle('hidden', capability !== 'speech');
-  $('#cap-music').classList.toggle('hidden', capability !== 'music');
+  for (const cap of Object.keys(CAP_VENDORS)) {
+    $(`#cap-${cap}`).classList.toggle('hidden', capability !== cap);
+  }
   $('#btn-tts').classList.toggle('active', capability === 'speech');
   $('#btn-music').classList.toggle('active', capability === 'music');
+  $('#btn-transcribe').classList.toggle('active', capability === 'transcription');
   // Switching capability mid-clip would leave audio playing with its stop
   // button hidden; opening fresh makes this a no-op.
   stopVendorPreview();
   if (open) {
-    $('#vendors-title').textContent = capability === 'music' ? 'music vendors' : 'tts vendors';
-    $('#vendors-subtitle').textContent = capability === 'music'
-      ? 'who renders a note spec — for the Studio and every connected agent'
-      : 'who narrates — for the Studio and every connected agent';
+    $('#vendors-title').textContent = CAP_LABELS[capability].title;
+    $('#vendors-subtitle').textContent = CAP_LABELS[capability].subtitle;
     stopAudition();
     $('#workbench').classList.add('hidden');
     $('#empty-state').classList.add('hidden');
@@ -1628,6 +1731,7 @@ function toggleVendorsPage(capability) {
 }
 $('#btn-tts').addEventListener('click', () => toggleVendorsPage('speech'));
 $('#btn-music').addEventListener('click', () => toggleVendorsPage('music'));
+$('#btn-transcribe').addEventListener('click', () => toggleVendorsPage('transcription'));
 $('#btn-vendors-close').addEventListener('click', () => showVendorsPage(null));
 $('#btn-vendors-refresh').addEventListener('click', () => {
   setVendorMsg('re-probing…');
@@ -1645,11 +1749,14 @@ async function loadVendors({ force = false } = {}) {
   const data = await api(`/api/vendors${force ? '?force=1' : ''}`);
   vendorState.report = data.speech;
   vendorState.music = data.music;
+  vendorState.transcription = data.transcription;
+  vendorState.whisperMeta = data.whisper ?? null;
   // Re-seed the edited chains from the server's truth on every load, including
   // after a save — an in-progress edit is not worth preserving across a reload
   // the user asked for, and a stale chain would silently re-save the old order.
   vendorState.chain.speech = [...(data.speech.chain ?? [data.speech.active])];
   vendorState.chain.music = [...(data.music.chain ?? [data.music.active])];
+  vendorState.chain.transcription = [...(data.transcription.chain ?? [data.transcription.active])];
 
   if (!vendorState.programsFilled) {
     const sel = $('#mu-program');
@@ -1695,8 +1802,10 @@ async function loadVendors({ force = false } = {}) {
 
   for (const v of data.speech.vendors) paintVendor(v, data.speech);
   paintMusic(data.music);
+  paintTranscription(data.transcription);
   paintChain('speech');
   paintChain('music');
+  paintChain('transcription');
 
   const fv = data.speech.settings.favoriteVoices ?? {};
   vendorState.favoriteVoices = Object.fromEntries(Object.entries(fv).map(([k, v]) => [k, [...v]]));
@@ -1704,6 +1813,9 @@ async function loadVendors({ force = false } = {}) {
   // Land on the vendor that will actually run — until the user picks a tab.
   if (!vendorState.tabTouched.speech && data.speech.active) selectVendorTab('speech', data.speech.active);
   if (!vendorState.tabTouched.music && data.music.active) selectVendorTab('music', data.music.active);
+  if (!vendorState.tabTouched.transcription && data.transcription.active) {
+    selectVendorTab('transcription', data.transcription.active);
+  }
 
   // Each capability gets its own environment block, under its own cards —
   // one shared list at the foot of the page meant the speech variables read as
@@ -1712,6 +1824,7 @@ async function loadVendors({ force = false } = {}) {
   const envRows = (re) => Object.keys(environment.env).filter((k) => re.test(k)).map((k) => [k, environment.env[k]]);
   defList($('#speech-env'), envRows(/SPEECH|TTS_VENDOR|TTS_EXE|PIPER|ELEVENLABS|XI_API|OPENAI|DEEPGRAM/));
   defList($('#music-env'), envRows(/MUSIC_VENDOR|SOUNDFONT|FLUIDSYNTH|MIDI_EXE/));
+  defList($('#transcription-env'), envRows(/WHISPER|TRANSCRIPTION_VENDOR/));
 
   await Promise.all(data.speech.vendors
     .filter((v) => v.available)
@@ -1831,6 +1944,166 @@ function paintMusic(report) {
   renderFavoritePrograms();
 }
 
+/* --------------------------- transcription ------------------------------ */
+
+/** Human size for a model file — the only honest thing we know about a .bin. */
+const fmtModelBytes = (n) => (n == null ? '' : n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
+
+/**
+ * The transcription half of the page (v0.22). Same card grammar as speech and
+ * music — pill, facts, error, config grid — with the model picker in place of a
+ * voice picker.
+ */
+function paintTranscription(report, meta = vendorState.whisperMeta) {
+  // The page test and the tool have different bounds on purpose — say both, so
+  // "it refused my two-hour recording" is never a mystery.
+  if (meta) {
+    $('#wh-limits').textContent =
+      `This test reads up to ${Math.round(meta.maxPreviewSeconds / 60)} minutes of a file; ` +
+      `transcribe_asset handles up to ${Math.round(meta.maxSeconds / 60)} minutes. ` +
+      'Nothing is written into a scene either way.';
+  }
+  for (const v of report.vendors) {
+    const pill = vendorEl.status(v.id);
+    pill.textContent = v.available
+      ? `ready · ${v.config?.activeModel ?? '?'}`
+      : 'unavailable';
+    pill.className = `pill ${v.available ? 'done' : 'error'}`;
+
+    const err = vendorEl.error(v.id);
+    err.classList.toggle('hidden', !v.error);
+    err.textContent = v.error ?? '';
+
+    const c = v.config ?? {};
+    defList(vendorEl.facts(v.id), [
+      ['command', withSource(c.command, c.commandSource)],
+      ['models folder', withSource(c.modelsDir, c.modelsDirSource)],
+      ['model in use', v.available ? `${c.activeModel} · ${fmtModelBytes(c.activeModelBytes)}` : null],
+      ['models found', c.modelCount == null ? null : String(c.modelCount)],
+      ['threads', c.threads ? withSource(String(c.threads), c.threadsSource) : 'whisper default (4)'],
+    ]);
+
+    // The picker lists what is on disk; "(auto)" means the documented
+    // preference order picks, which is what an unconfigured machine gets.
+    const sel = $('#wh-model');
+    const stored = report.settings?.whisper?.model ?? '';
+    const models = v.models ?? [];
+    sel.innerHTML = '';
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = c.activeModel && !stored ? `(auto — ${c.activeModel})` : '(auto)';
+    sel.appendChild(auto);
+    // What "auto" means, in the order it means it — otherwise the choice looks
+    // arbitrary on a machine holding several models.
+    sel.title = meta?.modelPreference
+      ? `(auto) picks the first of these that is installed: ${meta.modelPreference.join(', ')}`
+      : '';
+    for (const m of models) {
+      const o = document.createElement('option');
+      o.value = m.name;
+      o.textContent = `${m.name}${m.englishOnly ? ' · english only' : ''}${m.bytes ? ` · ${fmtModelBytes(m.bytes)}` : ''}`;
+      sel.appendChild(o);
+    }
+    if (stored && !models.some((m) => m.name === stored)) {
+      // A configured model that is not on disk (or is named by full path) stays
+      // selectable, so saving the page cannot silently drop it.
+      const o = document.createElement('option');
+      o.value = stored;
+      o.textContent = `${stored} (configured)`;
+      sel.appendChild(o);
+    }
+    sel.value = stored;
+  }
+
+  const s = report.settings ?? {};
+  $('#wh-exe').value = s.whisper?.exe ?? '';
+  $('#wh-models').value = s.whisper?.modelsDir ?? '';
+  $('#wh-threads').value = s.whisper?.threads ?? '';
+  $('#wh-language').value = s.whisper?.language ?? '';
+}
+
+/* --------------------- transcription test (read a file) ------------------ */
+
+$('#wh-file').addEventListener('change', (e) => {
+  const file = e.target.files?.[0] ?? null;
+  vendorState.whisperFile = file;
+  $('#wh-file-name').textContent = file ? `${file.name} · ${fmtBytes(file.size)}` : 'no file chosen';
+  vendorEl.testBtn('whisper-cpp').disabled = !file;
+  $('#wh-result').classList.add('hidden');
+});
+
+/**
+ * Read the chosen recording with the configured vendor and show what came back.
+ *
+ * The mirror of the voice preview: nothing is written into a scene, and the
+ * point is to answer "is this model good enough, and how fast is it here"
+ * before a film is built on it. The frames column is the same number an agent
+ * would place a caption with, so the page shows the actual product of the tool
+ * rather than a paraphrase of it.
+ */
+async function testTranscription() {
+  const btn = vendorEl.testBtn('whisper-cpp');
+  const msg = vendorEl.testMsg('whisper-cpp');
+  const file = vendorState.whisperFile;
+  if (!file) return;
+  const model = $('#wh-model').value;
+  const language = $('#wh-language').value.trim();
+  const params = new URLSearchParams({ name: file.name });
+  if (model) params.set('model', model);
+  if (language) params.set('language', language);
+  const idle = btn.dataset.idleLabel ?? btn.textContent;
+  btn.dataset.idleLabel = idle;
+  btn.disabled = true;
+  btn.textContent = '…';
+  msg.textContent = 'reading — whisper runs at a few times realtime, so this takes a moment';
+  msg.classList.remove('err');
+  try {
+    const res = await fetch(`/api/vendors/transcription/whisper-cpp/preview?${params}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `transcription failed (HTTP ${res.status})`);
+    }
+    const data = await res.json();
+    $('#wh-result').classList.remove('hidden');
+    $('#wh-result-text').textContent = data.text || '(no speech found in this file)';
+    $('#wh-result-stats').textContent =
+      `${data.sentences.length} sentences · ${data.wordCount} words · ${data.durationSeconds.toFixed(1)}s of audio ` +
+      `read in ${(data.elapsedMs / 1000).toFixed(1)}s (${data.realtimeFactor}× realtime) · ${data.model} · ${data.language ?? '?'}`;
+    const rows = $('#wh-result-rows');
+    rows.innerHTML = '';
+    for (const s of data.sentences) {
+      const tr = document.createElement('tr');
+      const p = s.minTokenP;
+      tr.innerHTML =
+        `<td class="num mono">${s.startInFrames}</td>` +
+        `<td class="num mono">${s.durationInFrames}</td>` +
+        `<td class="num mono${p != null && p < 0.5 ? ' err' : ''}">${p == null ? '—' : p.toFixed(2)}</td>` +
+        '<td></td>';
+      tr.lastElementChild.textContent = s.text;
+      rows.appendChild(tr);
+    }
+    msg.textContent = `${data.realtimeFactor}× realtime`;
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.classList.add('err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.idleLabel ?? '▶ read it';
+  }
+}
+{
+  // Its own binding rather than testVendor()'s loop: this button uploads a file
+  // instead of synthesizing a sample. idleLabel is set here for the same reason
+  // the others set it — stopVendorPreview() restores every .test-btn's label.
+  const btn = vendorEl.testBtn('whisper-cpp');
+  btn.dataset.idleLabel = btn.textContent;
+  btn.addEventListener('click', testTranscription);
+}
+
 /* ------------------------- favorite instruments ------------------------- */
 
 /** Chip list + star state for the audition instrument (v0.22). Starred
@@ -1933,8 +2206,8 @@ for (const sel of document.querySelectorAll('[data-voice]')) {
 /** One card at a time per capability (v0.22) — six speech cards made the page
  *  a long scroll. Tab labels come from each card's own title. */
 function buildVendorTabs() {
-  for (const cap of ['speech', 'music']) {
-    const nav = $(`#${cap === 'speech' ? 'speech' : 'music'}-tabs`);
+  for (const cap of Object.keys(CAP_VENDORS)) {
+    const nav = $(`#${cap}-tabs`);
     if (!nav || nav.children.length) continue;
     for (const vendor of CAP_VENDORS[cap]) {
       const btn = document.createElement('button');
@@ -1957,7 +2230,7 @@ function selectVendorTab(cap, vendor) {
   for (const v of CAP_VENDORS[cap]) {
     vendorEl.card(v)?.classList.toggle('tab-active', v === vendor);
   }
-  const nav = $(`#${cap === 'speech' ? 'speech' : 'music'}-tabs`);
+  const nav = $(`#${cap}-tabs`);
   for (const btn of nav.querySelectorAll('[data-vendor-tab]')) {
     btn.classList.toggle('active', btn.dataset.vendorTab === vendor);
   }
@@ -2046,7 +2319,7 @@ vendorEl.voice('azure').addEventListener('change', syncAzureStyles);
 
 // Each capability's chain is edited independently: ticking a speech vendor never
 // touches the music page, and the two pages save separately.
-for (const group of ['speech-vendor', 'music-vendor']) {
+for (const group of ['speech-vendor', 'music-vendor', 'transcription-vendor']) {
   for (const box of document.querySelectorAll(`input[name="${group}"]`)) {
     box.addEventListener('change', () => toggleChainVendor(box.value, box.checked));
   }
@@ -2059,13 +2332,13 @@ for (const btn of document.querySelectorAll('[data-down]')) {
 }
 
 $('#btn-vendors-save').addEventListener('click', async () => {
-  const cap = vendorState.openCapability === 'music' ? 'music' : 'speech';
+  const cap = vendorState.openCapability ?? 'speech';
   const chain = vendorState.chain[cap];
   // An empty chain would leave the capability with nothing to resolve to, and
   // silently substituting a default is exactly the kind of guess this page is
   // supposed to make visible. Refuse, and say which page is wrong.
   if (!chain.length) {
-    setVendorMsg(`tick at least one ${cap === 'music' ? 'music' : 'speech'} vendor before saving`, true);
+    setVendorMsg(`tick at least one ${CAP_LABELS[cap].noun} vendor before saving`, true);
     return;
   }
   setVendorMsg('saving…');
@@ -2073,7 +2346,22 @@ $('#btn-vendors-save').addEventListener('click', async () => {
     // Each page saves only its own capability: the tts page cannot rewrite
     // music settings it isn't showing, and vice versa.
     let patch;
-    if (cap === 'music') {
+    if (cap === 'transcription') {
+      patch = {
+        transcription: {
+          vendor: chain[0],   // chain head, for anything reading the scalar
+          vendors: chain,
+          whisper: {
+            exe: $('#wh-exe').value.trim() || null,
+            // "" = the documented preference order picks; a name pins it.
+            model: $('#wh-model').value || null,
+            modelsDir: $('#wh-models').value.trim() || null,
+            threads: $('#wh-threads').value === '' ? null : Number($('#wh-threads').value),
+            language: $('#wh-language').value.trim() || null,
+          },
+        },
+      };
+    } else if (cap === 'music') {
       patch = {
         music: {
           // `vendor` stays the chain head so an older engine (or anything

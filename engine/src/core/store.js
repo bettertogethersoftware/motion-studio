@@ -49,8 +49,9 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
 import { resolveInTarget } from './sandbox.js';
+import { defaultDataDir, workspacesRootFor } from './paths.js';
 import {
-  defaultDataDir, slugify, makeConfig, validateConfig, migrateConfig,
+  slugify, makeConfig, validateConfig, migrateConfig,
   scaffoldSceneFiles, MAX_ASSET_BYTES, TEMPLATES_ROOT, SCENE_CONFIG,
   checkJsSyntax, checkDeterminism, checkCanvasStateBalance, checkSequenceCoverage,
 } from './scene.js';
@@ -113,6 +114,22 @@ export function audioRefs(tracks, relPath) {
     .filter(({ track }) => norm(track.src) === target);
 }
 
+/**
+ * How many of a film's timeline segments are this footage file (v0.22).
+ *
+ * The twin of audioRefs, for the same reason it exists: a dangling reference does
+ * not fail at delete time, it fails much later as a build error naming a missing
+ * input. Footage segments were invisible to that machinery, so deleting a clip a
+ * film plays reported `audioRefs: 0` and succeeded quietly.
+ */
+export function footageRefs(scenes, relPath) {
+  const norm = (p) => String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  const target = norm(relPath);
+  return (scenes ?? [])
+    .map((segment, index) => ({ segment, index }))
+    .filter(({ segment }) => segment?.footage !== undefined && norm(segment.footage) === target);
+}
+
 const ASSET_KINDS = (ext) => {
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)) return 'image';
   if (['.mp3', '.wav', '.ogg', '.m4a', '.flac'].includes(ext)) return 'audio';
@@ -122,9 +139,17 @@ const ASSET_KINDS = (ext) => {
 };
 
 export class WorkspaceStore {
-  constructor(dataDir = defaultDataDir()) {
+  /**
+   * @param {string} [dataDir]  the storage root (core/paths.js decides the default)
+   * @param {object} [opts]
+   * @param {string} [opts.workspacesRoot]  where the workspace tree lives; defaults
+   *   to <dataDir>/workspaces, or to the configured override when `dataDir` is the
+   *   machine's configured one (v0.22 — see core/paths.js on why it is scoped
+   *   that way rather than applied to every data dir a caller might name).
+   */
+  constructor(dataDir = defaultDataDir(), { workspacesRoot } = {}) {
     this.dataDir = dataDir;
-    this.workspacesRoot = path.join(dataDir, 'workspaces');
+    this.workspacesRoot = workspacesRoot ?? workspacesRootFor(dataDir);
     this._ready = null;
   }
 
@@ -142,7 +167,7 @@ export class WorkspaceStore {
    */
   ready() {
     if (!this._ready) {
-      this._ready = migrateLegacyLayout(this.dataDir).catch((err) => {
+      this._ready = migrateLegacyLayout(this.dataDir, { workspacesRoot: this.workspacesRoot }).catch((err) => {
         this._ready = null;
         throw err;
       });
@@ -753,6 +778,10 @@ export class WorkspaceStore {
       path: film.path,
       getTracks: async () => (await this.getFilm(film.id)).audio ?? [],
       setTracks: async (audio) => (await this.updateFilm(film.id, { audio })).audio ?? [],
+      // Footage segments (v0.22) reference assets/ too, and a dangling one fails
+      // at build time rather than at delete time — so deletes and renames have to
+      // see them. A scene target has no timeline, hence the empty default above.
+      getSegments: async () => (await this.getFilm(film.id)).scenes ?? [],
     };
   }
 
@@ -875,6 +904,54 @@ export class WorkspaceStore {
   }
 
   /**
+   * Read-side resolver for one MEDIA file: like `resolveAssetFile`, but the path
+   * may also point under the target's `out/` — a file the engine rendered
+   * (v0.22).
+   *
+   * This exists because the read-only media tools promise it: `probe_asset` and
+   * `transcribe_asset` are how a finished cut is verified ("re-transcribe the
+   * render and check the words that came out are the words that went in"), and
+   * that means opening `out/film.mp4`. Confining the *read* to assets/ made that
+   * documented workflow impossible while protecting nothing — the file is one
+   * the engine itself just wrote.
+   *
+   * The write side is untouched: `_assetRelPath` still confines every write,
+   * delete and rename to assets/, so a rendered deliverable cannot be
+   * overwritten through the tool surface. The sandbox escape checks apply to
+   * both.
+   */
+  async resolveMediaFile(targetId, relPath) {
+    const target = await this.resolveAssetTarget(targetId);
+    const normalized = String(relPath ?? '').replace(/\\/g, '/');
+    if (!normalized.startsWith('assets/') && !normalized.startsWith('out/')) {
+      throw new EngineError(
+        ErrorCodes.PATH_NOT_ALLOWED,
+        `Media must live under assets/ (supplied material) or out/ (rendered output) — got "${relPath}"`,
+        { path: relPath },
+      );
+    }
+    const abs = resolveInTarget(target.path, normalized);
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st || !st.isFile()) {
+      throw new EngineError(
+        ErrorCodes.FILE_NOT_FOUND,
+        normalized.startsWith('out/')
+          ? `No such rendered file "${normalized}" in ${target.kind} "${target.id}" (render it first)`
+          : `No such asset "${normalized}" in ${target.kind} "${target.id}" (list_assets shows what is there)`,
+        { target: target.id, path: normalized },
+      );
+    }
+    return {
+      target,
+      abs,
+      path: normalized,
+      bytes: st.size,
+      mtime: st.mtime.toISOString(),
+      kind: ASSET_KINDS(path.extname(abs).toLowerCase()),
+    };
+  }
+
+  /**
    * Delete a single file under assets/ (v0.15).
    *
    * `updateAudio` also drops any audio track pointing at the file (scene
@@ -897,6 +974,19 @@ export class WorkspaceStore {
 
     const tracks = await target.getTracks();
     const refs = audioRefs(tracks, normalized);
+    // A film segment playing this file is a harder dependency than an audio
+    // track: there is no "drop the track" fix, the film simply loses a piece of
+    // its picture. Refuse instead of leaving a build to fail later.
+    const segRefs = footageRefs(await target.getSegments?.() ?? [], normalized);
+    if (segRefs.length) {
+      throw new EngineError(
+        ErrorCodes.INVALID_CONFIG,
+        `"${normalized}" is used as footage by ${segRefs.length} segment(s) of this film ` +
+          `(position${segRefs.length > 1 ? 's' : ''} ${segRefs.map((r) => r.index + 1).join(', ')}). ` +
+          'Remove those segments from the play order first (update_film { scenes: [...] }), then delete the file.',
+        { path: normalized, footageRefs: segRefs.length, segments: segRefs.map((r) => r.index) },
+      );
+    }
 
     await fsp.rm(abs);
 
@@ -911,6 +1001,7 @@ export class WorkspaceStore {
       path: normalized,
       deleted: true,
       audioRefs: refs.length,
+      footageRefs: 0,
       audioTracksRemoved,
       ...(audio ? { audio } : {}),
     };
@@ -936,6 +1027,12 @@ export class WorkspaceStore {
 
     const tracks = await target.getTracks();
     const refs = audioRefs(tracks, from);
+    // Footage segments are repointed unconditionally, unlike audio tracks: a
+    // rename is a move of the same file, and a segment left pointing at the old
+    // path is a film that no longer builds. There is no version of "keep the old
+    // reference" that a caller could want here.
+    const segments = await target.getSegments?.() ?? [];
+    const segRefs = footageRefs(segments, from);
 
     await fsp.mkdir(path.dirname(absTo), { recursive: true });
     await fsp.rename(absFrom, absTo);
@@ -947,7 +1044,21 @@ export class WorkspaceStore {
       audio = await target.setTracks(tracks.map((t, i) => (move.has(i) ? { ...t, src: to } : t)));
       audioTracksUpdated = refs.length;
     }
-    return { from, to, audioRefs: refs.length, audioTracksUpdated, ...(audio ? { audio } : {}) };
+    if (segRefs.length) {
+      const move = new Set(segRefs.map((r) => r.index));
+      await this.updateFilm(target.id, {
+        scenes: segments.map((s, i) => (move.has(i) ? { ...s, footage: to } : s)),
+      });
+    }
+    return {
+      from,
+      to,
+      audioRefs: refs.length,
+      audioTracksUpdated,
+      footageRefs: segRefs.length,
+      footageSegmentsUpdated: segRefs.length,
+      ...(audio ? { audio } : {}),
+    };
   }
 
   /* ---------------------------------------------------------------- */

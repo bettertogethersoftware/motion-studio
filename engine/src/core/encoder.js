@@ -515,6 +515,22 @@ const numOrNull = (v) => {
 };
 
 /**
+ * A colour tag the file does not carry, normalized to null (v0.22).
+ *
+ * ffprobe prints the literal string `unknown` for an untagged stream and
+ * `reserved` for a code the spec does not assign. Both mean "the file does not
+ * say", which is the same `null` every other unanswerable field in this summary
+ * uses — and neither may be read as a colour. It matters here more than most:
+ * an untagged matrix is precisely the case a player resolves by GUESSING, so
+ * reporting the string `"unknown"` as if it were a value would hide the one
+ * fact worth knowing about it.
+ */
+const colorTagOrNull = (v) => {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return !s || s === 'unknown' || s === 'reserved' ? null : s;
+};
+
+/**
  * Codecs headless Chromium cannot decode (v0.21).
  *
  * Chromium's bundled build ships without the proprietary codecs, so an
@@ -548,6 +564,21 @@ export function summarizeMedia(raw) {
     fps: parseRational(v.avg_frame_rate) ?? parseRational(v.r_frame_rate),
     frames: numOrNull(v.nb_frames),
     pixFmt: v.pix_fmt ?? null,
+    // Colour tags (v0.22). NOT part of the concat signature — a mismatch never
+    // breaks a stream copy — but the joined file advertises only the FIRST
+    // segment's, so footage tagged differently from the scenes beside it is a
+    // visible difference that nothing else in the tool surface reports.
+    //
+    // `matrix` is ffprobe's `color_space`, renamed on the way out: "colour
+    // space" reads as the whole colorimetry in every other sentence it appears
+    // in, while the field is only the YUV↔RGB matrix coefficients. Keeping
+    // ffprobe's name here would make every doc sentence about it ambiguous.
+    color: {
+      primaries: colorTagOrNull(v.color_primaries),
+      transfer: colorTagOrNull(v.color_transfer),
+      matrix: colorTagOrNull(v.color_space),
+      range: colorTagOrNull(v.color_range),
+    },
     durationSeconds: numOrNull(v.duration),
   } : null;
 

@@ -41,6 +41,48 @@ export function sceneSignature(cfg) {
   return `${cfg.width}x${cfg.height}@${cfg.fps}/${o.format ?? 'mp4'}/${o.transparent ? 'alpha' : 'opaque'}/${o.pixFmt ?? 'yuv420p'}`;
 }
 
+/**
+ * The engine's format name for a probed file, or null when it is not one the
+ * timeline can carry (v0.22).
+ *
+ * Needed because a probe and a scene config describe the same file in different
+ * vocabularies: ffprobe reports a **codec name** (`h264`) and a comma-separated
+ * container list (`mov,mp4,m4a,3gp,3g2,mj2`), while the engine names a **format**
+ * (`mp4`) whose encoder is `libx264`. Comparing either field directly is a
+ * guaranteed false mismatch, so the mapping is stated once, here.
+ */
+export function engineFormatForProbe(codec, container = '') {
+  const c = String(codec ?? '').toLowerCase();
+  const box = String(container ?? '').toLowerCase();
+  if (c === 'h264' && /mp4|mov/.test(box)) return 'mp4';
+  if ((c === 'vp9' || c === 'vp8') && /webm|matroska/.test(box)) return 'webm';
+  if (c === 'prores' && /mov|mp4/.test(box)) return 'prores';
+  return null;
+}
+
+/** Pixel formats that carry an alpha plane — the `alpha`/`opaque` signature segment. */
+const ALPHA_PIX_FMTS = /^(yuva|argb|rgba|abgr|bgra|gbrap|ya)/;
+
+/**
+ * Build the same fingerprint `sceneSignature()` produces, but from a probed
+ * file, so supplied footage can be compared against a film's contract.
+ *
+ * Returns null when the probe cannot answer — ffprobe is not a declared
+ * prerequisite, and "unverified" is a legitimate third state (the same one
+ * `renderVerified: null` represents for a render that predates the sidecar).
+ * A caller must not read null as "matches".
+ *
+ * @param {object|null} media  summarizeMedia() output
+ */
+export function probeSignature(media) {
+  const v = media?.video;
+  if (!v || !v.width || !v.height || !v.fps) return null;
+  const format = engineFormatForProbe(v.codec, media.container);
+  if (!format) return null;
+  const alpha = ALPHA_PIX_FMTS.test(String(v.pixFmt ?? '').toLowerCase());
+  return `${v.width}x${v.height}@${v.fps}/${format}/${alpha ? 'alpha' : 'opaque'}/${v.pixFmt ?? 'yuv420p'}`;
+}
+
 /** Where a scene's rendered file lives (what `render` wrote). */
 export function sceneOutputPath(scenePath, cfg) {
   const o = cfg.output ?? {};
@@ -75,7 +117,15 @@ export function renderMetaPath(scenePath, cfg) {
   return sceneOutputPath(scenePath, cfg) + '.render.json';
 }
 
-/** The fields that make a rendered file match (or not) the current config. */
+/**
+ * The fields that make a rendered file match (or not) the current config.
+ *
+ * These are exactly the fields sceneSignature() encodes, plus the frame count.
+ * `pixFmt` and `transparent` were missing until v0.22, which left a hole: both
+ * are part of the concat contract, so changing either after a render broke that
+ * contract with nothing reporting it — the output was still counted as rendered
+ * and build_film would stitch a file that could not stream-copy.
+ */
 function metaFromConfig(cfg, frames) {
   return {
     frames,
@@ -83,6 +133,8 @@ function metaFromConfig(cfg, frames) {
     height: cfg.height,
     fps: cfg.fps,
     format: cfg.output?.format ?? 'mp4',
+    pixFmt: cfg.output?.pixFmt ?? 'yuv420p',
+    transparent: cfg.output?.transparent ?? false,
   };
 }
 
@@ -122,8 +174,11 @@ export function renderStaleness(meta, cfg) {
   if (!meta) return null;
   const current = metaFromConfig(cfg, cfg.durationInFrames);
   const changed = [];
-  for (const k of ['frames', 'width', 'height', 'fps', 'format']) {
-    // An older/partial sidecar simply has less to say — only compare what it recorded.
+  for (const k of ['frames', 'width', 'height', 'fps', 'format', 'pixFmt', 'transparent']) {
+    // An older/partial sidecar simply has less to say — only compare what it
+    // recorded. That is also the whole backward-compatibility story for the two
+    // fields added in v0.22: a pre-v0.22 sidecar has no pixFmt/transparent, so
+    // those renders stay *unverified* on them rather than turning up *stale*.
     if (meta[k] !== undefined && meta[k] !== current[k]) changed.push(k);
   }
   if (!changed.length) return null;
@@ -139,8 +194,39 @@ export function describeStaleness(st) {
   return st.changed.map((k) => `${k} ${st.recorded[k]} → ${st.current[k]}`).join(', ');
 }
 
+/* ------------------------------------------------------------------ *
+ * Segment accessors (v0.22).
+ *
+ * A film's play order holds two kinds of segment: a **scene**, which the engine
+ * rendered and whose `config` is the source of truth, and **footage**, a file
+ * that joins as-is and whose truth is the file itself. These four functions are
+ * the only places that know the difference, so everything below them — layout,
+ * validation, assembly — reads one vocabulary.
+ *
+ * `isFootage` keys on the tagged `kind` rather than on the presence of a field,
+ * because a mis-tagged segment should fail loudly here rather than be silently
+ * treated as a scene with no config.
+ * ------------------------------------------------------------------ */
+
+export const isFootage = (s) => s?.kind === 'footage';
+
+/** Frames a segment occupies: a scene's configured duration, or footage's declared one. */
+export function segmentFrames(s) {
+  return (isFootage(s) ? s.durationInFrames : s.config?.durationInFrames) ?? 0;
+}
+
+/** The file a segment contributes to the concat. */
+export function segmentPath(s) {
+  return isFootage(s) ? s.segmentPath : sceneOutputPath(s.path, s.config);
+}
+
+/** A human label for a segment. */
+export function segmentName(s) {
+  return (isFootage(s) ? s.name ?? s.footage : s.config?.name) ?? null;
+}
+
 /**
- * Where each scene lands on the film timeline (v0.22).
+ * Where each segment lands on the film timeline (v0.22).
  *
  * Every doc and the synthesize_sfx tool description call this a scene's
  * `filmOffset` — "a chime on every scene cut is a plain map over your scene
@@ -148,19 +234,26 @@ export function describeStaleness(st) {
  * durations by hand and a single slip silently desynced narration from
  * picture. The numbers were always here; this just hands them back.
  *
- * @param {Array} scenes [{ sceneId, config }] in play order
+ * Footage entries report the same `filmOffset`/`startSeconds` fields as scenes,
+ * so "where does segment 6 start" is answered identically regardless of kind —
+ * an agent placing a caption or an audio cue should not have to care.
+ *
+ * @param {Array} scenes [{ kind, sceneId|footage, config?, durationInFrames? }] in play order
+ * @param {number} [fps] rate for startSeconds; defaults to the first scene's
  */
-export function filmLayout(scenes) {
+export function filmLayout(scenes, fps = null) {
+  const rate = fps ?? scenes.find((s) => !isFootage(s))?.config?.fps ?? null;
   let filmOffset = 0;
   return scenes.map((s) => {
-    const durationInFrames = s.config.durationInFrames;
+    const durationInFrames = segmentFrames(s);
     const entry = {
-      sceneId: s.sceneId,
+      kind: s.kind ?? 'scene',
+      ...(isFootage(s) ? { footage: s.footage } : { sceneId: s.sceneId }),
       ...(s.slug ? { slug: s.slug } : {}),
-      name: s.config.name,
+      name: segmentName(s),
       filmOffset,
       durationInFrames,
-      startSeconds: Number((filmOffset / s.config.fps).toFixed(3)),
+      startSeconds: rate ? Number((filmOffset / rate).toFixed(3)) : 0,
     };
     filmOffset += durationInFrames;
     return entry;
@@ -176,25 +269,36 @@ export function filmLayout(scenes) {
  * scenes exist, which is exactly when you need the offsets to place audio.
  */
 export function validateScenes(scenes, { hasMasterAudio = false, requireRendered = true } = {}) {
-  if (!scenes.length) throw new EngineError(ErrorCodes.INCONSISTENT_SCENES, 'a film needs at least one scene');
+  if (!scenes.length) throw new EngineError(ErrorCodes.INCONSISTENT_SCENES, 'a film needs at least one segment');
 
-  const format = scenes[0].config.output?.format ?? 'mp4';
+  // The encode contract comes from the first SCENE, because only a scene carries
+  // a config the engine authored. A film made entirely of footage has no such
+  // voice: its segments are files, already encoded, and the only honest check is
+  // that they exist — planFilm's footage_signature_mismatch is where a probed
+  // disagreement is reported, from measurements this function does not have.
+  const firstScene = scenes.find((s) => !isFootage(s));
+  const format = firstScene?.config.output?.format ?? 'mp4';
   const fmt = getFormat(format);
   if (!fmt.copyConcat) {
     throw new EngineError(ErrorCodes.INCONSISTENT_SCENES,
       `format "${format}" cannot be losslessly concatenated — render scenes as mp4, webm, or prores`, { format });
   }
 
-  const signature = sceneSignature(scenes[0].config);
-  const mismatched = scenes.filter((s) => sceneSignature(s.config) !== signature);
+  const signature = firstScene ? sceneSignature(firstScene.config) : null;
+  const mismatched = signature
+    ? scenes.filter((s) => !isFootage(s) && sceneSignature(s.config) !== signature)
+    : [];
   if (mismatched.length) {
     throw new EngineError(ErrorCodes.INCONSISTENT_SCENES,
       `all scenes must share resolution/fps/format/pixfmt (expected ${signature})`,
       { expected: signature, mismatched: mismatched.map((s) => ({ sceneId: s.sceneId, signature: sceneSignature(s.config) })) });
   }
 
+  // Footage is never "rendered" and has no sidecar — it is a file the user
+  // supplied, so there is nothing to re-render and nothing to go stale.
+  const renderable = scenes.filter((s) => !isFootage(s));
   const unrendered = requireRendered
-    ? scenes.filter((s) => !fs.existsSync(sceneOutputPath(s.path, s.config)))
+    ? renderable.filter((s) => !fs.existsSync(sceneOutputPath(s.path, s.config)))
     : [];
   if (unrendered.length) {
     throw new EngineError(ErrorCodes.SCENE_NOT_RENDERED,
@@ -211,7 +315,7 @@ export function validateScenes(scenes, { hasMasterAudio = false, requireRendered
   // missing one: it exists, so every existence check passes, and the film
   // assembles at a length its own plan disagrees with.
   const stale = requireRendered
-    ? scenes
+    ? renderable
       .map((s) => ({ s, st: renderStaleness(readRenderMeta(s.path, s.config), s.config) }))
       .filter((x) => x.st)
     : [];
@@ -226,25 +330,41 @@ export function validateScenes(scenes, { hasMasterAudio = false, requireRendered
       });
   }
 
-  // Concatenating a mix of with-audio and silent scenes with `-c copy` fails.
+  // Concatenating a mix of with-audio and silent segments with `-c copy` fails.
+  // Footage is silent by contract, so it counts as a silent segment — which is
+  // why a film mixing footage with audio-carrying scenes needs a master timeline.
+  // That is the normal shape for such a film, not a workaround.
   if (!hasMasterAudio) {
-    const states = new Set(scenes.map((s) => sceneHasAudio(s.config)));
+    const withAudio = renderable.filter((s) => sceneHasAudio(s.config));
+    const states = new Set([
+      ...renderable.map((s) => sceneHasAudio(s.config)),
+      ...(scenes.length > renderable.length ? [false] : []),
+    ]);
     if (states.size > 1) {
       throw new EngineError(ErrorCodes.INCONSISTENT_SCENES,
-        'scenes mix audio and silence — render them consistently, or pass a master `audio` timeline to lay over the whole film',
-        { withAudio: scenes.filter((s) => sceneHasAudio(s.config)).map((s) => s.sceneId) });
+        'segments mix audio and silence — render the scenes consistently, or pass a master `audio` timeline to lay ' +
+        'over the whole film (footage is always silent, so a film combining footage with audio-carrying scenes ' +
+        'needs one)',
+        { withAudio: withAudio.map((s) => s.sceneId) });
     }
   } else if (!fmt.audioArgs) {
     throw new EngineError(ErrorCodes.INCONSISTENT_SCENES, `format "${format}" cannot carry audio`, { format });
   }
 
-  return { format, fps: scenes[0].config.fps, signature };
+  return { format, fps: firstScene?.config.fps ?? null, signature };
 }
 
 /**
- * Assemble validated scenes into `outputPath`.
+ * Assemble validated segments into `outputPath`.
+ *
+ * This function is indifferent to where a segment came from: it concatenates a
+ * list of signature-matched files and lays the master audio over the result.
+ * That is why footage on the timeline needed no new machinery — only a second
+ * kind of entry in an ordered list, and the accessors above to read it.
+ *
  * @param {object}  opts
- * @param {Array}   opts.scenes         [{ sceneId, path, config }] (validated)
+ * @param {Array}   opts.scenes         validated segments, scenes and/or footage
+ * @param {number}  [opts.fps]          rate; defaults to the first scene's config
  * @param {string}  opts.format         shared output format
  * @param {string}  opts.outputPath     absolute destination
  * @param {Array}   [opts.audioTracks]  master audio: [{ src(abs), startInFrames?, gainDb? }]
@@ -257,12 +377,14 @@ export function validateScenes(scenes, { hasMasterAudio = false, requireRendered
  */
 export async function assembleFilm({
   scenes, format, outputPath, audioTracks, assetRoot,
-  audioLimiter = true, audioTargetPeakDb,
+  audioLimiter = true, audioTargetPeakDb, fps: fpsOverride = null,
   ffmpegPath = 'ffmpeg', onSpawn,
 }) {
-  const fps = scenes[0].config.fps;
-  const segmentPaths = scenes.map((s) => sceneOutputPath(s.path, s.config));
-  const totalFrames = scenes.reduce((sum, s) => sum + s.config.durationInFrames, 0);
+  // An all-footage film has no scene config to read a rate from, so the caller
+  // passes one (resolveFilmForBuild takes it from sceneDefaults).
+  const fps = fpsOverride ?? scenes.find((s) => !isFootage(s))?.config?.fps ?? null;
+  const segmentPaths = scenes.map(segmentPath);
+  const totalFrames = scenes.reduce((sum, s) => sum + segmentFrames(s), 0);
   const videoDurationSec = totalFrames / fps;
   const output = { format, audioLimiter };
   let audio;
@@ -316,14 +438,17 @@ export async function assembleFilm({
 
   return {
     scenes: scenes.length,
-    // Where each scene landed — the `filmOffset` the docs reference. Returned
-    // so a caller never has to re-derive what this function already knows.
-    sceneLayout: filmLayout(scenes),
+    // Where each segment landed — the `filmOffset` the docs reference. Returned
+    // so a caller never has to re-derive what this function already knows, and
+    // reported identically for footage and scenes.
+    sceneLayout: filmLayout(scenes, fps),
     totalFrames,
     durationSeconds: Number(videoDurationSec.toFixed(3)),
     fps,
     format,
-    hasAudio: !!(audioTracks && audioTracks.length) || sceneHasAudio(scenes[0].config),
+    // Footage is silent, so it can only contribute audio via the master timeline.
+    hasAudio: !!(audioTracks && audioTracks.length)
+      || sceneHasAudio(scenes.find((s) => !isFootage(s))?.config ?? {}),
     outputPath,
     ...(audio ? { audio } : {}),
   };

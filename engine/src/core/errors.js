@@ -73,6 +73,43 @@ export const ErrorCodes = Object.freeze({
   FILM_ALREADY_EXISTS: 'film_already_exists',
   INVALID_ID: 'invalid_id',
   MIGRATION_FAILED: 'migration_failed',
+  // added in v0.22 (transcribe_asset / whisper.cpp) — see docs/CHANGELOG.md.
+  // Same taxonomy the speech and music vendors follow: UNAVAILABLE is a setup
+  // problem for the user to fix (no binary, no model) and must not be retried;
+  // FAILED is the vendor running and not producing a transcript.
+  TRANSCRIPTION_UNAVAILABLE: 'transcription_unavailable',
+  TRANSCRIPTION_FAILED: 'transcription_failed',
+  // Distinct from both: the file exists and the vendor is ready, but the input
+  // could not be turned into the 16 kHz mono PCM whisper.cpp requires (not
+  // media, an unsupported codec, no audio stream). Neither the user's setup nor
+  // the vendor is broken — the *file* is the problem, so the fix is a different
+  // file, and retrying this one will not help.
+  TRANSCRIPTION_INPUT_UNSUPPORTED: 'transcription_input_unsupported',
+  // added in v0.22 (footage segments on the film timeline) — see docs/CHANGELOG.md.
+  // All three are plan-time problems as well as build-time errors, reported
+  // beside scene_not_rendered and stale_render so a caller sees them before
+  // paying for a build.
+  FOOTAGE_MISSING: 'footage_missing',
+  // The declared frame count disagrees with the file. Load-bearing: every
+  // downstream offset derives from the declaration, so one wrong count silently
+  // shifts every later scene, caption and cue while the render still succeeds.
+  FOOTAGE_DURATION_MISMATCH: 'footage_duration_mismatch',
+  // The footage does not match the film's encode signature, so it cannot be
+  // stream-copied onto the timeline. Never silently re-encoded: a film that
+  // quietly re-encodes one segment has stopped being losslessly assembled.
+  FOOTAGE_SIGNATURE_MISMATCH: 'footage_signature_mismatch',
+  // added in v0.22 (transcode_asset) — see docs/CHANGELOG.md.
+  // ffmpeg ran and did not produce the asked-for file. Distinct from
+  // UNSUPPORTED_FORMAT (the destination extension names no format this engine
+  // writes) and from INVALID_CONFIG (a field failed validation before anything
+  // was spawned).
+  TRANSCODE_FAILED: 'transcode_failed',
+  // added in v0.22 (configurable storage locations) — see docs/CHANGELOG.md.
+  // The data dir cannot be moved out from under work that is already running.
+  // Distinct from INVALID_CONFIG (the location itself was rejected): the
+  // locations are fine, the timing is not, and the caller's fix is to wait or
+  // cancel rather than to supply a different path.
+  STORAGE_BUSY: 'storage_busy',
 });
 
 export class EngineError extends Error {

@@ -273,6 +273,13 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .blk-scene.mismatch { border-color: var(--err); }
 .blk-scene .sc-dur { margin-left: auto; padding-right: 6px; color: var(--dim); font-size: 10px; position: relative; z-index: 2; }
 .blk-scene .thumb { position: absolute; inset: 0; opacity: 0.35; background-size: cover; background-position: center; }
+/* Footage (v0.22): a supplied file, not something the engine rendered. Distinct
+   at a glance — a warmer fill and a hatched edge — because the two kinds behave
+   differently (no render button, no staleness, must match the signature). */
+.blk-scene.blk-footage { background: #2a2418; border-color: #4a3f24; }
+.blk-scene.blk-footage .sc-status { background: var(--accent); }
+.blk-scene.blk-footage.mismatch .sc-status { background: var(--err); }
+.blk-scene.blk-footage .blk-label { color: #e8d9b0; }
 
 .blk-audio { background: rgba(63, 122, 84, 0.28); border-color: #3f7a54; }
 .blk-audio.duck { background: rgba(108, 78, 158, 0.30); border-color: #6c4e9e; }

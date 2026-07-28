@@ -71,6 +71,7 @@
         <button id="btn-add-tts" class="ghost" title="synthesize narration into the film">+ narration</button>
         <button id="btn-add-audio" class="ghost" title="place an audio asset on the timeline">+ audio</button>
         <button id="btn-add-caption" class="ghost" title="add a caption at the playhead">+ caption</button>
+        <button id="btn-add-footage" class="ghost" title="put a supplied video on the timeline beside the rendered scenes">+ footage</button>
         <button id="btn-add-overlay" class="ghost" title="overlay an image or video on the film">+ overlay</button>
       </div>
       <div class="divider"></div>
@@ -101,6 +102,24 @@
   <ul id="audio-pick" class="pick-list"></ul>
   <div class="fieldrow right">
     <button type="button" class="ghost" data-close="audio-dialog">close</button>
+  </div>
+</dialog>
+
+<dialog id="footage-dialog" class="fe-dialog">
+  <h2>add footage</h2>
+  <p class="dim note">A video that joins the timeline <strong>as-is</strong>, beside the rendered scenes — that is how
+  you cut &ldquo;footage, then a scene, then footage&rdquo;. It is never re-encoded, so it must already match the
+  film&rsquo;s signature (resolution, fps, format, pixel format) and must carry <strong>no audio</strong> — put its
+  sound on the master audio timeline instead. The frame count is read from the file and then verified on every plan.
+  Inserted after the segment at the playhead.</p>
+  <div class="fieldrow">
+    <button id="btn-footage-upload" class="ghost">+ upload file…</button>
+    <input type="file" id="footage-file-input" accept=".mp4,.webm,.mov" multiple hidden>
+    <span id="footage-upload-msg" class="dim mono"></span>
+  </div>
+  <ul id="footage-pick" class="pick-list"></ul>
+  <div class="fieldrow right">
+    <button type="button" class="ghost" data-close="footage-dialog">close</button>
   </div>
 </dialog>
 

@@ -95,13 +95,18 @@ function uniqueSlug(base, taken) {
 /**
  * Migrate `dataDir` if the legacy registries are present. Safe to call every
  * startup; returns a report ({ migrated: false } when there was nothing to do).
+ *
+ * `workspacesRoot` is passed in rather than derived (v0.22): the workspace tree
+ * is separately configurable now, and a migration that wrote to
+ * <dataDir>/workspaces regardless would deposit the recovered films where
+ * nothing afterwards looks for them.
  */
-export async function migrateLegacyLayout(dataDir) {
+export async function migrateLegacyLayout(dataDir, { workspacesRoot = path.join(dataDir, 'workspaces') } = {}) {
   const projectsRegistry = path.join(dataDir, 'projects.json');
   if (!fs.existsSync(projectsRegistry)) return { migrated: false };
 
   const backupDir = path.join(dataDir, LEGACY_BACKUP_DIR);
-  const wsPath = path.join(dataDir, 'workspaces', DEFAULT_WORKSPACE);
+  const wsPath = path.join(workspacesRoot, DEFAULT_WORKSPACE);
   const filmsRoot = path.join(wsPath, 'films');
   const report = {
     migratedAt: new Date().toISOString(),

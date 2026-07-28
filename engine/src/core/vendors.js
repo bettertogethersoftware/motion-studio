@@ -1,15 +1,22 @@
 /**
  * Vendors — the capability-agnostic half (v0.17).
  *
- * Motion Studio has two generators with more than one possible implementation:
+ * Motion Studio has three capabilities with more than one possible
+ * implementation:
  *
- *   speech  →  system (Windows exe)  |  azure (Azure AI Speech)
- *   music   →  node   (spessasynth)  |  fluidsynth (C# exe + fluidsynth.exe)
+ *   speech         →  system (Windows exe)  |  azure (Azure AI Speech)  |  …
+ *   music          →  node   (spessasynth)  |  fluidsynth (C# exe + fluidsynth.exe)
+ *   transcription  →  whisper-cpp (whisper-cli.exe + a ggml model)   — v0.22
  *
- * Everything those two axes share lives here — the selection rule, the env
+ * Everything those axes share lives here — the selection rule, the env
  * hooks, the shape of a status report, and the sentence a caller sees when a
- * vendor cannot be used. `core/tts-vendors.js` and `core/music-vendors.js`
- * supply the per-capability providers on top.
+ * vendor cannot be used. `core/tts-vendors.js`, `core/music-vendors.js` and
+ * `core/transcribe-vendors.js` supply the per-capability providers on top.
+ *
+ * Transcription has exactly one vendor today and still lives here rather than
+ * standing alone: a capability with one provider costs nothing extra to run
+ * through the kit, and the alternative — a second, near-identical resolution
+ * path — is what the kit exists to prevent.
  *
  * This module imports neither of them: capability modules depend on the shared
  * kit, never the reverse, so there is no cycle and no registry to keep in sync.
@@ -54,7 +61,7 @@
 
 import { EngineError, ErrorCodes } from './errors.js';
 
-export const CAPABILITIES = Object.freeze(['speech', 'music']);
+export const CAPABILITIES = Object.freeze(['speech', 'music', 'transcription']);
 
 /** Per-capability env hook and settings section. */
 export const CAPABILITY_META = Object.freeze({
@@ -71,6 +78,17 @@ export const CAPABILITY_META = Object.freeze({
     env: 'MOTION_STUDIO_MUSIC_VENDOR',
     settingsKey: 'music',
     unavailableCode: ErrorCodes.MUSIC_UNAVAILABLE,
+  }),
+  // v0.22. The first capability that *reads* audio rather than writing it; it
+  // joins the kit because everything above the provider is identical — the
+  // selection rule, the chain walk, the report shape, and the sentence a caller
+  // sees when nothing is set up. See core/transcribe-vendors.js.
+  transcription: Object.freeze({
+    id: 'transcription',
+    label: 'transcription',
+    env: 'MOTION_STUDIO_TRANSCRIPTION_VENDOR',
+    settingsKey: 'transcription',
+    unavailableCode: ErrorCodes.TRANSCRIPTION_UNAVAILABLE,
   }),
 });
 

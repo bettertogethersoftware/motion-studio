@@ -387,3 +387,13 @@ engine/vendor/*
 # FluidSynth binary distribution (runtime dependency; build/place locally, see docs/music-setup.md).
 fluidsynth-v2.5.6-win10-x64-glib/
 download/
+whisper-bin-x64
+# Motion Studio — the storage root and its bootstrap file (v0.22).
+#
+# `data/` is the default data dir: workspaces, films, scenes, renders. It is the
+# user's library, not source, and a single film run is hundreds of megabytes of
+# PNGs and encodes. `paths.json` records where that root actually is (see
+# engine/src/core/paths.js) and is per-machine by definition.
+/data/
+/paths.json
+/ffmpeg-8.1.2-full_build/

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * MCP server integration tests: connect a real MCP client (official SDK) to
  * the server over stdio, exactly as Claude Desktop would, and drive the full
  * agent workflow: create project → write composition (incl. syntax-error
@@ -30,13 +30,19 @@ const FAKE_TTS = path.resolve(__dirname, 'helpers/fake-tts.mjs');
 const FAKE_MIDI = path.resolve(__dirname, 'helpers/fake-music.mjs');
 const FAKE_FLUIDSYNTH = path.resolve(__dirname, 'helpers/fake-fluidsynth.mjs');
 const FAKE_SOUNDFONT = path.resolve(__dirname, 'fixtures/fake.sf2');
+const FAKE_WHISPER = path.resolve(__dirname, 'helpers/fake-whisper.mjs');
 
 let haveFfmpeg = false;
-let tmp, client, transport, fakeAzure;
+let tmp, client, transport, fakeAzure, whisperModels;
 
 before(async () => {
   try { await execFileP('ffmpeg', ['-version']); haveFfmpeg = true; } catch { /* skip below */ }
   tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-mcp-'));
+  // The transcription vendor (v0.22) is a binary plus a model file; the stub
+  // stands in for both, so the suite needs no 466 MB download.
+  whisperModels = path.join(tmp, 'whisper-models');
+  await fsp.mkdir(whisperModels, { recursive: true });
+  await fsp.writeFile(path.join(whisperModels, 'ggml-small.en.bin'), Buffer.alloc(64, 1));
   // The Azure speech vendor (v0.17) is stubbed by a local HTTP server the child
   // process reaches through the same env hooks a user would set.
   fakeAzure = await startFakeAzure();
@@ -59,6 +65,8 @@ before(async () => {
       MOTION_STUDIO_MUSIC_VENDOR: 'fluidsynth',
       MOTION_STUDIO_AZURE_SPEECH_KEY: 'test-key',
       MOTION_STUDIO_AZURE_SPEECH_ENDPOINT: fakeAzure.url,
+      MOTION_STUDIO_WHISPER_BIN: FAKE_WHISPER,
+      MOTION_STUDIO_WHISPER_MODELS: whisperModels,
     },
     stderr: 'pipe',
   });
@@ -134,6 +142,12 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'list_vendors',
     // new in v0.19 (audio-only mixdown)
     'preview_audio',
+    // new in v0.21 (media introspection)
+    'probe_asset',
+    // new in v0.22 (reading supplied speech)
+    'transcribe_asset',
+    // new in v0.22 (preparing media inside the tool surface)
+    'transcode_asset',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -1141,6 +1155,36 @@ test('mcp: build_film rejects scenes with mismatched dimensions', async (t) => {
   assert.ok(info.data.plan.problems.some((p) => p.code === 'signature_mismatch'), JSON.stringify(info.data.plan.problems));
 });
 
+test('mcp: get_film states the encode contract a file must match to join the film', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Signature Film', [{ name: 'One' }, { name: 'Two' }]);
+
+  const info = await callJson('get_film', { film });
+  assert.equal(info.isError, false, JSON.stringify(info.data));
+  const sig = info.data.plan.signature;
+  assert.ok(sig, 'get_film reports the signature (v0.22) — previously computed and dropped');
+
+  // The parameters a stream copy cannot reconcile…
+  assert.equal(sig.video.codec, 'libx264');
+  assert.equal(sig.container, 'mp4');
+  assert.equal(sig.pixFmt, 'yuv420p');
+  assert.equal(sig.transparent, false);
+  assert.equal(sig.copyConcat, true);
+  // …handed over ready to run, so nobody has to reassemble them in the right
+  // order — which is the step the prototype got wrong.
+  assert.ok(sig.ffmpegArgs.join(' ').includes('-c:v libx264'));
+  assert.ok(sig.ffmpegArgs.includes('-pix_fmt'));
+  // Stating what need NOT match is what stops the next author pinning
+  // profile/level/GOP for no reason.
+  assert.ok(sig.neednotMatch.includes('gopSize'));
+  assert.ok(sig.neednotMatch.includes('profile'));
+  assert.equal(sig.id, `${sig.width}x${sig.height}@${sig.fps}/mp4/opaque/yuv420p`);
+
+  // One projection serves every film tool, so the plan form carries it too.
+  const planned = await callJson('build_film', { film, plan: true });
+  assert.deepEqual(planned.data.signature, sig);
+});
+
 test('mcp: films carry their own master audio and assets (no "master project")', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const film = await filmWithRenderedScenes('Master Audio Film', [{ name: 'Only' }]);
@@ -1188,4 +1232,368 @@ test('mcp: the workspace library is listed and links into a scene', async (t) =>
   const missing = await callJson('use_shared_asset', { target: sceneId, path: 'nope.png' });
   assert.equal(missing.isError, true);
   assert.equal(missing.data.code, 'file_not_found');
+});
+
+/* ------------------------------------------------------------------ */
+/* v0.22 — transcribe_asset: reading the speech in supplied media      */
+/* ------------------------------------------------------------------ */
+
+/** A real WAV for ffmpeg to resample; the stub decides what "speech" it holds. */
+function toneWav({ seconds = 20, sampleRate = 48000, channels = 2 } = {}) {
+  const bytes = sampleRate * channels * 2 * seconds;
+  const buf = Buffer.alloc(44 + bytes);
+  buf.write('RIFF', 0, 'ascii');
+  buf.writeUInt32LE(36 + bytes, 4);
+  buf.write('WAVE', 8, 'ascii');
+  buf.write('fmt ', 12, 'ascii');
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(channels, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * channels * 2, 28);
+  buf.writeUInt16LE(channels * 2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36, 'ascii');
+  buf.writeUInt32LE(bytes, 40);
+  for (let i = 0; i < bytes; i += 2) buf.writeInt16LE(Math.round(6000 * Math.sin(i / 30)), 44 + i);
+  return buf;
+}
+
+test('mcp: list_vendors reports the transcription capability and its models', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('list_vendors', { capability: 'transcription' });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  const tr = res.data.transcription;
+  assert.equal(tr.active, 'whisper-cpp');
+  assert.deepEqual(tr.allVendors, ['whisper-cpp']);
+  assert.equal(tr.vendors[0].available, true);
+  assert.equal(tr.vendors[0].offline, true);
+  assert.equal(tr.vendors[0].activeModel, 'small.en');
+  assert.deepEqual(tr.vendors[0].models.map((m) => m.name), ['small.en']);
+  // The other two capabilities are untouched by asking for this one.
+  assert.equal(res.data.speech, undefined);
+});
+
+test('mcp: transcribe_asset reads a library recording into sentences and words', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const ws = await callJson('get_workspace');
+  const libDir = path.join(ws.data.path, 'library', 'takes');
+  await fsp.mkdir(libDir, { recursive: true });
+  await fsp.writeFile(path.join(libDir, 'interview.wav'), toneWav());
+
+  const res = await callJson('transcribe_asset', { path: 'takes/interview.wav', fps: 30 });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  const d = res.data;
+  assert.equal(d.source, 'library');
+  assert.equal(d.vendor, 'whisper-cpp');
+  assert.equal(d.model, 'small.en');
+  assert.equal(d.language, 'en');
+  assert.equal(d.cached, false);
+  // The fixture is the plan's sample: ONE decode window, THREE sentences.
+  assert.equal(d.sentences.length, 3);
+  assert.equal(d.rawSegments.length, 1, 'the vendor reported one window');
+  // sentences[] mirrors synthesize_speech's timings field-for-field.
+  for (const key of ['text', 'startSeconds', 'startInFrames', 'durationSeconds', 'durationInFrames']) {
+    assert.ok(key in d.sentences[0], `missing ${key}`);
+  }
+  assert.equal(d.sentences[0].startInFrames, 258);
+  assert.ok(d.words.length >= 12);
+  assert.equal(d.words.find((w) => w.text === 'salvation').startInFrames, 266);
+  assert.ok(d.speechRanges.length >= 1);
+  assert.equal(d.leadingSilenceFrames, 258);
+  // Confidence is reported, not hidden: the sample's middle sentence is a guess.
+  assert.ok(d.sentences[1].minTokenP < 0.5);
+
+  // Second call is served from the sidecar — this is what makes re-transcribing
+  // a finished cut to verify it cheap enough to actually do.
+  const again = await callJson('transcribe_asset', { path: 'takes/interview.wav', fps: 30 });
+  assert.equal(again.data.cached, true);
+  assert.deepEqual(again.data.sentences, d.sentences);
+
+  // A different fps re-derives frames from the same cached seconds.
+  const at24 = await callJson('transcribe_asset', { path: 'takes/interview.wav', fps: 24 });
+  assert.equal(at24.data.cached, true);
+  assert.equal(at24.data.sentences[0].startInFrames, 206);
+});
+
+test('mcp: transcribe_asset finds the frame a word is spoken on, and bounds the word list', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('transcribe_asset', {
+    path: 'takes/interview.wav', fps: 30, wordsMatching: 'salvation',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.matchedWords, 1);
+  assert.equal(res.data.words.length, 1);
+  assert.equal(res.data.words[0].startInFrames, 266);
+
+  const capped = await callJson('transcribe_asset', { path: 'takes/interview.wav', maxWords: 2 });
+  assert.equal(capped.data.words.length, 2);
+  assert.equal(capped.data.wordsTruncated, true);
+  assert.ok(capped.data.wordCount > 2);
+
+  const noWords = await callJson('transcribe_asset', { path: 'takes/interview.wav', words: false });
+  assert.equal(noWords.data.words, undefined);
+  assert.ok(noWords.data.sentences.length, 'sentences are still there');
+});
+
+test('mcp: transcribe_asset refuses a non-media file by name, before any work', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const ws = await callJson('get_workspace');
+  await fsp.writeFile(path.join(ws.data.path, 'library', 'notes.json'), '{}');
+  const res = await callJson('transcribe_asset', { path: 'notes.json' });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'transcription_input_unsupported');
+
+  const missing = await callJson('transcribe_asset', { path: 'takes/nope.wav' });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.data.code, 'file_not_found');
+});
+
+test('mcp: the read-only media tools reach out/, so a finished cut can be verified', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // Both tools promise this: "re-transcribe the render" is how a cut is checked,
+  // and the render lands in out/, not assets/. Confining the READ to assets/ made
+  // the documented workflow impossible while protecting nothing — the file is one
+  // the engine itself wrote.
+  const film = await callJson('create_film', { name: `Out Read Film ${++filmCounter}` });
+  assert.equal(film.isError, false, JSON.stringify(film.data));
+  const outDir = path.join(film.data.path, 'out');
+  await fsp.mkdir(outDir, { recursive: true });
+  await fsp.writeFile(path.join(outDir, 'film.wav'), toneWav({ seconds: 3 }));
+
+  const heard = await callJson('transcribe_asset', { target: film.data.film, path: 'out/film.wav', fps: 30 });
+  assert.equal(heard.isError, false, JSON.stringify(heard.data));
+  assert.equal(heard.data.path, 'out/film.wav');
+  assert.ok(heard.data.text.length > 0);
+
+  const probed = await callJson('probe_asset', { target: film.data.film, path: 'out/film.wav' });
+  assert.equal(probed.isError, false, JSON.stringify(probed.data));
+  assert.equal(probed.data.path, 'out/film.wav');
+
+  // A missing rendered file says so in the render's own terms.
+  const missing = await callJson('probe_asset', { target: film.data.film, path: 'out/nope.mp4' });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.data.code, 'file_not_found');
+  assert.match(missing.data.message, /render it first/);
+
+  // Reading out/ does not make it writable: a deliverable cannot be overwritten
+  // or deleted through the tool surface.
+  const write = await callJson('write_asset_file', {
+    target: film.data.film, path: 'out/film.wav', contentBase64: Buffer.from('x').toString('base64'),
+  });
+  assert.equal(write.isError, true);
+  assert.equal(write.data.code, 'path_not_allowed');
+  const del = await callJson('delete_asset', { target: film.data.film, path: 'out/film.wav' });
+  assert.equal(del.isError, true);
+  assert.equal(del.data.code, 'path_not_allowed');
+
+  // And the escape checks still apply to the new prefix.
+  const escape = await callJson('probe_asset', { target: film.data.film, path: 'out/../../../evil.wav' });
+  assert.equal(escape.isError, true);
+  assert.equal(escape.data.code, 'path_not_allowed');
+});
+
+test('mcp: a transcription is a job in its own lane, pollable like a render', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // waitMs: 0 hands the jobId straight back, which is the shape a long
+  // recording produces — and proves the transcript arrives as the job's result.
+  const res = await callJson('transcribe_asset', { path: 'takes/interview.wav', waitMs: 0, refresh: true });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.ok(res.data.jobId, JSON.stringify(res.data));
+  if (res.data.stillRunning) {
+    const waited = await callJson('wait_for_render', { jobIds: [res.data.jobId], timeoutMs: 20000 });
+    const job = waited.data.jobs[0];
+    assert.equal(job.state, 'done', JSON.stringify(job));
+    assert.equal(job.kind, 'transcribe');
+    assert.equal(job.result.sentences.length, 3, 'a task job carries its answer in result');
+  }
+  const listed = await callJson('list_render_jobs');
+  assert.ok(listed.data.jobs.some((j) => j.kind === 'transcribe'), 'both lanes appear in the job list');
+});
+
+test('mcp: an unconfigured transcription vendor fails with the fix, not a crash', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  await withServer({
+    home: 'home-no-whisper',
+    env: {
+      MOTION_STUDIO_WHISPER_BIN: path.join(tmp, 'no-such-whisper-cli'),
+      MOTION_STUDIO_WHISPER_MODELS: whisperModels,
+    },
+  }, async (call) => {
+    const vendors = await call('list_vendors', { capability: 'transcription' });
+    assert.equal(vendors.data.transcription.vendors[0].available, false);
+    assert.match(vendors.data.transcription.vendors[0].error, /not found|ENOENT|Could not start/i);
+
+    const ws = await call('get_workspace');
+    const libDir = path.join(ws.data.path, 'library');
+    await fsp.mkdir(libDir, { recursive: true });
+    await fsp.writeFile(path.join(libDir, 'take.wav'), toneWav({ seconds: 1 }));
+    const res = await call('transcribe_asset', { path: 'take.wav' });
+    assert.equal(res.isError, true);
+    assert.equal(res.data.code, 'transcription_unavailable');
+    assert.match(res.data.message, /do not retry blindly/);
+    assert.match(res.data.message, /MOTION_STUDIO_WHISPER_BIN/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* v0.22 — transcode_asset, and the loop all four plans close          */
+/* ------------------------------------------------------------------ */
+
+test('mcp: transcode_asset conforms a library clip to a film and puts it on the timeline', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  // THE acceptance case, end to end through the tool surface only — no shell.
+  // A film with two rendered scenes, a raw clip in the library, and the four
+  // plans doing their jobs: the film STATES its encode contract (plan 0),
+  // transcode_asset conforms the clip to it (plan 3), and the result goes on the
+  // timeline as a footage segment (plan 2) that build_film assembles.
+  const film = await filmWithRenderedScenes('Loop Closer', [{ name: 'Open' }, { name: 'Close' }]);
+  const ws = await callJson('get_workspace');
+
+  // The human drops a raw H.264 clip in the library — 640x480, wrong size and
+  // wrong length for this film, with an audio track footage may not have.
+  const libDir = path.join(ws.data.path, 'library');
+  await fsp.mkdir(libDir, { recursive: true });
+  const raw = path.join(libDir, 'raw-talk.mp4');
+  await execFileP('ffmpeg', ['-y', '-v', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=640x480:rate=30:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', raw]);
+
+  // What must this file look like to join the film? The film says so.
+  const sig = (await callJson('get_film', { film })).data.plan.signature;
+  assert.ok(sig?.ffmpegArgs, 'plan 0: the contract is stated');
+
+  const conformed = await callJson('transcode_asset', {
+    target: film, from: 'raw-talk.mp4', to: 'assets/segment.mp4',
+    mode: 'video', matchFilm: film,
+    trim: { startSeconds: 0.5, durationInFrames: 24 },
+    scale: { width: sig.width, height: sig.height },
+    fps: sig.fps,
+  });
+  assert.equal(conformed.isError, false, JSON.stringify(conformed.data));
+  const c = conformed.data;
+  assert.equal(c.matchedFilm, film);
+  assert.equal(c.signature, sig.id);
+  assert.equal(c.frames, 24, 'frame-exact, which is what the timeline will declare');
+  assert.equal(c.video.width, sig.width);
+  assert.equal(c.video.height, sig.height);
+  assert.equal(c.hasAudio, false, 'footage must be silent, and audio is dropped by default');
+  assert.match(c.hint, /update_film/);
+
+  // Plan 2: it goes on the timeline between the two scenes.
+  const patched = await callJson('update_film', {
+    film,
+    scenes: [{ slug: 'open' }, { footage: 'assets/segment.mp4', durationInFrames: 24 }, { slug: 'close' }],
+  });
+  assert.equal(patched.isError, false, JSON.stringify(patched.data));
+  const layout = patched.data.plan.sceneLayout;
+  assert.deepEqual(layout.map((s) => s.kind), ['scene', 'footage', 'scene']);
+  // Nothing disagrees: the conformed file matches, and its declared count is true.
+  assert.ok(!patched.data.plan.problems.some((p) => String(p.code).startsWith('footage_')),
+    JSON.stringify(patched.data.plan.problems));
+  assert.equal(layout[1].framesVerified, true);
+
+  // And the film builds, losslessly, with every frame present.
+  const built = await callJson('build_film', { film });
+  assert.equal(built.isError, false, JSON.stringify(built.data));
+  const done = await waitJobDone(built.data.jobId);
+  assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
+  const total = layout.reduce((n, s) => n + s.durationInFrames, 0);
+  const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+    '-count_packets', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', built.data.outputPath]);
+  assert.equal(Number(stdout.trim()), total, 'the built film holds every frame of all three segments');
+});
+
+test('mcp: transcode_asset extracts a voice spine from a talk', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Spine Film', [{ name: 'Only' }]);
+  const ws = await callJson('get_workspace');
+  const raw = path.join(ws.data.path, 'library', 'talk.mp4');
+  await fsp.mkdir(path.dirname(raw), { recursive: true });
+  await execFileP('ffmpeg', ['-y', '-v', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=30:duration=6',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', raw]);
+
+  // Four spans of someone's voice, joined — the thing a film built around a talk
+  // actually needs, and the reason this belongs in an asset tool: the mixer's
+  // fades are frame-quantized, and 12 ms at 30 fps is 0.36 frames.
+  const res = await callJson('transcode_asset', {
+    target: film, from: 'talk.mp4', to: 'assets/spine.wav', mode: 'audio',
+    spans: [
+      { startSeconds: 0.2, durationInFrames: 30 },
+      { startSeconds: 2.0, durationInFrames: 30 },
+      { startSeconds: 4.0, durationInFrames: 30 },
+    ],
+    crossfadeMs: 12, sampleRate: 48000, channels: 2,
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.equal(res.data.audio.codec, 'pcm_s16le');
+  assert.equal(res.data.audio.sampleRate, 48000);
+  // Three 1s spans minus two 12ms crossfades — the fade consumes time.
+  assert.ok(Math.abs(res.data.durationSeconds - 2.976) < 0.02, `got ${res.data.durationSeconds}`);
+  assert.match(res.data.hint, /preview_audio/);
+
+  // It goes on the master timeline as one track, which is the whole point.
+  const upd = await callJson('update_film', { film, audio: [{ src: 'assets/spine.wav' }] });
+  assert.equal(upd.isError, false, JSON.stringify(upd.data));
+});
+
+test('mcp: transcode_asset refuses anything shell-shaped, and never overwrites its source', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Guarded', [{ name: 'One' }]);
+  const ws = await callJson('get_workspace');
+  const raw = path.join(ws.data.path, 'library', 'guard.mp4');
+  await fsp.mkdir(path.dirname(raw), { recursive: true });
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+    '-i', 'testsrc2=size=160x120:rate=30:duration=1', '-pix_fmt', 'yuv420p', raw]);
+
+  // Writing outside assets/ is refused by the same guard write_asset_file uses.
+  const escape = await callJson('transcode_asset', { target: film, from: 'guard.mp4', to: '../escape.mp4' });
+  assert.equal(escape.isError, true);
+  assert.equal(escape.data.code, 'path_not_allowed');
+
+  // A destination extension that names no format this engine writes.
+  const gif = await callJson('transcode_asset', { target: film, from: 'guard.mp4', to: 'assets/out.gif' });
+  assert.equal(gif.isError, true);
+  assert.equal(gif.data.code, 'unsupported_format');
+
+  // Malformed fields come back with EVERY complaint, before anything is spawned.
+  const bad = await callJson('transcode_asset', {
+    target: film, from: 'guard.mp4', to: 'assets/o.mp4',
+    trim: { startSeconds: 1, startInFrames: 30 },
+  });
+  assert.equal(bad.isError, true);
+  assert.equal(bad.data.code, 'invalid_config');
+  assert.match(bad.data.message, /not both/);
+
+  // There is no `args`/`filter` field to smuggle anything through: zod strips
+  // unknown keys, so this call is simply the same as one without them.
+  const sneaky = await callJson('transcode_asset', {
+    target: film, from: 'guard.mp4', to: 'assets/ok.mp4', trim: { durationInFrames: 5 },
+    args: ['-vf', 'crop=1:1:0:0'], filter: 'anything',
+  });
+  assert.equal(sneaky.isError, false, JSON.stringify(sneaky.data));
+  assert.equal(sneaky.data.video.width, 160, 'the smuggled crop had no effect');
+});
+
+test('mcp: transcode_asset is idempotent and reports it', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await filmWithRenderedScenes('Idem', [{ name: 'One' }]);
+  const ws = await callJson('get_workspace');
+  const raw = path.join(ws.data.path, 'library', 'idem.mp4');
+  await fsp.mkdir(path.dirname(raw), { recursive: true });
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+    '-i', 'testsrc2=size=320x240:rate=30:duration=2', '-pix_fmt', 'yuv420p', raw]);
+
+  const req = { target: film, from: 'idem.mp4', to: 'assets/small.webm', trim: { durationInFrames: 10 }, scale: { width: 160 } };
+  const first = await callJson('transcode_asset', req);
+  assert.equal(first.data.skipped, false);
+  const second = await callJson('transcode_asset', req);
+  assert.equal(second.data.skipped, true, 're-pulling an unchanged clip should be free');
+  assert.equal(second.data.elapsedMs, 0);
+  const forced = await callJson('transcode_asset', { ...req, refresh: true });
+  assert.equal(forced.data.skipped, false);
 });

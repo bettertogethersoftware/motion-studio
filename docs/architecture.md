@@ -22,17 +22,20 @@ Motion Studio is three thin entry points around one shared render engine.
                        ▼            ▼      scripts, CI, parallel workers
         Render Engine Core (engine/src/core/)
           store.js     — workspace → film → scene storage (§11)
-          migrate.js   — one-shot pre-v0.20 layout migration (§11.1)
+          migrate.js   — one-shot pre-v0.20 layout migration (§11.2)
           scene.js     — scene config schema, scaffolding, source lints
           renderer.js  — capture loop, parallel split, stills
           browser.js   — Puppeteer lifecycle (injectable)
           encoder.js   — FFmpeg pipe / sequence / concat / transcode / audio
           formats.js   — output-format registry (mp4 webm gif prores png-seq)
-          jobs.js      — job queue, status, logs, cancellation
+          jobs.js      — job queue (render + task lanes), status, logs, cancel (§5)
           progress.js  — JSON-line protocol (+ etaMs)
           settings.js  — global user preferences (all entry points; see §11)
           vendors.js   — vendor kit: selection, status, errors (see §9.2)
-          tts-vendors.js / music-vendors.js — per-capability dispatch
+          tts-vendors.js / music-vendors.js / transcribe-vendors.js
+                       — per-capability dispatch
+          transcribe.js — reading supplied speech: extract, derive, cache (§9.3)
+          transcode.js — preparing media: named fields only, no shell (§9.4)
           film.js      — scene assembly primitives (lossless concat, §13)
           films.js     — film documents: validation, planning, build (§13)
                        ▼
@@ -137,6 +140,24 @@ session. Cancelling a queued job dequeues it without ever starting it. Job
 status includes `percent`, `renderFps`, `etaMs`, and `queuePosition` while
 queued.
 
+**Two lanes (v0.22).** The render lane is deliberately one-at-a-time because a
+render saturates the machine. `transcribe_asset` (§9.3) is the first job that is
+not a render, and it must not sit behind one: transcription is what you do
+*while* deciding what to render, so a ten-second read of a clip stuck behind a
+twelve-minute render is the opposite of the point. `startTask` therefore submits
+into a **second lane** with its own concurrency limit (2) and its own bounded
+queue (20), sharing everything a caller already knows how to use — the id space,
+`get_render_status`, `wait_for_render`, `get_logs`, `cancel_render`. The visible
+differences are exactly three: `kind` names the job type (`"render"` vs
+`"transcribe"`), a task has no frames (so `percent` stays 0 and `phase` is what
+to watch), and a finished task carries its `result` in the status — because a
+task's result *is* the answer, where a render's is the file at `outputPath`.
+The lanes never borrow each other's slots; a queue that quietly let
+transcriptions take the render slot would reintroduce the head-of-line blocking
+the split exists to remove. `MOTION_STUDIO_MAX_RENDERS` likewise does not apply
+to tasks: it bounds an unattended agent's *renders*, and reading a file it was
+handed is not one.
+
 ## 6. Error model
 
 All cross-boundary failures are `EngineError`s with a stable
@@ -167,10 +188,16 @@ v0.8 `music_unavailable`, `music_failed`, `invalid_music_spec`; v0.9
 `inconsistent_scenes`, `scene_not_rendered`, `film_failed`; v0.21 adds
 `stale_render` (the output exists but was rendered at settings the scene no
 longer has — distinct from `short_render`, where the file is incomplete); v0.12
-`invalid_sfx_spec`. The `*_unavailable` pair means "not configured on this
-machine — a setup problem, do not retry"; the `*_failed` pair means the
-configured tool itself failed. (There is deliberately no `sfx_unavailable`:
-sfx is pure JS with nothing to configure.)
+`invalid_sfx_spec`; v0.22 `transcription_unavailable`, `transcription_failed`,
+and `transcription_input_unsupported`. The `*_unavailable` pair means "not
+configured on this machine — a setup problem, do not retry"; the `*_failed` pair
+means the configured tool itself failed. (There is deliberately no
+`sfx_unavailable`: sfx is pure JS with nothing to configure.)
+`transcription_input_unsupported` is a **third** category the generators did not
+need: the vendor is fine and the setup is fine, but the *file* has no readable
+speech in it (not media, no audio stream, a codec this ffmpeg cannot decode). The
+fix is a different file, so it is neither the user's setup to repair nor worth a
+retry — and conflating it with either would send the caller to the wrong place.
 `render_already_in_progress` was retired from the render path in v0.5 and held
 reserved; **v0.11 raises it again for a different condition** — not
 in-process concurrency, which still queues, but a *second OS process* holding
@@ -385,24 +412,35 @@ is generated once and thereafter read as a file.
 
 ### 9.2 Vendors (v0.17)
 
-Two of the three generators have more than one possible implementation:
+Three capabilities have more than one possible implementation — or, in the
+newest case, room for one:
 
 ```
-speech  →  system (core/tts.js, Windows exe)   |  azure (core/tts-azure.js)  |  piper (core/tts-piper.js)
-music   →  node   (core/music-node.js)         |  fluidsynth (core/music.js)
+speech         →  system (core/tts.js, Windows exe)   |  azure (core/tts-azure.js)  |  piper (core/tts-piper.js)  |  …
+music          →  node   (core/music-node.js)         |  fluidsynth (core/music.js)
+transcription  →  whisper-cpp (core/transcribe-whisper.js)                                              — v0.22
 ```
 
 `core/vendors.js` owns what those axes share — the selection rule, the env
 hooks, the status-report shape, and the sentence a caller sees when a vendor
-cannot be used. `core/tts-vendors.js` and `core/music-vendors.js` supply the
-providers on top; the shared module imports neither, so capability modules
+cannot be used. `core/tts-vendors.js`, `core/music-vendors.js` and
+`core/transcribe-vendors.js` supply the providers on top; the shared module
+imports none of them, so capability modules
 depend on the kit and never the reverse. Within a capability, providers return
 identical payload and probe shapes, so nothing downstream branches on vendor:
-`synthesize_speech`, `synthesize_music`, the Studio page and the audio mixer
-each see one source.
+`synthesize_speech`, `synthesize_music`, `transcribe_asset`, the Studio pages and
+the audio mixer each see one source.
+
+Transcription joins the kit with exactly **one** vendor, on purpose. A capability
+with one provider costs nothing extra to run through the shared machinery, and
+the alternative — a second, near-identical resolution path with its own
+precedence and its own "not configured" sentence — is the thing the kit exists to
+prevent. It is also why `list_vendors` and the Studio's three vendor pages are one
+projection rather than three.
 
 Selection uses the standard precedence — explicit argument →
-`MOTION_STUDIO_TTS_VENDOR` / `MOTION_STUDIO_MUSIC_VENDOR` → `settings.json` →
+`MOTION_STUDIO_TTS_VENDOR` / `MOTION_STUDIO_MUSIC_VENDOR` /
+`MOTION_STUDIO_TRANSCRIPTION_VENDOR` → `settings.json` →
 built-in default. The defaults are chosen for what they cost you: speech
 defaults to `system` so a machine that has been narrating locally does not start
 billing a cloud subscription because a newer version knows how to; music
@@ -463,6 +501,118 @@ linear gain curve) to land at the same loudness, and `music.targetPeakDb`
 re-balance a film's music against its narration, and the measured peak is
 always reported rather than assumed.
 
+### 9.3 Reading speech, not writing it (v0.22)
+
+Everything above §9.2 is about *producing* audio. `transcribe_asset` is the first
+capability that *consumes* it: it turns a recording a user supplied into text plus
+per-sentence and per-word timing. The asymmetry it closes is specific —
+`synthesize_speech` returns `timings`, and that one field is why generated
+narration is easy to build against; a user's own recording had no equivalent, so
+every cut-in point was arithmetic against the clip's duration.
+
+The layering is three files deep, and the split is the whole design:
+
+```
+core/transcribe.js           extract → bound → cache → DERIVE
+core/transcribe-vendors.js   which vendor, and the chain rule (§9.2)
+core/transcribe-whisper.js   one CLI contract, normalized to milliseconds
+```
+
+The provider returns nothing but normalized tokens in milliseconds. Four
+derivations sit above it, and they are the product rather than conveniences:
+
+1. **Sentence re-segmentation.** whisper.cpp's `transcription[]` entries are
+   *decode windows* — ~7.5 s chunks bounded by the model's context — and nothing
+   about them respects grammar; one routinely starts mid-clause and crosses three
+   sentence boundaries. Splicing audio on those boundaries is the audible
+   mid-word cut the tool exists to prevent, so sentences are rebuilt from token
+   offsets. The engine owns this so every caller gets it right once instead of
+   re-deriving it per session — which is exactly the rule in
+   [agent-environments.md](agent-environments.md): a shell can run `whisper-cli`,
+   but then it re-derives sentence boundaries by hand from millisecond offsets.
+2. **Words.** Sentence timing cannot cue a graphic to a name spoken *inside* a
+   sentence; per-word offsets can. This is what makes a transcript direction
+   rather than documentation.
+3. **Frames.** `sentences[]` mirrors `timings[]` field-for-field, so recorded and
+   generated narration are one code path. Vendor offsets are integer
+   milliseconds and are converted **once**, in the engine.
+4. **`speechRanges` / leading + trailing silence.** The text answers "what does it
+   say"; these answer "where can I cut", which is the question a film has.
+
+Two properties follow from the vendor being local and cheap. **Confidence is
+derived and always reported** — whisper.cpp emits no `no_speech_prob`, so
+`minTokenP`/`meanTokenP` per sentence and `p` per word are computed from token
+probabilities; a confidently-wrong transcript quoted on screen is worse than no
+transcript. And **transcripts are cached** per (file identity, model, language) in
+`<dataDir>/cache/transcripts/`, keyed with a derivation version so a build with
+better segmentation never serves the old split. The cache stores *seconds*, so one
+entry serves a 24 fps film and a 30 fps one; it lives under the data dir rather
+than beside the file because a sidecar in the workspace library would be debris in
+a folder the human curates, and one in `assets/` invites someone to put it on a
+timeline. That cache is what makes the verification loop — render, then
+re-transcribe the render — cheap enough to actually run.
+
+The 16 kHz mono PCM whisper.cpp requires is produced internally with the engine's
+own ffmpeg, which is already a declared prerequisite; the extracted WAV is a temp
+file, never an asset. Bounds (60 minutes, 2 GB) exist so a wrong file fails with a
+measurement instead of becoming a twenty-minute silent job.
+
+### 9.4 Preparing media, without a shell (v0.22)
+
+`probe_asset` reads a media file and `transcribe_asset` hears one. Neither can
+**change** one, and until `transcode_asset` an agent on the MCP surface stopped at
+exactly that line: it could report that a clip's codec cannot be decoded by the
+render browser and then had no way to act on its own advice.
+
+Both read through `store.resolveMediaFile`, which accepts a path under the target's
+`assets/` **or** its `out/`. The asymmetry is deliberate and is the whole point:
+verifying a finished cut means probing or re-transcribing `out/film.mp4`, so
+confining the *read* to `assets/` blocked a documented workflow while protecting
+nothing — the file is one the engine itself just wrote. Writes, deletes and renames
+keep going through `_assetRelPath` and stay confined to `assets/`, so a deliverable
+is readable but not replaceable from the tool surface.
+
+`core/transcode.js` closes it with three modes — `video` (conform, trim, crop,
+scale, fps), `audio` (cut N spans out of one source and join them into a PCM WAV),
+`frames` (a PNG sequence) — and one architectural rule:
+
+> **No arbitrary ffmpeg arguments. Not `args`, not `filter`, not an escape hatch.**
+
+The premise of this whole surface is "no shell"; a passthrough is a shell wearing a
+hat, and it takes the path sandbox with it. Every operation is a named, validated
+field, and the two functions that turn those fields into a filter graph
+(`buildVideoFilter`, `buildSpanGraph`) are pure and unit-tested without ffmpeg —
+the same shape as `buildOverlayGraph`. They are the entire surface that can ever
+run, which is what makes that claim checkable rather than aspirational. The MCP
+schema strips unknown keys, so there is nothing to smuggle.
+
+Four properties are worth stating because each replaces a way a wrapper usually
+goes wrong:
+
+- **Report by measuring, never by echoing.** The response is `summarizeMedia` on
+  the output, so a caller who asked for 640×360 and got 640×358 (even dimensions,
+  chroma subsampling) learns it here rather than from a render three steps later.
+- **Frames, not seconds.** `trim.durationInFrames` maps to `-frames:v`, which
+  guarantees the count; `-t seconds` does not, and one frame of drift breaks a
+  concat seam and shifts every later cue. It always means frames *of source*, in
+  every mode — so `frames.every: 3` over 12 of them is 4 images, not 12 taken
+  from 36.
+- **`matchFilm` consumes the signature (§13), never a second copy of the encode
+  table.** It splices the film's own `ffmpegArgs` into the command, so a conformed
+  file agrees with the film by construction rather than by an agent's arithmetic.
+  That is the loop the four v0.22 plans close: the film *states* its contract, the
+  tool *conforms* a file to it, and the timeline *holds* the result.
+- **Idempotent, and never destructive.** A `*.transcode.json` sidecar beside the
+  output records the source identity and every parameter, so repeating an unchanged
+  call is free; the destination may never equal the source.
+
+Span-joining lives here rather than on the film's audio timeline for a measured
+reason: the mixer's fades are frame-quantized, and 12 ms at 30 fps is 0.36 frames.
+Four overlapping tracks with 1-frame (33 ms) fades is a different, worse edit. A
+hard butt-join between two spans of speech clicks audibly; `acrossfade` overlaps
+its inputs, so the joined length is `sum(spans) − (N−1) × crossfade` — the fade
+consumes time, which is what makes it a crossfade rather than a gap.
+
 ## 10. Security and sandboxing
 
 The agent-facing write surface is exactly composition source files and
@@ -506,7 +656,7 @@ other code you run.
 ## 11. Storage: workspace → film → scene (v0.20)
 
 **The filesystem is the registry.** Everything lives under one data dir
-(default `~/.motion-studio`, override `MOTION_STUDIO_HOME`):
+(default `<app>/data` since v0.22 — configurable, see §11.1):
 
 ```
 <dataDir>/
@@ -571,7 +721,7 @@ that every scene must share resolution/fps/format to concatenate losslessly
 (§13) used to be discipline enforced only at build time; it is now the
 default path, and diverging takes a deliberate override.
 
-`~/.motion-studio/settings.json` sits beside `workspaces/` and holds *user
+`<dataDir>/settings.json` sits beside `workspaces/` and holds *user
 preferences*, with the same atomic write and a validated schema:
 `newSceneDefaults` (which seed a new film's `sceneDefaults`),
 `render.defaultWorkers`, an `ffmpeg` block (binary `path` override plus
@@ -579,7 +729,65 @@ preferences*, with the same atomic write and a validated schema:
 per capability, plus their non-secret options). Credentials are the one thing
 it will not hold — see §9.2.
 
-### 11.1 Migration from the pre-v0.20 layout
+### 11.1 Where the data dir is (v0.22)
+
+Three locations decide where everything lives, and `core/paths.js` owns all
+three:
+
+| location | default | env override |
+|---|---|---|
+| `dataDir` | `<app>/data` | `MOTION_STUDIO_HOME` |
+| `workspacesRoot` | `<dataDir>/workspaces` | `MOTION_STUDIO_WORKSPACES` |
+| `settingsFile` | `<dataDir>/settings.json` | `MOTION_STUDIO_SETTINGS` |
+
+Through v0.22 all three were derived from `MOTION_STUDIO_HOME` (or
+`~/.motion-studio`) and changing one meant restarting every front end with a
+different environment — which is why the Studio's settings page listed them
+**read-only**. They are fields now, and that needed somewhere to record them
+that is *not* `settings.json`, since `settings.json` is one of the things being
+located. Hence a bootstrap file of their own:
+
+```
+<app>/paths.json   { dataDir, workspacesRoot, settingsFile }   any may be null
+```
+
+Resolution per key, highest first: **env → `paths.json` → the default**. Env
+sits on top for the same reason it does for the ffmpeg binary (§11.3): an MCP
+server is spawned by its client with whatever environment that client chose,
+and a value named there is a deliberate statement about *that* process which a
+shared file must not overrule. `resolvePaths()` reports which layer won for
+each key, and the settings page disables a field the environment has already
+decided rather than offering an edit that would do nothing.
+
+The default moved from `~/.motion-studio` to `<app>/data` so a checkout carries
+its own library: one folder to copy, back up, or move to another drive.
+`paths.json` stores app-relative values *relatively*, so moving the folder
+moves the install intact.
+
+**The legacy exception.** An upgrade must not make an existing library vanish.
+When nothing is configured, `<app>/data` does not exist yet, and
+`~/.motion-studio` does, the old directory wins and is reported as source
+`legacy`; both servers then call `ensureStableDataDir()` at startup to write it
+into `paths.json`, so the answer stops depending on which folders happen to
+exist and becomes a recorded decision the user can see and change. A fresh
+install never takes that branch.
+
+An override applies to the **configured** data dir only — name any other
+directory and you get the conventional layout inside it. That rule is what
+keeps a caller who passes an explicit `dataDir` (a test over a temp dir, a CLI
+run against a copy) from silently borrowing the machine's real workspaces.
+
+Relocating through `PATCH /api/settings` re-points the *running* Studio: it
+rebuilds its `WorkspaceStore` in place, because "changed the data dir, saw no
+change" is indistinguishable from a broken setting. It is refused with
+`storage_busy` while any job is in flight — a render holds absolute paths into
+the old tree and writes frames there for minutes, so swapping underneath it
+would produce a corrupted result rather than an error. **Nothing is moved on
+disk**, and connected MCP servers resolved their paths when their client
+spawned them, so they keep using the old location until restarted; the response
+says so (`relocated.restartAgents`).
+
+### 11.2 Migration from the pre-v0.20 layout
 
 `core/migrate.js` runs once, from `WorkspaceStore.ready()`, and only when
 `projects.json` exists — the last step moves that file into
@@ -602,7 +810,7 @@ A crash mid-way leaves `projects.json` in place and the migration resumes on
 the next start; folder moves that already happened are detected by their
 destination existing, and the report says so.
 
-### 11.2 The workspace library
+### 11.3 The workspace library
 
 The 25 MB base64 cap on `write_asset_file` exists to keep large media out of
 the MCP channel, which left "the user gave me a 500 MB plate" with no good
@@ -614,8 +822,9 @@ asset costs no extra disk and the scene still renders hermetically from its
 own `assets/`. Pulling the same file again refreshes the link, so an updated
 library file propagates on request rather than silently.
 
-`~/.motion-studio/settings.json` (v0.15, `core/settings.js`) sits alongside it
-and holds *user preferences*, with the same atomic write and a validated
+The settings file (v0.15, `core/settings.js`) sits alongside it — at
+`<dataDir>/settings.json` unless §11.1 says otherwise — and holds *user
+preferences*, with the same atomic write and a validated
 schema: `newSceneDefaults`, `render.defaultWorkers`, an `ffmpeg` block
 (binary `path` override plus `defaultCrf`/`defaultPreset`), and `tts` / `music`
 blocks (v0.17: the active vendor per capability, plus their non-secret options —
@@ -738,6 +947,64 @@ owns what that document *means*:
   config. Scenes already share the codec-determining parameters by
   construction, so scene 1 speaks for the film — and the film document needs
   no duplicate encode block that could drift from the scenes it describes.
+- **The play order is heterogeneous (v0.22).** A segment is a **scene** (which the
+  engine rendered; its `config` is the truth) or **footage** (a file the user
+  supplied; the file is the truth). `film.scenes[]` holds both — key unchanged,
+  `schemaVersion` unchanged, so pre-v0.22 films load untouched. Four accessors in
+  `core/film.js` (`isFootage`, `segmentFrames`, `segmentPath`, `segmentName`) are
+  the only code that knows the difference, which is why `assembleFilm` needed no new
+  machinery: it always concatenated a list of signature-matched files and laid the
+  master audio over the result, and could not take footage only because the path
+  could only come from a scene ref. Footage is **never re-encoded** (a mismatch is a
+  reported problem, not a silent transcode) and **always silent** (all sound comes
+  from the master timeline), and its declared `durationInFrames` is **verified by
+  probe at plan time** — the render-sidecar contract applied to a file the engine
+  did not write: declare, then verify, never trust.
+- **That voice is now stated, not just used (v0.22).** `filmSignature()` in
+  `core/films.js` publishes the encode contract as `planFilm`'s `signature`:
+  `sceneSignature()` supplies `id`, scene 1's `output` the values, and
+  `buildVideoArgs()` the `ffmpegArgs` — the *same call* the finishing pass makes,
+  so the reported args and the emitted args cannot diverge. `video`/`audio` are
+  read back out of those arrays by flag lookup rather than restated, because the
+  format registry holds codec identity only inside the argument lists; a
+  declarative copy would be the second table that goes stale, and the reported one
+  is the one that would be wrong. It never throws — a `png-sequence` film reports
+  `ffmpegArgs: null` and a warning rather than propagating `UNSUPPORTED_FORMAT` to
+  a caller who merely asked what the contract is.
+
+  One projection carries it everywhere: `planSummary` covers `get_film`,
+  `list_films`, `update_film` and `build_film { plan: true }`, and the Studio's
+  `GET /api/films/:fid` already returned the raw plan, so both surfaces are served
+  by one implementation. The rule this satisfies is the one in
+  [agent-environments.md](agent-environments.md): tools that only report what a
+  shell could report get bypassed, and this is knowledge no `ffprobe` can recover
+  from a workspace — the engine held it and never said it.
+
+  `mustMatch`/`neednotMatch`/`matchForLooks` are stated rather than derived,
+  because that knowledge existed nowhere in the code. `neednotMatch` is the
+  load-bearing half of the first pair: a segment encoded at a deliberately
+  different profile *and* GOP concatenates and decodes back bit-identically
+  (measured), which is why pinning them is wasted effort — each segment is its own
+  encode and opens on a keyframe, all that `concat -c copy` requires.
+
+  **`matchForLooks` is the third list (v0.22)**, and it exists because two could
+  not classify everything: `crf`/`preset` were in neither, described only in prose,
+  and the colour tags turned out to be the same shape of fact — no effect on the
+  join, but the joined file keeps only segment 1's, so a mismatch is a look
+  difference rather than an error. `signature.color` reports `stated: false` with
+  null values, which is the honest answer rather than a gap: the engine passes no
+  colour arguments, so a scene's tags are whatever Chromium's PNGs and ffmpeg's
+  default conversion produce, and naming a value would mean probing a rendered
+  file — a second copy of the truth, available only after a render, describing the
+  installed encoder rather than a decision. `matchFilm` therefore carries no colour
+  arguments either, and that is measured, not conservative: `-color_primaries` and
+  `-color_trc` are *silently ignored* on this pipeline (decoder frame properties
+  win), so emitting them would report a conform that never happened, while the one
+  flag that does take (`-colorspace`) re-matrixes the picture. Making colour part
+  of the contract starts at the render encode — stated there, it becomes
+  config-derived and everything downstream inherits it — and that changes rendered
+  pixels, so it is a decision rather than a fix. See
+  [film-setup.md](film-setup.md#the-consistency-invariant).
 - **The finishing pass.** Assembly is still `assembleFilm`'s lossless concat
   (+ master-audio mux). Only when a film has overlays or burns captions does
   ONE extra encode run: `buildOverlayGraph` (pure, unit-tested) composes the

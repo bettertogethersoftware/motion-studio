@@ -33,13 +33,15 @@ import fsp from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 import { EngineError, ErrorCodes } from './errors.js';
-import { getFormat } from './formats.js';
+import { getFormat, encodingCompatibilityWarnings } from './formats.js';
 import {
   sceneSignature, sceneOutputPath, sceneHasAudio, validateScenes, assembleFilm,
   readRenderMeta, renderStaleness, describeStaleness,
+  probeSignature, engineFormatForProbe, isFootage, segmentFrames, segmentName,
 } from './film.js';
-import { buildVideoArgs, runFfmpeg } from './encoder.js';
+import { buildVideoArgs, runFfmpeg, probeMedia, probeFrameCount } from './encoder.js';
 import { resolveInTarget } from './sandbox.js';
+import { resolveFfprobePath } from './settings.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits — generous for real work, bounded against runaway callers.   */
@@ -83,6 +85,30 @@ function checkTrack(t, i, problems) {
   if (t.fadeOutFrames !== undefined && !isNonNegInt(t.fadeOutFrames)) problems.push(`${at}.fadeOutFrames must be a non-negative integer`);
   if (t.duck !== undefined && typeof t.duck !== 'boolean') problems.push(`${at}.duck must be a boolean`);
   if (t.label !== undefined && typeof t.label !== 'string') problems.push(`${at}.label must be a string`);
+}
+
+/**
+ * A footage segment (v0.22): a piece of video that joins the timeline as-is,
+ * beside the rendered scenes.
+ *
+ * `durationInFrames` is **declared here and verified at plan time** against the
+ * file itself. Declaring it is what lets planFilm compute offsets without
+ * probing every file on every call — the same reason scenes declare their
+ * duration in config. But a declaration that is never checked is worse than
+ * none, because every downstream offset derives from it: one wrong frame count
+ * silently shifts every subsequent scene, caption and audio cue, and the render
+ * still "succeeds". So planFilm probes, and refuses to build on a disagreement.
+ */
+function checkFootage(s, i, problems) {
+  const at = `scenes[${i}]`;
+  if (typeof s.footage !== 'string' || !s.footage.replace(/\\/g, '/').startsWith('assets/')) {
+    problems.push(`${at}.footage must be a film-relative path under assets/`);
+  }
+  if (!isPosInt(s.durationInFrames)) {
+    problems.push(`${at}.durationInFrames must be a positive integer — declare the footage's frame count ` +
+      '(it is verified against the file, and every later offset depends on it)');
+  }
+  if (s.label !== undefined && typeof s.label !== 'string') problems.push(`${at}.label must be a string`);
 }
 
 function checkOverlay(o, i, problems) {
@@ -131,17 +157,33 @@ export function validateFilm(film) {
   }
   if (typeof film.name !== 'string' || !film.name.trim()) problems.push('name must be a non-empty string');
 
-  if (!Array.isArray(film.scenes)) problems.push('scenes must be an array of { slug }');
+  if (!Array.isArray(film.scenes)) problems.push('scenes must be an array of { slug } or { footage, durationInFrames }');
   else {
     if (film.scenes.length > MAX_FILM_SCENES) problems.push(`scenes exceeds ${MAX_FILM_SCENES}`);
     const seen = new Set();
     film.scenes.forEach((s, i) => {
+      // A segment is a scene OR a piece of footage (v0.22). One key decides
+      // which, so an old film — every entry a bare { slug } — stays valid with
+      // no migration, and schemaVersion stays 1.
+      const hasSlug = !!s && s.slug !== undefined;
+      const hasFootage = !!s && s.footage !== undefined;
+      if (hasSlug && hasFootage) {
+        problems.push(`scenes[${i}]: a segment is either a scene ({ slug }) or footage ({ footage }), not both`);
+        return;
+      }
+      if (hasFootage) {
+        checkFootage(s, i, problems);
+        return;
+      }
       if (!s || typeof s.slug !== 'string' || !SCENE_SLUG_RE.test(s.slug)) {
-        problems.push(`scenes[${i}].slug must be a scene slug (lowercase a-z, 0-9, "-", "_")`);
+        problems.push(`scenes[${i}] must be a scene ({ slug }) or footage ({ footage, durationInFrames })`);
       } else if (seen.has(s.slug)) {
         problems.push(`scenes[${i}].slug "${s.slug}" appears more than once — a scene plays once; ` +
           'to reuse footage, render it into two scenes');
       } else {
+        // Only scene slugs are deduped. A footage file may legitimately appear
+        // more than once (the same plate as a recurring cutaway), and it costs
+        // nothing: unlike a scene it has no per-instance render to collide with.
         seen.add(s.slug);
       }
     });
@@ -209,6 +251,32 @@ export function validateFilm(film) {
   return film;
 }
 
+/**
+ * One segment of the play order, normalized to exactly the keys its kind owns.
+ *
+ * This projection runs on EVERY save — createFilm, updateFilm, createScene's
+ * auto-append, removeScene, and the Studio's debounced autosave all pass through
+ * it — so it is the single place a footage entry can be silently destroyed.
+ * Before v0.22 it returned `{ slug: s?.slug }` unconditionally, which is why
+ * footage had to be understood here first: without this, an entry would survive
+ * validation and then vanish on the next unrelated edit.
+ */
+function normalizeSegment(s) {
+  if (s && s.footage !== undefined) {
+    return {
+      footage: typeof s.footage === 'string' ? s.footage.replace(/\\/g, '/') : s.footage,
+      durationInFrames: s.durationInFrames,
+      ...(s.label !== undefined ? { label: s.label } : {}),
+      // A segment carrying BOTH keys is a confused caller, not a footage entry
+      // with a stray field. Keeping the slug here is what lets validateFilm
+      // refuse it: dropping it would silently pick footage and persist a
+      // decision nobody made.
+      ...(s.slug !== undefined ? { slug: s.slug } : {}),
+    };
+  }
+  return { slug: s?.slug };
+}
+
 /** Fill defaults and stamp ids on timeline items so editors can address them. */
 export function normalizeFilm(input = {}) {
   const stampIds = (arr) => (Array.isArray(arr) ? arr.map((x) => (x && typeof x === 'object' && !x.id ? { ...x, id: randomUUID() } : x)) : arr);
@@ -216,7 +284,7 @@ export function normalizeFilm(input = {}) {
   const pickInts = (obj, keys) => Object.fromEntries(keys.filter((k) => obj?.[k] !== undefined).map((k) => [k, obj[k]]));
   return {
     name: typeof input.name === 'string' ? input.name.trim() : input.name,
-    scenes: Array.isArray(input.scenes) ? input.scenes.map((s) => ({ slug: s?.slug })) : [],
+    scenes: Array.isArray(input.scenes) ? input.scenes.map(normalizeSegment) : [],
     outputFilename: input.outputFilename ?? 'film',
     sceneDefaults: sd && typeof sd === 'object'
       ? pickInts(sd, ['fps', 'width', 'height', 'durationInFrames'])
@@ -230,9 +298,307 @@ export function normalizeFilm(input = {}) {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * The film signature (v0.22) — the encode contract, stated as data.
+ *
+ * The long-form guarantee is that scenes share an encode signature and
+ * therefore concatenate losslessly: sceneSignature() computes it,
+ * validateScenes() enforces it, assembleFilm() depends on it — and until now
+ * nothing told a caller what it *is*.
+ *
+ * That is fine while the engine renders every segment. The moment a file
+ * arrives from outside (footage, a supplied clip, a transcode) the caller has
+ * to produce something matching an invariant it cannot read, and it has two
+ * bad options: guess, or render a file first and probe it to discover a
+ * constant that lives in a hard-coded table. A real session guessed, and two
+ * of its three guesses were cargo-cult — it pinned `-profile:v high -level
+ * 4.0` (libx264 picks exactly those for 1080p30 anyway) and `-x264-params
+ * keyint=60` while the engine uses libx264's default 250. The concat succeeded
+ * *despite* the mismatch, because each segment is its own encode and therefore
+ * opens on a keyframe, which is all `concat -c copy` requires.
+ *
+ * So `neednotMatch` is as load-bearing as `mustMatch`: stating what is NOT
+ * required is what stops the next author inheriting that cargo cult.
+ *
+ * ## The third list (v0.22)
+ *
+ * Two lists could not classify everything, and the leftovers were the ones a
+ * caller actually gets wrong. `crf`/`preset` are not required for the concat but
+ * footage ignoring them looks different from the scenes beside it; colour tags
+ * are the same shape of fact. Calling either `neednotMatch` would be false —
+ * they are not *needed*, but a caller who skips them gets a visibly worse film —
+ * and calling them `mustMatch` would be false too, because nothing fails.
+ *
+ * `matchForLooks` is that third answer: **it does not affect the join, and the
+ * joined file keeps only segment 1's, so a mismatch is a look difference rather
+ * than an error.** The category is not new; docs/film-setup.md already described
+ * crf/preset exactly this way in prose, with nowhere to put them.
+ * ------------------------------------------------------------------ */
+
+/** First value after `flag` in an argument list, or null. */
+function argValue(args, flag) {
+  const i = (args ?? []).indexOf(flag);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
+}
+
+/**
+ * What a file must look like to join this film, derived from the code that
+ * already computes it — never from a second copy of the encode table. A
+ * duplicated table would diverge, and the *reported* one would be the wrong
+ * one, which is worse than reporting nothing.
+ *
+ * `ffmpegArgs` is literally `buildVideoArgs(output)`, the same call the
+ * finishing encode makes, so the reported args and the args the renderer
+ * passes cannot drift. Everything in `video`/`audio` is then read back out of
+ * those arrays by flag lookup rather than restated.
+ *
+ * Two fields answer different questions and can legitimately disagree:
+ * `id` is `sceneSignature()`'s comparison key — the exact string
+ * `validateScenes` enforces — while `pixFmt` is the pixel format the encoder
+ * actually emits. For mp4/webm they agree; for prores the profile decides the
+ * pixel format (`yuv422p10le`) regardless of `output.pixFmt`, and the honest
+ * answer to "what will my file have to be" is the encoder's.
+ *
+ * NEVER THROWS. A caller asking what the contract is must not be handed an
+ * exception because the film's format has no encode step.
+ *
+ * @param {object[]} configs  resolved scene configs, in film order
+ * @returns {object|null} null when no scene resolved — an empty film enforces
+ *   nothing, and a plausible guess from sceneDefaults alone would produce a
+ *   file that fails to concat much later.
+ */
+export function filmSignature(configs) {
+  const resolved = (configs ?? []).filter(Boolean);
+  if (!resolved.length) return null;
+
+  const first = resolved[0];
+  const output = first.output ?? {};
+  const format = output.format ?? 'mp4';
+  // An unknown format cannot reach here through validateConfig, but this
+  // function is a reporter and must survive a hand-edited scene.json.
+  let fmt = null;
+  try { fmt = getFormat(format); } catch { /* reported as nulls below */ }
+
+  // The advisory that matters exactly here: someone reading this block is
+  // deciding what to encode, and mp4+crf 0 is the lossless-H.264 black-video
+  // trap. Carried rather than re-derived.
+  const warnings = [...encodingCompatibilityWarnings(output)];
+
+  let ffmpegArgs = null;
+  if (fmt?.videoArgs) {
+    try { ffmpegArgs = buildVideoArgs(output); } catch { /* below */ }
+  }
+  if (!ffmpegArgs) {
+    // The whole story for this format; the copyConcat line below would only
+    // restate it, so the two are deliberately exclusive.
+    warnings.push(
+      `Format "${format}" has no encode step, so this film has no encoder arguments to match — ` +
+      'nothing can be conformed to join it.',
+    );
+  } else if (fmt && !fmt.copyConcat) {
+    warnings.push(
+      `Format "${format}" cannot be stream-copied, so its scenes are re-encoded from a lossless ` +
+      'intermediate rather than concatenated — matching these arguments does not make a file joinable.',
+    );
+  }
+  // crf/preset are deliberately NOT part of the signature: docs/film-setup.md
+  // states they may differ between scenes because they affect encoding, not
+  // stream compatibility. Scene 1 is the film's encode voice (buildFilmArtifact
+  // uses its output for the finishing pass), so that is what is reported — and
+  // when the scenes disagree, say so rather than let the report read as uniform.
+  const rateControl = new Set(resolved.map((c) => `${c.output?.crf ?? ''}/${c.output?.preset ?? ''}`));
+  if (rateControl.size > 1) {
+    warnings.push(
+      'Scenes disagree on crf/preset. The reported values are scene 1\'s — the film\'s encode voice, and what ' +
+      'the finishing pass uses. They are not part of the signature (they affect quality, not stream ' +
+      'compatibility), so a mismatch is legal; match them anyway if new footage should not look different — ' +
+      'which is exactly what matchForLooks lists them for.',
+    );
+  }
+
+  const audioArgs = fmt?.audioArgs ? fmt.audioArgs() : null;
+  const crf = argValue(ffmpegArgs, '-crf');
+
+  return {
+    // The comparison key validateScenes enforces, computed by the same
+    // function it uses — not reassembled from the fields below.
+    id: sceneSignature(first),
+    width: first.width,
+    height: first.height,
+    fps: first.fps,
+    format,
+    // prores writes .mov, so the container is not a synonym for the format.
+    container: fmt?.ext ? fmt.ext.replace(/^\./, '') : null,
+    pixFmt: argValue(ffmpegArgs, '-pix_fmt') ?? output.pixFmt ?? null,
+    transparent: output.transparent ?? false,
+    video: {
+      // gif's videoArgs is a -filter_complex with no -c:v, so codec is null
+      // there — honestly, rather than by inventing one.
+      codec: argValue(ffmpegArgs, '-c:v'),
+      crf: crf === null ? null : Number(crf),
+      preset: argValue(ffmpegArgs, '-preset'),
+    },
+    audio: audioArgs
+      ? { codec: argValue(audioArgs, '-c:a'), bitrate: argValue(audioArgs, '-b:a') }
+      : null,
+    ffmpegArgs,
+    copyConcat: fmt?.copyConcat ?? null,
+    /**
+     * Colour is deliberately reported as UNSTATED rather than as a value
+     * (v0.22), and that is the honest answer, not a gap.
+     *
+     * The engine passes no colour arguments at all, so a scene's tags are
+     * whatever Chromium's PNGs and ffmpeg's default conversion happen to
+     * produce. Measured on a real render: `primaries=bt709,
+     * transfer=iec61966-2-1, matrix=unset`, and the pixels are converted with
+     * the **bt601** matrix (a render forced to `smpte170m` is byte-identical),
+     * so the file does not even agree with itself — every player that assumes
+     * bt709 for HD decodes it with the wrong matrix.
+     *
+     * Naming a value here would therefore require probing a rendered file: a
+     * second copy of the truth, obtainable only after a render, and describing
+     * an accident of the installed Chromium/ffmpeg pair rather than a decision.
+     * Conforming footage to it would faithfully replicate that accident and
+     * bake it into a `.transcode.json` identity that survives the next upgrade.
+     *
+     * Two further measurements are why `matchFilm` carries no colour arguments:
+     * `-color_primaries`/`-color_trc` are **silently ignored** on this pipeline
+     * (frame properties from the decoder win), so emitting them would report a
+     * conform that did not happen; and the one flag that does take,
+     * `-colorspace`, re-matrixes the picture — a pixel change, not a tag.
+     *
+     * `stated: false` is the field a caller reads. It must never be treated as
+     * "no colour metadata exists" — the files carry tags; the engine just does
+     * not choose them.
+     */
+    color: { stated: false, primaries: null, transfer: null, matrix: null, range: null },
+    // What a stream copy cannot reconcile, what it does not care about, and
+    // what it copies through untouched from segment 1. The second and third
+    // lists exist to prevent over-matching and under-matching respectively;
+    // see the header.
+    mustMatch: ['codec', 'width', 'height', 'fps', 'pixFmt', 'container'],
+    neednotMatch: ['gopSize', 'profile', 'level', 'bitrate'],
+    matchForLooks: ['crf', 'preset', 'colorPrimaries', 'colorTransfer', 'colorMatrix', 'colorRange'],
+    warnings,
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* Planning — resolve a film against reality without throwing          */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Resolve one footage segment: locate it, probe it, and verify the two things a
+ * declaration cannot be trusted on (v0.22).
+ *
+ * **Declared, then verified.** The frame count comes from the document so offsets
+ * can be computed without probing on every call, exactly as scenes declare theirs
+ * in config — but every downstream offset derives from it, so one wrong count
+ * would silently shift every later scene, caption and cue while the render still
+ * succeeded. Same contract as the render sidecar: declare, then verify, never
+ * trust.
+ *
+ * `frames` is read from the container header when it is there and counted from
+ * packets when it is not — **measured: mp4 reports `nb_frames`, webm reports
+ * nothing**, and a packet count costs ~46 ms even on a 30 s 1080p file, so the
+ * fallback is cheap enough to always take.
+ *
+ * ffprobe is not a declared prerequisite, so "unverified" is a legitimate third
+ * state (`framesVerified: null`), mirroring `renderVerified` for a render that
+ * predates the sidecar. It must never be read as "matches".
+ */
+async function planFootage({ film, ref, index, problems, ffprobePath }) {
+  const rel = String(ref.footage ?? '').replace(/\\/g, '/');
+  const declared = ref.durationInFrames;
+  const base = {
+    kind: 'footage',
+    index,
+    footage: rel,
+    ...(ref.label ? { label: ref.label } : {}),
+    name: ref.label ?? rel.split('/').pop(),
+    durationInFrames: isPosInt(declared) ? declared : 0,
+  };
+
+  let abs = null;
+  try {
+    abs = resolveInTarget(film.path, rel);
+  } catch {
+    problems.push({
+      code: ErrorCodes.FOOTAGE_MISSING,
+      segment: rel,
+      message: `Footage ${index + 1}: "${rel}" is not a valid path under the film's assets/`,
+    });
+    return { ...base, missing: true, durationInFrames: 0 };
+  }
+  if (!fs.existsSync(abs)) {
+    problems.push({
+      code: ErrorCodes.FOOTAGE_MISSING,
+      segment: rel,
+      message: `Footage ${index + 1}: "${rel}" does not exist in the film's assets/ folder`,
+    });
+    return { ...base, missing: true, durationInFrames: 0 };
+  }
+
+  const media = await probeMedia({ filePath: abs, ffprobePath }).catch(() => null);
+  if (!media) {
+    // Unprobeable is not the same as missing: the file is there, but nothing can
+    // be verified about it, and saying so beats inventing a verdict.
+    return { ...base, missing: false, probed: false, framesVerified: null, signature: null };
+  }
+
+  let frames = media.video?.frames ?? null;
+  if (!frames) {
+    const counted = await probeFrameCount({ filePath: abs, ffprobePath }).catch(() => null);
+    if (counted) frames = counted;
+  }
+  if (frames && isPosInt(declared) && frames !== declared) {
+    problems.push({
+      code: ErrorCodes.FOOTAGE_DURATION_MISMATCH,
+      segment: rel,
+      message: `Footage "${rel}" declares ${declared} frames but the file has ${frames} — ` +
+        `declared ${declared} → actual ${frames}. Every offset after this segment derives from the ` +
+        'declaration, so fix it before building.',
+      declared,
+      actual: frames,
+    });
+  }
+  // Footage is silent by contract: all sound comes from the master timeline.
+  // Dropping an audio stream silently would be worse than refusing it — the
+  // user's own voice would vanish from a film they can hear it in.
+  if (media.hasAudio) {
+    problems.push({
+      code: ErrorCodes.FOOTAGE_MISSING,
+      segment: rel,
+      message: `Footage "${rel}" carries an audio stream. Footage segments must be silent — extract the audio ` +
+        'to a WAV, put it on the film\'s master audio timeline (update_film { audio: [...] }), and supply a ' +
+        'video-only file here. Otherwise the concat mixes audio-carrying and silent segments, which is exactly ' +
+        'what mixed_scene_audio refuses.',
+    });
+  }
+
+  return {
+    ...base,
+    missing: false,
+    probed: true,
+    width: media.video?.width ?? null,
+    height: media.video?.height ?? null,
+    fps: media.video?.fps ?? null,
+    codec: media.video?.codec ?? null,
+    pixFmt: media.video?.pixFmt ?? null,
+    // Measured, and reported even though nothing enforces it (v0.22): footage
+    // whose colour tags differ from the scenes' is a look difference at the cut,
+    // never a broken concat, and this is the only place a caller can see it.
+    // The scenes have no counterpart here on purpose — the engine does not state
+    // its colour (see filmSignature's `color`), so there is nothing to compare
+    // against that would not be an accident of the installed encoder.
+    color: media.video?.color ?? null,
+    format: engineFormatForProbe(media.video?.codec, media.container),
+    hasAudio: media.hasAudio,
+    actualFrames: frames ?? null,
+    framesVerified: frames ? frames === declared : null,
+    signature: probeSignature(media),
+  };
+}
 
 /**
  * Resolve every reference in a film and report, rather than throw. The editor
@@ -243,15 +609,58 @@ export function normalizeFilm(input = {}) {
  * @param {object} opts.film   a film from WorkspaceStore.getFilm (id + path + doc)
  * @param {object} opts.store  the WorkspaceStore
  * @returns {{ scenes, totalFrames, durationSeconds, fps, format, signature, problems }}
+ *   `signature` is the structured contract from filmSignature() (null for a film
+ *   with no resolvable scenes); `signature.id` is the string every scene's own
+ *   `signature` is compared against.
  */
-export async function planFilm({ film, store }) {
+export async function planFilm({ film, store, ffprobePath = null }) {
   const problems = [];
   const scenes = [];
+  // Resolved lazily and once: only a film with footage needs ffprobe, so a
+  // scene-only film pays nothing, and no caller has to remember to pass it.
+  // (Bare "ffprobe" would miss the sibling-of-ffmpeg resolution that exists
+  // precisely for an MCP server with a minimal PATH — see core/settings.js.)
+  let probeBin = ffprobePath;
+  const resolveProbe = async () => {
+    if (probeBin === null) {
+      probeBin = (await resolveFfprobePath({ dataDir: store?.dataDir }).catch(() => null))?.path ?? 'ffprobe';
+    }
+    return probeBin;
+  };
+  // The resolved configs, kept only so filmSignature() can state the encode
+  // contract without re-reading them. They are already in memory.
+  const configs = [];
   let signature = null, fps = null, format = null;
 
   for (const [i, ref] of (film.scenes ?? []).entries()) {
+    // Footage segments (v0.22): a piece of video that joins the timeline as-is.
+    // Resolved, probed and verified here — before a build is paid for. The
+    // signature seeding below is shared with scenes on purpose: whichever KIND of
+    // segment resolves first establishes the film's contract, so a film that
+    // opens on footage is not left without one.
+    if (ref?.footage !== undefined) {
+      const seg = await planFootage({ film, ref, index: i, problems, ffprobePath: await resolveProbe() });
+      if (signature === null && seg.signature) {
+        signature = seg.signature;
+        fps = seg.fps ?? film.sceneDefaults?.fps ?? null;
+        format = seg.format ?? null;
+      } else if (seg.signature && signature !== null && seg.signature !== signature) {
+        problems.push({
+          code: ErrorCodes.FOOTAGE_SIGNATURE_MISMATCH,
+          segment: seg.footage,
+          message: `Footage "${seg.footage}" is ${seg.signature} — the film is ${signature}. It cannot be ` +
+            'stream-copied onto the timeline. Re-encode it to match the film signature ' +
+            '(get_film reports it, including the exact ffmpegArgs) — the engine will not silently re-encode it, ' +
+            'because a film that quietly re-encodes one segment has stopped being losslessly assembled.',
+        });
+      }
+      scenes.push(seg);
+      continue;
+    }
     const sceneId = `${film.id}/${ref.slug}`;
-    const base = { sceneId, slug: ref.slug, index: i };
+    // `kind` is on every entry (v0.22) so "where does segment 6 start" is
+    // answered identically regardless of what the segment is.
+    const base = { kind: 'scene', sceneId, slug: ref.slug, index: i };
     let entry = null, config = null;
     try {
       entry = await store.getScene(sceneId);
@@ -261,6 +670,7 @@ export async function planFilm({ film, store }) {
       scenes.push({ ...base, missing: true, durationInFrames: 0 });
       continue;
     }
+    configs.push(config);
     const sig = sceneSignature(config);
     if (signature === null) { signature = sig; fps = config.fps; format = config.output?.format ?? 'mp4'; }
     else if (sig !== signature) {
@@ -308,13 +718,25 @@ export async function planFilm({ film, store }) {
     problems.push({ code: 'format_not_concatenatable', message: `Format "${format}" cannot be losslessly concatenated — scenes must be mp4, webm, or prores` });
   }
   if (!(film.audio ?? []).length) {
-    const states = new Set(scenes.filter((s) => !s.missing).map((s) => s.hasAudio));
+    // Unprobed footage contributes no opinion: `hasAudio` is undefined there, and
+    // counting it would report a mix that may not exist.
+    const states = new Set(scenes.filter((s) => !s.missing && s.hasAudio !== undefined).map((s) => s.hasAudio));
     if (states.size > 1) {
-      problems.push({ code: 'mixed_scene_audio', message: 'Scenes mix audio and silence — add a master audio timeline, or render the scenes consistently' });
+      problems.push({
+        code: 'mixed_scene_audio',
+        message: 'Segments mix audio and silence — add a master audio timeline, or make them consistent. ' +
+          '(Footage is silent by contract, so a film mixing footage with audio-carrying scenes needs a master ' +
+          'timeline; that is the normal shape, not a workaround.)',
+      });
     }
   }
 
-  // Running offsets, missing scenes contributing zero frames.
+  // A film that opens on footage has no scene config to take an fps from, and
+  // an unprobeable file cannot supply one — fall back to what new scenes would
+  // inherit, so offsets and startSeconds stay meaningful either way.
+  if (fps === null) fps = film.sceneDefaults?.fps ?? null;
+
+  // Running offsets, missing segments contributing zero frames.
   let offset = 0;
   for (const s of scenes) {
     s.filmOffset = offset;
@@ -352,7 +774,9 @@ export async function planFilm({ film, store }) {
     durationSeconds: fps ? Number((totalFrames / fps).toFixed(3)) : 0,
     fps,
     format,
-    signature,
+    // The structured contract (v0.22). `signature.id` is the string this field
+    // used to be, and the one every scene's own `signature` is compared against.
+    signature: filmSignature(configs),
     problems,
   };
 }
@@ -488,12 +912,31 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
   if (!(film.scenes ?? []).length) {
     throw new EngineError(ErrorCodes.INVALID_FILM, 'a film needs at least one scene before it can build', { problems: ['scenes is empty'] });
   }
+  // The play order is heterogeneous (v0.22): a segment is a scene (which the
+  // engine rendered, and whose config is the source of truth) or footage (a file
+  // that joins as-is, whose truth is the file). Everything downstream —
+  // validateScenes, assembleFilm, filmLayout — reads `kind`.
   const sceneData = [];
   for (const s of film.scenes) {
+    if (s.footage !== undefined) {
+      const rel = String(s.footage).replace(/\\/g, '/');
+      const abs = resolveInTarget(film.path, rel, { asAsset: true });
+      if (!fs.existsSync(abs)) {
+        throw new EngineError(ErrorCodes.FOOTAGE_MISSING, `footage not found: ${rel} in film ${film.id}`, { path: rel });
+      }
+      sceneData.push({
+        kind: 'footage',
+        footage: rel,
+        segmentPath: abs,
+        durationInFrames: s.durationInFrames,
+        name: s.label ?? rel.split('/').pop(),
+      });
+      continue;
+    }
     const sceneId = `${film.id}/${s.slug}`;
     const entry = await store.getScene(sceneId);
     const config = await store.readConfig(sceneId);
-    sceneData.push({ sceneId, slug: s.slug, path: entry.path, config });
+    sceneData.push({ kind: 'scene', sceneId, slug: s.slug, path: entry.path, config });
   }
   const hasMasterAudio = !!(film.audio ?? []).length;
   const info = validateScenes(sceneData, { hasMasterAudio, requireRendered });
@@ -527,7 +970,7 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
     overlays.push({ ...o, abs, isVideo: ['.mp4', '.webm', '.mov'].includes(ext2), isWebm: ext2 === '.webm' });
   }
 
-  const totalFrames = sceneData.reduce((n, s) => n + s.config.durationInFrames, 0);
+  const totalFrames = sceneData.reduce((n, s) => n + segmentFrames(s), 0);
   return { sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames };
 }
 
@@ -551,13 +994,17 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
   const { sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames } = r;
   await fsp.mkdir(outDir, { recursive: true });
 
-  const fps = info.fps;
+  const fps = info.fps ?? film.sceneDefaults?.fps ?? null;
   const captions = film.captions ?? [];
   const burn = !!film.burnCaptions && captions.length > 0;
   const finishing = overlays.length > 0 || burn;
-  const firstOutput = sceneData[0].config.output ?? {};
-  const width = sceneData[0].config.width;
-  const height = sceneData[0].config.height;
+  // Scene 1 is the film's encode voice — but an all-footage film has no scene
+  // config, so the geometry the finishing pass needs comes from the first
+  // segment that can supply it, falling back to sceneDefaults.
+  const firstScene = sceneData.find((s) => !isFootage(s));
+  const firstOutput = firstScene?.config.output ?? {};
+  const width = firstScene?.config.width ?? film.sceneDefaults?.width ?? null;
+  const height = firstScene?.config.height ?? film.sceneDefaults?.height ?? null;
 
   progress?.phase('assembling');
   checkCancel();
@@ -574,6 +1021,7 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
       assetRoot: film.path,
       audioLimiter: firstOutput.audioLimiter !== false,
       audioTargetPeakDb: film.audioTargetPeakDb ?? undefined,
+      fps,
       ffmpegPath,
       onSpawn,
     });
@@ -649,7 +1097,8 @@ export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg'
   const submitted = jobs.startRender({
     targetId: film.id,
     scenePath: film.path,
-    config: { durationInFrames: r.totalFrames, fps: r.info.fps },
+    // An all-footage film has no scene config to read a rate from.
+    config: { durationInFrames: r.totalFrames, fps: r.info.fps ?? film.sceneDefaults?.fps ?? 30 },
     outputPath: r.outputPath,
     renderFn: (o) => buildFilmArtifact({
       film, store, ffmpegPath,

@@ -31,10 +31,11 @@
  *   GET    /api/prereqs
  *   GET    /api/settings                     global settings + environment report
  *   PATCH  /api/settings                     {patch}
- *   GET    /api/vendors                      speech + music vendors: active + live status
+ *   GET    /api/vendors                      speech + music + transcription vendors: active + live status
  *   GET    /api/vendors/speech/:id/voices    ?locale=&search=&limit=&offset=
  *   POST   /api/vendors/speech/:id/preview   {text,voice,…} → audio/wav sample
  *   POST   /api/vendors/music/:id/preview    {program,drums} → audio/wav sample
+ *   POST   /api/vendors/transcription/:id/preview?name=  raw media body → transcript JSON
  *   GET    /api/workspaces                   all workspaces, each with its films
  *   POST   /api/workspaces                   {name}
  *   GET    /api/workspaces/:ws/library       shared-asset library listing
@@ -57,6 +58,7 @@
  *   GET    /api/{films|scenes}/:tid/outputs  list files in the out dir
  *   GET    /api/{films|scenes}/:tid/output?file=            download a rendered output / built film
  *   GET    /api/{films|scenes}/:tid/assets   list assets + audioRefs
+ *   GET    /api/{films|scenes}/:tid/probe?path=            one asset's media properties
  *   PUT    /api/{films|scenes}/:tid/asset?path=             raw-body upload into assets/
  *   GET    /api/{films|scenes}/:tid/asset?path=             stream/download an asset
  *   DELETE /api/{films|scenes}/:tid/asset?path=&updateAudio=1
@@ -79,8 +81,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MAX_ASSET_BYTES } from '../core/scene.js';
 import { WorkspaceStore } from '../core/store.js';
 import {
-  readSettings, updateSettings, resolveFfmpegPath, withNewSceneDefaults, outputSeedFromSettings,
+  readSettings, updateSettings, resolveFfmpegPath, resolveFfprobePath,
+  withNewSceneDefaults, outputSeedFromSettings,
 } from '../core/settings.js';
+import {
+  resolvePaths, updateLocations, ensureStableDataDir, PATH_KEYS, PATH_ENV, APP_DATA_DIR,
+} from '../core/paths.js';
 import {
   speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
   ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS, OPENAI_ENV, DEEPGRAM_ENV,
@@ -89,18 +95,22 @@ import {
 import {
   musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
 } from '../core/music-vendors.js';
+import {
+  transcriptionVendorReport, TRANSCRIPTION_VENDORS, WHISPER_ENV, MODEL_PREFERENCE,
+} from '../core/transcribe-vendors.js';
+import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
 import { maskKey } from '../core/tts-azure.js';
 import { PIPER_ENV } from '../core/tts-piper.js';
 import {
   parseWavHeader, wavDurationSeconds, framesForDuration, measureWavLevels, splitSentences, concatWavBuffers,
 } from '../core/tts.js';
-import { JobManager } from '../core/jobs.js';
+import { JobManager, RENDER_LANE, TASK_LANE } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks } from '../core/films.js';
-import { mixAudioOnly } from '../core/encoder.js';
+import { mixAudioOnly, probeMedia } from '../core/encoder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -157,9 +167,23 @@ const STATUS_FOR_CODE = {
   [ErrorCodes.MUSIC_UNAVAILABLE]: 503,
   [ErrorCodes.INVALID_MUSIC_SPEC]: 400,
   [ErrorCodes.MUSIC_FAILED]: 502,
+  // Transcription (v0.22): the same three-way split. No binary/model = a
+  // prerequisite the user must install; a file with no readable speech = the
+  // caller's fault; whisper running and failing = upstream.
+  [ErrorCodes.TRANSCRIPTION_UNAVAILABLE]: 503,
+  [ErrorCodes.TRANSCRIPTION_INPUT_UNSUPPORTED]: 400,
+  [ErrorCodes.TRANSCRIPTION_FAILED]: 502,
+  // Footage segments (v0.22): a missing or non-conforming file is the caller's
+  // to fix, like an unrendered scene (409) rather than a server fault.
+  [ErrorCodes.FOOTAGE_MISSING]: 404,
+  [ErrorCodes.FOOTAGE_DURATION_MISMATCH]: 409,
+  [ErrorCodes.FOOTAGE_SIGNATURE_MISMATCH]: 409,
   // States the UI can act on: another render owns the lock (retry later), a
   // name that already exists (pick another).
   [ErrorCodes.RENDER_ALREADY_IN_PROGRESS]: 409,
+  // Relocating storage while jobs are in flight (v0.22) — the same "come back
+  // when the conflict has cleared" shape as the render lock.
+  [ErrorCodes.STORAGE_BUSY]: 409,
   [ErrorCodes.SCENE_ALREADY_EXISTS]: 409,
   [ErrorCodes.FILM_ALREADY_EXISTS]: 409,
   // Films.
@@ -173,6 +197,16 @@ const STATUS_FOR_CODE = {
 
 /** Preview clips are for auditioning a voice, not for rendering a script. */
 const MAX_PREVIEW_CHARS = 400;
+
+/**
+ * The transcription page's test is "drop a recording in and see what comes
+ * back", so its bounds are about a *page test*, not about the tool: a couple of
+ * minutes is enough to judge accuracy on your own microphone, and it keeps the
+ * button honest about how long it will take. `transcribe_asset` has its own,
+ * much larger, bounds.
+ */
+const MAX_TRANSCRIBE_PREVIEW_BYTES = 256 * 1024 * 1024;
+const MAX_TRANSCRIBE_PREVIEW_SECONDS = 180;
 
 /** Library uploads are for large media; this is an abuse guard, not a policy. */
 const MAX_LIBRARY_BYTES = 2 * 1024 * 1024 * 1024;
@@ -286,7 +320,129 @@ async function streamFile(res, absPath, { download = false, range = null } = {})
  * @param {JobManager}  [opts.jobs]
  * @param {Function}    [opts.browserFactory]  DI for tests (fake Chromium)
  */
-export function createStudioServer({ store = new WorkspaceStore(), jobs = new JobManager(), browserFactory = null } = {}) {
+export function createStudioServer({ store: initialStore = null, jobs = new JobManager(), browserFactory = null } = {}) {
+  // Rebindable since v0.22: PATCH /api/settings can move the storage root, and a
+  // store captured by `const` would leave this process serving the old tree
+  // until it was restarted — the one thing a user who just changed the setting
+  // would read as "it did not work".
+  let store = initialStore ?? new WorkspaceStore();
+
+  /**
+   * Where everything lives, plus — for each of the three storage locations —
+   * which layer decided it and what the settings page may do about it (v0.22).
+   *
+   * `editable: false` is the honest report for a location the environment has
+   * fixed: MOTION_STUDIO_HOME is set by whoever launched this process, writing
+   * paths.json underneath it would change nothing, and an input that silently
+   * does nothing is worse than one that explains why it is disabled.
+   */
+  const storageReport = () => {
+    const p = resolvePaths();
+    return {
+      locationsFile: p.locationsFile,
+      appDataDir: APP_DATA_DIR,
+      locations: Object.fromEntries(PATH_KEYS.map((key) => [key, {
+        value: p[key],
+        source: p.sources[key],           // env | configured | default | legacy
+        stored: p.stored[key] ?? null,    // what paths.json holds, if anything
+        default: p.defaults[key],
+        env: { name: PATH_ENV[key], value: process.env[PATH_ENV[key]] ?? null },
+        editable: p.sources[key] !== 'env',
+        exists: fs.existsSync(p[key]),
+      }])),
+    };
+  };
+
+  const environmentReport = async () => {
+    const ENV_HOOKS = [
+      'MOTION_STUDIO_FFMPEG', 'MOTION_STUDIO_TTS_EXE',
+      'MOTION_STUDIO_MIDI_EXE',
+      'MOTION_STUDIO_FLUIDSYNTH', 'MOTION_STUDIO_SOUNDFONT', 'MOTION_STUDIO_LIBS_DIR',
+      'MOTION_STUDIO_ALLOW_LOCAL_FETCH', 'MOTION_STUDIO_MAX_RENDERS',
+      'MOTION_STUDIO_WORKSPACE',
+      'PUPPETEER_EXECUTABLE_PATH',
+    ];
+    const { path: effectiveFfmpeg, source } = await resolveFfmpegPath({ dataDir: store.dataDir });
+    const probe = await checkPrerequisites({ ffmpegPath: effectiveFfmpeg });
+    const storage = storageReport();
+    return {
+      // The flat trio predates the storage block and is what this server is
+      // actually serving from right now — which is the same thing until a
+      // relocation is applied, and the truth about this process either way.
+      dataDir: store.dataDir,
+      workspacesRoot: store.workspacesRoot,
+      settingsPath: storage.locations.settingsFile.value,
+      storage,
+      ffmpeg: { effectivePath: effectiveFfmpeg, source, ...probe.ffmpeg },
+      env: {
+        // MOTION_STUDIO_HOME/_WORKSPACES/_SETTINGS are deliberately absent: they
+        // are reported inside `storage`, against the field each one locks.
+        ...Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
+        // Vendor credentials are reported as "set, ending in …" and never in
+        // full: this endpoint feeds a browser page, and a key that reaches the
+        // DOM is a key in every screenshot.
+        ...Object.fromEntries(
+          [...AZURE_ENV.key, ...ELEVENLABS_ENV.key, ...OPENAI_ENV.key, ...DEEPGRAM_ENV.key]
+            .map((k) => [k, maskKey(process.env[k]?.trim())]),
+        ),
+        ...Object.fromEntries(
+          [
+            ...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice,
+            ...PIPER_ENV.exe, ...PIPER_ENV.python, ...PIPER_ENV.voices,
+            ...ELEVENLABS_ENV.endpoint, ...ELEVENLABS_ENV.voice,
+            ...OPENAI_ENV.endpoint, ...OPENAI_ENV.voice,
+            ...DEEPGRAM_ENV.endpoint, ...DEEPGRAM_ENV.voice,
+            ...WHISPER_ENV.bin, ...WHISPER_ENV.model, ...WHISPER_ENV.models, ...WHISPER_ENV.threads,
+            'MOTION_STUDIO_TTS_VENDOR', 'MOTION_STUDIO_MUSIC_VENDOR',
+            'MOTION_STUDIO_TRANSCRIPTION_VENDOR',
+          ].map((k) => [k, process.env[k] ?? null]),
+        ),
+      },
+    };
+  };
+
+  /**
+   * Write new storage locations and, if the tree this process serves moved,
+   * re-point it — without a restart, because "changed the data dir, saw no
+   * change" is indistinguishable from a broken setting.
+   *
+   * Refused outright while any job is in flight. A render holds absolute paths
+   * into the old tree and writes its frames there over the next several minutes;
+   * swapping the store underneath it would leave the output somewhere the film
+   * that commissioned it no longer looks, which is a corrupted result rather
+   * than an error. Waiting is cheap and the message says what to wait for.
+   *
+   * Only THIS process is re-pointed. Connected MCP servers resolved their own
+   * paths when their client spawned them, so the response says they need a
+   * restart rather than pretending otherwise.
+   */
+  const relocateStorage = async (patch) => {
+    const busy = jobs.runningCount(RENDER_LANE) + jobs.runningCount(TASK_LANE)
+      + jobs.queuedCount(RENDER_LANE) + jobs.queuedCount(TASK_LANE);
+    if (busy) {
+      throw new EngineError(
+        ErrorCodes.STORAGE_BUSY,
+        `${busy} job(s) are running or queued against the current storage location. `
+          + 'Let them finish (or cancel them) before moving it.',
+        { jobs: busy },
+      );
+    }
+    const before = { dataDir: store.dataDir, workspacesRoot: store.workspacesRoot };
+    const p = await updateLocations(patch);
+    const moved = p.dataDir !== before.dataDir || p.workspacesRoot !== before.workspacesRoot;
+    if (moved) {
+      store = new WorkspaceStore(p.dataDir, { workspacesRoot: p.workspacesRoot });
+      await store.ready();
+    }
+    return {
+      moved,
+      from: before,
+      to: { dataDir: p.dataDir, workspacesRoot: p.workspacesRoot, settingsFile: p.settingsFile },
+      // Nothing here can reach into another process's environment.
+      restartAgents: moved,
+    };
+  };
+
   // Parallel renders need the factory too: workers inherit the env hook, but
   // the parent's preflight page does not — without it a fake-browser test that
   // asks for workers > 1 would reach for real Chromium (same rule as the MCP
@@ -365,54 +521,31 @@ export function createStudioServer({ store = new WorkspaceStore(), jobs = new Jo
         });
       }
 
-      // /api/settings — global settings + a read-only environment report so
-      // the UI has one place that answers "where does everything live".
+      // /api/settings — global settings + the environment report, so the UI has
+      // one place that answers "where does everything live". Since v0.22 the
+      // three storage locations in that report are writable, and PATCH takes
+      // them alongside the settings patch.
       if (parts[1] === 'settings' && parts.length === 2) {
         if (req.method === 'GET') {
-          const ENV_HOOKS = [
-            'MOTION_STUDIO_HOME', 'MOTION_STUDIO_FFMPEG', 'MOTION_STUDIO_TTS_EXE',
-            'MOTION_STUDIO_MIDI_EXE',
-            'MOTION_STUDIO_FLUIDSYNTH', 'MOTION_STUDIO_SOUNDFONT', 'MOTION_STUDIO_LIBS_DIR',
-            'MOTION_STUDIO_ALLOW_LOCAL_FETCH', 'MOTION_STUDIO_MAX_RENDERS',
-            'MOTION_STUDIO_WORKSPACE',
-            'PUPPETEER_EXECUTABLE_PATH',
-          ];
-          const settings = await readSettings(store.dataDir);
-          const { path: effectiveFfmpeg, source } = await resolveFfmpegPath({ dataDir: store.dataDir });
-          const probe = await checkPrerequisites({ ffmpegPath: effectiveFfmpeg });
           return sendJson(res, 200, {
-            settings,
-            environment: {
-              dataDir: store.dataDir,
-              workspacesRoot: store.workspacesRoot,
-              settingsPath: path.join(store.dataDir, 'settings.json'),
-              ffmpeg: { effectivePath: effectiveFfmpeg, source, ...probe.ffmpeg },
-              env: {
-                ...Object.fromEntries(ENV_HOOKS.map((k) => [k, process.env[k] ?? null])),
-                // Vendor credentials are reported as "set, ending in …" and
-                // never in full: this endpoint feeds a browser page, and a key
-                // that reaches the DOM is a key in every screenshot.
-                ...Object.fromEntries(
-                  [...AZURE_ENV.key, ...ELEVENLABS_ENV.key, ...OPENAI_ENV.key, ...DEEPGRAM_ENV.key]
-                    .map((k) => [k, maskKey(process.env[k]?.trim())]),
-                ),
-                ...Object.fromEntries(
-                  [
-                    ...AZURE_ENV.region, ...AZURE_ENV.endpoint, ...AZURE_ENV.voice,
-                    ...PIPER_ENV.exe, ...PIPER_ENV.python, ...PIPER_ENV.voices,
-                    ...ELEVENLABS_ENV.endpoint, ...ELEVENLABS_ENV.voice,
-                    ...OPENAI_ENV.endpoint, ...OPENAI_ENV.voice,
-                    ...DEEPGRAM_ENV.endpoint, ...DEEPGRAM_ENV.voice,
-                    'MOTION_STUDIO_TTS_VENDOR', 'MOTION_STUDIO_MUSIC_VENDOR',
-                  ].map((k) => [k, process.env[k] ?? null]),
-                ),
-              },
-            },
+            settings: await readSettings(store.dataDir),
+            environment: await environmentReport(),
           });
         }
         if (req.method === 'PATCH') {
-          const { patch } = await readBody(req);
-          return sendJson(res, 200, { settings: await updateSettings(patch ?? {}, store.dataDir) });
+          const body = await readBody(req);
+          // Locations first: a body carrying both means the settings patch is
+          // meant for the NEW settings file, not a parting write to the old one.
+          const relocated = body.paths ? await relocateStorage(body.paths) : null;
+          const settings = body.patch
+            ? await updateSettings(body.patch, store.dataDir)
+            : await readSettings(store.dataDir);
+          return sendJson(res, 200, {
+            settings,
+            // The report costs an ffmpeg probe, so it rides along only when the
+            // storage moved — the case where the UI cannot re-derive the answer.
+            ...(relocated ? { relocated, environment: await environmentReport() } : {}),
+          });
         }
       }
 
@@ -427,15 +560,23 @@ export function createStudioServer({ store = new WorkspaceStore(), jobs = new Jo
         if (req.method === 'GET' && parts.length === 2) {
           const probe = url.searchParams.get('probe') !== '0';
           const force = url.searchParams.get('force') === '1';
-          const [speech, music] = await Promise.all([
+          const [speech, music, transcription] = await Promise.all([
             speechVendorReport({ dataDir: store.dataDir, probe, force }),
             musicVendorReport({ dataDir: store.dataDir, probe }),
+            transcriptionVendorReport({ dataDir: store.dataDir, probe }),
           ]);
           return sendJson(res, 200, {
             speech,
             music,
+            transcription,
             azure: { outputFormats: AZURE_WAV_FORMATS, env: AZURE_ENV },
             elevenlabs: { outputFormats: ELEVENLABS_WAV_FORMATS, env: ELEVENLABS_ENV },
+            whisper: {
+              env: WHISPER_ENV,
+              modelPreference: MODEL_PREFERENCE,
+              maxPreviewSeconds: MAX_TRANSCRIBE_PREVIEW_SECONDS,
+              maxSeconds: MAX_TRANSCRIBE_SECONDS,
+            },
             gmPrograms: GM_PROGRAMS,
           });
         }
@@ -479,6 +620,79 @@ export function createStudioServer({ store = new WorkspaceStore(), jobs = new Jo
                 'X-Music-Duration': (dataSize / byteRate).toFixed(3),
               });
               return res.end(wav);
+            } finally {
+              await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+            }
+          }
+        }
+
+        /* ------------------------ transcription vendors ----------------------- */
+        // v0.22. The page's test is the mirror image of the speech page's: there
+        // you type a line and hear it, here you hand over a recording and read
+        // what came back. Both exist for the same reason — "is this vendor good
+        // enough for my film" is a question you want answered before a render,
+        // not after one — and neither writes anything into a scene.
+        if (parts[2] === 'transcription' && parts.length >= 4) {
+          const vendor = parts[3];
+          if (!TRANSCRIPTION_VENDORS.includes(vendor)) {
+            throw new EngineError(
+              ErrorCodes.INVALID_CONFIG,
+              `Unknown transcription vendor "${vendor}" — expected one of: ${TRANSCRIPTION_VENDORS.join(', ')}`,
+              { vendor, allowed: TRANSCRIPTION_VENDORS },
+            );
+          }
+
+          // POST …/preview — raw media body (the file the user picked in the
+          // browser), transcribed and returned as JSON.
+          if (req.method === 'POST' && parts[4] === 'preview' && parts.length === 5) {
+            const name = url.searchParams.get('name') ?? 'preview';
+            if (!looksTranscribable(name)) {
+              throw new EngineError(
+                ErrorCodes.TRANSCRIPTION_INPUT_UNSUPPORTED,
+                `"${name}" is not an audio or video file — pick a recording (wav/mp3/m4a/flac/ogg, mp4/mov/mkv/webm).`,
+                { name },
+              );
+            }
+            const buf = await readRawBody(req, MAX_TRANSCRIBE_PREVIEW_BYTES);
+            if (!buf.length) throw new EngineError(ErrorCodes.INVALID_CONFIG, 'preview needs a file to transcribe');
+            const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-transcribe-preview-'));
+            const src = path.join(dir, `input${path.extname(name) || '.wav'}`);
+            try {
+              await fsp.writeFile(src, buf);
+              const result = await transcribeMedia({
+                filePath: src,
+                fps: Number(url.searchParams.get('fps')) || 30,
+                model: url.searchParams.get('model') || undefined,
+                language: url.searchParams.get('language') || undefined,
+                dataDir: store.dataDir,
+                ffmpegPath: await ffmpegPath(),
+                // The temp path never recurs, so a cache entry for it would be
+                // dead weight the moment this request ends.
+                cache: false,
+                maxSeconds: MAX_TRANSCRIBE_PREVIEW_SECONDS,
+                maxBytes: MAX_TRANSCRIBE_PREVIEW_BYTES,
+              });
+              return sendJson(res, 200, {
+                file: name,
+                vendor: result.vendor,
+                model: result.model,
+                language: result.language,
+                durationSeconds: result.durationSeconds,
+                elapsedMs: result.elapsedMs,
+                // How much faster than realtime this machine reads speech — the
+                // number that decides whether transcribing on ingest is viable.
+                realtimeFactor: result.elapsedMs
+                  ? Number((result.durationSeconds / (result.elapsedMs / 1000)).toFixed(2))
+                  : null,
+                text: result.text,
+                sentences: result.sentences,
+                wordCount: result.words.length,
+                // A page shows a sample, not a corpus: the words are here to
+                // prove per-word timing exists, and the tool returns them all.
+                words: result.words.slice(0, 200),
+                speechRanges: result.speechRanges,
+                leadingSilenceSeconds: result.leadingSilenceSeconds,
+              });
             } finally {
               await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
             }
@@ -875,6 +1089,20 @@ export function createStudioServer({ store = new WorkspaceStore(), jobs = new Jo
         if (req.method === 'GET' && sub === 'assets') {
           return sendJson(res, 200, { files: await store.listAssets(targetId) });
         }
+        // GET …/probe?path= — one asset's real media properties (v0.22). The film
+        // editor needs a footage file's FRAME COUNT to put it on the timeline, and
+        // that number must come from the file: it is what every later offset is
+        // built on, so a typed guess would shift every subsequent segment. Same
+        // summarizer the probe_asset tool returns, and the same addressing —
+        // assets/ or out/ — so both surfaces agree.
+        if (req.method === 'GET' && sub === 'probe' && parts.length === 4) {
+          const rel = url.searchParams.get('path') ?? '';
+          const a = await store.resolveMediaFile(targetId, rel);
+          const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
+          const media = await probeMedia({ filePath: a.abs, ffprobePath });
+          // probed:false rather than an error — ffprobe is not a prerequisite.
+          return sendJson(res, 200, { path: a.path, bytes: a.bytes, probed: media !== null, ...(media ?? {}) });
+        }
         if (sub === 'asset' && parts.length === 4) {
           const rel = url.searchParams.get('path') ?? '';
           if (req.method === 'GET') {
@@ -1026,6 +1254,17 @@ if (isMain) {
   if (process.env.MOTION_STUDIO_BROWSER_MODULE) {
     const mod = await import(pathToFileURL(path.resolve(process.env.MOTION_STUDIO_BROWSER_MODULE)).href);
     browserFactory = mod.createBrowser;
+  }
+  // Record a data dir inherited from a pre-v0.22 install before anything reads
+  // it, so the location stops depending on which folders happen to exist (see
+  // core/paths.js). A no-op on a fresh install and whenever the environment or
+  // paths.json already decided.
+  const pinned = await ensureStableDataDir();
+  if (pinned) {
+    process.stderr.write(
+      `[motion-studio] using the existing data dir ${pinned.pinned} (recorded in ${resolvePaths().locationsFile}; `
+      + 'change it in Global Settings)\n',
+    );
   }
   const port = Number(process.env.PORT) || 7345;
   const host = '127.0.0.1'; // local tool: never expose on the network
