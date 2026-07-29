@@ -232,20 +232,15 @@ test('filmSignature warns when scenes disagree on crf/preset instead of reading 
   assert.ok(filmSignature([a, b]).matchForLooks.includes('crf'));
 });
 
-test('filmSignature: colour is reported as unstated, never guessed at', () => {
-  // The engine passes no colour arguments, so a scene's tags are whatever
-  // Chromium's PNGs and ffmpeg's default conversion produce. Naming a value
-  // here would mean probing a rendered file — a second copy of the truth, and
-  // one describing the installed encoder rather than a decision.
+test('filmSignature: colour is stated from the render profile, never guessed at', () => {
   const sig = filmSignature([cfg()]);
-  assert.equal(sig.color.stated, false);
+  assert.equal(sig.color.stated, true);
   assert.deepEqual(
     { p: sig.color.primaries, t: sig.color.transfer, m: sig.color.matrix, r: sig.color.range },
-    { p: null, t: null, m: null, r: null },
+    { p: 'bt709', t: 'iec61966-2-1', m: 'bt709', r: 'tv' },
   );
-  // No colour flag may appear in the args a caller is told to pass verbatim:
-  // `-color_primaries`/`-color_trc` are silently ignored on this pipeline, so
-  // emitting them would report a conform that never happened.
+  // ffmpegArgs remain a flat codec contract; the renderer folds the profile's
+  // filter into the chain it owns, so callers never get a second -vf to lose.
   for (const flag of ['-color_primaries', '-color_trc', '-colorspace', '-color_range']) {
     assert.ok(!sig.ffmpegArgs.includes(flag), `${flag} must not be in ffmpegArgs`);
   }

@@ -105,6 +105,15 @@ chroma-subsampled formats. Switching `output.format` automatically renames
 the configured output file's extension so a `.mp4` never silently contains
 VP9.
 
+Final colour-carrying encodes also state one contract: BT.709 primaries and
+matrix, sRGB transfer (`iec61966-2-1`), and TV range. `formats.outputColorFilter`
+supplies the one `setparams` filter shared by serial renders, parallel renders,
+and the film finishing pass; it deliberately does not apply to GIF, a PNG
+sequence, or the RGB intermediate used to make a GIF. `outputColorProfile` is
+derived from that same choice for signatures and sidecars, so callers are told
+what the encoder was instructed to make rather than what one installed ffmpeg
+happened to probe afterward.
+
 ## 4. IPC: the JSON-line progress protocol
 
 Everything the engine reports crosses one contract,
@@ -278,7 +287,8 @@ then drifted against the picture, silently.
 
 So a render that is the **whole scene, at its current settings, to its real
 destination** writes `<output>.render.json` holding
-`{ frames, width, height, fps, format, renderedAt }` (`film.writeRenderMeta`).
+`{ frames, width, height, fps, format, colorPrimaries, colorTransfer,
+colorMatrix, colorRange, renderedAt }` (`film.writeRenderMeta`).
 `film.renderStaleness` compares it with the live config;
 `films.planFilm` surfaces a `stale_render` problem plus a per-scene
 `renderVerified`, and `film.validateScenes` refuses the build with the
@@ -289,7 +299,9 @@ be the scene's canonical output.
 Two deliberate non-failures, matching §7.2's philosophy: writing the sidecar is
 best-effort (a render that already succeeded must not fail on metadata), and a
 **missing** sidecar is `renderVerified: null` — unknown, not stale — so output
-from an older build still assembles.
+from an older build still assembles. A sidecar from before stated colour likewise
+has no colour fields and is unverified rather than falsely called current; a
+present field that differs (for example `colorMatrix: bt601 → bt709`) is stale.
 
 ## 8. Parallel rendering
 
@@ -543,7 +555,10 @@ Two properties follow from the vendor being local and cheap. **Confidence is
 derived and always reported** — whisper.cpp emits no `no_speech_prob`, so
 `minTokenP`/`meanTokenP` per sentence and `p` per word are computed from token
 probabilities; a confidently-wrong transcript quoted on screen is worse than no
-transcript. And **transcripts are cached** per (file identity, model, language) in
+transcript. An English-only `.en` model also refuses an explicit non-English
+language (`transcription_language_unsupported`) before it runs: whisper.cpp would
+otherwise return a plausible English artefact with unusable timing. And
+**transcripts are cached** per (file identity, model, language) in
 `<dataDir>/cache/transcripts/`, keyed with a derivation version so a build with
 better segmentation never serves the old split. The cache stores *seconds*, so one
 entry serves a 24 fps film and a 30 fps one; it lives under the data dir rather
@@ -600,8 +615,11 @@ goes wrong:
 - **`matchFilm` consumes the signature (§13), never a second copy of the encode
   table.** It splices the film's own `ffmpegArgs` into the command, so a conformed
   file agrees with the film by construction rather than by an agent's arithmetic.
-  That is the loop the four v0.22 plans close: the film *states* its contract, the
-  tool *conforms* a file to it, and the timeline *holds* the result.
+  When that signature states colour, its existing filter chain also performs a
+  real `colorspace=all=bt709:trc=srgb` conversion; an input with incomplete
+  metadata is treated as BT.709 and the returned `assumptions.color` records that
+  decision. That is the loop the four v0.22 plans close: the film *states* its
+  contract, the tool *conforms* a file to it, and the timeline *holds* the result.
 - **Idempotent, and never destructive.** A `*.transcode.json` sidecar beside the
   output records the source identity and every parameter, so repeating an unchanged
   call is free; the destination may never equal the source.
@@ -991,19 +1009,14 @@ owns what that document *means*:
   not classify everything: `crf`/`preset` were in neither, described only in prose,
   and the colour tags turned out to be the same shape of fact — no effect on the
   join, but the joined file keeps only segment 1's, so a mismatch is a look
-  difference rather than an error. `signature.color` reports `stated: false` with
-  null values, which is the honest answer rather than a gap: the engine passes no
-  colour arguments, so a scene's tags are whatever Chromium's PNGs and ffmpeg's
-  default conversion produce, and naming a value would mean probing a rendered
-  file — a second copy of the truth, available only after a render, describing the
-  installed encoder rather than a decision. `matchFilm` therefore carries no colour
-  arguments either, and that is measured, not conservative: `-color_primaries` and
-  `-color_trc` are *silently ignored* on this pipeline (decoder frame properties
-  win), so emitting them would report a conform that never happened, while the one
-  flag that does take (`-colorspace`) re-matrixes the picture. Making colour part
-  of the contract starts at the render encode — stated there, it becomes
-  config-derived and everything downstream inherits it — and that changes rendered
-  pixels, so it is a decision rather than a fix. See
+  difference rather than an error. `signature.color` is derived from the render's
+  output profile and now states BT.709/sRGB/BT.709/TV for final colour-carrying
+  outputs. The renderer places `setparams` in the filter chain it owns (bare
+  `-color_primaries` and `-color_trc` do not reliably override decoder frame
+  properties). `matchFilm` then converts footage through `colorspace`, rather
+  than relabelling it, and reports a BT.709 assumption when its source left
+  colour metadata incomplete. Legacy render sidecars without these fields remain
+  unverified; a present colour mismatch is stale. See
   [film-setup.md](film-setup.md#the-consistency-invariant).
 - **The finishing pass.** Assembly is still `assembleFilm`'s lossless concat
   (+ master-audio mux). Only when a film has overlays or burns captions does
@@ -1026,6 +1039,15 @@ owns what that document *means*:
   sidechain ducking, limiter). It deliberately does NOT approximate the mix
   in WebAudio: an approximation that gets ducking wrong is worse than a
   one-second wait for the truth.
+- **Delivered-picture review is advisory, not a hidden gate.**
+  `inspect_render` extracts downscaled PNGs from the encoded file itself, using
+  the film layout to sample cuts or holds; a long film is represented across the
+  timeline without exceeding the 24-image response cap. `measure_render` runs in
+  the task lane and scans a low-resolution greyscale stream for per-second motion,
+  static/black runs, solid frames, and expected-cut deltas. Full scene renders
+  expose `staticFrames`; film builds expose the compact `picture` summary on the
+  completed job. A title card may correctly be black or static, so these are facts
+  for an agent to inspect, never reasons for the engine to reject a deliverable.
 
 ## 14. Testability
 
@@ -1042,7 +1064,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-546 tests across 28 suites; see `engine/test/`. A clean run has **zero
+754 tests across 33 files; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

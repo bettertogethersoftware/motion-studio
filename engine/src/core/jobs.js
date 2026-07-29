@@ -352,6 +352,10 @@ export class JobManager {
       error: job.error,
       // Measured level of the muxed mix (v0.10) — the caller cannot hear it.
       ...(job.result?.audio ? { audio: job.result.audio } : {}),
+      // Picture checks are advisory facts about the file that was written —
+      // static frames on a scene; static/black/cut summary on a film build.
+      ...(job.result?.staticFrames !== undefined ? { staticFrames: job.result.staticFrames } : {}),
+      ...(job.result?.picture ? { picture: job.result.picture } : {}),
       // Player-compatibility advisories (v0.22, e.g. mp4 crf 0 → Hi444PP) —
       // the caller cannot try the file in a consumer player either.
       ...(job.result?.encodingWarnings ? { encodingWarnings: job.result.encodingWarnings } : {}),
@@ -376,16 +380,19 @@ export class JobManager {
    * Wait until every listed job reaches a terminal state (done | error |
    * cancelled), or the timeout elapses (v0.14). Backs `wait_for_render`: one
    * blocking call instead of a get_render_status round trip per poll. Unknown
-   * ids fail up front with job_not_found, not halfway through the wait. A
+   * ids are returned as terminal `not_found` snapshots so one expired id cannot
+   * hide the state of every surviving job in a batch. A
    * timeout is NOT an error — the caller gets the current snapshots plus
    * `timedOut: true` and decides what to do; the jobs keep running.
    */
   async waitFor(jobIds, { timeoutMs = 300_000, pollMs = 250 } = {}) {
-    for (const id of jobIds) this._get(id);
-    const terminal = new Set([JobState.DONE, JobState.ERROR, JobState.CANCELLED]);
+    const terminal = new Set([JobState.DONE, JobState.ERROR, JobState.CANCELLED, 'not_found']);
+    const snapshot = (id) => this.jobs.has(id)
+      ? this.getStatus(id)
+      : { jobId: id, state: 'not_found' };
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const statuses = jobIds.map((id) => this.getStatus(id));
+      const statuses = jobIds.map(snapshot);
       if (statuses.every((s) => terminal.has(s.state))) return { timedOut: false, jobs: statuses };
       const remaining = deadline - Date.now();
       if (remaining <= 0) return { timedOut: true, jobs: statuses };

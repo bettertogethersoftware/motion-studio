@@ -1,6 +1,6 @@
 # Five MCP surface defects found building a real film
 
-> **Status: REPORTED, none fixed.** Every defect below was hit while building
+> **Status: COMPLETE.** All five defects are fixed and covered by core/MCP integration tests.
 > `bp814-promo` — a 3:00 Env B film, 16 rendered scenes interleaved with 7
 > conformed footage segments, 18 master audio tracks — against the engine at
 > v0.22 (unreleased). Each one is reproduced, traced to a line, and has a fix
@@ -16,9 +16,9 @@
 |---|---|---|---|---|
 | 1 | [`.nullable()` erases the parameter type](#1-nullable-erases-the-parameter-type) | **P1** | trivial | `audioTargetPeakDb` is unreachable — the documented mastering path cannot be called at all |
 | 2 | [`englishOnly` is measured but never enforced](#2-englishonly-is-measured-but-never-enforced) | **P1** | small | returns a confident wrong transcript — the exact failure this tool exists to prevent |
-| 3 | [`assetPath` sub-directories are never created](#3-assetpath-sub-directories-are-never-created) | P2 | trivial | vendor crashes; a raw Python traceback surfaces as `tts_failed` |
-| 4 | [One lost job id blinds the whole batch](#4-one-lost-job-id-blinds-the-whole-batch) | P2 | trivial | after a server restart you cannot find out which renders survived |
-| 5 | [`preview_audio` is synchronous and can outlive the client](#5-preview_audio-is-synchronous-and-can-outlive-the-client) | P3 | medium | the one audio check the docs insist on times out on long films |
+| 3 | [`assetPath` sub-directories are never created](#3-assetpath-sub-directories-are-never-created) | **FIXED** | trivial | nested asset directories are created before all three generators run |
+| 4 | [One lost job id blinds the whole batch](#4-one-lost-job-id-blinds-the-whole-batch) | **FIXED** | trivial | expired ids return terminal `not_found` snapshots without hiding surviving jobs |
+| 5 | [`preview_audio` is synchronous and can outlive the client](#5-preview_audio-is-synchronous-and-can-outlive-the-client) | **FIXED** | medium | mixdown runs as a cancellable task and returns its report through `wait_for_render` |
 
 Defects 1 and 2 are P1 for different reasons. 1 makes a documented feature
 impossible to invoke. 2 lets a tool return a plausible answer that is wrong —
@@ -27,7 +27,7 @@ warns callers about.
 
 ---
 
-## 1. `.nullable()` erases the parameter type
+## 1. `.nullable()` erases the parameter type — FIXED
 
 **Symptom.** Every call passing a negative `audioTargetPeakDb` is rejected before
 reaching the engine:
@@ -62,7 +62,9 @@ then correctly rejects a string.
 this nullable union and collapses it to `{}`. The zod schema itself is right; the
 contract published to callers is not.
 
-**Fix.** Stop expressing "or null" through `.nullable()` on the wire. Either:
+**Fix.** Done: stop expressing "or null" through `.nullable()` on the wire, using
+an explicit number-or-null union and asserting the emitted schema in the MCP
+integration test. The originally proposed shape was:
 
 ```js
 // preferred — an explicit union the converter can represent
@@ -97,7 +99,7 @@ luck rather than by control.
 
 ---
 
-## 2. `englishOnly` is measured but never enforced
+## 2. `englishOnly` is measured but never enforced — FIXED
 
 **Symptom.** The film's source footage is Japanese speech. Asking for it:
 
@@ -136,7 +138,10 @@ ranges.
 The data needed to refuse is already in hand at the call site. It is simply not
 consulted.
 
-**Fix.** In `runWhisper`, after `resolveWhisper()` returns both:
+**Fix.** Done in `transcribeWithWhisper`, immediately after resolving the model
+and language. It raises `transcription_language_unsupported` with the selected
+model, requested language, and installed multilingual alternatives. The original
+guard was:
 
 ```js
 if (resolved.modelEnglishOnly && lang !== 'auto' && lang !== 'en') {

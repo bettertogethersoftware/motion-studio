@@ -177,6 +177,23 @@ test('FfmpegFrameSink: a rational fps string reaches -framerate verbatim', () =>
   }
 });
 
+test('FfmpegFrameSink: the stated colour filter appears once on final encodes only', () => {
+  const make = (output) => new FfmpegFrameSink({
+    outputPath: path.join(os.tmpdir(), 'never-written.mp4'), fps: 30, output,
+    ffmpegPath: path.join(os.tmpdir(), 'ms-no-such-ffmpeg'),
+  });
+  const sink = make({ format: 'mp4' });
+  const intermediate = make({ format: 'mp4', intermediate: true });
+  try {
+    assert.equal(sink.args.filter((a) => a === '-vf').length, 1);
+    assert.match(sink.args[sink.args.indexOf('-vf') + 1], /setparams=.*bt709/);
+    assert.equal(intermediate.args.includes('-vf'), false);
+  } finally {
+    sink.kill();
+    intermediate.kill();
+  }
+});
+
 /* ----------------------------------------- full pipeline (real ffmpeg) ---- */
 
 test('proxy render: scaled viewport, stepped frames, rational rate, no preflight, .proxy name', async (t) => {

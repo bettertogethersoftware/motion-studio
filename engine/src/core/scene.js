@@ -457,10 +457,45 @@ export function checkSequenceCoverage(source, durationInFrames, { gapFrames = 30
     calls.push({
       start: Number(m[1]),
       end: Number(m[1]) + Number(m[2]),
+      index: m.index,
       line: scanned.slice(0, m.index).split('\n').length,
     });
   }
   if (calls.length < 2) return [];
+
+  // A shared composition engine dispatches into different helper functions for
+  // different scene data. Literal Sequences in separate function bodies cannot
+  // be merged into one coverage interval: at least one body is unreachable for
+  // every scene. Treat that as the same "coverage unknowable" bucket as dynamic
+  // arguments rather than training callers to ignore a false warning.
+  const functionBodies = new Set();
+  for (const match of scanned.matchAll(/\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\([^)]*\)\s*\{|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g)) {
+    functionBodies.add(match.index + match[0].lastIndexOf('{'));
+  }
+  const scopeAt = (index) => {
+    const stack = [];
+    let scope = -1;
+    for (let i = 0; i < index; i += 1) {
+      if (scanned[i] === '{') {
+        stack.push(scope);
+        if (functionBodies.has(i)) scope = i;
+      } else if (scanned[i] === '}') {
+        scope = stack.pop() ?? -1;
+      }
+    }
+    return scope;
+  };
+  const sequenceScopes = new Set(calls.map((call) => scopeAt(call.index)));
+  const namedHelpers = [...scanned.matchAll(/\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{/g)];
+  // The documented shared-engine shape has one sequence-owning helper and one
+  // or more sibling helpers selected by `if (SCENE.mode …)`. The other branch
+  // may draw continuously and contain no Sequence at all, so scope diversity
+  // alone cannot see it. A conditional dispatcher plus sibling named helpers
+  // is sufficient evidence that duration-relative coverage is unknowable.
+  if (sequenceScopes.size > 1 || (
+    sequenceScopes.size === 1 && !sequenceScopes.has(-1) &&
+    namedHelpers.length > 1 && /\b(?:if|switch)\b/.test(scanned)
+  )) return [];
 
   const lines = source.split('\n');
   const snippetAt = (line) => (lines[line - 1] ?? '').trim().slice(0, 120);

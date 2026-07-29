@@ -1,5 +1,8 @@
 # Lint defect — `sequence-gap` is branch-blind
 
+> **Status: COMPLETE.** Coverage is now skipped when literal `Sequence()` calls
+> belong to mutually exclusive helper scopes; same-scope coverage gaps still warn.
+
 > Found the same way as the other entries here: by building two real films
 > (`cymatic`, 45 s / 5 scenes and `the-last-difference`, 64 s / 5 scenes) with the
 > **recommended** shared-engine film pattern and reading the tool output back.

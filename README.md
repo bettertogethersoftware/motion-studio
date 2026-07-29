@@ -32,12 +32,15 @@ two kinds of users through one shared render engine:
   timings, and a `deterministic` option), music beds **composed from a chord
   progression** (`['D','A','Bm','G']` + a style) or from raw notes
   (in-process SoundFont synth or FluidSynth) and sound effects, audition the
-  audio mix without a render (`preview_audio`), pull in the human's
+   audio mix without a render (`preview_audio`), inspect and measure the
+   **encoded deliverable** (`inspect_render` / `measure_render` — frames at known
+   cuts plus static/black/cut checks), pull in the human's
   library files (`use_shared_asset`), read a media file's duration /
   dimensions / codecs (`probe_asset`) **and the speech inside it**
   (`transcribe_asset` — local whisper.cpp, sentence *and* word timing in
-  frames), **prepare it** (`transcode_asset` — conform footage to a film's
-  encode signature, trim to an exact frame count, crop/scale, or cut and join
+  frames, and a guard against using an English-only model for named non-English
+  speech), **prepare it** (`transcode_asset` — conform footage to a film's
+   encode and colour signature, trim to an exact frame count, crop/scale, or cut and join
   spans of someone's voice into one WAV; named fields only, never a shell),
   attach 3D libraries
   (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as

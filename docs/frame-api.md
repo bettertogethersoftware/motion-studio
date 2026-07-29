@@ -77,7 +77,7 @@ When one composition holds several sections:
 
 The failure this prevents: every section visible at once, stacked, for the whole video — while every automated check passes, because nothing about it is an error. Note that direction 1→2 (a container that is never turned *on*) and direction 2→1 (a container that is never turned *off*) are equally silent: the first ships a video missing its subject, the second ships one where the subject never leaves. Both look intentional in any single preview frame, which is why you compare captures from *different* sections — an element identical in all of them is owned by none of them.
 
-`write_composition_file` flags `classList.add/remove` and checks literal `Sequence(start, duration)` calls against the composition duration (gaps and uncovered tails come back as `sequence-gap` warnings). Neither check can see the ownership rule above: the lint compares the `Sequence` calls you *wrote* against the duration, so a composition that writes none, or one whose markup carries an unowned element, passes clean.
+`write_composition_file` flags `classList.add/remove` and checks literal `Sequence(start, duration)` calls against the composition duration (gaps and uncovered tails come back as `sequence-gap` warnings). Calls spread across mutually exclusive helper scopes are intentionally not merged into one coverage claim; same-scope sibling calls are still checked. Neither check can see the ownership rule above: the lint compares the `Sequence` calls you *wrote* against the duration, so a composition that writes none, or one whose markup carries an unowned element, passes clean.
 
 ## 4. `window.frameReady` (manual mode)
 

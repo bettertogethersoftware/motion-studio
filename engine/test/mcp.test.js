@@ -106,6 +106,34 @@ const newScene = (opts) => makeScene((n, a) => callJson(n, a), opts);
 /** create_scene's result id, for tools that take a target. */
 const sceneOf = (res) => res.data.scene;
 
+const schemaHasType = (schema, type) => {
+  if (!schema || typeof schema !== 'object') return false;
+  if (schema.type === type || (Array.isArray(schema.type) && schema.type.includes(type))) return true;
+  return Object.values(schema).some((value) => {
+    if (Array.isArray(value)) return value.some((item) => schemaHasType(item, type));
+    return schemaHasType(value, type);
+  });
+};
+
+test('mcp: nullable numeric fields publish numeric JSON schemas', async () => {
+  const { tools } = await client.listTools();
+  const tool = (name) => tools.find((candidate) => candidate.name === name);
+  const property = (name, key) => tool(name)?.inputSchema?.properties?.[key];
+
+  for (const [name, key] of [
+    ['update_film', 'audioTargetPeakDb'],
+    ['build_film', 'audioTargetPeakDb'],
+  ]) {
+    const schema = property(name, key);
+    assert.ok(schemaHasType(schema, 'number'), `${name}.${key} must publish a numeric type`);
+    assert.ok(schemaHasType(schema, 'null'), `${name}.${key} must permit null`);
+  }
+
+  const widthPct = tool('update_film')?.inputSchema?.properties?.overlays?.items?.properties?.widthPct;
+  assert.ok(schemaHasType(widthPct, 'number'), 'update_film.overlays[].widthPct must publish a numeric type');
+  assert.ok(schemaHasType(widthPct, 'null'), 'update_film.overlays[].widthPct must permit null');
+});
+
 test('mcp: exposes the full spec tool surface', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { tools } = await client.listTools();
@@ -148,6 +176,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'transcribe_asset',
     // new in v0.22 (preparing media inside the tool surface)
     'transcode_asset',
+    // new in v0.23 (reviewing the encoded deliverable)
+    'inspect_render', 'measure_render',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -490,6 +520,31 @@ test('mcp: synthesize_speech attach mode adds an audio track and reports frames'
     (proj.data.config.audio ?? []).some((tk) => tk.src === 'assets/narration-1.wav'),
     JSON.stringify(proj.data.config.audio),
   );
+});
+
+test('mcp: preview_audio is a cancellable job and returns its mix report through wait_for_render', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('preview_audio', { target: sceneId, waitMs: 0 });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  assert.ok(res.data.jobId, JSON.stringify(res.data));
+
+  const job = res.data.stillRunning
+    ? (await callJson('wait_for_render', { jobIds: [res.data.jobId], timeoutMs: 20_000 })).data.jobs[0]
+    : { state: 'done', kind: 'audio-preview', result: res.data };
+  assert.equal(job.state, 'done', JSON.stringify(job));
+  assert.equal(job.kind, 'audio-preview');
+  assert.ok(job.result.mix, JSON.stringify(job.result));
+});
+
+test('mcp: synthesize_speech creates nested asset directories', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const res = await callJson('synthesize_speech', {
+    target: sceneId, text: 'Nested speech.', voice: 'Microsoft David Desktop',
+    mode: 'asset-only', assetPath: 'assets/generated/narration.wav',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  const scene = await callJson('get_scene', { scene: sceneId });
+  assert.ok(fs.existsSync(path.join(scene.data.path, 'assets', 'generated', 'narration.wav')));
 });
 
 test('mcp: synthesize_speech asset-only mode writes a WAV but leaves config.audio unchanged', async (t) => {
@@ -875,6 +930,15 @@ test('mcp: synthesize_music asset-only mode writes a WAV but leaves config.audio
   assert.equal((after.data.config.audio ?? []).length, beforeCount);
 });
 
+test('mcp: synthesize_music creates nested asset directories', async () => {
+  const res = await callJson('synthesize_music', {
+    target: musicSceneId, spec: MUSIC_SPEC, mode: 'asset-only', assetPath: 'assets/generated/music.wav',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  const scene = await callJson('get_scene', { scene: musicSceneId });
+  assert.ok(fs.existsSync(path.join(scene.data.path, 'assets', 'generated', 'music.wav')));
+});
+
 test('mcp: synthesize_music rejects an assetPath outside assets/', async () => {
   const res = await callJson('synthesize_music', { target: musicSceneId, spec: MUSIC_SPEC, assetPath: '../evil.wav' });
   assert.equal(res.isError, true);
@@ -1048,6 +1112,15 @@ test('mcp: synthesize_sfx asset-only mode writes a WAV but leaves config.audio u
   assert.equal((after.data.config.audio ?? []).length, beforeCount);
 });
 
+test('mcp: synthesize_sfx creates nested asset directories', async () => {
+  const res = await callJson('synthesize_sfx', {
+    target: sfxSceneId, spec: SFX_SPEC, mode: 'asset-only', assetPath: 'assets/generated/sfx.wav',
+  });
+  assert.equal(res.isError, false, JSON.stringify(res.data));
+  const scene = await callJson('get_scene', { scene: sfxSceneId });
+  assert.ok(fs.existsSync(path.join(scene.data.path, 'assets', 'generated', 'sfx.wav')));
+});
+
 test('mcp: synthesize_sfx reports the real level and leaves a quiet bed quiet', async () => {
   const res = await callJson('synthesize_sfx', {
     target: sfxSceneId, mode: 'asset-only',
@@ -1123,8 +1196,23 @@ test('mcp: build_film concatenates a film\'s rendered scenes', async (t) => {
   assert.equal(res.data.totalFrames, 12);
   const done = await waitJobDone(res.data.jobId);
   assert.ok(fs.existsSync(res.data.outputPath), done.outputPath);
+  assert.ok(done.picture, JSON.stringify(done));
   const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', res.data.outputPath]);
   assert.ok(Math.abs(parseFloat(stdout) - 0.4) < 0.2, `film ~0.4s, got ${stdout.trim()}`);
+
+  const inspected = await callJson('inspect_render', { target: film, around: 'cuts' });
+  assert.equal(inspected.isError, false, JSON.stringify(inspected.data));
+  assert.ok(inspected.content.some((block) => block.type === 'image'));
+  assert.ok(inspected.data.frames.some((frame) => frame.frame === 6), JSON.stringify(inspected.data));
+
+  const measured = await callJson('measure_render', { target: film, waitMs: 0 });
+  assert.equal(measured.isError, false, JSON.stringify(measured.data));
+  const report = measured.data.stillRunning
+    ? (await callJson('wait_for_render', { jobIds: [measured.data.jobId], timeoutMs: 20_000 })).data.jobs[0].result
+    : measured.data;
+  assert.ok(report.motionEnvelope, JSON.stringify(report));
+  assert.equal(report.cutsChecked, undefined, 'the detailed report keeps cut data inside cutCheck');
+  assert.ok(Array.isArray(report.cutCheck), JSON.stringify(report));
 });
 
 test('mcp: build_film reports scene_not_rendered when a scene has no output', async (t) => {
@@ -1314,6 +1402,22 @@ test('mcp: transcribe_asset reads a library recording into sentences and words',
   const at24 = await callJson('transcribe_asset', { path: 'takes/interview.wav', fps: 24 });
   assert.equal(at24.data.cached, true);
   assert.equal(at24.data.sentences[0].startInFrames, 206);
+});
+
+test('mcp: transcribe_asset refuses a named non-English language on an English-only model', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const ws = await callJson('get_workspace');
+  const libDir = path.join(ws.data.path, 'library', 'language-guard');
+  await fsp.mkdir(libDir, { recursive: true });
+  await fsp.writeFile(path.join(libDir, 'take.wav'), toneWav({ seconds: 1 }));
+
+  const res = await callJson('transcribe_asset', {
+    path: 'language-guard/take.wav', language: 'ja', refresh: true,
+  });
+  assert.equal(res.isError, true);
+  assert.equal(res.data.code, 'transcription_language_unsupported');
+  assert.equal(res.data.detail.model, 'small.en');
+  assert.equal(res.data.detail.requestedLanguage, 'ja');
 });
 
 test('mcp: transcribe_asset finds the frame a word is spoken on, and bounds the word list', async (t) => {

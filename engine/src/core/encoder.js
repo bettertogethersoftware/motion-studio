@@ -22,7 +22,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { EngineError, ErrorCodes } from './errors.js';
-import { getFormat, INTERMEDIATE } from './formats.js';
+import { getFormat, INTERMEDIATE, outputColorFilter } from './formats.js';
 
 const STDERR_TAIL_LINES = 40;
 
@@ -128,6 +128,7 @@ export class FfmpegFrameSink {
       '-hide_banner', '-loglevel', 'error', '-y',
       '-f', 'image2pipe', '-framerate', String(fps), '-i', 'pipe:0',
       '-an',
+      ...(outputColorFilter(output) ? ['-vf', outputColorFilter(output)] : []),
       ...buildVideoArgs(output),
       outputPath,
     ];
@@ -173,6 +174,7 @@ export async function encodePngSequence({ framesDir, outputPath, fps, output = {
     '-hide_banner', '-loglevel', 'error', '-y',
     '-framerate', String(fps), '-i', path.join(framesDir, 'frame-%06d.png'),
     '-an',
+    ...(outputColorFilter(output) ? ['-vf', outputColorFilter(output)] : []),
     ...buildVideoArgs(output),
     outputPath,
   ];
@@ -194,6 +196,7 @@ export async function transcode({ inputPath, outputPath, output = {}, ffmpegPath
     '-hide_banner', '-loglevel', 'error', '-y',
     '-i', inputPath,
     '-an',
+    ...(outputColorFilter(output) ? ['-vf', outputColorFilter(output)] : []),
     ...buildVideoArgs(output),
     outputPath,
   ];
@@ -696,7 +699,7 @@ export async function muxAudio({ videoPath, audioTracks, outputPath, fps, assetR
  * buildAudioFilter graph (whose audio inputs start at 1) is reused verbatim —
  * what you hear is what the render will mux.
  */
-export async function mixAudioOnly({ audioTracks, outputPath, fps, assetRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec }) {
+export async function mixAudioOnly({ audioTracks, outputPath, fps, assetRoot, output = {}, ffmpegPath = 'ffmpeg', onSpawn, videoDurationSec, signal }) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-y',
     // dummy input 0 (the "video" slot in the shared filter graph)
@@ -710,9 +713,5 @@ export async function mixAudioOnly({ audioTracks, outputPath, fps, assetRoot, ou
     `;[aout]apad=whole_dur=${videoDurationSec.toFixed(3)},atrim=0:${videoDurationSec.toFixed(3)}[afinal]`;
 
   args.push('-filter_complex', filter, '-map', '[afinal]', '-c:a', 'pcm_s16le', outputPath);
-  const stderrTail = [];
-  const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  collectStderr(proc, stderrTail);
-  if (onSpawn && proc.pid) onSpawn(proc.pid);
-  await waitExit(proc, stderrTail, 'audio-preview');
+  await runFfmpeg({ args, ffmpegPath, onSpawn, what: 'audio-preview', signal });
 }

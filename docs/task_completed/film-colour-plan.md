@@ -1,15 +1,11 @@
 # Film colour — state it at the render encode instead of inheriting it
 
-> **Status: PLANNED.** Nothing here is built. What *is* built (unreleased, v0.22)
-> is the measurement and the reporting: `signature.color` says `stated: false`,
-> `signature.matchForLooks` names the parameters that affect the look but not the
-> join, and `probe_asset` / footage plan entries report `video.color`. See the
-> [CHANGELOG](../CHANGELOG.md) and the colour bullet in
-> [film-setup.md](../film-setup.md#the-consistency-invariant).
->
-> This plan is the follow-on that makes colour part of the contract. It is filed
-> rather than done because **it changes rendered pixels**, which is a decision
-> about how films look, not a fix to slip in.
+> **Status: IMPLEMENTED.** Final colour-carrying encodes state
+> `bt709` / `iec61966-2-1` / `bt709` / `tv`; `matchFilm` converts footage to
+> that contract and reports an untagged-input assumption. Render sidecars make
+> old output unverified and changed colour settings stale. The implementation is
+> covered by real ffmpeg tests; rebuilding the named historical promotion remains
+> an optional artefact-level verification outside this checkout.
 
 ## Read this first: three options, and what this document is
 
@@ -157,7 +153,7 @@ demonstrably mishandles it.
 ## Rules it must obey
 
 - **Derive, never duplicate.** Same rule as
-  [film-signature-plan.md](../task_completed/film-signature-plan.md): once stated,
+  [film-signature-plan.md](film-signature-plan.md): once stated,
   `signature.color` reads back from the same place the encode gets it, never from
   a second table. `stated: false` becomes `stated: true` with real values, and no
   probe appears anywhere in `filmSignature()`.
@@ -173,37 +169,37 @@ demonstrably mishandles it.
 
 ## TODO
 
-- [ ] `engine/src/core/formats.js` — export the colour filter string per format
+- [x] `engine/src/core/formats.js` — export the colour filter string per format
       (null for `gif`/`png-sequence`/`INTERMEDIATE`). One definition, no second copy.
-- [ ] `engine/src/core/encoder.js` — fold it into `FfmpegFrameSink`'s args,
+- [x] `engine/src/core/encoder.js` — fold it into `FfmpegFrameSink`'s args,
       `encodePngSequence` and `transcode()`. None of the three has a `-vf` today,
       so each gains one.
-- [ ] `engine/src/core/films.js` — `buildFilmArtifact`'s finishing pass. **Verified
+- [x] `engine/src/core/films.js` — `buildFilmArtifact`'s finishing pass. **Verified
       unnecessary as a first cut**: a `-filter_complex` re-encode of a tagged input
       preserves all three tags. Assert it in a test rather than trusting it, since
       the overlay graph is what would break it.
-- [ ] `engine/src/core/film.js` — colour into the render sidecar;
+- [x] `engine/src/core/film.js` — colour into the render sidecar;
       `renderStaleness` reports it; `describeStaleness` renders it
       (`colorMatrix bt601 → bt709`); an older sidecar stays unverified, not stale.
-- [ ] `engine/src/core/films.js` — `filmSignature().color` becomes
+- [x] `engine/src/core/films.js` — `filmSignature().color` becomes
       `stated: true` with the real values, still derived at call time. Colour moves
       out of `matchForLooks`… **or does it?** It still cannot break a concat, so it
       probably stays there with `stated: true` beside it. Decide when implementing;
       the two fields answer different questions.
-- [ ] `engine/src/core/transcode.js` — `matchFilm` folds the `colorspace`
+- [x] `engine/src/core/transcode.js` — `matchFilm` folds the `colorspace`
       conversion into `buildPictureArgs`'s existing `-vf` chain (after crop/scale,
       before/with `fps`), and handles untagged input per A§2. The signature's
       `ffmpegArgs` stay usable verbatim; the conversion is a filter, not an arg.
-- [ ] Tests: the filter string appears exactly once per encode path; a
+- [x] Tests: the filter string appears exactly once per encode path; a
       round-trip render reports the stated tags; `matchFilm` output matches the
       film on all four properties; untagged footage reports its assumption;
       a scene rendered before the change reads as **stale**, and one with no colour
       in its sidecar reads as **unverified**; the finishing pass preserves tags.
-- [ ] **End-to-end sufficiency proof**, in the shape the signature plan used:
+- [ ] **Historical artefact proof (optional):** rebuild `motion-studio-promo`, assert
       rebuild `motion-studio-promo`, assert `film.mp4` and the footage segment
       agree on all four properties, and that `ffmpeg -i film.mp4 -f null -` logs
       **no** filter reconfiguration at the seam.
-- [ ] Docs: `film-setup.md` (rewrite the colour bullet — it currently documents the
+- [x] Docs: `film-setup.md` (rewrite the colour bullet — it currently documents the
       unstated state and links here), `mcp-setup.md`, `architecture.md` §13,
       `SKILL.md`, `SKILL-shell.md`, `CHANGELOG.md`, and this file's status block.
 

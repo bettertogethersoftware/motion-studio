@@ -438,6 +438,22 @@ test('checkSequenceCoverage: silent for dynamic args, single sequences, and full
   assert.deepEqual(checkSequenceCoverage('Sequence(0, 300, f => {});\nSequence(280, 320, f => {});', 600), []);
 });
 
+test('checkSequenceCoverage: does not merge mutually exclusive shared-engine branches', () => {
+  const src = [
+    'function renderA(frame) {',
+    '  Sequence(0, 240, f => {});',
+    '  Sequence(96, 144, f => {});',
+    '}',
+    'function renderB(frame) { drawPlate(frame); }',
+    "if (SCENE.mode === 'a') renderA(frame); else renderB(frame);",
+  ].join('\n');
+  assert.deepEqual(checkSequenceCoverage(src, 320), []);
+
+  // Calls in the same executable body still catch the original large hole.
+  const sibling = 'function frame() {\nSequence(0, 100, f => {});\nSequence(398, 100, f => {});\n}';
+  assert.equal(checkSequenceCoverage(sibling, 500).length, 1);
+});
+
 test('checkDeterminism: CSS real-time transitions flagged, zero/none ignored', () => {
   assert.equal(checkDeterminism('.a { transition: opacity 300ms ease; }', 'styles.css').length, 1);
   assert.equal(checkDeterminism('.a { animation: spin 2s linear infinite; }', 'styles.css').length, 1);

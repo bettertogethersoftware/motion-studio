@@ -92,7 +92,7 @@ Four tiers, in order. Tier 0 and 1 are the ones that change the ranking.
    transcript **with fabricated timings**. The entire strategy above rests on
    "this tool tells you the truth about your film." One tool that confidently
    lies costs more credibility than five that error out.
-   See [mcp-defects-plan.md §2](todo_task/mcp-defects-plan.md).
+   See [mcp-defects-plan.md §2](task_completed/mcp-defects-plan.md).
 2. **Fix the other four defects**, especially `audioTargetPeakDb` — a documented
    mastering feature that cannot be called at all. You cannot market
    "best-instrumented" with a broken instrument.
@@ -103,7 +103,7 @@ Four tiers, in order. Tier 0 and 1 are the ones that change the ranking.
 
 *Cost: small → medium. This is the difference between #2 and #1 on the scorecard.*
 
-4. **Ship [render-review-plan.md](todo_task/render-review-plan.md), parts R§1–R§3.**
+4. **Ship [render-review-plan.md](task_completed/render-review-plan.md), parts R§1–R§3.**
    Every image-returning tool points at the *composition*; nothing points at the
    deliverable. It does **not** need a video-understanding model — the agent
    already is one. It needs frames of the rendered file plus the picture analogue
@@ -115,7 +115,7 @@ Four tiers, in order. Tier 0 and 1 are the ones that change the ranking.
    stills rather than motion either way. So the priority inside the plan is
    **R§2 (measurement) over R§1 (frames)** — `freezedetect` reads all 9,000 frames
    and returns four lines, which is a trade sampling cannot make. See
-   [the objection](todo_task/render-review-plan.md#but-a-shell-agent-can-already-just-look-at-the-mp4).
+   [the objection](task_completed/render-review-plan.md#but-a-shell-agent-can-already-just-look-at-the-mp4).
 
 5. **Do not ship R§4 (a cloud review vendor) as the default.** Shipping it first
    would be matching the competitor on their ground and trading away the offline

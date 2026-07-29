@@ -106,7 +106,10 @@ re-read the finished render to check it — which is the difference between a
 transcript being documentation and being a verification step.
 
 An `.en` model beats the multilingual model of the same size on English, and
-costs the same. Use one unless the recording is not in English.
+costs the same. Use one unless the recording is not in English. When a call
+names a non-English `language`, Motion Studio refuses an `.en` model instead of
+returning a plausible but wrong transcript; install and select its multilingual
+twin (for example, `small` rather than `small.en`). Auto-detect remains allowed.
 
 **Which model runs when nobody names one:** the first of
 `small.en, small, base.en, base, medium.en, medium, large-v3-turbo, large-v3,
@@ -278,6 +281,7 @@ to every agent connected over MCP.
 |---|---|---|
 | `transcription_unavailable` | no binary, or no model | **a setup problem for the user** — install it; do not retry |
 | `transcription_input_unsupported` | the file has no readable speech (not media, no audio stream, unsupported codec) | a different file; `probe_asset` reports whether one has audio |
+| `transcription_language_unsupported` | an English-only `.en` model was asked to transcribe a named non-English language | install/select a multilingual model of the requested size (for example, `small`, not `small.en`) |
 | `transcription_failed` | whisper ran and did not produce a transcript (crash, timeout, a build with no `--output-json-full`) | read the message; it carries the stderr tail |
 | `asset_too_large` | over the duration or size bound | cut the span first |
 | `invalid_config` | an unknown model name or vendor | the message lists what is installed |

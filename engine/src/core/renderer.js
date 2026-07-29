@@ -56,6 +56,7 @@ import { EngineError, ErrorCodes, asEngineError } from './errors.js';
 import { ProgressEmitter, ProgressStreamParser } from './progress.js';
 import { createPuppeteerBrowser, isBrowserCrash } from './browser.js';
 import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount, computeBalanceWarnings } from './encoder.js';
+import { measureRenderedPicture } from './render-review.js';
 import { measureWavLevels, wavDurationSeconds } from './tts.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
@@ -560,12 +561,28 @@ export async function renderComposition(opts) {
       await writeRenderMeta({ scenePath, config, frames: totalFrames });
     }
 
+    let staticFrames = null;
+    if (isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config }) && !isPngSequence) {
+      try {
+        const picture = await measureRenderedPicture({
+          filePath: outPath, fps: config.fps, totalFrames,
+          sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
+          ffmpegPath, signal, onSpawn: onChildPid,
+        });
+        staticFrames = picture.summary.staticFrames;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        progress.log('warn', `Picture measurement unavailable: ${err?.message ?? err}`);
+      }
+    }
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath: outPath, frames: totalFrames, elapsedMs, audio });
+    progress.done({ outputPath: outPath, frames: totalFrames, elapsedMs, audio, ...(staticFrames !== null ? { staticFrames } : {}) });
     return {
       outputPath: outPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(audio ? { audio } : {}),
+      ...(staticFrames !== null ? { staticFrames } : {}),
       ...(prx ? { proxy: prx } : {}),
       ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
@@ -913,12 +930,28 @@ export async function renderParallel(opts) {
       await writeRenderMeta({ scenePath, config, frames: totalFrames });
     }
 
+    let staticFrames = null;
+    if (isFullSceneRender({ prx: null, skipAudio: false, asIntermediate: false, startFrame, endFrame, config }) && !isPngSequence) {
+      try {
+        const picture = await measureRenderedPicture({
+          filePath: outputPath, fps: config.fps, totalFrames,
+          sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
+          ffmpegPath, signal, onSpawn: onChildPid,
+        });
+        staticFrames = picture.summary.staticFrames;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        progress.log('warn', `Picture measurement unavailable: ${err?.message ?? err}`);
+      }
+    }
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio });
+    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio, ...(staticFrames !== null ? { staticFrames } : {}) });
     return {
       outputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(audio ? { audio } : {}),
+      ...(staticFrames !== null ? { staticFrames } : {}),
       ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
   } catch (err) {

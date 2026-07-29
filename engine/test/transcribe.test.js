@@ -4,7 +4,7 @@
  * The derivations are pure and tested directly, because they are the product —
  * everything else here is a vendor wrapper. The load-bearing case has its own
  * test: **a decode window that spans three sentences must re-segment**, driven
- * from the verbatim `-ojf` sample in docs/todo_task/transcribe-asset-plan.md
+ * from the verbatim `-ojf` sample in docs/task_completed/transcribe-asset-plan.md
  * (helpers/fake-whisper.mjs serves it). Splicing audio on the vendor's own
  * segments is the audible mid-clause cut the whole tool exists to prevent, so if
  * one test in this file matters, it is that one.
@@ -528,6 +528,22 @@ test('an unnamed language asks for auto-detect and reports what came back', asyn
   const result = await transcribeWithWhisper({ wavPath: wav, ...withStub() });
   assert.equal(result.requestedLanguage, 'auto');
   assert.equal(result.language, 'en');
+});
+
+test('an English-only model refuses an explicit non-English language before it transcribes', async () => {
+  const wav = path.join(tmp, 'in-ja.wav');
+  await fsp.writeFile(wav, 'pretend audio');
+  await assert.rejects(
+    () => transcribeWithWhisper({ wavPath: wav, ...withStub(), language: 'ja' }),
+    (err) => {
+      assert.equal(err.code, ErrorCodes.TRANSCRIPTION_LANGUAGE_UNSUPPORTED);
+      assert.equal(err.detail.model, 'small.en');
+      assert.equal(err.detail.requestedLanguage, 'ja');
+      assert.deepEqual(err.detail.multilingualModels, []);
+      assert.match(err.message, /English-only/);
+      return true;
+    },
+  );
 });
 
 test('a vendor that exits non-zero is transcription_failed with its stderr tail', async () => {

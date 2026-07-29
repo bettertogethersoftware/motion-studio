@@ -406,4 +406,8 @@ test('matchFilm conforms the output using the film\'s OWN encoder arguments', { 
   assert.equal(r.frames, 24, 'and still frame-exact, which is what the timeline declares');
   // The encode args came from the film, not from a second derivation here.
   assert.deepEqual(r.applied.args, signature.ffmpegArgs);
+  assert.deepEqual(measured.video.color, {
+    primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', range: 'tv',
+  });
+  assert.equal(r.assumptions?.color?.inputColor, 'bt709', 'untagged source assumptions are reported');
 });

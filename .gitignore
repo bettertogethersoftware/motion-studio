@@ -397,3 +397,8 @@ whisper-bin-x64
 /data/
 /paths.json
 /ffmpeg-8.1.2-full_build/
+# Same policy as the ffmpeg build above: locally downloaded third-party
+# toolchains, unpacked at the repo root and reachable via MOTION_STUDIO_* env
+# hooks. Binaries, not source.
+/ImageMagick-7.1.2-Q16-HDRI/
+/auto-editor-windows-x86_64/

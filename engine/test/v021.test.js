@@ -328,6 +328,10 @@ test('a real render stamps the sidecar; proxy and partial renders do not', { ski
   assert.equal(recorded.frames, 24);
   assert.equal(recorded.width, 160);
   assert.equal(recorded.fps, 30);
+  const picture = await probeMedia({ filePath: out });
+  assert.deepEqual(picture.video.color, {
+    primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', range: 'tv',
+  });
   assert.equal(renderStaleness(recorded, config), null);
 
   // And that sidecar is what makes a later config change detectable.
@@ -341,10 +345,16 @@ test('a real render stamps the sidecar; proxy and partial renders do not', { ski
   // after rendering and the contract was broken with nothing reporting it.
   assert.equal(recorded.pixFmt, 'yuv420p');
   assert.equal(recorded.transparent, false);
+  assert.deepEqual(
+    [recorded.colorPrimaries, recorded.colorTransfer, recorded.colorMatrix, recorded.colorRange],
+    ['bt709', 'iec61966-2-1', 'bt709', 'tv'],
+  );
   // makeConfig() owns the output block, so the pixel format is changed on the
   // config it produced rather than passed in — the same edit a user makes.
   const repixed = { ...config, output: { ...config.output, pixFmt: 'yuv444p' } };
   assert.equal(describeStaleness(renderStaleness(readRenderMeta(dir, repixed), repixed)), 'pixFmt yuv420p → yuv444p');
+  const recolored = { ...recorded, colorMatrix: 'bt601' };
+  assert.equal(describeStaleness(renderStaleness(recolored, config)), 'colorMatrix bt601 → bt709');
 });
 
 test('an older sidecar without pixFmt stays unverified rather than turning up stale', () => {

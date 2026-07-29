@@ -926,7 +926,7 @@ export class WorkspaceStore {
     if (!normalized.startsWith('assets/') && !normalized.startsWith('out/')) {
       throw new EngineError(
         ErrorCodes.PATH_NOT_ALLOWED,
-        `Media must live under assets/ (supplied material) or out/ (rendered output) — got "${relPath}"`,
+        `Media path must begin with "assets/" (supplied material) or "out/" (rendered output), for example "out/output.mp4" — got "${relPath}"`,
         { path: relPath },
       );
     }

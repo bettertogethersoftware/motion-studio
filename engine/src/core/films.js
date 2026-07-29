@@ -33,13 +33,14 @@ import fsp from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 import { EngineError, ErrorCodes } from './errors.js';
-import { getFormat, encodingCompatibilityWarnings } from './formats.js';
+import { getFormat, encodingCompatibilityWarnings, outputColorProfile } from './formats.js';
 import {
   sceneSignature, sceneOutputPath, sceneHasAudio, validateScenes, assembleFilm,
   readRenderMeta, renderStaleness, describeStaleness,
   probeSignature, engineFormatForProbe, isFootage, segmentFrames, segmentName,
 } from './film.js';
 import { buildVideoArgs, runFfmpeg, probeMedia, probeFrameCount } from './encoder.js';
+import { measureRenderedPicture } from './render-review.js';
 import { resolveInTarget } from './sandbox.js';
 import { resolveFfprobePath } from './settings.js';
 
@@ -443,35 +444,9 @@ export function filmSignature(configs) {
       : null,
     ffmpegArgs,
     copyConcat: fmt?.copyConcat ?? null,
-    /**
-     * Colour is deliberately reported as UNSTATED rather than as a value
-     * (v0.22), and that is the honest answer, not a gap.
-     *
-     * The engine passes no colour arguments at all, so a scene's tags are
-     * whatever Chromium's PNGs and ffmpeg's default conversion happen to
-     * produce. Measured on a real render: `primaries=bt709,
-     * transfer=iec61966-2-1, matrix=unset`, and the pixels are converted with
-     * the **bt601** matrix (a render forced to `smpte170m` is byte-identical),
-     * so the file does not even agree with itself — every player that assumes
-     * bt709 for HD decodes it with the wrong matrix.
-     *
-     * Naming a value here would therefore require probing a rendered file: a
-     * second copy of the truth, obtainable only after a render, and describing
-     * an accident of the installed Chromium/ffmpeg pair rather than a decision.
-     * Conforming footage to it would faithfully replicate that accident and
-     * bake it into a `.transcode.json` identity that survives the next upgrade.
-     *
-     * Two further measurements are why `matchFilm` carries no colour arguments:
-     * `-color_primaries`/`-color_trc` are **silently ignored** on this pipeline
-     * (frame properties from the decoder win), so emitting them would report a
-     * conform that did not happen; and the one flag that does take,
-     * `-colorspace`, re-matrixes the picture — a pixel change, not a tag.
-     *
-     * `stated: false` is the field a caller reads. It must never be treated as
-     * "no colour metadata exists" — the files carry tags; the engine just does
-     * not choose them.
-     */
-    color: { stated: false, primaries: null, transfer: null, matrix: null, range: null },
+    // Derived from the very same output profile the renderer applies, so a
+    // signature describes a decision rather than the accident of a probe.
+    color: outputColorProfile(output),
     // What a stream copy cannot reconcile, what it does not care about, and
     // what it copies through untouched from segment 1. The second and third
     // lists exist to prevent over-matching and under-matching respectively;
@@ -1069,6 +1044,22 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
       });
     }
 
+    // Picture review is advisory in the same sense as audio balance warnings:
+    // it measures the completed deliverable but never turns a valid build into
+    // a failure because a diagnostic pass was unavailable.
+    let picture;
+    try {
+      progress?.phase('measuring-picture');
+      const measured = await measureRenderedPicture({
+        filePath: outputPath, fps, totalFrames, sceneLayout: result.sceneLayout,
+        ffmpegPath, signal, onSpawn,
+      });
+      picture = measured.summary;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      picture = { unavailable: true, message: err?.message ?? 'Picture measurement was unavailable' };
+    }
+
     return {
       ...result,
       filmId: film.id,
@@ -1078,6 +1069,7 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
       captionsBurned: burn,
       ...(srtPath ? { srtPath } : {}),
       reEncoded: finishing,
+      picture,
     };
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});

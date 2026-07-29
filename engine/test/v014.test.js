@@ -173,9 +173,13 @@ test('waitFor: times out with current snapshots while a job is still running', a
   await jobs.waitFor([jobId], { timeoutMs: 1_000, pollMs: 10 });
 });
 
-test('waitFor: unknown job id fails up front with job_not_found', async () => {
+test('waitFor: an unknown job id is terminal without hiding surviving batch jobs', async () => {
   const jobs = new JobManager();
-  await assert.rejects(jobs.waitFor(['nope'], { timeoutMs: 100 }), (err) => err.code === ErrorCodes.JOB_NOT_FOUND);
+  const done = jobs.startTask({ kind: 'test', run: async () => ({ ok: true }) });
+  const result = await jobs.waitFor(['nope', done.jobId], { timeoutMs: 1_000, pollMs: 10 });
+  assert.equal(result.timedOut, false);
+  assert.deepEqual(result.jobs.map((job) => job.state), ['not_found', JobState.DONE]);
+  assert.equal(result.jobs[1].result.ok, true);
 });
 
 /* ------------------------------------------------------ sfx clamping ------ */

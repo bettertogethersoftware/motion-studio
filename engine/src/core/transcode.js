@@ -346,6 +346,15 @@ export async function transcodeAsset({
     );
   }
 
+  // A stated film contract is an instruction to *convert* footage, never to
+  // relabel it. colorspace needs known input metadata; HD material that leaves
+  // it unstated is treated as bt709 and the response records that assumption.
+  const targetColor = signature?.color?.stated ? signature.color : null;
+  const inputColor = source?.video?.color;
+  const colorAssumption = targetColor && (!inputColor?.primaries || !inputColor?.transfer || !inputColor?.matrix)
+    ? { inputColor: 'bt709', reason: 'source did not state complete colour metadata' }
+    : null;
+
   // The effective request, after matchFilm — this is what the sidecar keys on, so
   // a signature change invalidates a cached output exactly like a parameter change.
   const effective = {
@@ -358,7 +367,8 @@ export async function transcodeAsset({
     ...(audio !== undefined ? { audio } : {}),
     ...(spans ? { spans, crossfadeMs, sampleRate, channels } : {}),
     ...(frames ? { frames } : {}),
-    ...(signature ? { signature: signature.id, args: signature.ffmpegArgs } : {}),
+    ...(signature ? { signature: signature.id, args: signature.ffmpegArgs, color: signature.color } : {}),
+    ...(colorAssumption ? { colorAssumption } : {}),
   };
   const identity = transcodeIdentity({ sourceAbs, bytes: st.size, mtimeMs: st.mtimeMs, request: effective });
 
@@ -371,6 +381,7 @@ export async function transcodeAsset({
       skipped: true,
       elapsedMs: 0,
       probed: measured !== null,
+      ...(colorAssumption ? { assumptions: { color: colorAssumption } } : {}),
       ...(measured ?? {}),
     };
   }
@@ -384,7 +395,7 @@ export async function transcodeAsset({
   const args = mode === 'audio'
     ? buildAudioArgs({ sourceAbs, outPath, spans, crossfadeMs, sampleRate, channels, fpsForFrames })
     : buildPictureArgs({
-      sourceAbs, outPath, mode, trim, crop, scale, fps, video, audio, frames, signature, fpsForFrames,
+      sourceAbs, outPath, mode, trim, crop, scale, fps, video, audio, frames, signature, fpsForFrames, colorAssumption,
     });
 
   try {
@@ -415,6 +426,7 @@ export async function transcodeAsset({
     skipped: false,
     elapsedMs: Date.now() - started,
     probed: measured !== null,
+    ...(colorAssumption ? { assumptions: { color: colorAssumption } } : {}),
     ...(measured ?? {}),
     ...(frameCount ? { frames: frameCount } : {}),
   };
@@ -438,7 +450,7 @@ const durationSeconds = (o, fps) => (o?.durationInFrames !== undefined
 
 /** `video` and `frames` modes: one input, a named filter chain, one output. */
 function buildPictureArgs({
-  sourceAbs, outPath, mode, trim, crop, scale, fps, video, audio, frames, signature, fpsForFrames,
+  sourceAbs, outPath, mode, trim, crop, scale, fps, video, audio, frames, signature, fpsForFrames, colorAssumption,
 }) {
   const format = mode === 'frames' ? null : formatForExtension(outPath);
   if (mode === 'video' && !format) {
@@ -478,9 +490,14 @@ function buildPictureArgs({
   const vf = buildVideoFilter({ crop, scale, fps, evenDims: mode === 'frames' ? false : (fmt?.requiresEvenDims ?? true) });
   // Frame decimation joins the SAME chain: a second `-vf` would win outright and
   // silently discard the crop/scale the caller asked for.
-  const chain = mode === 'frames' && frames?.every
-    ? [vf, `select=not(mod(n\\,${frames.every}))`].filter(Boolean).join(',')
-    : vf;
+  const color = signature?.color?.stated
+    ? `colorspace=all=bt709:trc=srgb${colorAssumption ? ':iall=bt709' : ''}`
+    : null;
+  const chain = [
+    vf,
+    color,
+    ...(mode === 'frames' && frames?.every ? [`select=not(mod(n\\,${frames.every}))`] : []),
+  ].filter(Boolean).join(',') || null;
   if (chain) args.push('-vf', chain);
   if (mode === 'frames' && frames?.every) args.push('-vsync', '0');
 

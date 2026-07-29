@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Two P1 MCP safeguards: callable mastering and language-safe transcription
+
+`audioTargetPeakDb` and overlay `widthPct` used Zod's `.nullable()` form, which
+the MCP schema converter published as `{}`. Clients therefore could not coerce
+numeric values such as `-2` for mastering. They now publish an explicit
+number-or-null schema, with an integration test covering all three fields.
+
+`transcribe_asset` now refuses an explicit non-English `language` when the
+selected whisper.cpp model is English-only (`*.en`). Previously whisper.cpp
+returned a plausible-looking English artefact and timing data for speech it did
+not understand. The new `transcription_language_unsupported` error names the
+model and reports installed multilingual alternatives; auto-detection is still
+allowed.
+
 ### Where everything lives is a setting, and the default moved into the app
 
 The Studio's Global Settings page listed the data dir, the workspaces root and
@@ -68,75 +82,44 @@ suite can cover the write path without rewriting the developer's real
 New error code: **`storage_busy`**. Details in
 [architecture.md §11.1](architecture.md).
 
-### Colour is measured and reported, and the signature grows a third list
+### Stated film colour and footage conforming
 
-Found by reading a real build back: a film's rendered scenes and its footage segment
-carry different colour tags, the joined file advertises only segment 1's, and nothing
-in the tool surface said so.
+Final colour-carrying renders now state BT.709 primaries and matrix, sRGB transfer
+(`iec61966-2-1`), and TV range via the shared `setparams` filter. The same derived
+profile is exposed in `signature.color`, recorded in render sidecars, and preserved
+by the finishing pass. Legacy sidecars that lack colour fields remain unverified;
+re-rendering under a different stated profile produces a normal `stale_render`
+diagnostic instead of silently mixing old and new output.
 
-**`signature.matchForLooks`** joins `mustMatch`/`neednotMatch`. Two lists could not
-classify everything, and the leftovers were what a caller actually gets wrong:
-`crf`/`preset` were in neither and existed only in prose, and the colour tags are the
-same shape of fact — no effect on the join, but the joined file keeps only segment
-1's, so a mismatch is a **look difference rather than an error**.
+`transcode_asset { matchFilm }` now performs a real `colorspace` conversion to the
+signature's colour contract rather than merely relabelling footage. If input colour
+metadata is incomplete, it assumes BT.709 and returns that in `assumptions.color`;
+the same assumption is part of the transcode cache identity. GIF, PNG-sequence, and
+the RGB GIF intermediate remain deliberately outside this YUV delivery contract.
 
-**`signature.color` reports `stated: false`**, which is the honest answer rather than
-a gap. The engine passes no colour arguments, so a scene's tags are whatever
-Chromium's PNGs and ffmpeg's default conversion produce. Naming a value would mean
-probing a rendered file — a second copy of the truth, available only after a render,
-describing the installed encoder rather than a decision anyone made.
+### Deliverable review and picture telemetry
 
-**`probe_asset` and footage plan entries now report `color`**
-(`{ primaries, transfer, matrix, range }`). ffprobe's literal `"unknown"` becomes
-`null`, because an untagged matrix is precisely the case a player resolves by
-guessing, and passing the string through would hide the one fact worth knowing.
-`matrix` is ffprobe's `color_space`, renamed: the field is only the YUV↔RGB
-coefficients, while "colour space" reads as the whole colorimetry everywhere else.
+`inspect_render` returns downscaled PNGs from a scene's encoded output or a built
+film — including concat seams, burned captions, and finishing overlays that a
+composition preview cannot show. It samples known cuts or holds from the film plan,
+distributed across longer films while staying within a 24-image response cap.
 
-Measured (`motion-studio-promo`, ffmpeg 8.1.1) — scene render
-`primaries=bt709, transfer=iec61966-2-1, matrix` unset; camera footage `bt709`
-throughout. Both `yuv420p`, so they stream-copy and decode; a decoder logs a filter
-reconfiguration at the cut and those frames may play at a slightly different gamma.
+`measure_render` is the picture analogue of `preview_audio`: a cancellable task that
+reports a motion envelope, static/black runs, solid frames, and measurements across
+the cuts the engine already knows. Full scene render jobs expose `staticFrames` and
+film builds expose a compact `picture` summary. These are advisory facts: a static
+title card or intentional fade is not an engine failure.
 
-#### Why `matchFilm` still carries no colour arguments
+### MCP resilience and branch-aware linting
 
-Not caution — three measurements:
+Speech, music, and sound-effect generators now create nested `assetPath` parents;
+`wait_for_render` returns expired ids as terminal `not_found` snapshots without
+hiding the rest of a batch; and `preview_audio` runs as a cancellable task so a long
+mix cannot outlive an MCP request.
 
-- **`-color_primaries`/`-color_trc` are silently ignored** on this pipeline.
-  Re-encoding `bt709` footage with `-color_trc iec61966-2-1` yields a file still
-  tagged `transfer=bt709`; decoder frame properties win over the output option.
-  Emitting them would make the tool *report a conform it did not perform*.
-- **`-colorspace`, the one flag that takes, changes pixels** — it re-matrixes the
-  picture (different `framemd5`, ~+3% bitrate). A re-encode, not a tag. Only
-  `-vf setparams=…` sets all three, and it converts too.
-- **The scenes are not a coherent target yet.** A render forced to
-  `setparams=colorspace=smpte170m` is byte-identical to today's output: the engine
-  converts RGB→YUV with the **bt601** matrix while tagging the result `bt709`/sRGB
-  with the matrix unset, so the file does not agree with itself and any player
-  assuming bt709 for HD already decodes it with the wrong matrix. Conforming footage
-  to that would replicate the accident and freeze it into a `.transcode.json`
-  identity that survives the next ffmpeg upgrade.
-
-#### Open decision: stating colour at the render encode
-
-Filed as [todo_task/film-colour-plan.md](todo_task/film-colour-plan.md).
-
-Making colour part of the contract starts at the **render** encode, not at
-`transcode_asset`. Stated there (via `setparams`, the only mechanism that works) it
-becomes config-derived, so `filmSignature()` reports it under the same
-derived-at-call-time rule as everything else and `matchFilm` inherits it. Two
-candidates, both self-consistent, neither taken yet because both are decisions about
-how films look rather than fixes:
-
-- **bt709 end-to-end** — conventional and correct for HD, and it makes scenes agree
-  with `bt709` footage on the matrix so only the transfer needs reconciling. Changes
-  every future render's pixels, so already-rendered scenes differ from re-renders;
-  would want colour in the render sidecar so `renderStaleness` flags a half-re-rendered
-  film.
-- **Tag what already happens (`smpte170m`)** — verified byte-identical, so zero pixel
-  change and every existing render stays valid. But 601 on 1080p is unconventional,
-  some hardware paths force 709 for HD regardless, and `matchFilm` would then convert
-  real bt709 footage *down* to 601 — making the footage side worse, not better.
+The `sequence-gap` lint now skips coverage analysis when literal `Sequence()` calls
+span mutually exclusive helper scopes. Its same-scope gap detection is unchanged,
+so documented shared-engine branches no longer teach callers to ignore warnings.
 
 ### The read-only media tools can reach `out/`
 

@@ -568,6 +568,10 @@ test('films API: overlay triggers the finishing pass', async (t) => {
   const outPath = path.join(film.film.path, 'out', 'e2e-overlay.mp4');
   assert.ok(fs.existsSync(outPath));
   assert.ok((await fsp.stat(outPath)).size > 0);
+  const picture = await probeMedia({ filePath: outPath });
+  assert.deepEqual(picture.video.color, {
+    primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', range: 'tv',
+  });
 });
 
 test('films API: preview-audio streams the master mix', async (t) => {

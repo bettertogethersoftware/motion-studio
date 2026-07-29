@@ -385,7 +385,7 @@ const isSpecialToken = (text) => /^\s*\[_.*_?\]\s*$/.test(text ?? '');
  * milliseconds, real tokens only, and nothing vendor-specific left in it.
  *
  * Exported for the tests, which drive it from the verbatim sample in
- * docs/todo_task/transcribe-asset-plan.md.
+ * docs/task_completed/transcribe-asset-plan.md.
  */
 export function normalizeWhisperJson(doc) {
   const windows = Array.isArray(doc?.transcription) ? doc.transcription : [];
@@ -439,6 +439,22 @@ export async function transcribeWithWhisper({
   const models = await listWhisperModels(resolved.modelsDir);
   const chosen = pickWhisperModel(resolved.model, models, resolved);
   const lang = resolved.language || 'auto';
+
+  // whisper.cpp accepts `-l ja` with an `.en` model, but the result is a
+  // well-formed English hallucination rather than a usable transcript. Refuse
+  // before spawning so callers cannot mistake its timings for real speech.
+  if (chosen.englishOnly && !['auto', 'en'].includes(String(lang).toLowerCase())) {
+    throw new EngineError(
+      ErrorCodes.TRANSCRIPTION_LANGUAGE_UNSUPPORTED,
+      `Model "${chosen.name}" is English-only and cannot transcribe "${lang}". ` +
+        'Install and select a multilingual ggml model (for example, ggml-small.bin).',
+      {
+        model: chosen.name,
+        requestedLanguage: lang,
+        multilingualModels: models.filter((candidate) => !candidate.englishOnly).map((candidate) => candidate.name),
+      },
+    );
+  }
 
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-whisper-'));
   const prefix = path.join(dir, 'transcript');

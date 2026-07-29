@@ -1,17 +1,20 @@
 # Render review — let the agent see what it actually made
 
-> **Status: PLANNED.** Nothing here is built. It is the largest capability gap
+> **Status: IMPLEMENTED (R§1–R§3).** `inspect_render` returns downscaled frames
+> from an encoded deliverable, `measure_render` runs as a cancellable task and
+> reports motion/static/black/cut facts, and completed scene renders/film builds
+> carry picture summaries. The optional cloud review vendor (R§4) remains out of
+> scope by design. It is the largest capability gap
 > found by building two complete films through the MCP surface (a 3:00 product
 > ad, a 5:00 tool review), and it is the one place where a competitor is
 > straightforwardly ahead: with the community plugin stack, a Remotion agent
 > renders, feeds the file to a video-understanding model, and iterates on the
 > critique.
 >
-> **Stated carefully** (an earlier draft of this banner overstated it): an Env A
-> agent cannot see the deliverable at all, because no MCP tool returns a frame
-> from `out/`. An Env B agent *can* — with a shell it extracts frames itself, and
-> that is how three of the four defects below were actually found. What neither
-> can do is perceive **motion**, or afford to look at more than a fraction of a
+> **Before R§1–R§3**, an Env A agent could not see the deliverable at all, because
+> no MCP tool returned a frame from `out/`. An Env B agent *could* extract frames
+> with a shell, and that is how three of the four defects below were actually found.
+> Neither could perceive **motion**, or afford to look at more than a fraction of a
 > percent of the frames. See
 > [the objection](#but-a-shell-agent-can-already-just-look-at-the-mp4), which is
 > the right question to ask of this plan and sharpens what it should build.
@@ -175,7 +178,7 @@ opposite case.
 So the plan does not try to *discover* cuts. It does the opposite: **the engine
 already knows every cut frame from `plan.sceneLayout`, and samples and measures
 there.** That is knowledge the shell does not have, which is precisely the test
-[the README](README.md#the-rule-this-implies) sets for whether a tool earns its
+[the README](../todo_task/README.md#the-rule-this-implies) sets for whether a tool earns its
 place:
 
 > Tools that only report lose to the shell. Tools that report what only the

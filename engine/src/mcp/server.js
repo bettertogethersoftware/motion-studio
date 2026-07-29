@@ -113,6 +113,10 @@ import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { planFilm, submitFilmBuild } from '../core/films.js';
 import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings, probeMedia } from '../core/encoder.js';
+import { getFormat } from '../core/formats.js';
+import {
+  MAX_RENDER_INSPECTION_FRAMES, reviewFrameList, extractRenderedFrame, measureRenderedPicture,
+} from '../core/render-review.js';
 import { ensureStableDataDir } from '../core/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -244,6 +248,36 @@ async function locateMedia(relPath, target) {
     source: a.target.kind, target: localId(a.target.id), path: a.path,
     abs: a.abs, bytes: a.bytes, mtime: a.mtime, kind: a.kind,
   };
+}
+
+/** Resolve an encoded deliverable, defaulting to the target's canonical out/ file. */
+async function locateRenderedMedia(target, relPath) {
+  const t = await describeTarget(target);
+  if (relPath) {
+    const located = await locateMedia(relPath, target);
+    return { t, ...located };
+  }
+  const relative = t.kind === 'scene'
+    ? `${t.output.dir ?? 'out'}/${t.output.filename ?? 'output.mp4'}`
+    : `out/${String(t.film.outputFilename ?? 'film').replace(/\.[a-z0-9]+$/i, '')}${getFormat(t.plan.format ?? 'mp4').ext}`;
+  const abs = path.join(t.path, ...relative.split('/'));
+  const stat = await fsp.stat(abs).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new EngineError(ErrorCodes.FILE_NOT_FOUND,
+      `No rendered output at "${relative}" — render the scene or build the film first, or pass an out/-relative path.`,
+      { target, path: relative });
+  }
+  return { t, source: t.kind, target: localId(t.id), path: relative, abs, bytes: stat.size, mtime: stat.mtime.toISOString() };
+}
+
+function renderReviewLayout(t) {
+  if (t.kind === 'film') {
+    return (t.plan.scenes ?? []).map((entry) => ({
+      ...entry,
+      ...(entry.sceneId ? { sceneId: localId(entry.sceneId) } : {}),
+    }));
+  }
+  return [{ sceneId: localId(t.id), name: t.config.name, filmOffset: 0, durationInFrames: t.durationInFrames }];
 }
 
 /**
@@ -550,7 +584,10 @@ const FILM_OVERLAY = z.object({
   toFrame: z.number().int().min(1),
   xPct: z.number().min(-100).max(200).optional().describe('Top-left x as % of frame width (default 0)'),
   yPct: z.number().min(-100).max(200).optional().describe('Top-left y as % of frame height (default 0)'),
-  widthPct: z.number().min(0.1).max(400).nullable().optional().describe('Width as % of frame width, aspect kept; null = natural size'),
+  // Do not use `.nullable()` here: the MCP SDK's Zod → JSON Schema conversion
+  // publishes that form as `{}`, so clients cannot coerce a numeric argument.
+  widthPct: z.union([z.number().min(0.1).max(400), z.null()]).optional()
+    .describe('Width as % of frame width, aspect kept; null = natural size'),
   opacity: z.number().min(0).max(1).optional(),
 });
 const FILM_CAPTION = z.object({
@@ -607,7 +644,7 @@ server.registerTool(
         sizePct: z.number().min(1).max(20).optional().describe('Font size as % of frame height (default 4.5)'),
         position: z.enum(['bottom', 'top']).optional(),
       }).optional(),
-      audioTargetPeakDb: z.number().min(-60).max(0).nullable().optional()
+      audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
         .describe('Master the mix to this peak on build (e.g. -2); null disables'),
       burnCaptions: z.boolean().optional().describe('Burn captions into the picture (a .srt sidecar is written either way)'),
     },
@@ -667,7 +704,8 @@ server.registerTool(
       plan: z.boolean().optional()
         .describe('Return the resolved layout + problems without building (works before scenes are rendered)'),
       outputFilename: z.string().optional().describe('Override + persist the film\'s output filename'),
-      audioTargetPeakDb: z.number().min(-60).max(0).nullable().optional().describe('Override + persist the mastering target'),
+      audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
+        .describe('Override + persist the mastering target'),
       burnCaptions: z.boolean().optional().describe('Override + persist caption burn-in'),
     },
   },
@@ -1002,6 +1040,114 @@ server.registerTool(
   }),
 );
 
+server.registerTool(
+  'inspect_render',
+  {
+    title: 'Return frames from the encoded deliverable',
+    description:
+      'Extract downscaled PNG frames from a scene render or built film in out/ — unlike capture_preview_frames, ' +
+      'these images include the file that ffmpeg actually wrote: concat seams, burned captions, overlays and muxed ' +
+      'picture. For a film, around="cuts" samples before/at/after known scene or footage boundaries across the ' +
+      'timeline; around="holds" samples block midpoints. Pass frames for a follow-up. Maximum 24 images.',
+    inputSchema: {
+      target: z.string().describe('Film id "<film>" or scene id "<film>/<scene>"'),
+      path: z.string().optional().describe('Optional target-relative media path. It must begin with "out/" or "assets/" (for example, "out/output.mp4"); bare filenames are rejected. Defaults to the target\'s canonical output'),
+      frames: z.array(z.number().int().min(0)).min(1).max(MAX_RENDER_INSPECTION_FRAMES).optional(),
+      count: z.number().int().min(1).max(MAX_RENDER_INSPECTION_FRAMES).optional()
+        .describe('Uniform samples when frames/around are omitted (default 5)'),
+      around: z.enum(['cuts', 'holds']).optional()
+        .describe('Film-aware samples: cuts = before/at/after each boundary; holds = midpoint of each block'),
+      maxWidth: z.number().int().min(160).max(1920).default(960).describe('Maximum returned PNG width'),
+    },
+  },
+  wrap(async ({ target, path: relPath, frames, count, around, maxWidth }) => {
+    await requirePrereqs();
+    if (frames?.length && (count !== undefined || around !== undefined)) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, 'inspect_render takes frames, count, or around — not a combination');
+    }
+    const located = await locateRenderedMedia(target, relPath);
+    const { t } = located;
+    const layout = renderReviewLayout(t);
+    const totalFrames = t.durationInFrames;
+    const mode = around ?? (t.kind === 'film' ? 'cuts' : 'uniform');
+    const list = reviewFrameList({
+      totalFrames, sceneLayout: layout, frames, count: count ?? 5, around: mode,
+      maxFrames: frames ? undefined : MAX_RENDER_INSPECTION_FRAMES,
+    });
+    const ffmpegPath = await ffmpegPathOnly();
+    const shots = await Promise.all(list.map(async (frame) => ({
+      frame,
+      png: await extractRenderedFrame({ filePath: located.abs, frame, fps: t.fps, maxWidth, ffmpegPath }),
+    })));
+    return {
+      content: [
+        ...shots.map((shot) => ({ type: 'image', data: shot.png.toString('base64'), mimeType: 'image/png' })),
+        {
+          type: 'text',
+          text: JSON.stringify({
+            target: localId(t.id), path: located.path, fps: t.fps,
+            frames: shots.map((shot) => {
+              const context = layout.find((entry) => shot.frame >= (entry.filmOffset ?? 0)
+                && shot.frame < (entry.filmOffset ?? 0) + (entry.durationInFrames ?? 0));
+              return { frame: shot.frame, ...(context ? { context } : {}) };
+            }),
+            note: 'Images are in the same order as frames.',
+          }, null, 2),
+        },
+      ],
+    };
+  }),
+);
+
+server.registerTool(
+  'measure_render',
+  {
+    title: 'Measure the encoded picture for static, black, and suspect cuts',
+    description:
+      'Read a rendered scene or built film end-to-end at low resolution and report per-second motion, static/black ' +
+      'runs, solid frames and known-cut checks. This is a report, not a quality verdict: title cards and fades can ' +
+      'be intentional. Long files run as a task job and return their detailed report through wait_for_render.',
+    inputSchema: {
+      target: z.string().describe('Film id "<film>" or scene id "<film>/<scene>"'),
+      path: z.string().optional().describe('Optional target-relative media path. It must begin with "out/" or "assets/" (for example, "out/output.mp4"); bare filenames are rejected. Defaults to the target\'s canonical output'),
+      waitMs: z.number().int().min(0).max(50_000).default(45_000)
+        .describe('Block up to this long; a longer inspection returns a jobId to poll with wait_for_render'),
+    },
+  },
+  wrap(async ({ target, path: relPath, waitMs }) => {
+    await requirePrereqs();
+    const located = await locateRenderedMedia(target, relPath);
+    const { t } = located;
+    const layout = renderReviewLayout(t);
+    const ffmpegPath = await ffmpegPathOnly();
+    const submitted = jobs.startTask({
+      kind: 'render-review',
+      targetId: t.id,
+      run: async ({ onPhase, signal, onChildPid }) => {
+        onPhase('measuring-picture');
+        return measureRenderedPicture({
+          filePath: located.abs, fps: t.fps, totalFrames: t.durationInFrames,
+          sceneLayout: layout, ffmpegPath, signal, onSpawn: onChildPid,
+        });
+      },
+    });
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.FFMPEG_FAILED,
+        status.error?.message ?? 'render measurement failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, state: status.state, phase: status.phase,
+        target: localId(t.id), path: located.path, stillRunning: true,
+        hint: `Still measuring the picture (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — the report arrives as the job result.`,
+      });
+    }
+    return ok({ jobId: submitted.jobId, target: localId(t.id), path: located.path, ...status.result });
+  }),
+);
+
 /**
  * Proxy metadata per jobId, so get_render_status can tell a proxy draft from
  * a deliverable render. It lives BESIDE the JobManager rather than inside it:
@@ -1146,10 +1292,11 @@ server.registerTool(
       'running and you get the current snapshots with timedOut: true — CALL IT AGAIN to keep watching, which is the ' +
       'normal way to wait out a long render. The ceiling is deliberately below the typical 60s MCP client request ' +
       'timeout: waiting longer in one call returns a transport error instead of the snapshot, which tells you nothing ' +
-      'about the jobs. Job ids live in server memory only — if the server restarts they are gone and every id returns ' +
-      'job_not_found, so verify finished work by its output file, not by id. Errors: job_not_found if any id is unknown.',
+      'about the jobs. Job ids live in server memory only — if the server restarts, wait_for_render returns each lost ' +
+      'id as terminal state "not_found" while preserving the other snapshots. Verify finished work by its output file; ' +
+      'get_render_status still reports job_not_found for its one unknown id.',
     inputSchema: {
-      jobIds: z.array(z.string()).min(1).max(16).describe('Job ids from render; every id must exist'),
+      jobIds: z.array(z.string()).min(1).max(16).describe('Job ids from render or a task; expired ids return state "not_found"'),
       timeoutMs: z
         .number()
         .int()
@@ -1252,9 +1399,11 @@ server.registerTool(
       target: z.string().describe('Scene id "<film>/<scene>" or film id "<film>"'),
       outputFilename: z.string().optional()
         .describe('Bare .wav filename inside the "out" dir (default audio-preview.wav)'),
+      waitMs: z.number().int().min(0).max(50_000).default(45_000)
+        .describe('Block up to this long; a longer mix returns a jobId to poll with wait_for_render'),
     },
   },
-  wrap(async ({ target, outputFilename }) => {
+  wrap(async ({ target, outputFilename, waitMs }) => {
     await requirePrereqs();
     const t = await describeTarget(target);
     const tracks = await t.getTracks();
@@ -1284,53 +1433,82 @@ server.registerTool(
     const ffmpegPath = await ffmpegPathOnly();
     const videoDurationSec = t.durationInFrames / t.fps;
 
-    await mixAudioOnly({
-      audioTracks: tracks, outputPath, fps: t.fps,
-      assetRoot: t.path, output: { audioLimiter: t.output.audioLimiter !== false }, ffmpegPath, videoDurationSec,
-    });
+    const submitted = jobs.startTask({
+      kind: 'audio-preview',
+      targetId: t.id,
+      run: async ({ onPhase, signal }) => {
+        onPhase('mixing');
+        await mixAudioOnly({
+          audioTracks: tracks,
+          outputPath,
+          fps: t.fps,
+          assetRoot: t.path,
+          output: { audioLimiter: t.output.audioLimiter !== false },
+          ffmpegPath,
+          videoDurationSec,
+          signal,
+        });
 
-    // Per-clip levels: direct PCM read for WAVs, ffmpeg decode for the rest.
-    const trackReport = [];
-    for (const tr of tracks) {
-      const abs = path.resolve(t.path, tr.src);
-      let levels = { peakDb: null, meanDb: null };
-      let clipDurationSec = null;
-      if (/\.wav$/i.test(tr.src)) {
-        levels = await measureWavLevels(abs).catch(() => levels);
-        clipDurationSec = await wavDurationSeconds(abs).catch(() => null);
-      } else {
-        levels = (await measureAudioLevels({ filePath: abs, ffmpegPath })) ?? levels;
-      }
-      trackReport.push({ ...tr, clipPeakDb: levels.peakDb, clipMeanDb: levels.meanDb, ...(clipDurationSec !== null ? { clipDurationSec: Number(clipDurationSec.toFixed(3)) } : {}) });
-    }
-    // Balance check: a track buried >=10 dB under a louder overlapping track
-    // renders "successfully" and never clips — this is the only place the
-    // problem becomes visible to a caller that cannot listen.
-    const balanceWarnings = computeBalanceWarnings(trackReport, { fps: t.fps, videoDurationSec });
-    const mix = await measureWavLevels(outputPath).catch(() => ({ peakDb: null, meanDb: null }));
-    // Whole-file peak/mean can look healthy while the tail is dead — report a
-    // per-second envelope so a mix that goes silent early is visible here
-    // instead of only in the rendered film.
-    const envelope = await measureWavEnvelope(outputPath).catch(() => null);
+        onPhase('measuring');
+        // Per-clip levels: direct PCM read for WAVs, ffmpeg decode for the rest.
+        const trackReport = [];
+        for (const tr of tracks) {
+          const abs = path.resolve(t.path, tr.src);
+          let levels = { peakDb: null, meanDb: null };
+          let clipDurationSec = null;
+          if (/\.wav$/i.test(tr.src)) {
+            levels = await measureWavLevels(abs).catch(() => levels);
+            clipDurationSec = await wavDurationSeconds(abs).catch(() => null);
+          } else {
+            levels = (await measureAudioLevels({ filePath: abs, ffmpegPath, signal })) ?? levels;
+          }
+          trackReport.push({ ...tr, clipPeakDb: levels.peakDb, clipMeanDb: levels.meanDb, ...(clipDurationSec !== null ? { clipDurationSec: Number(clipDurationSec.toFixed(3)) } : {}) });
+        }
+        // Balance check: a track buried >=10 dB under a louder overlapping track
+        // renders "successfully" and never clips — this is the only place the
+        // problem becomes visible to a caller that cannot listen.
+        const balanceWarnings = computeBalanceWarnings(trackReport, { fps: t.fps, videoDurationSec });
+        const mix = await measureWavLevels(outputPath).catch(() => ({ peakDb: null, meanDb: null }));
+        // Whole-file peak/mean can look healthy while the tail is dead — report a
+        // per-second envelope so a mix that goes silent early is visible here
+        // instead of only in the rendered film.
+        const envelope = await measureWavEnvelope(outputPath).catch(() => null);
 
-    return ok({
-      target: localId(t.id),
-      kind: t.kind,
-      outputPath,
-      durationSeconds: Number(videoDurationSec.toFixed(3)),
-      limiter: t.output.audioLimiter !== false,
-      balanceWarnings,
-      tracks: trackReport,
-      mix: {
-        peakDb: mix.peakDb,
-        meanDb: mix.meanDb,
-        clipping: mix.peakDb !== null && mix.peakDb >= -0.1,
-        ...(envelope ? {
-          envelopeDb: envelope.envelopeDb,
-          silentTailSeconds: envelope.silentTailSeconds,
-        } : {}),
+        return {
+          target: localId(t.id),
+          kind: t.kind,
+          outputPath,
+          durationSeconds: Number(videoDurationSec.toFixed(3)),
+          limiter: t.output.audioLimiter !== false,
+          balanceWarnings,
+          tracks: trackReport,
+          mix: {
+            peakDb: mix.peakDb,
+            meanDb: mix.meanDb,
+            clipping: mix.peakDb !== null && mix.peakDb >= -0.1,
+            ...(envelope ? {
+              envelopeDb: envelope.envelopeDb,
+              silentTailSeconds: envelope.silentTailSeconds,
+            } : {}),
+          },
+        };
       },
     });
+
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.FFMPEG_FAILED,
+        status.error?.message ?? 'audio preview failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, state: status.state, phase: status.phase,
+        target: localId(t.id), kind: t.kind, outputPath, stillRunning: true,
+        hint: `Still mixing audio (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — the report arrives as the job result.`,
+      });
+    }
+    return ok({ jobId: submitted.jobId, ...status.result });
   }),
 );
 
@@ -1430,6 +1608,8 @@ server.registerTool(
       'CONFIDENCE IS REPORTED, NOT HIDDEN: per-sentence `minTokenP`/`meanTokenP` and per-word `p`. A low minTokenP ' +
       'means the model guessed — never put such a sentence on screen verbatim without the user reading it. Proper ' +
       'nouns and technical terms come back wrong often enough to matter; TIMING is far more reliable than spelling. ' +
+      'An English-only .en model refuses an explicit non-English language with transcription_language_unsupported ' +
+      'rather than returning a plausible but wrong transcript; use a multilingual model or omit language for auto-detection. ' +
       'Vendor: whisper.cpp, local and offline, NO API key. An unconfigured machine fails with ' +
       'transcription_unavailable naming the fix — that is for the user to fix, do not retry. Check availability ' +
       'with list_vendors (capability "transcription"). ' +
@@ -1447,7 +1627,7 @@ server.registerTool(
       fps: z.number().positive().max(240).optional()
         .describe('Frame rate every *InFrames field is reported at (default: the target\'s fps, else 30)'),
       language: z.string().optional()
-        .describe('Spoken language, e.g. "en" — omit to auto-detect (naming it is faster and more accurate)'),
+        .describe('Spoken language, e.g. "en" — omit to auto-detect; an English-only .en model refuses an explicit non-English language'),
       model: z.string().optional()
         .describe('Vendor model name, e.g. "small.en" / "large-v3" (see list_vendors); omit for the configured default'),
       vendor: z.enum(TRANSCRIPTION_VENDORS).optional()
@@ -1750,6 +1930,7 @@ server.registerTool(
       ...(r.hasAudio !== undefined ? { hasAudio: r.hasAudio } : {}),
       ...(r.frames ? { frames: r.frames } : {}),
       ...(r.notes ? { notes: r.notes } : {}),
+      ...(r.assumptions ? { assumptions: r.assumptions } : {}),
       hint: mode === 'audio'
         ? `Put it on a timeline with ${t.kind === 'scene' ? 'update_scene_config' : 'update_film'} { audio: [{ src: "${normalized}" }] }, then check the mix with preview_audio.`
         : mode === 'video' && signature
@@ -1925,6 +2106,7 @@ server.registerTool(
     }
     // Reuse the sandbox's write guards (allow-list incl. .wav, traversal/symlink checks).
     const abs = resolveInTarget(t.path, normalized, { forWrite: true, asAsset: true });
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
 
     // Hand the dispatcher the decision already made above rather than letting it
     // resolve again. Before preference chains that was merely wasted work
@@ -2308,6 +2490,7 @@ server.registerTool(
       throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, `Music must be written under assets/ (got "${relPath}")`, { path: relPath });
     }
     const abs = resolveInTarget(t.path, normalized, { forWrite: true, asAsset: true });
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
 
     // As with speech: hand the dispatcher the resolution already made, so the
     // vendor that was probed is the vendor that renders (see synthesize_speech).
@@ -2435,6 +2618,7 @@ server.registerTool(
       throw new EngineError(ErrorCodes.PATH_NOT_ALLOWED, `SFX must be written under assets/ (got "${relPath}")`, { path: relPath });
     }
     const abs = resolveInTarget(t.path, normalized, { forWrite: true, asAsset: true });
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
 
     // fps and the default length come from the target, so a bed spans the
     // composition (or the film) without the caller restating what the engine

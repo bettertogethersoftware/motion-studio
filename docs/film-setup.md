@@ -59,11 +59,13 @@ destination** drops a small JSON sidecar beside its output:
 ```
 scenes/<scene>/out/output.mp4
 scenes/<scene>/out/output.mp4.render.json
-  { frames, width, height, fps, format, pixFmt, transparent, renderedAt }
+  { frames, width, height, fps, format, pixFmt, transparent,
+    colorPrimaries, colorTransfer, colorMatrix, colorRange, renderedAt }
 ```
 
 Those are exactly the fields the concat signature is built from, plus the frame
-count. `pixFmt` and `transparent` joined the list in v0.22 — they were always part
+count. The colour fields mean an older sidecar remains unverified on colour while
+a fresh render made under a different colour contract becomes stale. `pixFmt` and `transparent` joined the list in v0.22 — they were always part
 of the signature, so leaving them unrecorded meant a film-wide change to either
 broke the concat contract with nothing reporting it. A sidecar written before that
 release simply has less to say: it stays *unverified* on those two fields rather
@@ -144,10 +146,10 @@ the same `filmOffset` / `durationInFrames` / `startSeconds` fields either way, s
 Footage additionally carries what the probe measured — `width`, `height`, `fps`,
 `codec`, `pixFmt`, `signature`, `actualFrames`, `hasAudio`, and `color`
 (`{ primaries, transfer, matrix, range }`, each `null` when the file does not say).
-`color` is reported but **not** enforced: it is the one segment property that
-differs visibly without failing anything, and this is the only place you can see
-it. The scenes have no counterpart to compare it against — see the colour bullet
-under [the consistency invariant](#the-consistency-invariant).
+`color` is reported so you can see the source properties. `transcode_asset {
+matchFilm: "<film>" }` now converts a footage segment to the stated film colour
+contract; when source colour metadata is incomplete it records the bt709 input
+assumption in its response instead of hiding it.
 
 ### Lip sync is yours, and should stay that way
 
@@ -199,8 +201,8 @@ it, as `plan.signature` on every film tool that returns a plan:
   "ffmpegArgs": ["-c:v","libx264","-preset","medium","-crf","18",
                  "-pix_fmt","yuv420p","-movflags","+faststart"],
   "copyConcat": true,
-  "color": { "stated": false, "primaries": null, "transfer": null,
-             "matrix": null, "range": null },
+  "color": { "stated": true, "primaries": "bt709", "transfer": "iec61966-2-1",
+              "matrix": "bt709", "range": "tv" },
   "mustMatch": ["codec","width","height","fps","pixFmt","container"],
   "neednotMatch": ["gopSize","profile","level","bitrate"],
   "matchForLooks": ["crf","preset","colorPrimaries","colorTransfer",
@@ -238,50 +240,22 @@ engine's, and the concat succeeded *despite* it.
   only segment 1's — so a mismatch is a look difference rather than an error.
   `crf`/`preset` live there (the category the bullet above described in prose and
   had nowhere to put), and so do the colour tags.
-- **Colour is reported as *unstated*, and that is the honest answer.** The engine
-  passes no colour arguments at all, so a scene's tags are whatever Chromium's
-  PNGs and ffmpeg's default conversion happen to produce — which is why
-  `signature.color.stated` is `false` and every value beside it is `null`. Naming
-  a value there would mean probing a rendered file: a second copy of the truth,
-  available only after a render, and describing the installed Chromium/ffmpeg
-  pair rather than a decision anyone made.
-
-  Measured on a real build (`motion-studio-promo`, ffmpeg 8.1.1):
-
-  | | primaries | transfer | matrix | range |
-  |---|---|---|---|---|
-  | scene render | `bt709` | `iec61966-2-1` (sRGB) | *unset* | `tv` |
-  | camera footage | `bt709` | `bt709` | `bt709` | `tv` |
-
-  Both are `yuv420p`, so they stream-copy and every frame decodes — but the joined
-  file advertises only segment 1's tags. `ffmpeg -i film.mp4 -f null -` logs
-  *"Reconfiguring filter graph because video parameters changed"* at the footage
-  boundary, and a player honouring transfer characteristics renders those frames
-  at a slightly different gamma. **A look difference, never a broken concat.**
-
-- **`matchFilm` deliberately carries no colour arguments,** and the reason is
-  measured rather than assumed:
-  - **`-color_primaries` and `-color_trc` are silently ignored here.** Re-encoding
-    `bt709` footage with `-color_trc iec61966-2-1` produced a file still tagged
-    `transfer=bt709`: frame properties from the decoder win over the output
-    option. Passing them would make the tool *report* a conform it did not
-    perform, which is worse than carrying nothing.
-  - **The one flag that does take, `-colorspace`, changes pixels.** It re-matrixes
-    the picture (different `framemd5`, ~+3% bitrate) — a re-encode of the image,
-    not a tag. Only `-vf setparams=…` sets all three, and it converts too.
-  - **The scenes are not a coherent target yet.** A render forced to
-    `setparams=colorspace=smpte170m` is *byte-identical* to today's output, which
-    means the engine converts RGB→YUV with the **bt601** matrix while tagging the
-    result `bt709`/sRGB with the matrix left unset. The file does not agree with
-    itself, so conforming footage to it would replicate an accident — and freeze
-    it into a `.transcode.json` identity that survives the next ffmpeg upgrade.
-
-  Making colour part of the contract therefore starts at the *render* encode, not
-  at `transcode_asset`: state it once there and it becomes config-derived, so the
-  signature reports it under the same rule as everything else and `matchFilm`
-  inherits it. That change alters rendered pixels, so it is a deliberate decision
-  rather than a fix to slip in — it is planned, not done:
-  [todo_task/film-colour-plan.md](todo_task/film-colour-plan.md).
+- **Colour is stated at the render encode.** Final colour-carrying outputs use
+  BT.709 primaries and matrix, sRGB transfer (`iec61966-2-1`), and TV range.
+  `signature.color` is derived from the same `setparams` decision and reports
+  `stated: true`; GIF and PNG-sequence correctly remain unstated because they do
+  not carry this YUV delivery contract.
+- **`matchFilm` converts colour; it does not just relabel footage.** The filter
+  chain it owns adds `colorspace=all=bt709:trc=srgb` to the film's encode
+  contract. An input that lacks complete colour metadata is assumed to be BT.709
+  and that decision returns as `assumptions.color`, including on a cached call.
+  The assumption is visible because it is not a measurement.
+- **Colour participates in render staleness.** Current sidecars record
+  `colorPrimaries`, `colorTransfer`, `colorMatrix`, and `colorRange`; a changed
+  value is a `stale_render` problem. Older sidecars that predate these fields are
+  unverified rather than falsely declared compatible. See
+  [task_completed/film-colour-plan.md](task_completed/film-colour-plan.md) for the design
+  record and historical measurements that led to this choice.
 
 **Do not confuse this with the render-browser codec rule.** Video played *inside a
 composition* must be VP8/VP9/AV1 in `.webm`, because the render browser is

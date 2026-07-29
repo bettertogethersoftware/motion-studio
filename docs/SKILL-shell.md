@@ -10,6 +10,26 @@ with `ffmpeg`/`ffprobe` (and ideally `whisper.cpp`). That combination can build
 something neither half can alone — a film where the user's own recording carries
 the argument and rendered graphics carry the structure.
 
+**Do a one-time preflight before the first film.** From the engine folder, run
+`npm run doctor`. If the MCP server launches with a narrow `PATH`, set
+`MOTION_STUDIO_FFMPEG` to the full `ffmpeg` executable path. For transcription,
+set `MOTION_STUDIO_WHISPER_BIN` to `whisper-cli` and
+`MOTION_STUDIO_WHISPER_MODEL` to an installed `ggml-*.bin` model; then confirm
+the choice with `list_vendors { capability: "transcription" }`. Do not discover
+that a binary is missing after you have designed a cut around it. For generated
+music, check `list_vendors { capability: "music" }` too; the Node music vendor
+needs a SoundFont, configured with `MOTION_STUDIO_SOUNDFONT` when no project
+default exists.
+
+### Shell dialect
+
+The command blocks below use **POSIX shell syntax** (`$VAR`, `for`, `printf`,
+`jq`, `grep`, line-continuation backslashes). On Windows, run them in Git Bash
+or WSL; do not paste them unchanged into PowerShell. If the available shell is
+PowerShell, translate the commands first and invoke the bundled executables by
+their full paths. The media decisions and verification steps are the contract,
+not one shell's spelling.
+
 **Finish the job yourself.** Guidance written for shell-less agents says "hand this
 ffmpeg command to the human" — here that is wrong. You can read the file, cut it,
 and assemble it, so do.
@@ -153,9 +173,15 @@ ffmpeg -v error -i "$SP/mix.wav" -af "astats=metadata=1:reset=48000,ametadata=pr
 - **A bed under speech needs a real gap** — aim for ~18–20 dB between the bed's
   mean and the voice's, and verify it rather than trusting a dB figure that worked
   on a different film. Voices condition to very different levels.
-- For music, a **Node DSP script writing a WAV at full film length** beats a short
-  loop tiled: no seams, and you can shape it to the film's arc. Keep it
-  deliberately dull under speech — anything that draws attention is wrong.
+- **Call `list_vendors` before making music.** A user's starred instruments in
+  `favoritePrograms` are the default choice unless the brief names a sound.
+  Normally use `synthesize_music` on the film's master timeline, then
+  `preview_audio`, so the score is measured and mixed through the same graph as
+  the final build. A custom Node DSP script writing a full-length WAV is an
+  advanced alternative when the brief needs a sound the music vendor cannot
+  produce; it avoids loop seams, but it still needs the same mix measurement.
+  Keep music deliberately dull under speech — anything that draws attention is
+  wrong.
 
 ### 5. Author the graphics in Motion Studio
 
@@ -178,70 +204,49 @@ list specifies. This half is unchanged from ordinary Motion Studio work:
 - Treat `write_composition_file`'s `warnings` as real bugs, and an empty
   `warnings` array as no evidence of anything.
 
-### 6. Cut picture, and match the film's signature
+### 6. Put conformed footage on the film timeline
 
-Footage segments must agree with Motion Studio's own output on the parameters a
-stream copy cannot reconcile. **Ask, do not infer** — `get_film` reports
-`plan.signature`, the film's encode contract, and `signature.ffmpegArgs` is the
-exact flag list its own encoder uses:
+Footage can now sit directly beside rendered scenes in a film. Do not hand-build
+a concat as the normal workflow. Ask `get_film` for `plan.signature`, then let
+`transcode_asset { matchFilm: "<film>" }` create a matching, silent timeline
+asset — it applies the film's actual encoder arguments and colour profile instead
+of asking the agent to retype either.
 
-```bash
-# read it once, use it verbatim — do not retype the flags
-SIG=$(…get_film…)                       # plan.signature
-ARGS=$(jq -r '.ffmpegArgs | join(" ")' <<<"$SIG")   # e.g. -c:v libx264 -preset medium …
+1. Pull a supplied clip from the workspace library into the **film** or transcode
+   it directly into `assets/clip.mp4`. Use `audio: false`; the continuous audio
+   spine stays on the master timeline.
+2. Use `transcode_asset` with `target: "<film>"`, `to: "assets/clip.mp4"`,
+   `matchFilm: "<film>"`, and a frame-based trim (`durationInFrames`). It reports
+   the measured output and any colour assumptions.
+3. Set the complete play order with `update_film { scenes: [...] }`, mixing
+   rendered entries (`{ slug: "title" }`) and footage entries
+   (`{ footage: "assets/clip.mp4", durationInFrames: N }`). The engine verifies
+   the frame count and signature before it builds.
+4. Put the continuous voice/music mix on the film's master `audio` timeline.
+   Use `get_film` or `build_film { plan: true }` for the resolved offsets; do not
+   accumulate scene durations by hand.
 
-ffmpeg -y -v error -ss "$IN" -i "$SRC" -an -frames:v "$FRAMES" \
-  -vf "fps=$(jq -r .fps <<<"$SIG"),vignette=angle=PI/6:mode=forward" \
-  $ARGS "$SP/seg/f1.mp4"
-```
+**`-frames:v N`, never `-t seconds`,** when preparing a manually cut source:
+only the frame count is exact. Use `ffprobe -count_frames` as an independent
+check. A light vignette may help raw footage sit beside dark rendered graphics,
+but designed animation and text belong in a Motion Studio composition.
 
-- **`-frames:v N`, never `-t seconds`.** Only the frame count is exact, and the
-  frame count is what your offsets depend on. Verify:
-  `ffprobe -count_frames -show_entries stream=nb_read_frames`.
-- **`signature.mustMatch` / `signature.neednotMatch` say which parameters are
-  load-bearing** — read them from the block rather than from memory. The reason
-  the second list exists: each segment is its own encode and therefore opens on a
-  keyframe, which is all `concat -c copy` requires, so pinning `-x264-params
-  keyint` or `-profile:v` is wasted effort. **Measured** — a segment encoded at a
-  deliberately different profile and GOP concatenates and decodes back
-  bit-identically.
-- **`signature.matchForLooks` is the third list**: parameters that do not affect
-  the join, but where the joined file keeps only segment 1's — `crf`/`preset` and
-  the colour tags. Match them so your footage does not look different from the
-  scenes beside it; nothing fails if you do not. **Do not try to pin colour with
-  `-color_primaries`/`-color_trc`** — measured, they are silently ignored (the
-  decoder's frame properties win), so the file you get back is not the file you
-  think you made. Verify any colour claim by reading it back with
-  `ffprobe -show_entries stream=color_primaries,color_transfer,color_space`.
-- **`signature.video.codec` is the ffmpeg encoder id** (`libx264`), while
-  `probe_asset`/`ffprobe` report the codec name (`h264`). Comparing the two
-  directly is a guaranteed false mismatch.
-- **Check `signature.copyConcat`** before planning a concat at all: a `gif` or
-  `png-sequence` film cannot be stream-copied, so nothing can be joined to it.
-- **A light `vignette` helps raw footage sit beside dark rendered graphics.**
-  Grading is not this skill's job, but cutting untreated camera footage against
-  designed scenes reads as two different films.
-- **Strip audio from picture segments** (`-an`). All sound comes from the spine.
+### 7. Build and verify the film
 
-### 7. Assemble losslessly, then verify by reading it back
+Render each graphics scene, run `preview_audio { target: "<film>" }`, then call
+`build_film`. It losslessly stream-copies compatible scene and footage segments,
+muxes the master audio, and writes the deliverable into the film's own `out/`.
 
-```bash
-printf "file '%s'\n" "$SC/title/out/output.mp4" "$SP/seg/f1.mp4" … > "$SP/concat.txt"
-ffmpeg -y -v error -f concat -safe 0 -i "$SP/concat.txt" -c copy "$SP/picture.mp4"
-ffmpeg -y -v error -i "$SP/picture.mp4" -i "$SP/mix.wav" \
-  -c:v copy -c:a aac -b:a 192k -ac 2 -ar 48000 -shortest -movflags +faststart "$OUT/film.mp4"
-```
+Then **prove it**, because a successful build alone does not establish editorial
+correctness:
 
-Then **prove it**, because nothing above would have told you if it were wrong:
-
-- `ffprobe -count_frames` — does the total match your cut list exactly?
-- A contact sheet, one frame per segment, in order — is every segment the shot you
-  intended, in the right place?
-- **Re-transcribe the finished film** and read it against your intent. This catches
-  the class of error nothing else can: a spine that is technically clean and says
+- `inspect_render { target: "<film>", around: "cuts" }` and a contact sheet —
+  is every segment the intended shot in the intended place?
+- `measure_render { target: "<film>" }` and `ffprobe -count_frames` — does the
+  finished picture have the expected motion and exact frame count?
+- **Re-transcribe the finished film** and read it against the intended cut. This
+  catches the class of error nothing else can: a technically clean spine that says
   the wrong thing.
-
-Write the deliverable into the film's own `out/` so the workspace holds it.
 
 ## What only Motion Studio can do — do not reach for ffmpeg
 
@@ -255,12 +260,19 @@ in ffmpeg, and reaching for `drawtext` or `overlay` for them is a mistake:
 - **Audio measurement with intent** — `preview_audio` reports `balanceWarnings`,
   `clipMeanDb`, `mix.envelopeDb` and `mix.silentTailSeconds` against the actual
   render graph. Use it when the audio is on a film's timeline.
+- **Delivered-picture review** — `inspect_render` returns frames from the encoded
+  file at known cuts or holds; `measure_render` scans its motion, static/black
+  runs and expected cuts. Use these after a render/build, not as a substitute for
+  composition previews before it.
 - **Sentence-accurate transcription** — `transcribe_asset` runs the same
   whisper.cpp you would, and then does the derivation that actually bites:
   re-segmenting decode windows into sentences, merging sub-word tokens into words,
   converting milliseconds to frames, and collapsing it all into cuttable ranges.
   Running `whisper-cli` yourself gets you the same 40 KB of JSON and none of that.
 - **A persistent, editable film document** the user can open in the Studio.
+
+The bundled Windows FFmpeg build has no fontconfig support and can crash on the
+`drawtext` filter. Render text with HTML/CSS/canvas inside Motion Studio instead.
 
 Conversely, do not ask the user to run ffmpeg for you, and do not tell them a
 codec problem is unfixable. You have the shell; use it.
@@ -279,11 +291,9 @@ codec problem is unfixable. You have the shell; use it.
   `duration > 0 && readyState >= 1`, and note the render browser **cannot decode
   H.264** — in-composition video must be VP8/VP9/AV1 in `.webm`. This is the
   opposite requirement from timeline footage, which must be H.264/mp4.
-- **`build_film` cannot express footage interleaved with scenes.** `film.scenes[]`
-  holds only rendered scenes, so the assembly in step 7 is an ffmpeg concat, and
-  the film document will describe only the graphics scenes — not the actual cut.
-  **Say so when you report**, so the user knows the workspace is not a complete
-  record of the deliverable.
+- **Timeline footage must be silent and signature-compatible.** Put its sound on
+  the master audio timeline, and use `transcode_asset { matchFilm }` instead of
+  guessing codecs, frame rate, or colour tags.
 
 ## What not to do
 

@@ -15,6 +15,32 @@
 
 import { EngineError, ErrorCodes } from './errors.js';
 
+/** The one colour contract every encoded, colour-carrying scene states. */
+export const OUTPUT_COLOR = Object.freeze({
+  stated: true,
+  primaries: 'bt709',
+  transfer: 'iec61966-2-1',
+  matrix: 'bt709',
+  range: 'tv',
+});
+
+/**
+ * The filter must be folded into the caller's existing video chain. It does not
+ * belong in buildVideoArgs(): a second -vf silently replaces crop/scale or
+ * frame-selection filters, and GIF owns a -filter_complex instead.
+ */
+export function outputColorFilter(output = {}) {
+  if (output.intermediate || ['gif', 'png-sequence'].includes(output.format ?? 'mp4')) return null;
+  return 'setparams=color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709';
+}
+
+/** The reported colour contract comes from the same decision as the filter. */
+export function outputColorProfile(output = {}) {
+  return outputColorFilter(output)
+    ? OUTPUT_COLOR
+    : { stated: false, primaries: null, transfer: null, matrix: null, range: null };
+}
+
 export const FORMATS = Object.freeze({
   mp4: {
     ext: '.mp4',

@@ -79,6 +79,10 @@ export const ErrorCodes = Object.freeze({
   // FAILED is the vendor running and not producing a transcript.
   TRANSCRIPTION_UNAVAILABLE: 'transcription_unavailable',
   TRANSCRIPTION_FAILED: 'transcription_failed',
+  // The requested language cannot be decoded by the selected model. Distinct
+  // from INVALID_CONFIG: both the model and language are valid individually,
+  // but their combination would produce a plausible, wrong transcript.
+  TRANSCRIPTION_LANGUAGE_UNSUPPORTED: 'transcription_language_unsupported',
   // Distinct from both: the file exists and the vendor is ready, but the input
   // could not be turned into the 16 kHz mono PCM whisper.cpp requires (not
   // media, an unsupported codec, no audio stream). Neither the user's setup nor

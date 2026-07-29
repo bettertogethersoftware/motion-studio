@@ -22,7 +22,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { EngineError, ErrorCodes } from './errors.js';
-import { getFormat } from './formats.js';
+import { getFormat, outputColorProfile } from './formats.js';
 import { concatSegments, muxAudio, measureAudioLevels } from './encoder.js';
 
 /** Peak (dBFS) at or above which the mix is reported as clipping. */
@@ -127,6 +127,7 @@ export function renderMetaPath(scenePath, cfg) {
  * and build_film would stitch a file that could not stream-copy.
  */
 function metaFromConfig(cfg, frames) {
+  const color = outputColorProfile(cfg.output);
   return {
     frames,
     width: cfg.width,
@@ -135,6 +136,10 @@ function metaFromConfig(cfg, frames) {
     format: cfg.output?.format ?? 'mp4',
     pixFmt: cfg.output?.pixFmt ?? 'yuv420p',
     transparent: cfg.output?.transparent ?? false,
+    colorPrimaries: color.primaries,
+    colorTransfer: color.transfer,
+    colorMatrix: color.matrix,
+    colorRange: color.range,
   };
 }
 
@@ -174,7 +179,10 @@ export function renderStaleness(meta, cfg) {
   if (!meta) return null;
   const current = metaFromConfig(cfg, cfg.durationInFrames);
   const changed = [];
-  for (const k of ['frames', 'width', 'height', 'fps', 'format', 'pixFmt', 'transparent']) {
+  for (const k of [
+    'frames', 'width', 'height', 'fps', 'format', 'pixFmt', 'transparent',
+    'colorPrimaries', 'colorTransfer', 'colorMatrix', 'colorRange',
+  ]) {
     // An older/partial sidecar simply has less to say — only compare what it
     // recorded. That is also the whole backward-compatibility story for the two
     // fields added in v0.22: a pre-v0.22 sidecar has no pixFmt/transparent, so
