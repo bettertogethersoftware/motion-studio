@@ -345,3 +345,56 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .levels { font: 12px var(--mono); margin-top: 8px; }
 .levels .clip { color: var(--err); }
 .levels .ok { color: var(--ok); }
+
+/* Platform deliverables stay compact because the inspector is narrow. The
+   card is editable data, while the generated contact sheet remains the visual
+   proof of the crop and social-safe caption region. */
+.deliverable-card { margin: 10px 0; padding: 9px; border: 1px solid var(--line); background: rgba(255,255,255,.018); }
+.deliverable-card-head { display: flex; align-items: baseline; gap: 7px; margin-bottom: 8px; }
+.deliverable-card-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--mono); color: var(--text); }
+.deliverable-card-head .mono { font-size: 10px; }
+.deliverable-card-head button { margin-left: auto; }
+.deliverable-card .insp-row { margin-bottom: 7px; }
+.deliverable-card .note { margin: 5px 0; font-size: 10px; line-height: 1.45; }
+.deliverable-focus { margin-top: 8px; border-top: 1px solid rgba(124,131,148,.28); }
+.deliverable-focus summary { padding: 7px 0 3px; cursor: pointer; color: var(--dim); font: 10px var(--mono); }
+.deliverable-focus-row { display: flex; align-items: end; gap: 5px; padding: 5px 0; border-top: 1px solid rgba(124,131,148,.16); }
+.deliverable-focus-row label { flex: 0 0 54px; font-size: 9px; }
+.deliverable-focus-row label input { width: 100% !important; }
+.deliverable-focus-name { flex: 1 1 56px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 10px var(--mono); }
+.deliverable-default { font-size: 9px; }
+.deliverable-add { margin-top: 8px; }
+.deliverable-add > button { align-self: end; white-space: nowrap; }
+
+/* Persisted delivery review: the image is the real staged-and-promoted file,
+   while the CSS grid mirrors the contact-sheet cells so frame/context labels
+   and findings stay attached to the evidence rather than a reconstructed
+   timeline. */
+.output-review { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.review-head strong { font: 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+.review-count { color: var(--ok); font: 10px var(--mono); }
+.review-count.block { color: var(--err); }
+.review-contact { position: relative; background: #10141d; border: 1px solid var(--line); overflow: hidden; }
+.review-contact > img { display: block; width: 100%; height: auto; }
+.review-thumb-grid { position: absolute; inset: 4px; gap: 4px; display: grid; pointer-events: none; }
+.review-thumb { position: relative; min-width: 0; border: 1px solid transparent; }
+.review-thumb.has-warning { border-color: rgba(226, 116, 101, 0.94); background: rgba(96, 25, 22, 0.12); }
+.review-thumb-label {
+  position: absolute; left: 2px; right: 2px; bottom: 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  padding: 1px 3px; background: rgba(12, 14, 18, 0.76); color: #eef0f5; font: 8px/1.25 var(--mono);
+}
+.review-thumb-badge {
+  display: block; position: relative; z-index: 1; width: max-content; max-width: calc(100% - 4px); margin: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px;
+  background: rgba(12, 14, 18, 0.82); color: var(--accent); font: 8px/1.2 var(--mono);
+}
+.review-thumb-badge.block { color: #fff; background: var(--err); }
+.review-thumb-badge.warn { color: #2b1d00; background: var(--accent); }
+.review-facts { margin: 6px 0 0; font: 10px/1.45 var(--mono); }
+.review-warning-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 150px; overflow-y: auto; }
+.review-warning-list li { display: flex; gap: 6px; align-items: baseline; padding: 4px 0; border-top: 1px solid rgba(124, 131, 148, 0.18); color: var(--dim); font: 10px/1.35 var(--mono); }
+.review-warning-list li.block { color: var(--err); }
+.review-warning-list li.warn { color: var(--accent); }
+.review-warning-code { flex: 0 0 auto; color: var(--text); font-size: 9px; }
+.review-loading { margin: 0; font: 11px var(--mono); }

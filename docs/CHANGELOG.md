@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+### Direct ComfyUI image, video, and music generators
+
+The shell-capable authoring workflow now has dedicated helpers for local Qwen
+Image 2512, local Ideogram 4, local Krea 2, paid Wan partner video generation,
+and local ACE-Step 1.5 music. Every helper prints machine-readable JSON, performs
+model/node readiness checks, supports reproducible seeds and idempotency
+sidecars, and writes requested outputs under the caller's chosen path.
+
+The Ideogram guide now makes structured JSON captions the primary workflow.
+Plain text can trigger a false safety-filter placeholder even for a harmless
+prompt; the verified JSON smoke test rendered the exact requested headline.
+Wan remains cost-guarded and does not submit until the caller explicitly adds
+`--confirm-cost`. ACE-Step documentation includes instrumental, English vocal,
+and Mandarin metal-rock examples plus the handoff into Motion Studio's measured
+audio-preview workflow.
+
+### Safe staged delivery promotion
+
+Scene renders and film builds now encode to a hidden `.staging/` file beside the
+delivery, verify the staged frame count when ffprobe is available, then promote
+it with one rename. A failed or cancelled retry no longer truncates or removes a
+previous good delivery. The terminal job status reports `promoted: true` only
+after that rename and reports `framesVerified: false` when the optional frame
+probe was unavailable.
+
+Canonical scene sidecars now record the promoted file's `bytes` and `mtimeMs`.
+If the file is replaced after metadata is written, the plan reports it stale
+even at identical settings; legacy sidecars remain explicitly unverified. The
+Studio's output list hides the staging folder.
+
+### Delivery review artefacts and policy gates
+
+Every staged single-file scene delivery and film build now records a persistent
+`<base>.review.json` plus `<base>.contact.png` from the encoded staging file
+before promotion. The report contains frame/probe/audio/picture facts and
+classified warnings; the contact sheet covers first/last frame, cuts, and
+caption onsets with segment context. Default policy blocks only a verified
+frame-count mismatch, while intentional dark/static/cut findings remain
+warnings. Global `render.review` settings seed the policy and a film can
+override either severity list. A block returns `promotion_blocked`, preserves
+the previous delivery, and leaves staged evidence for diagnosis. The Studio
+film build panel now displays the contact sheet with warning overlays.
+
+### Stage-A platform deliverables: one film, several aspect ratios
+
+Films can now save platform-delivery snapshots for YouTube 16:9, Shorts/TikTok
+9:16, Square 1:1, or a configured custom target. An AI/API caller resolves them
+at `create_film` time (`deliverables: ["youtube-16x9", "shorts-9x16"]`), before
+any scene exists; the chosen snapshot carries target geometry, crop focus,
+caption style, safe areas and an independent filename. No platform named means
+master-only by default — the engine does not silently manufacture three versions.
+
+`build_film { deliverable: "shorts-9x16" }` takes the approved master cut,
+compiles a timeline-aware reframe from the scene layout, and makes one target-size
+finishing encode. It never clones/rebuilds the timeline. Each delivery gets its
+own output, SRT, review JSON and contact sheet; the sheet draws its safe guides.
+Completed jobs expose the exact `deliverable` plus `reEncoded: true`. Studio now
+has platform selection in **new film**, version/crop/caption controls in the film
+inspector, and master/selected/all-version build choices.
+
+### Prepared-footage source provenance
+
+A footage segment may now carry `derivedFrom: { asset, transcodeMeta }`, a small
+pointer to the `.transcode.json` record that made its prepared clip. The film does
+not duplicate that record's trim, crop, or source identity. `transcode_asset`
+returns a ready-to-insert `timelineSegment` with those pointers when it conforms
+video for a film.
+
+`planFilm` reads the sidecar and rechecks the recorded source before a build. A
+source edit, replacement, missing source, or missing sidecar reports
+`footage_source_changed` in the plan and blocks a direct build as well. Existing
+footage with no provenance pointer keeps its previous behavior.
+
 ### Two P1 MCP safeguards: callable mastering and language-safe transcription
 
 `audioTargetPeakDb` and overlay `widthPct` used Zod's `.nullable()` form, which

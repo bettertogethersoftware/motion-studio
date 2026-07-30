@@ -9,9 +9,16 @@
  */
 
 import { spawn } from 'node:child_process';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
+import { runFfmpeg, probeMedia } from './encoder.js';
+import { outputIdentity } from './delivery.js';
 
 export const MAX_RENDER_INSPECTION_FRAMES = 24;
+/** A persistent contact sheet needs more coverage than an inline MCP response. */
+export const MAX_DELIVERY_REVIEW_FRAMES = 96;
 const SAMPLE_WIDTH = 64;
 const SAMPLE_HEIGHT = 36;
 const SAMPLE_BYTES = SAMPLE_WIDTH * SAMPLE_HEIGHT;
@@ -19,7 +26,39 @@ const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
 
 const round = (value, digits = 3) => Number(Number(value).toFixed(digits));
 
-function contextAtFrame(sceneLayout = [], frame) {
+/** Stable policy names persisted in review artifacts and accepted by settings. */
+export const REVIEW_WARNING_CODES = Object.freeze([
+  'frame_count_mismatch',
+  'frame_count_unverified',
+  'static_run',
+  'black_run',
+  'suspect_cut',
+  'audio_clipping',
+  'audio_balance',
+  'audio_silent_tail',
+  'picture_measurement_unavailable',
+  'probe_unavailable',
+  'contact_sheet_truncated',
+]);
+
+/** Conservative by default: production intent, not a heuristic, owns a block. */
+export const DEFAULT_REVIEW_POLICY = Object.freeze({
+  block: Object.freeze(['frame_count_mismatch']),
+  warn: Object.freeze([
+    'static_run',
+    'black_run',
+    'suspect_cut',
+    'audio_clipping',
+    'audio_balance',
+    'audio_silent_tail',
+    'picture_measurement_unavailable',
+    'frame_count_unverified',
+    'contact_sheet_truncated',
+  ]),
+});
+
+/** Find the segment that owns a frame, for both review JSON and Studio labels. */
+export function contextAtFrame(sceneLayout = [], frame) {
   const item = sceneLayout.find((entry) => {
     const start = entry.filmOffset ?? 0;
     return frame >= start && frame < start + (entry.durationInFrames ?? 0);
@@ -32,6 +71,42 @@ function contextAtFrame(sceneLayout = [], frame) {
     startFrame: item.filmOffset ?? 0,
     durationFrames: item.durationInFrames ?? null,
   };
+}
+
+function uniqueKnownCodes(values) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.filter((value) => REVIEW_WARNING_CODES.includes(value)))];
+}
+
+/** Normalize a policy without silently letting the same rule block and warn. */
+export function normalizeReviewPolicy(policy = DEFAULT_REVIEW_POLICY) {
+  const block = uniqueKnownCodes(policy?.block ?? DEFAULT_REVIEW_POLICY.block);
+  const warn = uniqueKnownCodes(policy?.warn ?? DEFAULT_REVIEW_POLICY.warn)
+    .filter((code) => !block.includes(code));
+  return { block, warn };
+}
+
+/** Global settings seed a film; a supplied film policy wins field-by-field. */
+export function resolveReviewPolicy({ globalPolicy, filmPolicy } = {}) {
+  const global = normalizeReviewPolicy(globalPolicy ?? DEFAULT_REVIEW_POLICY);
+  if (!filmPolicy) return global;
+  return normalizeReviewPolicy({
+    block: filmPolicy.block ?? global.block,
+    warn: filmPolicy.warn ?? global.warn,
+  });
+}
+
+/** Attach the producer-facing severity, leaving unconfigured facts as info. */
+export function classifyReviewWarnings(warnings = [], policy) {
+  const resolved = normalizeReviewPolicy(policy);
+  return warnings.map((warning) => ({
+    ...warning,
+    level: resolved.block.includes(warning.code)
+      ? 'block'
+      : resolved.warn.includes(warning.code)
+        ? 'warn'
+        : 'info',
+  }));
 }
 
 /** Return explicitly useful review frames, not a generic uniform sample. */
@@ -109,14 +184,36 @@ function ffmpegCapture({ args, ffmpegPath = 'ffmpeg', what, signal, onSpawn, max
 /** Extract one downscaled PNG from an encoded output, at a frame-number time. */
 export async function extractRenderedFrame({ filePath, frame, fps, maxWidth = 960, ffmpegPath = 'ffmpeg', signal, onSpawn }) {
   const seconds = Math.max(0, frame) / fps;
+  const scale = `scale=${maxWidth}:-2:force_original_aspect_ratio=decrease`;
+  try {
+    const png = await ffmpegCapture({
+      ffmpegPath,
+      what: 'inspect-render',
+      signal,
+      onSpawn,
+      args: [
+        '-hide_banner', '-loglevel', 'error', '-ss', String(seconds), '-i', filePath,
+        '-frames:v', '1', '-vf', scale,
+        '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
+      ],
+    });
+    if (png.length) return png;
+  } catch (fastSeekError) {
+    // Some short MP4s advertise their last packet at the exact container end;
+    // an input seek to that timestamp can return no decoded frame even though
+    // ffprobe counted it. Retry through select=n so the review still samples
+    // the final delivery frame rather than failing an otherwise valid build.
+    if (frame < 1) throw fastSeekError;
+  }
   const png = await ffmpegCapture({
     ffmpegPath,
-    what: 'inspect-render',
+    what: 'inspect-render fallback',
     signal,
     onSpawn,
     args: [
-      '-hide_banner', '-loglevel', 'error', '-ss', String(seconds), '-i', filePath,
-      '-frames:v', '1', '-vf', `scale=${maxWidth}:-2:force_original_aspect_ratio=decrease`,
+      '-hide_banner', '-loglevel', 'error', '-i', filePath,
+      '-vf', `select=eq(n\\,${Math.round(frame)}),${scale}`,
+      '-frames:v', '1', '-vsync', '0',
       '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
     ],
   });
@@ -264,4 +361,265 @@ export async function measureRenderedPicture({
       cutsSuspect: cutCheck.filter((cut) => cut.verdict === 'near-identical').length,
     },
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Persistent delivery review (P0-2)                                  */
+/* ------------------------------------------------------------------ */
+
+/** Paths beside a delivery, rather than beside an in-progress staging file. */
+export function reviewArtifactPaths(deliveryPath) {
+  const abs = path.resolve(deliveryPath);
+  const ext = path.extname(abs);
+  const base = path.basename(abs, ext);
+  const dir = path.dirname(abs);
+  return {
+    reviewPath: path.join(dir, `${base}.review.json`),
+    contactPath: path.join(dir, `${base}.contact.png`),
+  };
+}
+
+/**
+ * First/last, every timeline cut, and every caption onset make a compact
+ * producer review. Long timelines may exceed the contact-sheet safety cap;
+ * the report says so instead of pretending the omitted points were sampled.
+ */
+export function deliveryReviewFrameList({
+  totalFrames, sceneLayout = [], captions = [], maxFrames = MAX_DELIVERY_REVIEW_FRAMES,
+}) {
+  const limit = Math.max(0, Number(totalFrames ?? 0) - 1);
+  const frames = [0, limit];
+  for (const entry of sceneLayout.slice(1)) frames.push(entry.filmOffset ?? 0);
+  for (const caption of captions) frames.push(caption?.fromFrame ?? 0);
+  const requested = [...new Set(frames.map((frame) => Math.max(0, Math.min(limit, Math.round(frame)))))]
+    .sort((a, b) => a - b);
+  const cap = Number.isFinite(maxFrames) ? Math.max(2, Math.floor(maxFrames)) : requested.length;
+  if (requested.length <= cap) return { frames: requested, requestedFrames: requested.length, truncated: false };
+  const sampled = [...new Set(Array.from({ length: cap }, (_, index) =>
+    requested[Math.round(index * (requested.length - 1) / (cap - 1))],
+  ))].sort((a, b) => a - b);
+  return { frames: sampled, requestedFrames: requested.length, truncated: true };
+}
+
+function pictureWarnings(picture) {
+  if (!picture) return [];
+  return [
+    ...(picture.staticRuns ?? []).filter((run) => run.durationSeconds >= 2).map((run) => ({
+      code: 'static_run',
+      message: `Picture is nearly static for ${run.durationSeconds}s from frame ${run.startFrame}.`,
+      frame: run.startFrame,
+      durationFrames: run.durationFrames,
+      ...(run.scene ? { context: run.scene } : {}),
+    })),
+    ...(picture.blackRuns ?? []).filter((run) => run.durationSeconds >= 1).map((run) => ({
+      code: 'black_run',
+      message: `Picture is near-black for ${run.durationSeconds}s from frame ${run.startFrame}.`,
+      frame: run.startFrame,
+      durationFrames: run.durationFrames,
+      ...(run.scene ? { context: run.scene } : {}),
+    })),
+    ...(picture.cutCheck ?? []).filter((cut) => cut.verdict === 'near-identical').map((cut) => ({
+      code: 'suspect_cut',
+      message: `Expected cut at frame ${cut.expectedFrame} is nearly identical on both sides.`,
+      frame: cut.expectedFrame,
+      ...(cut.scene ? { context: cut.scene } : {}),
+    })),
+  ];
+}
+
+function audioWarnings(audio) {
+  if (!audio) return [];
+  return [
+    ...(audio.clipping ? [{
+      code: 'audio_clipping',
+      message: `Mixed audio peaks at ${audio.peakDb ?? '?'} dBFS.`,
+    }] : []),
+    ...((audio.balanceWarnings ?? []).map((message) => ({ code: 'audio_balance', message }))),
+    ...(audio.silentTailSeconds > 0 ? [{
+      code: 'audio_silent_tail',
+      message: `Audio is silent for the final ${round(audio.silentTailSeconds)}s.`,
+    }] : []),
+  ];
+}
+
+function rawReviewWarnings({ frameCheck, picture, pictureError, audio, probe, selection }) {
+  const expected = frameCheck?.expected ?? null;
+  const actual = frameCheck?.actual ?? null;
+  return [
+    ...(Number.isInteger(actual) && Number.isInteger(expected) && actual !== expected ? [{
+      code: 'frame_count_mismatch',
+      message: `Encoded output has ${actual} frames; ${expected} were required.`,
+      expectedFrames: expected,
+      actualFrames: actual,
+    }] : []),
+    ...(frameCheck && frameCheck.verified === false ? [{
+      code: 'frame_count_unverified',
+      message: 'The output frame count could not be verified because ffprobe was unavailable.',
+    }] : []),
+    ...pictureWarnings(picture),
+    ...(pictureError ? [{
+      code: 'picture_measurement_unavailable',
+      message: `Picture measurement was unavailable: ${pictureError}`,
+    }] : []),
+    ...audioWarnings(audio),
+    ...(probe ? [] : [{
+      code: 'probe_unavailable',
+      message: 'Media probe was unavailable; codec and stream facts were not recorded.',
+    }]),
+    ...(selection.truncated ? [{
+      code: 'contact_sheet_truncated',
+      message: `Contact sheet sampled ${selection.frames.length} of ${selection.requestedFrames} requested review frames.`,
+    }] : []),
+  ];
+}
+
+function safeGuideFilters(safeAreas) {
+  if (!safeAreas || typeof safeAreas !== 'object') return [];
+  const guide = (insets, color) => {
+    if (!insets || typeof insets !== 'object') return null;
+    const left = Number(insets.leftPct);
+    const right = Number(insets.rightPct);
+    const top = Number(insets.topPct);
+    const bottom = Number(insets.bottomPct);
+    if (![left, right, top, bottom].every(Number.isFinite)) return null;
+    const width = 100 - left - right;
+    const height = 100 - top - bottom;
+    if (width <= 0 || height <= 0) return null;
+    // These expressions draw on every extracted target-sized thumbnail before
+    // tile packs it. `iw`/`ih` keep the guide correct for landscape, portrait,
+    // and square contact sheets without guessing their thumbnail dimensions.
+    return `drawbox=x=iw*${left / 100}:y=ih*${top / 100}:w=iw*${width / 100}:h=ih*${height / 100}:color=${color}:t=2`;
+  };
+  return [
+    guide(safeAreas.title, '0x4fd1c5@0.92'),
+    guide(safeAreas.caption, '0xf6c85f@0.92'),
+  ].filter(Boolean);
+}
+
+async function writeContactSheet({ images, outputPath, safeAreas = null, ffmpegPath, signal, onSpawn }) {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-contact-sheet-'));
+  try {
+    for (let index = 0; index < images.length; index += 1) {
+      await fsp.writeFile(path.join(tmp, `frame-${String(index + 1).padStart(4, '0')}.png`), images[index].png);
+    }
+    const columns = Math.max(1, Math.ceil(Math.sqrt(images.length * (16 / 9))));
+    const rows = Math.ceil(images.length / columns);
+    await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+    const guides = safeGuideFilters(safeAreas);
+    await runFfmpeg({
+      ffmpegPath,
+      signal,
+      onSpawn,
+      what: 'render-review contact sheet',
+      args: [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-framerate', '1', '-start_number', '1', '-i', path.join(tmp, 'frame-%04d.png'),
+        '-vf', [...guides, `tile=${columns}x${rows}:padding=4:margin=4:color=0x10141d`].join(','),
+        '-frames:v', '1', outputPath,
+      ],
+    });
+    return { columns, rows, safeAreas: guides.length ? safeAreas : null };
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Build review JSON + contact PNG from the staged file. The caller owns policy
+ * enforcement and promotion, so this function can be shared by scene renders
+ * and film builds without either layer guessing at output paths.
+ */
+export async function createDeliveryReview({
+  stagedOutputPath,
+  deliveryPath = stagedOutputPath,
+  fps,
+  totalFrames,
+  sceneLayout = [],
+  captions = [],
+  audio = null,
+  picture = null,
+  pictureError = null,
+  frameCheck = null,
+  policy,
+  safeAreas = null,
+  ffmpegPath = 'ffmpeg',
+  ffprobePath = 'ffprobe',
+  signal,
+  onSpawn,
+  maxFrames = MAX_DELIVERY_REVIEW_FRAMES,
+}) {
+  const stagedPaths = reviewArtifactPaths(stagedOutputPath);
+  const paths = reviewArtifactPaths(deliveryPath);
+  const selection = deliveryReviewFrameList({ totalFrames, sceneLayout, captions, maxFrames });
+  const onsetText = new Map((captions ?? []).map((caption) => [Math.round(caption.fromFrame ?? 0), caption.text ?? '']));
+  const images = [];
+  for (const frame of selection.frames) {
+    images.push({
+      frame,
+      png: await extractRenderedFrame({
+        filePath: stagedOutputPath, frame, fps, maxWidth: 360, ffmpegPath, signal, onSpawn,
+      }),
+      context: contextAtFrame(sceneLayout, frame),
+      ...(onsetText.has(frame) ? { captionOnset: onsetText.get(frame) } : {}),
+    });
+  }
+  const contact = await writeContactSheet({
+    images, outputPath: stagedPaths.contactPath, safeAreas, ffmpegPath, signal, onSpawn,
+  });
+  const probe = await probeMedia({ filePath: stagedOutputPath, ffprobePath, signal, onSpawn }).catch(() => null);
+  const resolvedPolicy = normalizeReviewPolicy(policy);
+  const warnings = classifyReviewWarnings(
+    rawReviewWarnings({ frameCheck, picture, pictureError, audio, probe, selection }),
+    resolvedPolicy,
+  );
+  const report = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    delivery: {
+      filename: path.basename(deliveryPath),
+      fps,
+      expectedFrames: totalFrames,
+      actualFrames: frameCheck?.actual ?? null,
+      framesVerified: frameCheck?.verified === true,
+      durationSeconds: round(totalFrames / fps),
+      outputIdentity: outputIdentity(stagedOutputPath),
+      probe,
+    },
+    audio,
+    picture,
+    policy: resolvedPolicy,
+    warnings,
+    contact: {
+      filename: path.basename(paths.contactPath),
+      columns: contact.columns,
+      rows: contact.rows,
+      ...(contact.safeAreas ? { safeAreas: contact.safeAreas } : {}),
+      requestedFrames: selection.requestedFrames,
+      truncated: selection.truncated,
+      thumbnails: images.map(({ png, ...thumbnail }, index) => ({
+        ...thumbnail,
+        index,
+        row: Math.floor(index / contact.columns),
+        column: index % contact.columns,
+      })),
+    },
+  };
+  await fsp.writeFile(stagedPaths.reviewPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  return { report, paths, stagedPaths };
+}
+
+/** Prevent promotion while preserving the complete staged evidence for review. */
+export function assertReviewAllowsPromotion(review, { stagingPath } = {}) {
+  const blocked = (review?.report?.warnings ?? []).filter((warning) => warning.level === 'block');
+  if (!blocked.length) return;
+  throw new EngineError(
+    ErrorCodes.PROMOTION_BLOCKED,
+    `Delivery promotion blocked by review policy: ${blocked.map((warning) => warning.code).join(', ')}.`,
+    {
+      stagingPath,
+      reviewPath: review.stagedPaths?.reviewPath,
+      contactPath: review.stagedPaths?.contactPath,
+      rules: blocked.map((warning) => ({ code: warning.code, message: warning.message })),
+    },
+  );
 }

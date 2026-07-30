@@ -7,8 +7,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
-  reviewFrameList, extractRenderedFrame, measureRenderedPicture,
+  reviewFrameList, deliveryReviewFrameList, extractRenderedFrame, measureRenderedPicture,
+  createDeliveryReview, assertReviewAllowsPromotion, resolveReviewPolicy,
 } from '../src/core/render-review.js';
+import { ErrorCodes } from '../src/core/errors.js';
 
 const execFileP = promisify(execFile);
 let tmp, fixture, haveFfmpeg = true;
@@ -42,6 +44,30 @@ test('reviewFrameList keeps a long film review useful within the image cap', () 
   assert.ok(frames.some((frame) => frame >= 110), 'review samples the end as well as the start');
 });
 
+test('deliveryReviewFrameList anchors a persisted review to first, last, cuts, and caption onsets', () => {
+  const selection = deliveryReviewFrameList({
+    totalFrames: 40,
+    sceneLayout: [
+      { filmOffset: 0, durationInFrames: 20 },
+      { filmOffset: 20, durationInFrames: 20 },
+    ],
+    captions: [{ fromFrame: 3 }, { fromFrame: 27 }],
+  });
+  assert.deepEqual(selection, {
+    frames: [0, 3, 20, 27, 39], requestedFrames: 5, truncated: false,
+  });
+});
+
+test('a film review policy overrides only the severity list it supplies', () => {
+  assert.deepEqual(
+    resolveReviewPolicy({
+      globalPolicy: { block: ['frame_count_mismatch'], warn: ['black_run', 'static_run'] },
+      filmPolicy: { block: ['black_run'] },
+    }),
+    { block: ['black_run'], warn: ['static_run'] },
+  );
+});
+
 test('render review extracts a delivered frame and measures static, black, and cut facts', { skip: !haveFfmpeg }, async () => {
   const layout = [
     { sceneId: 'review/black', name: 'Black', filmOffset: 0, durationInFrames: 20 },
@@ -56,4 +82,47 @@ test('render review extracts a delivered frame and measures static, black, and c
   assert.ok(report.blackRuns.length > 0, JSON.stringify(report));
   assert.equal(report.cutCheck[0].expectedFrame, 20);
   assert.equal(report.cutCheck[0].verdict, 'changed');
+});
+
+test('delivery review persists staged evidence and only a policy block stops promotion', { skip: !haveFfmpeg }, async () => {
+  const layout = [
+    { sceneId: 'review/black', name: 'Black', filmOffset: 0, durationInFrames: 20 },
+    { sceneId: 'review/white', name: 'White', filmOffset: 20, durationInFrames: 20 },
+  ];
+  const picture = await measureRenderedPicture({ filePath: fixture, fps: 10, totalFrames: 40, sceneLayout: layout });
+  const delivery = path.join(tmp, 'delivered.mp4');
+  const review = await createDeliveryReview({
+    stagedOutputPath: fixture,
+    deliveryPath: delivery,
+    fps: 10,
+    totalFrames: 40,
+    sceneLayout: layout,
+    captions: [{ text: 'Cut to white', fromFrame: 20, toFrame: 30 }],
+    picture,
+    frameCheck: { expected: 40, actual: 40, verified: true },
+    policy: { block: [], warn: ['static_run', 'black_run', 'suspect_cut'] },
+  });
+
+  assert.ok(await fsp.stat(review.stagedPaths.contactPath));
+  assert.ok(await fsp.stat(review.stagedPaths.reviewPath));
+  assert.equal((await fsp.readFile(review.stagedPaths.contactPath)).subarray(1, 4).toString('ascii'), 'PNG');
+  assert.deepEqual(
+    review.report.contact.thumbnails.map((thumb) => thumb.frame),
+    [0, 20, 39],
+  );
+  assert.deepEqual(JSON.parse(await fsp.readFile(review.stagedPaths.reviewPath, 'utf8')), review.report);
+  assert.doesNotThrow(() => assertReviewAllowsPromotion(review));
+
+  assert.throws(
+    () => assertReviewAllowsPromotion({
+      ...review,
+      report: {
+        ...review.report,
+        warnings: [...review.report.warnings, {
+          code: 'frame_count_mismatch', level: 'block', message: 'Encoded output has 39 frames; 40 were required.',
+        }],
+      },
+    }),
+    (error) => error.code === ErrorCodes.PROMOTION_BLOCKED && error.detail.reviewPath === review.stagedPaths.reviewPath,
+  );
 });

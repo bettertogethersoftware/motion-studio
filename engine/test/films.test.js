@@ -14,10 +14,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
-  validateFilm, normalizeFilm, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm,
+  validateFilm, normalizeFilm, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm, submitFilmBuild,
 } from '../src/core/films.js';
 import { sceneSignature } from '../src/core/film.js';
 import { probeMedia } from '../src/core/encoder.js';
+import { transcodeAsset, transcodeMetaPath } from '../src/core/transcode.js';
+import { compileReframeFilter, resolveDeliverableSelections } from '../src/core/deliverables.js';
 import { JobManager } from '../src/core/jobs.js';
 import { createStudioServer } from '../src/studio/server.js';
 import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
@@ -79,6 +81,16 @@ test('validateFilm checks sceneDefaults shape', () => {
     (e) => e.code === 'invalid_film');
 });
 
+test('validateFilm accepts a partial delivery-review override and rejects conflicting codes', () => {
+  const inheritedWarns = normalizeFilm({ name: 'F', review: { block: ['black_run'] } });
+  validateFilm(inheritedWarns);
+  assert.deepEqual(inheritedWarns.review, { block: ['black_run'] });
+  assert.throws(
+    () => validateFilm(normalizeFilm({ name: 'F', review: { block: ['black_run'], warn: ['black_run'] } })),
+    (error) => error.code === 'invalid_film' && /both block and warn/.test(error.detail.problems.join(' ')),
+  );
+});
+
 /* ------------------------------- captions ------------------------------- */
 
 test('captionsToSrt formats and orders cues', () => {
@@ -130,6 +142,46 @@ test('buildOverlayGraph with captions only burns straight off the base', () => {
   const { filterComplex, outLabel } = buildOverlayGraph([], { width: 640, height: 360, fps: 30, subtitlesFile: 'c.ass' });
   assert.equal(filterComplex, '[0:v]subtitles=c.ass[vsub]');
   assert.equal(outLabel, 'vsub');
+});
+
+/* ----------------------- Stage-A deliverables ----------------------- */
+
+test('deliverables resolve to saved snapshots and compile timeline crop centres', () => {
+  const [youtube, shorts] = resolveDeliverableSelections({
+    requested: [{ id: 'youtube-16x9' }, { id: 'shorts-9x16' }],
+    baseFilename: 'car-promo',
+  });
+  assert.equal(youtube.outputFilename, 'car-promo-youtube-16x9');
+  assert.equal(shorts.outputFilename, 'car-promo-shorts-9x16');
+  assert.equal(shorts.captionStyle.sizePct, 6.5);
+  assert.equal(shorts.safeAreas.caption.bottomPct, 8);
+
+  const compiled = compileReframeFilter({
+    reframe: { default: { xPct: 50, yPct: 50 }, segments: { product: { xPct: 70, yPct: 50 } } },
+    sceneLayout: [
+      { slug: 'hook', name: 'Hook', filmOffset: 0, durationInFrames: 30 },
+      { slug: 'product', name: 'Product', filmOffset: 30, durationInFrames: 30 },
+    ],
+    sourceWidth: 1920, sourceHeight: 1080, targetWidth: 1080, targetHeight: 1920, fps: 30,
+  });
+  assert.equal(compiled.centers.length, 2);
+  assert.ok(compiled.centers[1].x > compiled.centers[0].x, JSON.stringify(compiled.centers));
+  assert.match(compiled.filter, /^crop=\d+:1080:if\(lt\(t\\,1\.000000\)\\,/);
+  assert.match(compiled.filter, /scale=1080:1920:flags=lanczos,setsar=1$/);
+});
+
+test('validateFilm refuses deliverables that would overwrite the master', () => {
+  assert.throws(() => validateFilm(normalizeFilm({
+    name: 'F', outputFilename: 'film', deliverables: [{
+      id: 'portrait', width: 1080, height: 1920, outputFilename: 'film',
+      captionStyle: { sizePct: 6.5, position: 'bottom' },
+      safeAreas: {
+        title: { leftPct: 7, rightPct: 7, topPct: 6, bottomPct: 50 },
+        caption: { leftPct: 8, rightPct: 8, topPct: 55, bottomPct: 8 },
+      },
+      reframe: { default: { xPct: 50, yPct: 50 }, segments: {} },
+    }],
+  })), (error) => /duplicates the master/.test(error.detail.problems.join(' ')));
 });
 
 /* -------------------------------- store --------------------------------- */
@@ -255,6 +307,34 @@ test('normalizeFilm round-trips footage instead of destroying it', () => {
   assert.deepEqual(normalizeFilm(film).scenes, film.scenes);
 });
 
+test('normalizeFilm preserves an optional footage provenance pointer', () => {
+  const film = normalizeFilm({
+    name: 'Provenance',
+    scenes: [{
+      footage: 'assets\\prepared.mp4',
+      durationInFrames: 30,
+      derivedFrom: {
+        asset: 'library\\raw.mp4',
+        transcodeMeta: 'assets\\prepared.mp4.transcode.json',
+      },
+    }],
+  });
+  validateFilm(film);
+  assert.deepEqual(film.scenes[0].derivedFrom, {
+    asset: 'library/raw.mp4',
+    transcodeMeta: 'assets/prepared.mp4.transcode.json',
+  });
+  assert.deepEqual(normalizeFilm(film).scenes, film.scenes, 'the pointer survives unrelated later saves');
+
+  assert.throws(() => validateFilm(normalizeFilm({
+    name: 'Bad provenance',
+    scenes: [{
+      footage: 'assets/prepared.mp4', durationInFrames: 30,
+      derivedFrom: { asset: 'library/raw.mp4', transcodeMeta: 'assets/not-a-sidecar.json' },
+    }],
+  })), (e) => /must name a .transcode.json sidecar/.test(e.detail.problems.join(' ')));
+});
+
 test('validateFilm dedupes scene slugs but lets footage repeat', () => {
   // A scene plays once (it has one rendered output); the same plate can appear
   // several times as a recurring cutaway, and there is nothing to collide.
@@ -322,6 +402,59 @@ test('planFilm verifies a declared footage duration against the file', async (t)
     assert.equal(mismatch.actual, 30);
     assert.match(mismatch.message, /declared 231 → actual 30/);
     assert.equal(plan.scenes[0].framesVerified, false);
+  });
+});
+
+test('planFilm flags a prepared footage segment when its recorded source changes', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  await withTmp(async (home) => {
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, {
+      name: 'Source provenance', sceneDefaults: { fps: 30, width: 320, height: 240 },
+    });
+    const doc0 = await store.getFilm(film.id);
+    const source = path.join(doc0.path, 'assets', 'raw.mp4');
+    const prepared = path.join(doc0.path, 'assets', 'prepared.mp4');
+    await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+      '-i', 'testsrc2=size=320x240:rate=30:duration=2', '-pix_fmt', 'yuv420p', source]);
+    await transcodeAsset({
+      sourceAbs: source, outPath: prepared, mode: 'video',
+      trim: { durationInFrames: 30 }, fpsForFrames: 30,
+    });
+    assert.ok(fs.existsSync(transcodeMetaPath(prepared)), 'the prepared file owns the one authoritative manifest');
+
+    const doc = await store.updateFilm(film.id, {
+      scenes: [{
+        footage: 'assets/prepared.mp4',
+        durationInFrames: 30,
+        derivedFrom: {
+          asset: 'assets/raw.mp4',
+          transcodeMeta: 'assets/prepared.mp4.transcode.json',
+        },
+      }],
+    });
+    let plan = await planFilm({ film: doc, store });
+    assert.equal(plan.scenes[0].derivedFrom.sourceVerified, true, JSON.stringify(plan.problems));
+    assert.ok(!plan.problems.some((p) => p.code === 'footage_source_changed'));
+
+    // Same path, different source. The prepared clip remains playable and its
+    // declared frame count remains valid, so provenance is the only guard that
+    // can stop this old trim being mistaken for the new source.
+    await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+      '-i', 'testsrc2=size=320x240:rate=30:duration=3', '-pix_fmt', 'yuv420p', source]);
+    plan = await planFilm({ film: await store.getFilm(film.id), store });
+    const changed = plan.problems.find((p) => p.code === 'footage_source_changed');
+    assert.ok(changed, JSON.stringify(plan.problems));
+    assert.equal(changed.reason, 'source_identity_changed');
+    assert.equal(plan.scenes[0].derivedFrom.sourceVerified, false);
+    assert.equal(plan.scenes[0].derivedFrom.reason, 'source_identity_changed');
+    const changedFilm = await store.getFilm(film.id);
+    await assert.rejects(
+      () => submitFilmBuild({ film: changedFilm, store, jobs: new JobManager() }),
+      (error) => error.code === 'footage_source_changed'
+        && error.detail.problems[0].reason === 'source_identity_changed',
+      'a direct build call cannot bypass the pre-build provenance problem',
+    );
   });
 });
 
@@ -531,18 +664,98 @@ test('films API: render scenes → build with master audio + captions → sideca
   const done = await waitJob(build.data.jobId);
   assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
   assert.ok(done.audio, 'master timeline reports measured levels');
+  assert.ok(done.review, 'the job reports the staged-delivery review artefacts');
 
   // The film folder's out/ holds the build + sidecar.
   const { data: film } = await j(`/api/films/${enc(filmId)}`);
   const outDir = path.join(film.film.path, 'out');
   assert.ok(fs.existsSync(path.join(outDir, 'e2e.mp4')), 'film written');
   assert.ok(fs.existsSync(path.join(outDir, 'e2e.srt')), 'caption sidecar written');
+  assert.ok(fs.existsSync(path.join(outDir, 'e2e.review.json')), 'review report written beside film');
+  assert.ok(fs.existsSync(path.join(outDir, 'e2e.contact.png')), 'contact sheet written beside film');
+  const review = JSON.parse(await fsp.readFile(path.join(outDir, 'e2e.review.json'), 'utf8'));
+  assert.equal(review.delivery.expectedFrames, 16);
+  assert.equal(review.delivery.framesVerified, true);
+  assert.deepEqual(review.contact.thumbnails.map((thumb) => thumb.frame), [0, 8, 15]);
   const srt = await fsp.readFile(path.join(outDir, 'e2e.srt'), 'utf8');
   assert.match(srt, /Hello film/);
 
   // And downloads through the film output route.
   const dl = await fetch(`${base}/api/films/${enc(filmId)}/output?file=e2e.mp4`);
   assert.equal(dl.status, 200);
+  const reviewDl = await fetch(`${base}/api/films/${enc(filmId)}/output?file=e2e.review.json`);
+  assert.equal(reviewDl.status, 200);
+});
+
+test('films API: a Stage-A deliverable reframes the approved master into its own portrait output', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const deliverable = {
+    id: 'portrait-review', label: 'Portrait review', width: 180, height: 320,
+    outputFilename: 'e2e-portrait',
+    captionStyle: { sizePct: 6.5, position: 'bottom' },
+    safeAreas: {
+      title: { leftPct: 7, rightPct: 7, topPct: 6, bottomPct: 50 },
+      caption: { leftPct: 8, rightPct: 8, topPct: 55, bottomPct: 8 },
+    },
+    reframe: {
+      default: { xPct: 50, yPct: 50 },
+      // The second scene begins at frame 8, proving the compiler consumes the
+      // real timeline rather than a hand-calculated seconds list.
+      segments: { 'cut-b': { xPct: 72, yPct: 50 } },
+    },
+  };
+  const patched = await j(`/api/films/${enc(filmId)}`, {
+    method: 'PATCH', body: { patch: { deliverables: [deliverable] } },
+  });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+
+  const build = await j(`/api/films/${enc(filmId)}/build`, {
+    method: 'POST', body: { deliverable: deliverable.id },
+  });
+  assert.equal(build.status, 202, JSON.stringify(build.data));
+  assert.equal(build.data.deliverable.id, deliverable.id);
+  const done = await waitJob(build.data.jobId);
+  assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
+  assert.equal(done.deliverable.id, deliverable.id);
+  assert.equal(done.reEncoded, true, 'a reframe never takes the lossless concat shortcut');
+  assert.ok(done.review, 'variant receives independent review artefacts');
+
+  const { data } = await j(`/api/films/${enc(filmId)}`);
+  const outDir = path.join(data.film.path, 'out');
+  const out = path.join(outDir, 'e2e-portrait.mp4');
+  assert.ok(fs.existsSync(out));
+  const media = await probeMedia({ filePath: out });
+  assert.equal(media.video.width, 180);
+  assert.equal(media.video.height, 320);
+  assert.ok(fs.existsSync(path.join(outDir, 'e2e-portrait.srt')));
+  const review = JSON.parse(await fsp.readFile(path.join(outDir, 'e2e-portrait.review.json'), 'utf8'));
+  assert.deepEqual(review.contact.safeAreas, deliverable.safeAreas);
+  assert.equal(review.delivery.expectedFrames, 16);
+});
+
+test('films API: default review policy promotes an intentional static black film as warnings', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const created = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST', body: { name: 'Static Review', width: 320, height: 240, fps: 30, durationInFrames: 90 },
+  });
+  const film = created.data.film;
+  const clip = path.join(film.path, 'assets', 'black.mp4');
+  await execFileP('ffmpeg', [
+    '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=320x240:r=30:d=3',
+    '-frames:v', '90', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip,
+  ]);
+  const patched = await j(`/api/films/${enc(film.id)}`, {
+    method: 'PATCH', body: { patch: { scenes: [{ footage: 'assets/black.mp4', durationInFrames: 90, label: 'Intentional black hold' }] } },
+  });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+  assert.ok(!patched.data.detail.problems.length, JSON.stringify(patched.data.detail.problems));
+
+  const submitted = await j(`/api/films/${enc(film.id)}/build`, { method: 'POST', body: { outputFilename: 'black-review' } });
+  const done = await waitJob(submitted.data.jobId);
+  assert.equal(done.state, 'done', JSON.stringify(done.error ?? {}));
+  const report = JSON.parse(await fsp.readFile(path.join(film.path, 'out', 'black-review.review.json'), 'utf8'));
+  assert.ok(report.warnings.some((warning) => warning.code === 'static_run' && warning.level === 'warn'), JSON.stringify(report.warnings));
+  assert.ok(report.warnings.some((warning) => warning.code === 'black_run' && warning.level === 'warn'), JSON.stringify(report.warnings));
 });
 
 test('films API: overlay triggers the finishing pass', async (t) => {

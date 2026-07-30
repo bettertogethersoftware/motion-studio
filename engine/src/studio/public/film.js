@@ -79,6 +79,7 @@ const filmId = new URLSearchParams(location.search).get('id');
 const state = {
   film: null,        // the editable document (what PATCH sends)
   detail: null,      // server-resolved reality: scene layout, problems, fps…
+  settings: null,    // global platform presets; films still keep their own snapshots
   assets: [],        // the film's own assets (media bin)
   pxf: 1,            // pixels per frame (zoom)
   pxfFit: 1,
@@ -102,6 +103,8 @@ const state = {
   sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
 };
+
+let reviewRequestId = 0;
 
 const fps = () => state.detail?.fps || 30;
 const totalFrames = () => state.detail?.totalFrames || 0;
@@ -128,7 +131,7 @@ function frameOfEvent(ev) {
 /* ------------------------------ persistence ---------------------------- */
 
 const EDITABLE = ['name', 'scenes', 'audio', 'overlays', 'captions', 'captionStyle',
-  'audioTargetPeakDb', 'burnCaptions', 'outputFilename'];
+  'audioTargetPeakDb', 'burnCaptions', 'outputFilename', 'deliverables'];
 
 function snapshot() {
   return JSON.parse(JSON.stringify(Object.fromEntries(EDITABLE.map((k) => [k, state.film[k]]))));
@@ -239,8 +242,12 @@ function adoptDetail(detail) {
 }
 
 async function refresh() {
-  const { film, detail, sceneFolders } = await api(`/api/films/${fid}`);
+  const [{ film, detail, sceneFolders }, settingsResult] = await Promise.all([
+    api(`/api/films/${fid}`),
+    api('/api/settings').catch(() => null),
+  ]);
   state.film = film;
+  state.settings = settingsResult?.settings ?? state.settings;
   state.sceneFolders = sceneFolders ?? [];
   lastAudioJson = JSON.stringify(film.audio ?? []);
   adoptDetail(detail);
@@ -273,7 +280,7 @@ function renderHeader() {
     'scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'asset_missing', 'mixed_scene_audio',
     // Footage problems block a build exactly as their scene equivalents do, so
     // they must not render as soft warnings (v0.22).
-    'footage_missing', 'footage_duration_mismatch', 'footage_signature_mismatch',
+    'footage_missing', 'footage_duration_mismatch', 'footage_signature_mismatch', 'footage_source_changed',
   ]);
   const ul = $('#problems-list');
   ul.innerHTML = '';
@@ -1253,6 +1260,195 @@ function renderInspector() {
   if (sel.kind === 'overlay') return renderOverlayInspector(box, sel.id);
 }
 
+const cloneJson = (value) => JSON.parse(JSON.stringify(value));
+
+function filmDeliverablePresets() {
+  return Array.isArray(state.settings?.deliverablePresets) ? state.settings.deliverablePresets : [];
+}
+
+function deliverableBaseName(value) {
+  const base = String(value ?? 'film').replace(/\.[a-z0-9]+$/i, '');
+  return base.trim() || 'film';
+}
+
+function deliverableById(film, id) {
+  return (film.deliverables ?? []).find((item) => item.id === id) ?? null;
+}
+
+function segmentFocusKeys(scene) {
+  return [scene?.slug, scene?.name, scene?.footage, scene?.sceneId]
+    .filter((key) => typeof key === 'string' && key.trim());
+}
+
+function segmentFocus(deliverable, scene) {
+  const keys = segmentFocusKeys(scene);
+  const segments = deliverable?.reframe?.segments ?? {};
+  const key = keys.find((candidate) => Object.prototype.hasOwnProperty.call(segments, candidate)) ?? null;
+  return {
+    key,
+    point: (key ? segments[key] : null) ?? deliverable?.reframe?.default ?? { xPct: 50, yPct: 50 },
+  };
+}
+
+function updateFilmDeliverable(id, change, options = {}) {
+  mutate((film) => {
+    const deliverable = deliverableById(film, id);
+    if (deliverable) change(deliverable, film);
+  }, options);
+}
+
+function renderDeliverableFocusRows(card, deliverable) {
+  const scenes = state.detail?.scenes ?? [];
+  if (!scenes.length) return;
+  const details = el('details', { class: 'deliverable-focus' });
+  const customCount = Object.keys(deliverable.reframe?.segments ?? {}).length;
+  details.appendChild(el('summary', { text: `per-scene framing${customCount ? ` (${customCount} custom)` : ''}` }));
+  details.appendChild(el('p', {
+    class: 'dim note',
+    text: 'Set the crop focus for a scene only when it needs a different subject position. Reset returns it to this version’s default focus.',
+  }));
+  scenes.forEach((scene, index) => {
+    const keys = segmentFocusKeys(scene);
+    const primaryKey = scene.slug ?? keys[0];
+    if (!primaryKey) return;
+    const focus = segmentFocus(deliverable, scene);
+    const row = el('div', { class: 'deliverable-focus-row' });
+    row.appendChild(el('span', {
+      class: 'deliverable-focus-name',
+      text: scene.name ?? scene.slug ?? scene.footage ?? `scene ${index + 1}`,
+      title: primaryKey,
+    }));
+    const writeFocus = (field, value) => updateFilmDeliverable(deliverable.id, (current) => {
+      current.reframe ??= { default: { xPct: 50, yPct: 50 }, segments: {} };
+      current.reframe.segments ??= {};
+      const previous = segmentFocus(current, scene).point;
+      current.reframe.segments[primaryKey] = {
+        xPct: previous.xPct ?? 50,
+        yPct: previous.yPct ?? 50,
+        [field]: value ?? previous[field] ?? 50,
+      };
+    }, { silent: true });
+    row.appendChild(labelled('x%', numInput(focus.point.xPct, {
+      min: 0, step: 1, width: '48px', onCommit: (value) => writeFocus('xPct', value),
+    })));
+    row.appendChild(labelled('y%', numInput(focus.point.yPct, {
+      min: 0, step: 1, width: '48px', onCommit: (value) => writeFocus('yPct', value),
+    })));
+    if (focus.key) {
+      row.appendChild(el('button', {
+        class: 'ghost tiny-btn', text: 'reset', title: 'use the default focus for this version',
+        onclick: () => {
+          updateFilmDeliverable(deliverable.id, (current) => {
+            for (const key of keys) delete current.reframe?.segments?.[key];
+          }, { structural: true, silent: true });
+          renderInspector();
+        },
+      }));
+    } else {
+      row.appendChild(el('span', { class: 'dim deliverable-default', text: 'default' }));
+    }
+    details.appendChild(row);
+  });
+  card.appendChild(details);
+}
+
+function renderDeliverablesInspector(box, film) {
+  box.appendChild(el('hr', { class: 'sep' }));
+  box.appendChild(el('h3', { text: 'platform versions' }));
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: 'Each version is a saved reframe of this film’s completed master. Its timing, audio and edit stay shared; its crop, captions and output file stay version-specific.',
+  }));
+
+  const versions = film.deliverables ?? [];
+  for (const deliverable of versions) {
+    const card = el('section', { class: 'deliverable-card' });
+    const title = el('div', { class: 'deliverable-card-head' },
+      el('strong', { text: deliverable.label ?? deliverable.id }),
+      el('span', { class: 'dim mono', text: `${deliverable.width}×${deliverable.height}` }),
+      el('button', {
+        class: 'ghost tiny-btn danger', text: 'remove', title: 'remove this platform version',
+        onclick: () => {
+          mutate((current) => { current.deliverables = (current.deliverables ?? []).filter((item) => item.id !== deliverable.id); }, { structural: true, silent: true });
+          renderInspector();
+        },
+      }),
+    );
+    card.appendChild(title);
+
+    const filename = el('input', { spellcheck: 'false', value: deliverable.outputFilename ?? '' });
+    filename.value = deliverable.outputFilename ?? '';
+    filename.addEventListener('change', () => {
+      const next = filename.value.trim();
+      if (!next) { filename.value = deliverable.outputFilename ?? ''; return; }
+      updateFilmDeliverable(deliverable.id, (current) => { current.outputFilename = next; }, { silent: true });
+    });
+    card.appendChild(el('div', { class: 'insp-row' }, labelled('output filename', filename)));
+
+    const style = deliverable.captionStyle ?? {};
+    const captionSize = numInput(style.sizePct ?? 4.5, {
+      min: 1, step: 0.5, width: '62px',
+      onCommit: (value) => updateFilmDeliverable(deliverable.id, (current) => {
+        current.captionStyle = { ...current.captionStyle, sizePct: value ?? 4.5 };
+      }, { silent: true }),
+    });
+    const captionPosition = el('select', {
+      onchange: (event) => updateFilmDeliverable(deliverable.id, (current) => {
+        current.captionStyle = { ...current.captionStyle, position: event.target.value };
+      }, { silent: true }),
+    }, el('option', { value: 'bottom', text: 'bottom' }), el('option', { value: 'top', text: 'top' }));
+    captionPosition.value = style.position ?? 'bottom';
+    card.appendChild(el('div', { class: 'insp-row' },
+      labelled('caption size %', captionSize), labelled('caption position', captionPosition),
+    ));
+
+    const def = deliverable.reframe?.default ?? { xPct: 50, yPct: 50 };
+    const focusX = numInput(def.xPct, {
+      min: 0, step: 1, width: '50px',
+      onCommit: (value) => updateFilmDeliverable(deliverable.id, (current) => {
+        current.reframe = { ...current.reframe, default: { ...current.reframe?.default, xPct: value ?? 50 } };
+      }, { silent: true }),
+    });
+    const focusY = numInput(def.yPct, {
+      min: 0, step: 1, width: '50px',
+      onCommit: (value) => updateFilmDeliverable(deliverable.id, (current) => {
+        current.reframe = { ...current.reframe, default: { ...current.reframe?.default, yPct: value ?? 50 } };
+      }, { silent: true }),
+    });
+    card.appendChild(el('div', { class: 'insp-row' },
+      labelled('default focus x%', focusX), labelled('y%', focusY),
+    ));
+    const safe = deliverable.safeAreas?.caption;
+    if (safe) {
+      card.appendChild(el('p', {
+        class: 'dim note',
+        text: `Caption-safe guide: ${safe.leftPct}% left / ${safe.rightPct}% right / ${safe.topPct}% top / ${safe.bottomPct}% bottom. It is drawn on the delivery contact sheet.`,
+      }));
+    }
+    renderDeliverableFocusRows(card, deliverable);
+    box.appendChild(card);
+  }
+
+  const available = filmDeliverablePresets().filter((preset) => !versions.some((item) => item.id === preset.id));
+  if (!available.length) return;
+  const choose = el('select');
+  for (const preset of available) {
+    choose.appendChild(el('option', { value: preset.id, text: `${preset.label} · ${preset.width}×${preset.height}` }));
+  }
+  const add = el('button', {
+    class: 'ghost', text: 'add version',
+    onclick: () => {
+      const preset = available.find((item) => item.id === choose.value);
+      if (!preset) return;
+      const next = cloneJson(preset);
+      next.outputFilename = `${deliverableBaseName(film.outputFilename)}-${next.id}`;
+      mutate((current) => { (current.deliverables ??= []).push(next); }, { structural: true, silent: true });
+      renderInspector();
+    },
+  });
+  box.appendChild(el('div', { class: 'insp-row deliverable-add' }, labelled('add platform version', choose), add));
+}
+
 function renderFilmInspector(box) {
   const d = state.detail, f = state.film;
   box.appendChild(el('h3', { text: 'film' }));
@@ -1285,6 +1481,7 @@ function renderFilmInspector(box) {
   box.appendChild(el('label', { class: 'check' }, burn, document.createTextNode(' burn captions into the picture')));
   box.appendChild(el('p', { class: 'dim note', text: 'A .srt sidecar is always written next to the film when captions exist. Burning re-encodes once in the finishing pass.' }));
 
+  renderDeliverablesInspector(box, f);
   box.appendChild(el('hr', { class: 'sep' }));
   box.appendChild(el('p', { class: 'dim note', text: 'Select a block on the timeline to edit it. Drag blocks to move, drag edges to trim, Del to remove.' }));
 }
@@ -1345,6 +1542,15 @@ function renderFootageInspector(box, index, s) {
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
   fact('file', s.footage);
   if (s.label) fact('label', s.label);
+  if (s.derivedFrom) {
+    fact('source', s.derivedFrom.asset);
+    fact('source record', s.derivedFrom.transcodeMeta);
+    fact('source status', s.derivedFrom.sourceVerified === true
+      ? 'verified ✓'
+      : s.derivedFrom.sourceVerified === false
+        ? `⚠ ${String(s.derivedFrom.reason ?? 'changed').replace(/_/g, ' ')}`
+        : 'unverified');
+  }
   if (s.missing) {
     fact('status', '⚠ missing from the film’s assets/');
   } else if (s.probed === false) {
@@ -1997,9 +2203,23 @@ function renderBuildInspector(box) {
     el('button', { class: 'ghost tiny-btn', text: '✕', title: 'back to properties', onclick: () => { state.inspectorMode = null; renderInspector(); } }));
   box.appendChild(head);
 
+  const version = el('select', { id: 'bi-deliverable' });
+  const masterScene = d.scenes.find((scene) => !scene.missing);
+  version.appendChild(el('option', {
+    value: '', text: `master · ${masterScene?.width ?? '?'}×${masterScene?.height ?? '?'}`,
+  }));
+  for (const deliverable of f.deliverables ?? []) {
+    version.appendChild(el('option', {
+      value: deliverable.id, text: `${deliverable.label ?? deliverable.id} · ${deliverable.width}×${deliverable.height}`,
+    }));
+  }
+  box.appendChild(el('div', { class: 'insp-row' }, labelled('build version', version)));
+
   const name = el('input', { id: 'bi-filename', placeholder: 'film', spellcheck: 'false' });
   name.value = f.outputFilename ?? 'film';
   box.appendChild(el('div', { class: 'insp-row' }, labelled('output filename', name)));
+  const targetNote = el('p', { id: 'bi-deliverable-note', class: 'dim note' });
+  box.appendChild(targetNote);
 
   const target = el('select', { id: 'bi-target' });
   for (const [v, t] of [['', 'off — ship the gains as set'], ['-1', '−1 dBFS'], ['-2', '−2 dBFS (recommended)'], ['-3', '−3 dBFS'], ['-6', '−6 dBFS']]) {
@@ -2023,9 +2243,29 @@ function renderBuildInspector(box) {
   summary.innerHTML = bits.join('<br>');
   box.appendChild(summary);
 
-  const go = el('button', { class: 'primary', id: 'bi-go', text: 'assemble →', style: 'width:100%' });
+  const go = el('button', { class: 'primary', id: 'bi-go', text: 'build master →', style: 'width:100%' });
   go.addEventListener('click', startBuild);
   box.appendChild(go);
+  if ((f.deliverables ?? []).length) {
+    const all = el('button', {
+      class: 'ghost', id: 'bi-go-all', text: 'build master + all versions', style: 'width:100%;margin-top:7px',
+    });
+    all.addEventListener('click', startBuildAll);
+    box.appendChild(all);
+  }
+
+  const syncBuildTarget = () => {
+    const deliverable = deliverableById(f, version.value);
+    const isVariant = !!deliverable;
+    name.disabled = isVariant;
+    name.value = isVariant ? deliverable.outputFilename : (f.outputFilename ?? 'film');
+    targetNote.textContent = isVariant
+      ? `${deliverable.label ?? deliverable.id} reuses the master edit, then applies its saved crop, caption style and safe-area review guide.`
+      : 'The master preserves the completed scene layout. Choose a platform version to make a separately named reframe.';
+    go.textContent = isVariant ? `build ${deliverable.label ?? deliverable.id} →` : 'build master →';
+  };
+  version.addEventListener('change', syncBuildTarget);
+  syncBuildTarget();
 
   // Job card — same ids the poller writes into.
   const job = el('div', { class: 'job-card', id: 'build-job' });
@@ -2036,6 +2276,7 @@ function renderBuildInspector(box) {
     '<div class="bar"><div id="bj-bar" class="bar-fill"></div></div>' +
     '<pre id="bj-logs" class="logs"></pre>' +
     '<div id="bj-levels" class="levels hidden"></div>' +
+    '<section id="bj-review" class="output-review hidden" aria-live="polite"></section>' +
     '<a id="bj-download" class="download hidden" href="#">⤓ download film</a>';
   if (!state.buildJobId) job.classList.add('hidden');
   box.appendChild(job);
@@ -2045,24 +2286,92 @@ function renderBuildInspector(box) {
   if (state.lastBuild) updateBuildUI(state.lastBuild.status, state.lastBuild.logs);
 }
 
+function readBuildOptions() {
+  return {
+    outputFilename: $('#bi-filename').value.trim() || 'film',
+    audioTargetPeakDb: $('#bi-target').value === '' ? null : Number($('#bi-target').value),
+    burnCaptions: $('#bi-burn').checked,
+  };
+}
+
+function buildRequestFor(deliverableId, options) {
+  const body = {
+    audioTargetPeakDb: options.audioTargetPeakDb,
+    burnCaptions: options.burnCaptions,
+  };
+  if (deliverableId) body.deliverable = deliverableId;
+  else body.outputFilename = options.outputFilename;
+  return body;
+}
+
+function beginBuildJob(submitted, { watch = true } = {}) {
+  state.buildJobId = submitted.jobId;
+  state.lastBuild = null;
+  $('#build-job')?.classList.remove('hidden');
+  $('#bj-download')?.classList.add('hidden');
+  $('#bj-levels')?.classList.add('hidden');
+  const review = $('#bj-review');
+  if (review) { review.classList.add('hidden'); review.replaceChildren(); review.dataset.reviewPath = ''; }
+  if (watch) pollBuild();
+}
+
 async function startBuild() {
   try {
-    const body = {
-      outputFilename: $('#bi-filename').value.trim() || 'film',
-      audioTargetPeakDb: $('#bi-target').value === '' ? null : Number($('#bi-target').value),
-      burnCaptions: $('#bi-burn').checked,
-    };
-    const submitted = await api(`/api/films/${fid}/build`, { method: 'POST', body });
-    state.film.outputFilename = body.outputFilename;
-    state.film.audioTargetPeakDb = body.audioTargetPeakDb;
-    state.film.burnCaptions = body.burnCaptions;
-    state.buildJobId = submitted.jobId;
-    state.lastBuild = null;
-    $('#build-job')?.classList.remove('hidden');
-    $('#bj-download')?.classList.add('hidden');
-    $('#bj-levels')?.classList.add('hidden');
-    pollBuild();
+    const deliverableId = $('#bi-deliverable')?.value || null;
+    const options = readBuildOptions();
+    const submitted = await api(`/api/films/${fid}/build`, {
+      method: 'POST', body: buildRequestFor(deliverableId, options),
+    });
+    if (!deliverableId) state.film.outputFilename = options.outputFilename;
+    state.film.audioTargetPeakDb = options.audioTargetPeakDb;
+    state.film.burnCaptions = options.burnCaptions;
+    beginBuildJob(submitted);
   } catch (err) { toastError(err); }
+}
+
+async function waitForBuildCompletion(jobId) {
+  for (;;) {
+    const status = await api(`/api/jobs/${jobId}`);
+    const { logs } = await api(`/api/jobs/${jobId}/logs?tail=12`);
+    state.lastBuild = { status, logs };
+    updateBuildUI(status, logs);
+    if (['done', 'error', 'cancelled'].includes(status.state)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+}
+
+/** Build separate staged outputs in sequence. That preserves the normal job
+ * queue limit even for a film with every allowed platform version selected. */
+async function startBuildAll() {
+  const options = { ...readBuildOptions(), outputFilename: state.film.outputFilename ?? 'film' };
+  const targets = [null, ...(state.film.deliverables ?? []).map((item) => item.id)];
+  const single = $('#bi-go');
+  const all = $('#bi-go-all');
+  if (single) single.disabled = true;
+  if (all) all.disabled = true;
+  clearInterval(state.buildPoll);
+  state.buildPoll = null;
+  try {
+    for (const deliverableId of targets) {
+      const submitted = await api(`/api/films/${fid}/build`, {
+        method: 'POST', body: buildRequestFor(deliverableId, options),
+      });
+      beginBuildJob(submitted, { watch: false });
+      const finished = await waitForBuildCompletion(submitted.jobId);
+      if (finished.state !== 'done') {
+        throw new Error(`Build failed: ${finished.error?.message ?? finished.state}`);
+      }
+    }
+    state.film.outputFilename = options.outputFilename;
+    state.film.audioTargetPeakDb = options.audioTargetPeakDb;
+    state.film.burnCaptions = options.burnCaptions;
+    toast(`${targets.length} deliveries built ✓`, { kind: 'info' });
+  } catch (err) {
+    toastError(err);
+  } finally {
+    if (single) single.disabled = false;
+    if (all) all.disabled = false;
+  }
 }
 
 /** Write the job status into the panel IF it is showing — the poll keeps
@@ -2093,6 +2402,105 @@ function updateBuildUI(s, logs) {
             (s.audio.appliedOffsetDb != null ? ` · mastered ${s.audio.appliedOffsetDb > 0 ? '+' : ''}${s.audio.appliedOffsetDb} dB` : '');
       });
     }
+    if (s.review) renderBuildReview(s.review);
+  }
+}
+
+function deliveryFileName(filePath) {
+  return String(filePath ?? '').split(/[\\/]/).pop() ?? '';
+}
+
+function reviewOutputUrl(filePath) {
+  return `/api/films/${fid}/output?file=${encodeURIComponent(deliveryFileName(filePath))}`;
+}
+
+/**
+ * Read the persisted review record rather than trying to reconstruct warning
+ * positions from the live timeline. The contact sheet is made from the staged
+ * delivery, so this stays honest after an edit or a page reload.
+ */
+async function renderBuildReview(review) {
+  const host = $('#bj-review');
+  if (!host || !review?.reviewPath) return;
+  if (host.dataset.reviewPath === review.reviewPath && host.dataset.loaded === 'true') return;
+  if (host.dataset.reviewPath === review.reviewPath && host.dataset.loading === 'true') return;
+
+  const requestId = ++reviewRequestId;
+  host.dataset.reviewPath = review.reviewPath;
+  host.dataset.loading = 'true';
+  host.dataset.loaded = '';
+  host.classList.remove('hidden');
+  host.replaceChildren(el('p', { class: 'review-loading dim', text: 'loading output review…' }));
+  try {
+    const report = await api(reviewOutputUrl(review.reviewPath));
+    if (requestId !== reviewRequestId || host !== $('#bj-review')) return;
+
+    host.replaceChildren();
+    const warnings = Array.isArray(report.warnings) ? report.warnings : [];
+    const heading = el('div', { class: 'review-head' },
+      el('strong', { text: 'output review' }),
+      el('span', {
+        class: `review-count ${warnings.some((warning) => warning.level === 'block') ? 'block' : ''}`,
+        text: warnings.length ? `${warnings.length} finding${warnings.length === 1 ? '' : 's'}` : 'clear',
+      }),
+    );
+    host.appendChild(heading);
+
+    const figure = el('div', { class: 'review-contact' });
+    const contact = report.contact ?? {};
+    const image = el('img', {
+      src: reviewOutputUrl(review.contactPath ?? contact.filename),
+      alt: 'Contact sheet for the delivered film',
+      loading: 'lazy',
+    });
+    figure.appendChild(image);
+    const grid = el('div', { class: 'review-thumb-grid' });
+    grid.style.gridTemplateColumns = `repeat(${Math.max(1, Number(contact.columns) || 1)}, minmax(0, 1fr))`;
+    const warningsForFrame = (frame) => warnings.filter((warning) => {
+      if (!Number.isInteger(warning.frame)) return false;
+      const end = warning.frame + Math.max(1, Number(warning.durationFrames) || 1);
+      return frame >= warning.frame && frame < end;
+    });
+    for (const thumb of contact.thumbnails ?? []) {
+      const finding = warningsForFrame(thumb.frame);
+      const label = [
+        `f${thumb.frame}`,
+        thumb.context?.name ?? thumb.context?.footage ?? thumb.context?.scene,
+        thumb.captionOnset ? 'caption' : '',
+      ].filter(Boolean).join(' · ');
+      const cell = el('div', {
+        class: `review-thumb${finding.length ? ' has-warning' : ''}`,
+        title: [label, ...finding.map((warning) => warning.message)].filter(Boolean).join('\n'),
+      }, el('span', { class: 'review-thumb-label', text: label }));
+      for (const warning of finding) {
+        cell.appendChild(el('span', { class: `review-thumb-badge ${warning.level}`, text: warning.code }));
+      }
+      grid.appendChild(cell);
+    }
+    figure.appendChild(grid);
+    host.appendChild(figure);
+
+    const facts = el('p', {
+      class: 'review-facts dim',
+      text: `${report.delivery?.actualFrames ?? '?'} / ${report.delivery?.expectedFrames ?? '?'} frames · ${contact.thumbnails?.length ?? 0} review frames${contact.truncated ? ' (sampled)' : ''}`,
+    });
+    host.appendChild(facts);
+    if (warnings.length) {
+      const list = el('ul', { class: 'review-warning-list' });
+      for (const warning of warnings) {
+        list.appendChild(el('li', { class: warning.level ?? 'info' },
+          el('span', { class: 'review-warning-code', text: warning.code }),
+          document.createTextNode(warning.message),
+        ));
+      }
+      host.appendChild(list);
+    }
+    host.dataset.loaded = 'true';
+  } catch (err) {
+    if (requestId !== reviewRequestId || host !== $('#bj-review')) return;
+    host.replaceChildren(el('p', { class: 'review-loading err', text: `Output review could not be opened: ${err.message}` }));
+  } finally {
+    if (requestId === reviewRequestId && host === $('#bj-review')) delete host.dataset.loading;
   }
 }
 

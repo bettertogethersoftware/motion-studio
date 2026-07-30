@@ -24,6 +24,7 @@ import fsp from 'node:fs/promises';
 import { EngineError, ErrorCodes } from './errors.js';
 import { getFormat, outputColorProfile } from './formats.js';
 import { concatSegments, muxAudio, measureAudioLevels } from './encoder.js';
+import { outputIdentity, outputIdentityMatches } from './delivery.js';
 
 /** Peak (dBFS) at or above which the mix is reported as clipping. */
 const CLIPPING_DBFS = -0.1;
@@ -147,10 +148,16 @@ function metaFromConfig(cfg, frames) {
  * Record what a completed render wrote. Best-effort: a sidecar that cannot
  * be written must never fail a render that already succeeded.
  */
-export async function writeRenderMeta({ scenePath, config, frames }) {
+export async function writeRenderMeta({ scenePath, config, frames, outputPath = sceneOutputPath(scenePath, config) }) {
+  const identity = outputIdentity(outputPath);
   const body = {
     ...metaFromConfig(config, frames),
     renderedAt: new Date().toISOString(),
+    // This is deliberately captured only after the output is promoted.  The
+    // config alone cannot distinguish a new partial file from the prior render
+    // at identical settings; bytes + mtime catches the common crash window
+    // without making a full-file hash part of every normal render.
+    ...(identity ? { outputIdentity: identity } : {}),
   };
   try {
     await fsp.writeFile(renderMetaPath(scenePath, config), JSON.stringify(body, null, 2) + '\n');
@@ -197,9 +204,38 @@ export function renderStaleness(meta, cfg) {
   };
 }
 
+/**
+ * Does a sidecar still describe the particular file at the delivery path?
+ *
+ * null = legacy sidecar without a file identity (unverified, not an error);
+ * false = the delivery was replaced or edited after metadata was written;
+ * true = the cheap file identity still agrees.
+ */
+export function renderOutputIdentityMatches(meta, outputPath) {
+  return outputIdentityMatches(meta?.outputIdentity, outputPath);
+}
+
+/**
+ * One stale verdict for both configuration changes and a sidecar/file mismatch.
+ * `validateScenes` and `planFilm` must use the same rule; otherwise an MCP plan
+ * could warn about a replaced delivery while build_film still concatenates it.
+ */
+export function renderDeliveryStaleness(meta, cfg, outputPath) {
+  const configStale = renderStaleness(meta, cfg);
+  if (configStale) return configStale;
+  if (renderOutputIdentityMatches(meta, outputPath) !== false) return null;
+  return {
+    changed: ['outputIdentity'],
+    recorded: { outputIdentity: meta?.outputIdentity ?? null },
+    current: { outputIdentity: outputIdentity(outputPath) },
+  };
+}
+
 /** One-line human summary of a staleness result, e.g. "frames 217 → 200". */
 export function describeStaleness(st) {
-  return st.changed.map((k) => `${k} ${st.recorded[k]} → ${st.current[k]}`).join(', ');
+  return st.changed.map((k) => k === 'outputIdentity'
+    ? 'output file identity changed'
+    : `${k} ${st.recorded[k]} → ${st.current[k]}`).join(', ');
 }
 
 /* ------------------------------------------------------------------ *
@@ -324,7 +360,10 @@ export function validateScenes(scenes, { hasMasterAudio = false, requireRendered
   // assembles at a length its own plan disagrees with.
   const stale = requireRendered
     ? renderable
-      .map((s) => ({ s, st: renderStaleness(readRenderMeta(s.path, s.config), s.config) }))
+      .map((s) => {
+        const outputPath = sceneOutputPath(s.path, s.config);
+        return { s, st: renderDeliveryStaleness(readRenderMeta(s.path, s.config), s.config, outputPath) };
+      })
       .filter((x) => x.st)
     : [];
   if (stale.length) {

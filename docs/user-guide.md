@@ -48,10 +48,14 @@ film row — name, scene count, a ✕ to delete — expands to its scenes plus a
 starts a new tree.
 
 **+ film** opens the **new film** dialog: a name plus width/height/fps/
-duration. Those dimensions become the film's *scene defaults* — every scene
-created inside it inherits them, which is what keeps a film's scenes
-losslessly concatenable — and the visual [film editor](#the-film-editor)
-opens next. **+ scene** opens the **new scene** dialog: just a name and an
+duration and optional **platform versions** (YouTube 16:9, Shorts/TikTok 9:16,
+Square 1:1). The first selected platform supplies the master canvas; every
+selected version is saved before any scene exists, so it shares one edit rather
+than becoming a second film later. Leave them unticked for a master-only film.
+Those dimensions become the film's *scene defaults* — every scene created
+inside it inherits them, which is what keeps a film's scenes losslessly
+concatenable — and the visual [film editor](#the-film-editor) opens next.
+**+ scene** opens the **new scene** dialog: just a name and an
 optional duration (0 = the film's default); width/height/fps always come
 from the film, so diverging them is left to the scene's own config tab
 rather than offered up front. Scenes and films created or edited by an agent
@@ -141,8 +145,19 @@ workbench while open; close restores it), no longer a popup dialog:
   gets when its creator didn't specify — including one an agent makes over
   MCP (`create_film`/`create_scene`). Newly created films/scenes only;
   existing ones keep their own.
+- **new-film platform defaults** — optional platform versions preselected in
+  Studio's **new film** dialog. Leave all clear for master-only by default.
+  An AI request that explicitly names YouTube, TikTok/Shorts, or Square always
+  wins and is saved as that film's own snapshot; changing this setting never
+  alters a film already created.
 - **default workers** — the render tab's initial workers selection, and the
   worker count for any render that doesn't name one.
+- **delivery review** — comma-separated finding codes to **block** or record
+  as a **warning** after an encoded file is staged. The default blocks only a
+  frame-count mismatch; dark/static/cut findings stay warnings because they can
+  be intentional. A block preserves the prior delivery and leaves staged
+  evidence for diagnosis. A film can save a more specific policy through its
+  document (for example an agent can use `update_film { review: … }`).
 - **ffmpeg** — a binary path override (leave empty to use `ffmpeg` on PATH;
   the dialog live-probes the effective binary and shows its version or a
   ✗ if it can't be run — the footer status updates too) and default
@@ -177,9 +192,10 @@ Settings persist in `<dataDir>/settings.json` and are genuinely global:
 the Studio, the CLI, and agents working over MCP all honour them. They fill in
 what a new scene or render didn't specify — an explicit choice always wins,
 so an agent told to make a 4K vertical video still gets one — and they apply
-only at creation. A scene already on disk is never rewritten because you
-changed a global, so it keeps rendering the way it did. One thing that file
-never holds is a credential: API keys are read from the environment only.
+only at creation where they seed a scene. The worker and delivery-review
+settings are runtime defaults, so they apply to the next render but do not
+rewrite any scene. One thing that file never holds is a credential: API keys
+are read from the environment only.
 
 The sidebar collapses to a slim strip with the **«** button, and each
 workspace's and film's expanded/collapsed state persists the same way — both
@@ -516,16 +532,20 @@ left rail lists **the film's own scenes** — every folder under its
 play order) or `unlisted` (a scene folder that exists but isn't placed yet,
 e.g. made by an agent or copied in by hand). The right panel is the context
 inspector — and the **build panel** docks there too, so assembling never
-covers the timeline. The timeline has four kinds of track:
+covers the timeline. The timeline contains scene/footage blocks plus audio,
+caption, and overlay tracks:
 
-- **scenes** — **drag a scene from the left rail onto the timeline** to
-  place it (an insert marker shows where it lands), or hit the row's **+** to
-  append it; drag scene blocks to reorder. **+ new scene** at the foot of the
-  rail scaffolds a fresh scene folder directly into the film. Incompatible
-  scenes (different resolution/fps/format) and unrendered scenes are
-  flagged, and each scene has a **render** button right in the inspector, so
-  you never leave the editor to fix a red flag. Scene blocks are butt-joined
-  — a film has no gaps — so order is the only thing to drag.
+- **scenes and footage** — **drag a scene from the left rail onto the
+  timeline** to place it (an insert marker shows where it lands), or hit the
+  row's **+** to append it; drag blocks to reorder. **+ new scene** at the
+  foot of the rail scaffolds a fresh scene folder directly into the film.
+  Incompatible/unrendered scenes and footage with a mismatched signature or
+  frame count are flagged before a build. Prepared footage can retain the
+  source record returned by `transcode_asset`; its inspector status is
+  **source verified** until the original file changes. A changed or missing
+  source stops the build and needs a fresh preparation pass. Scene and footage
+  blocks are butt-joined — a film has no gaps — so order is the only thing to
+  drag.
 - **audio** — a master timeline laid over the whole film (it replaces
   per-scene audio, same rule as `build_film`). “+ audio” places an asset at
   the playhead; “+ narration” synthesizes speech through your configured
@@ -548,6 +568,14 @@ ducking, limiter) — what you hear is what ships. Snap, zoom, undo/redo and
 autosave behave the way you'd expect from an NLE; Space plays, arrows step,
 Del removes the selected block.
 
+The empty right-side inspector also contains **platform versions**. It shows the
+versions the AI or new-film dialog chose, lets you add/remove a saved preset,
+choose its output name and caption style, and set a default or per-scene crop
+focus. These controls change only that delivery version; timing, cuts, master
+audio and captions remain the one shared film edit. Its contact sheet later
+draws the version's caption-safe guide so the final portrait crop can be judged
+from the actual encoded picture.
+
 **build film →** opens the build panel in the right-side column (the
 timeline stays visible and editable) and assembles: lossless concat,
 master-audio mux with optional **master-to-peak** (measure the mix, shift
@@ -555,7 +583,15 @@ every track by one offset, re-mux once — your balance survives), then — only
 if the film uses overlays or burned captions — a single finishing encode.
 The panel shows live progress (the header button carries the percent even if
 you switch back to editing) and, when it lands, the measured
-`peak/mean dBFS` of the mix and a download link.
+`peak/mean dBFS` of the mix, a download link, and an **Output review** contact
+sheet. Its badges point to the encoded film's black/static/cut findings and
+caption/cut frames; the list below it records the exact policy severity. The
+same `<base>.review.json` and `<base>.contact.png` live beside the movie in
+`out/`, so the review survives a reload and is available to agents too. Choose
+**master** or a saved platform version in the panel; a platform version is a
+target-size reframe of the approved master, with its own output/SRT/review files.
+**build master + all versions** runs every saved delivery in sequence with separate
+staged output names — it does not rebuild the edit by hand.
 
 Films are shared with the agent whose workspace they live in: `update_film`
 and `build_film` over MCP edit and build this same `film.json`, so a film you

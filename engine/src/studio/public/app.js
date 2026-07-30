@@ -1321,7 +1321,11 @@ $('#btn-settings').addEventListener('click', async () => {
     f.width.value = settings.newSceneDefaults.width;
     f.height.value = settings.newSceneDefaults.height;
     f.durationInFrames.value = settings.newSceneDefaults.durationInFrames;
+    renderDeliverablePicker($('#settings-deliverable-defaults'),
+      settings.newFilmDefaults?.deliverableIds ?? []);
     f.defaultWorkers.value = String(settings.render.defaultWorkers);
+    f.reviewBlock.value = (settings.render.review?.block ?? []).join(', ');
+    f.reviewWarn.value = (settings.render.review?.warn ?? []).join(', ');
     f.ffmpegPath.value = settings.ffmpeg.path ?? '';
     f.ffmpegCrf.value = settings.ffmpeg.defaultCrf ?? '';
     f.ffmpegPreset.value = settings.ffmpeg.defaultPreset ?? '';
@@ -1357,6 +1361,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
   const msg = $('#settings-msg');
   msg.textContent = '…';
   try {
+    const reviewCodes = (value) => value.split(',').map((code) => code.trim()).filter(Boolean);
     const patch = {
       newSceneDefaults: {
         fps: Number(f.fps.value),
@@ -1364,7 +1369,16 @@ $('#settings-form').addEventListener('submit', async (e) => {
         height: Number(f.height.value),
         durationInFrames: Number(f.durationInFrames.value),
       },
-      render: { defaultWorkers: Number(f.defaultWorkers.value) },
+      newFilmDefaults: {
+        deliverableIds: selectedDeliverableIds($('#settings-deliverable-defaults')),
+      },
+      render: {
+        defaultWorkers: Number(f.defaultWorkers.value),
+        review: {
+          block: reviewCodes(f.reviewBlock.value),
+          warn: reviewCodes(f.reviewWarn.value),
+        },
+      },
       ffmpeg: {
         path: f.ffmpegPath.value.trim() || null,
         defaultCrf: f.ffmpegCrf.value === '' ? null : Number(f.ffmpegCrf.value),
@@ -2537,8 +2551,63 @@ for (const tab of document.querySelectorAll('.tab')) {
  * dimensions every scene inside will inherit. */
 
 let newFilmWorkspace = null;
-function openNewFilmDialog(wsId) {
+
+function studioDeliverablePresets() {
+  return Array.isArray(state.settings?.deliverablePresets) ? state.settings.deliverablePresets : [];
+}
+
+function selectedDeliverableIds(host) {
+  return host ? [...host.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value) : [];
+}
+
+/** Render the same persisted platform presets in Settings and New Film. */
+function renderDeliverablePicker(host, selectedIds = [], { onChange = null } = {}) {
+  if (!host) return;
+  host.replaceChildren();
+  const chosen = new Set(selectedIds);
+  const presets = studioDeliverablePresets();
+  if (!presets.length) {
+    host.appendChild(el('span', 'dim', 'No platform presets are configured.'));
+    return;
+  }
+  for (const preset of presets) {
+    const label = document.createElement('label');
+    label.className = 'check';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = preset.id;
+    input.checked = chosen.has(preset.id);
+    input.addEventListener('change', () => onChange?.());
+    const text = document.createElement('span');
+    text.textContent = preset.label;
+    const size = document.createElement('span');
+    size.className = 'deliverable-size';
+    size.textContent = `${preset.width}×${preset.height}`;
+    label.append(input, text, size);
+    host.appendChild(label);
+  }
+}
+
+function syncNewFilmPrimaryCanvas() {
+  const f = $('#new-film-form');
+  const selected = selectedDeliverableIds($('#new-film-deliverables'));
+  const primary = studioDeliverablePresets().find((preset) => selected.includes(preset.id));
+  const note = $('#new-film-platform-note');
+  if (!primary) {
+    note.textContent = 'Optional. Leave all unchecked for a master-only film.';
+    return;
+  }
+  f.width.value = primary.width;
+  f.height.value = primary.height;
+  note.textContent = `${primary.label} supplies the master canvas. The same edit is reframed for every selected version.`;
+}
+
+async function openNewFilmDialog(wsId) {
   newFilmWorkspace = wsId;
+  // The picker must reflect the same persisted defaults the server will use.
+  // If the footer's background settings load has not landed yet, wait for it
+  // rather than accidentally sending an explicit empty list that overrides it.
+  if (!state.settings) await loadSettings().catch(() => {});
   const d = state.settings?.newSceneDefaults;
   const f = $('#new-film-form');
   if (d) {
@@ -2547,6 +2616,10 @@ function openNewFilmDialog(wsId) {
     f.fps.value = d.fps;
     f.durationInFrames.value = d.durationInFrames;
   }
+  renderDeliverablePicker($('#new-film-deliverables'), state.settings?.newFilmDefaults?.deliverableIds ?? [], {
+    onChange: syncNewFilmPrimaryCanvas,
+  });
+  syncNewFilmPrimaryCanvas();
   $('#new-film-workspace').textContent = wsId;
   $('#new-film-dialog').showModal();
 }
@@ -2555,6 +2628,7 @@ $('#new-film-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
   try {
+    const selectedDeliverables = selectedDeliverableIds($('#new-film-deliverables')).map((id) => ({ id }));
     const { film } = await api(`/api/workspaces/${enc(newFilmWorkspace)}/films`, {
       method: 'POST',
       body: {
@@ -2563,6 +2637,9 @@ $('#new-film-form').addEventListener('submit', async (e) => {
         height: Number(f.height.value),
         fps: Number(f.fps.value),
         durationInFrames: Number(f.durationInFrames.value),
+        // Only send an explicit list once the picker has a real settings
+        // snapshot. Otherwise the server correctly applies its defaults.
+        ...(state.settings ? { deliverables: selectedDeliverables } : {}),
       },
     });
     $('#new-film-dialog').close();

@@ -436,6 +436,10 @@
           <label>fps <input name="fps" type="number" min="1" max="240"></label>
           <label>frames <input name="durationInFrames" type="number" min="1"></label>
         </div>
+        <p class="section-label">new-film platform defaults</p>
+        <div id="settings-deliverable-defaults" class="deliverable-options"></div>
+        <p class="dim note">Optional. These versions are preselected whenever someone creates a film in Studio.
+        Leave all unchecked for a master-only film. AI-created films use the platforms named in the request instead.</p>
         <p class="section-label">render</p>
         <div class="fieldrow">
           <label>default workers
@@ -450,6 +454,18 @@
             </select>
           </label>
         </div>
+        <div class="fieldrow">
+          <label class="grow">block delivery on
+            <input name="reviewBlock" spellcheck="false" autocapitalize="off" autocorrect="off"
+              placeholder="frame_count_mismatch">
+          </label>
+          <label class="grow">record as warning
+            <input name="reviewWarn" spellcheck="false" autocapitalize="off" autocorrect="off"
+              placeholder="static_run, black_run, suspect_cut">
+          </label>
+        </div>
+        <p class="dim note">Comma-separated delivery-review codes. A block keeps the prior video in place; a
+        warning still ships with a contact sheet and review report. Film-specific policies can override these defaults.</p>
         <p class="section-label">ffmpeg</p>
         <div class="fieldrow">
           <label class="grow">binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
@@ -726,6 +742,11 @@
       <label>fps <input name="fps" type="number" value="30"></label>
       <label>frames <input name="durationInFrames" type="number" value="150"></label>
     </div>
+    <fieldset class="deliverable-picker">
+      <legend>platform versions</legend>
+      <div id="new-film-deliverables" class="deliverable-options"></div>
+      <p id="new-film-platform-note" class="dim note">Optional. The first selected platform supplies this film's master canvas; the same edit is reframed for every selected version.</p>
+    </fieldset>
     <p class="dim note">A film holds ordered scenes and combines their renders into one continuous video,
     with a master audio timeline, captions and overlays — arranged in the visual editor that opens next.
     It keeps its own assets/ (master audio) and out/ (the built film). These dimensions become the film's

@@ -290,7 +290,9 @@ export class WorkspaceStore {
    * which is how the lossless-concat consistency invariant — all scenes share
    * resolution/fps — becomes the default instead of a discipline.
    */
-  async createFilm(ws, { name, slug = undefined, sceneDefaults = undefined, outputFilename = undefined } = {}) {
+  async createFilm(ws, {
+    name, slug = undefined, sceneDefaults = undefined, outputFilename = undefined, deliverables = undefined,
+  } = {}) {
     if (typeof name !== 'string' || !name.trim()) {
       throw new EngineError(ErrorCodes.INVALID_FILM, 'Film name is required', { problems: ['name is required'] });
     }
@@ -303,7 +305,11 @@ export class WorkspaceStore {
     }
     const now = new Date().toISOString();
     const doc = validateFilm({
-      ...normalizeFilm({ name: name.trim(), sceneDefaults, ...(outputFilename ? { outputFilename } : {}) }),
+      ...normalizeFilm({
+        name: name.trim(), sceneDefaults,
+        ...(outputFilename ? { outputFilename } : {}),
+        ...(deliverables !== undefined ? { deliverables } : {}),
+      }),
       schemaVersion: FILM_SCHEMA_VERSION,
       createdAt: now,
       updatedAt: now,
@@ -360,7 +366,7 @@ export class WorkspaceStore {
    */
   async updateFilm(filmId, patch) {
     const ALLOWED = new Set(['name', 'scenes', 'outputFilename', 'audio', 'overlays', 'captions',
-      'captionStyle', 'audioTargetPeakDb', 'burnCaptions', 'sceneDefaults']);
+      'captionStyle', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables']);
     for (const k of Object.keys(patch ?? {})) {
       if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_FILM, `Film field "${k}" cannot be updated`, { field: k });
     }

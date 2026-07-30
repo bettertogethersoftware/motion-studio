@@ -44,6 +44,11 @@ import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir, settingsFileFor } from './paths.js';
 import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
 import { ELEVENLABS_WAV_FORMATS, ELEVENLABS_DEFAULT_FORMAT } from './tts-elevenlabs.js';
+import { DEFAULT_REVIEW_POLICY, REVIEW_WARNING_CODES } from './render-review.js';
+import {
+  DEFAULT_DELIVERABLE_PRESETS, DELIVERABLE_ID_RE, MAX_FILM_DELIVERABLES,
+  normalizeDeliverable, validateDeliverablePreset,
+} from './deliverables.js';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -64,7 +69,20 @@ export const TRANSCRIPTION_VENDORS = Object.freeze(['whisper-cpp']);
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   newSceneDefaults: Object.freeze({ fps: 30, width: 1920, height: 1080, durationInFrames: 150 }),
-  render: Object.freeze({ defaultWorkers: 1 }),
+  // New films are master-only unless an agent/user explicitly names platforms
+  // or opts into workspace defaults. Presets are snapshots seeded into the
+  // film; changing this list never mutates an existing film document.
+  newFilmDefaults: Object.freeze({ deliverableIds: Object.freeze([]) }),
+  deliverablePresets: DEFAULT_DELIVERABLE_PRESETS,
+  render: Object.freeze({
+    defaultWorkers: 1,
+    // Review policy is a list of stable warning codes. The default refuses a
+    // known-short file and records intentional dark/static frames as warnings.
+    review: Object.freeze({
+      block: Object.freeze([...DEFAULT_REVIEW_POLICY.block]),
+      warn: Object.freeze([...DEFAULT_REVIEW_POLICY.warn]),
+    }),
+  }),
   // path: null → "ffmpeg" on PATH. defaultCrf/defaultPreset: null → the
   // engine's per-format defaults; when set they seed newly created scenes'
   // output config (existing scenes are untouched — same rule as everything
@@ -161,6 +179,37 @@ export function validateSettings(s) {
   };
   if (!s || typeof s !== 'object') problems.push('settings must be an object');
   else {
+    const presets = s.deliverablePresets;
+    if (!Array.isArray(presets) || presets.length === 0 || presets.length > MAX_FILM_DELIVERABLES * 3) {
+      problems.push(`deliverablePresets: array of 1..${MAX_FILM_DELIVERABLES * 3} presets required`);
+    } else {
+      const ids = new Set();
+      presets.forEach((preset, index) => {
+        const normalized = normalizeDeliverable(preset, { baseFilename: 'film' });
+        validateDeliverablePreset(normalized, `deliverablePresets[${index}]`, problems);
+        if (typeof normalized?.id === 'string') {
+          if (ids.has(normalized.id)) problems.push(`deliverablePresets[${index}].id "${normalized.id}" is duplicated`);
+          ids.add(normalized.id);
+        }
+      });
+    }
+    const nfd = s.newFilmDefaults;
+    if (!nfd || typeof nfd !== 'object' || Array.isArray(nfd)) {
+      problems.push('newFilmDefaults: object required');
+    } else {
+      const ids = nfd.deliverableIds;
+      if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !DELIVERABLE_ID_RE.test(id))) {
+        problems.push('newFilmDefaults.deliverableIds: array of deliverable ids required');
+      } else {
+        if (new Set(ids).size !== ids.length) problems.push('newFilmDefaults.deliverableIds: duplicate ids are not allowed');
+        const known = new Set((Array.isArray(presets) ? presets : []).map((preset) => preset?.id));
+        const unknown = ids.filter((id) => !known.has(id));
+        if (unknown.length) problems.push(`newFilmDefaults.deliverableIds: unknown preset id(s) ${unknown.join(', ')}`);
+      }
+      for (const key of Object.keys(nfd)) {
+        if (key !== 'deliverableIds') problems.push(`newFilmDefaults.${key} is not a new-film default`);
+      }
+    }
     const d = s.newSceneDefaults;
     if (!d || typeof d !== 'object') problems.push('newSceneDefaults: object required');
     else {
@@ -171,7 +220,26 @@ export function validateSettings(s) {
     }
     const r = s.render;
     if (!r || typeof r !== 'object') problems.push('render: object required');
-    else if (!isPosInt(r.defaultWorkers) || r.defaultWorkers > 10) problems.push('render.defaultWorkers: integer in 1..10 required');
+    else {
+      if (!isPosInt(r.defaultWorkers) || r.defaultWorkers > 10) problems.push('render.defaultWorkers: integer in 1..10 required');
+      const review = r.review;
+      if (!review || typeof review !== 'object' || Array.isArray(review)) {
+        problems.push('render.review: object with block/warn arrays required');
+      } else {
+        for (const field of ['block', 'warn']) {
+          const values = review[field];
+          if (!Array.isArray(values)) {
+            problems.push(`render.review.${field}: array of review warning codes required`);
+            continue;
+          }
+          const unknown = values.filter((value) => !REVIEW_WARNING_CODES.includes(value));
+          if (unknown.length) problems.push(`render.review.${field}: unknown warning code(s) ${unknown.join(', ')}`);
+          if (new Set(values).size !== values.length) problems.push(`render.review.${field}: duplicate warning codes are not allowed`);
+        }
+        const overlap = (review.block ?? []).filter((code) => (review.warn ?? []).includes(code));
+        if (overlap.length) problems.push(`render.review: a code cannot be both block and warn (${overlap.join(', ')})`);
+      }
+    }
     const f = s.ffmpeg;
     if (!f || typeof f !== 'object') problems.push('ffmpeg: object required');
     else {
@@ -445,7 +513,15 @@ export async function readSettings(dataDir = defaultDataDir()) {
   const merged = {
     schemaVersion: SETTINGS_SCHEMA_VERSION,
     newSceneDefaults: { ...DEFAULT_SETTINGS.newSceneDefaults, ...(raw.newSceneDefaults ?? {}) },
-    render: { ...DEFAULT_SETTINGS.render, ...(raw.render ?? {}) },
+    newFilmDefaults: { ...DEFAULT_SETTINGS.newFilmDefaults, ...(raw.newFilmDefaults ?? {}) },
+    deliverablePresets: Array.isArray(raw.deliverablePresets)
+      ? raw.deliverablePresets.map((preset) => normalizeDeliverable(preset, { baseFilename: 'film' }))
+      : structuredClone(DEFAULT_SETTINGS.deliverablePresets),
+    render: {
+      ...DEFAULT_SETTINGS.render,
+      ...(raw.render ?? {}),
+      review: { ...DEFAULT_SETTINGS.render.review, ...(raw.render?.review ?? {}) },
+    },
     ffmpeg: { ...DEFAULT_SETTINGS.ffmpeg, ...(raw.ffmpeg ?? {}) },
     // Only known fields survive the read. A hand-edited file that parked an
     // `azure.key` in here is ignored rather than treated as corrupt (which
@@ -486,7 +562,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
  * atomically. Unknown top-level keys are rejected so typos fail loudly.
  */
 export async function updateSettings(patch, dataDir = defaultDataDir()) {
-  const ALLOWED = new Set(['newSceneDefaults', 'render', 'ffmpeg', 'tts', 'music', 'transcription']);
+  const ALLOWED = new Set(['newSceneDefaults', 'newFilmDefaults', 'deliverablePresets', 'render', 'ffmpeg', 'tts', 'music', 'transcription']);
   for (const k of Object.keys(patch ?? {})) {
     if (!ALLOWED.has(k)) {
       throw new EngineError(ErrorCodes.INVALID_CONFIG, `Settings field "${k}" cannot be updated`, { field: k });
@@ -496,7 +572,15 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
   const next = validateSettings({
     schemaVersion: SETTINGS_SCHEMA_VERSION,
     newSceneDefaults: { ...cur.newSceneDefaults, ...(patch.newSceneDefaults ?? {}) },
-    render: { ...cur.render, ...(patch.render ?? {}) },
+    newFilmDefaults: { ...cur.newFilmDefaults, ...(patch.newFilmDefaults ?? {}) },
+    deliverablePresets: patch.deliverablePresets === undefined
+      ? cur.deliverablePresets
+      : patch.deliverablePresets.map((preset) => normalizeDeliverable(preset, { baseFilename: 'film' })),
+    render: {
+      ...cur.render,
+      ...(patch.render ?? {}),
+      review: { ...cur.render.review, ...(patch.render?.review ?? {}) },
+    },
     ffmpeg: { ...cur.ffmpeg, ...(patch.ffmpeg ?? {}) },
     // tts.azure merges one level deeper so a patch may set just the region
     // without clearing the default voice (and vice versa).

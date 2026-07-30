@@ -19,7 +19,7 @@ import { promisify } from 'node:util';
 
 import { summarizeMedia, probeMedia } from '../src/core/encoder.js';
 import {
-  writeRenderMeta, readRenderMeta, renderStaleness, describeStaleness,
+  writeRenderMeta, readRenderMeta, renderStaleness, renderDeliveryStaleness, describeStaleness,
   renderMetaPath, sceneOutputPath, validateScenes,
 } from '../src/core/film.js';
 import { planFilm } from '../src/core/films.js';
@@ -29,6 +29,7 @@ import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
 import { formatPageDiagnostics } from '../src/core/browser.js';
 import { makeStore, makeScene, TEST_WS } from './helpers/workspace.mjs';
 import { ErrorCodes } from '../src/core/errors.js';
+import { stagingOutputPath } from '../src/core/delivery.js';
 
 const execFileP = promisify(execFile);
 
@@ -45,6 +46,14 @@ const dirFor = async (name) => {
   await fsp.mkdir(d, { recursive: true });
   return d;
 };
+
+test('stagingOutputPath gives direct callers a unique path when they have no job id', () => {
+  const out = path.join(tmp, 'staging-name', 'out', 'output.mp4');
+  const a = stagingOutputPath(out, { jobId: null });
+  const b = stagingOutputPath(out, { jobId: null });
+  assert.notEqual(a, b);
+  assert.match(a, /[\\/]\.staging[\\/]output-[0-9a-f-]+\.mp4$/i);
+});
 
 /* ------------------------------------------------------------------ */
 /* summarizeMedia — pure, so no ffprobe needed                         */
@@ -201,6 +210,7 @@ test('writeRenderMeta round-trips through readRenderMeta', async () => {
   const scenePath = await dirFor('meta');
   const cfg = cfgOf();
   await fsp.mkdir(path.join(scenePath, 'out'), { recursive: true });
+  await fsp.writeFile(sceneOutputPath(scenePath, cfg), 'rendered-output');
   const written = await writeRenderMeta({ scenePath, config: cfg, frames: 60 });
   assert.equal(written.frames, 60);
   assert.ok(fs.existsSync(renderMetaPath(scenePath, cfg)));
@@ -209,7 +219,27 @@ test('writeRenderMeta round-trips through readRenderMeta', async () => {
   assert.equal(read.frames, 60);
   assert.equal(read.width, 320);
   assert.ok(read.renderedAt, 'records when it was rendered');
+  assert.deepEqual(read.outputIdentity.bytes, Buffer.byteLength('rendered-output'));
   assert.equal(renderStaleness(read, cfg), null);
+});
+
+test('a sidecar is stale when the delivery file changes at identical settings', async () => {
+  const scenePath = await dirFor('meta-output-identity');
+  const cfg = cfgOf();
+  const out = sceneOutputPath(scenePath, cfg);
+  await fsp.mkdir(path.dirname(out), { recursive: true });
+  await fsp.writeFile(out, 'the first delivery');
+  await writeRenderMeta({ scenePath, config: cfg, frames: 60 });
+
+  await fsp.writeFile(out, 'a different replacement delivery with a different size');
+  const meta = readRenderMeta(scenePath, cfg);
+  const stale = renderDeliveryStaleness(meta, cfg, out);
+  assert.deepEqual(stale.changed, ['outputIdentity']);
+  assert.equal(describeStaleness(stale), 'output file identity changed');
+  assert.throws(
+    () => validateScenes([{ sceneId: 'a/b', path: scenePath, config: cfg }]),
+    (err) => err.code === ErrorCodes.STALE_RENDER,
+  );
 });
 
 test('writeRenderMeta never throws when the sidecar cannot be written', async () => {
@@ -314,15 +344,22 @@ test('a real render stamps the sidecar; proxy and partial renders do not', { ski
 
   // A partial range renders only part of the file — claiming it as the
   // scene's canonical output would be a lie.
-  await renderComposition({ scenePath: dir, config, outputPath: out, frameRange: [0, 9], browserFactory, preflight: false });
+  const partial = await renderComposition({
+    scenePath: dir, config, outputPath: out, frameRange: [0, 9], browserFactory, preflight: false,
+  });
+  assert.equal(partial.promoted, true, 'a direct partial export is also promoted from staging');
   assert.equal(fs.existsSync(meta()), false, 'a partial render must not stamp the sidecar');
 
   // A proxy writes to output.proxy.mp4 and is not the deliverable.
-  await renderComposition({ scenePath: dir, config, outputPath: out, proxy: { scale: 0.5, frameStep: 2 }, browserFactory, preflight: false });
+  const proxy = await renderComposition({
+    scenePath: dir, config, outputPath: out, proxy: { scale: 0.5, frameStep: 2 }, browserFactory, preflight: false,
+  });
+  assert.equal(proxy.promoted, true, 'a proxy is a caller-visible file and is promoted safely too');
   assert.equal(fs.existsSync(meta()), false, 'a proxy must not stamp the sidecar');
 
   // The full scene does.
-  await renderComposition({ scenePath: dir, config, outputPath: out, browserFactory, preflight: false });
+  const full = await renderComposition({ scenePath: dir, config, outputPath: out, browserFactory, preflight: false });
+  assert.equal(full.promoted, true);
   assert.ok(fs.existsSync(meta()), 'a full render stamps the sidecar');
   const recorded = readRenderMeta(dir, config);
   assert.equal(recorded.frames, 24);
@@ -355,6 +392,56 @@ test('a real render stamps the sidecar; proxy and partial renders do not', { ski
   assert.equal(describeStaleness(renderStaleness(readRenderMeta(dir, repixed), repixed)), 'pixFmt yuv420p → yuv444p');
   const recolored = { ...recorded, colorMatrix: 'bt601' };
   assert.equal(describeStaleness(renderStaleness(recolored, config)), 'colorMatrix bt601 → bt709');
+});
+
+test('a failed identical-settings re-render preserves the promoted delivery and its metadata', { skip: !haveFfmpeg }, async () => {
+  const store = await makeStore(await dirFor('staged-retry'));
+  const { film, scene } = await makeScene(store, {
+    name: 'Staged retry', film: 'Staged Retry Film', fps: 30, width: 160, height: 120, durationInFrames: 12,
+  });
+  const config = await store.readConfig(scene.id);
+  const out = sceneOutputPath(scene.path, config);
+
+  const first = await renderComposition({
+    scenePath: scene.path, config, outputPath: out,
+    browserFactory: makeFakeBrowserFactory(), preflight: false, jobId: 'first',
+  });
+  assert.equal(first.promoted, true);
+  const before = await fsp.readFile(out);
+  const beforeMeta = readRenderMeta(scene.path, config);
+
+  let failedStagingPath;
+  await assert.rejects(
+    renderComposition({
+      scenePath: scene.path, config, outputPath: out,
+      browserFactory: makeFakeBrowserFactory({ failAtFrame: 5 }), preflight: false, jobId: 'retry',
+    }),
+    (err) => {
+      assert.equal(err.code, ErrorCodes.COMPOSITION_ERROR);
+      assert.match(err.detail.stagingPath, /[\\/]\.staging[\\/]/);
+      failedStagingPath = err.detail.stagingPath;
+      return true;
+    },
+  );
+
+  assert.deepEqual(await fsp.readFile(out), before, 'the prior delivery must not be replaced by a partial retry');
+  assert.deepEqual(readRenderMeta(scene.path, config).outputIdentity, beforeMeta.outputIdentity, 'the old sidecar remains truthful');
+  assert.doesNotThrow(() => validateScenes([{ sceneId: scene.id, path: scene.path, config }]));
+  const afterFailure = await planFilm({ film: await store.getFilm(film.id), store });
+  assert.equal(afterFailure.problems.length, 0, JSON.stringify(afterFailure.problems));
+  assert.equal(afterFailure.scenes[0].renderVerified, true, 'the healthy previous delivery stays verified after a failed retry');
+  assert.ok(fs.existsSync(path.dirname(failedStagingPath)), 'the failure identifies a retained staging area for diagnosis');
+  assert.notEqual(path.resolve(failedStagingPath), path.resolve(out), 'a failed attempt can never claim the delivery path');
+
+  // This is the complementary Windows-sensitive check: the next successful
+  // retry must replace the existing destination by rename, never by deleting it
+  // first. The sidecar follows that new delivery and is immediately trustworthy.
+  const second = await renderComposition({
+    scenePath: scene.path, config, outputPath: out,
+    browserFactory: makeFakeBrowserFactory(), preflight: false, jobId: 'retry-success',
+  });
+  assert.equal(second.promoted, true);
+  assert.equal(renderDeliveryStaleness(readRenderMeta(scene.path, config), config, out), null);
 });
 
 test('an older sidecar without pixFmt stays unverified rather than turning up stale', () => {

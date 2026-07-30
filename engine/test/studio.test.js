@@ -54,10 +54,15 @@ let filmId, sceneId;
 test('studio: serves the UI shell and static assets', async () => {
   const home = await fetch(base + '/');
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /MOTION/);
+  const shell = await home.text();
+  assert.match(shell, /MOTION/);
+  assert.match(shell, /platform versions/);
   const app = await fetch(base + '/app.js');
   assert.equal(app.status, 200);
   assert.match(app.headers.get('content-type'), /javascript/);
+  const filmEditor = await fetch(base + '/film.js');
+  assert.equal(filmEditor.status, 200);
+  assert.match(await filmEditor.text(), /build master \+ all versions/);
 });
 
 test('studio: prereqs endpoint reports engine state', async (t) => {
@@ -141,12 +146,18 @@ test('studio: render → poll to done → outputs list → download', async (t) 
   }
   assert.equal(status.state, 'done', JSON.stringify(status));
   assert.equal(status.framesDone, 20);
+  assert.equal(status.promoted, true, JSON.stringify(status));
+  assert.equal(typeof status.framesVerified, 'boolean', JSON.stringify(status));
 
   const logs = await j(`/api/jobs/${jobId}/logs`);
   assert.ok(logs.data.logs.some((l) => /encoding/.test(l.message)));
 
+  const scene = (await j(`/api/scenes/${enc(sceneId)}`)).data;
+  await fsp.mkdir(path.join(scene.path, 'out', '.staging'), { recursive: true });
+  await fsp.writeFile(path.join(scene.path, 'out', '.staging', 'interrupted.mp4'), 'not a delivery');
   const outputs = await j(`/api/scenes/${enc(sceneId)}/outputs`);
   assert.ok(outputs.data.files.some((f) => f.name === 'output.mp4'));
+  assert.equal(outputs.data.files.some((f) => f.name === '.staging'), false, 'interrupted staging never appears as an output');
 
   const dl = await fetch(`${base}/api/scenes/${enc(sceneId)}/output?file=output.mp4&download=1`);
   assert.equal(dl.status, 200);
@@ -319,6 +330,7 @@ test('studio: settings — defaults, patch, validation, unknown keys (v0.15)', a
   assert.equal(got.status, 200);
   assert.equal(got.data.settings.newSceneDefaults.fps, 30);
   assert.equal(got.data.settings.render.defaultWorkers, 1);
+  assert.deepEqual(got.data.settings.render.review.block, ['frame_count_mismatch']);
   assert.ok(got.data.environment.dataDir);
   assert.ok(got.data.environment.workspacesRoot);
   assert.ok('MOTION_STUDIO_TTS_EXE' in got.data.environment.env);
@@ -336,9 +348,22 @@ test('studio: settings — defaults, patch, validation, unknown keys (v0.15)', a
   const again = await j('/api/settings');
   assert.equal(again.data.settings.render.defaultWorkers, 2);
 
+  const reviewPatched = await j('/api/settings', {
+    method: 'PATCH',
+    body: { patch: { render: { review: { block: ['frame_count_mismatch'], warn: ['black_run'] } } } },
+  });
+  assert.equal(reviewPatched.status, 200, JSON.stringify(reviewPatched.data));
+  assert.deepEqual(reviewPatched.data.settings.render.review.warn, ['black_run']);
+
   const invalid = await j('/api/settings', { method: 'PATCH', body: { patch: { render: { defaultWorkers: 99 } } } });
   assert.equal(invalid.status, 400);
   assert.equal(invalid.data.code, 'invalid_config');
+
+  const invalidReview = await j('/api/settings', {
+    method: 'PATCH',
+    body: { patch: { render: { review: { block: ['black_run'], warn: ['black_run'] } } } },
+  });
+  assert.equal(invalidReview.status, 400);
 
   const unknown = await j('/api/settings', { method: 'PATCH', body: { patch: { evil: true } } });
   assert.equal(unknown.status, 400);
@@ -401,6 +426,41 @@ test('studio: new film inherits settings defaults as sceneDefaults (v0.20)', asy
     method: 'PATCH',
     body: { patch: { newSceneDefaults: { fps: 30, width: 1920, height: 1080 }, render: { defaultWorkers: 1 } } },
   });
+});
+
+test('studio: platform defaults and explicit platform choices become saved film snapshots', async () => {
+  const settings = await j('/api/settings', {
+    method: 'PATCH',
+    body: { patch: { newFilmDefaults: { deliverableIds: ['square-1x1'] } } },
+  });
+  assert.equal(settings.status, 200, JSON.stringify(settings.data));
+
+  const inherited = await j(`/api/workspaces/${TEST_WS}/films`, { method: 'POST', body: { name: 'Square Default' } });
+  assert.equal(inherited.status, 201, JSON.stringify(inherited.data));
+  assert.equal(inherited.data.film.sceneDefaults.width, 1080);
+  assert.equal(inherited.data.film.sceneDefaults.height, 1080);
+  assert.equal(inherited.data.film.deliverables[0].id, 'square-1x1');
+  assert.equal(inherited.data.film.deliverables[0].outputFilename, 'film-square-1x1');
+
+  const explicit = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST',
+    body: { name: 'Platform Brief', deliverables: [{ id: 'youtube-16x9' }, { id: 'shorts-9x16' }] },
+  });
+  assert.equal(explicit.status, 201, JSON.stringify(explicit.data));
+  assert.deepEqual(explicit.data.film.deliverables.map((item) => item.id), ['youtube-16x9', 'shorts-9x16']);
+  assert.equal(explicit.data.film.sceneDefaults.width, 1920, 'the first chosen platform is the master canvas');
+  assert.equal(explicit.data.film.sceneDefaults.height, 1080);
+  assert.equal(explicit.data.film.deliverables[1].captionStyle.sizePct, 6.5);
+
+  const unknown = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST', body: { name: 'Unknown Platform', deliverables: [{ id: 'made-up-9x16' }] },
+  });
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.data.code, 'unknown_deliverable');
+
+  await j(`/api/films/${enc(inherited.data.film.id)}?deleteFiles=1`, { method: 'DELETE' });
+  await j(`/api/films/${enc(explicit.data.film.id)}?deleteFiles=1`, { method: 'DELETE' });
+  await j('/api/settings', { method: 'PATCH', body: { patch: { newFilmDefaults: { deliverableIds: [] } } } });
 });
 
 test('studio: asset upload → list → download → rename → delete (v0.15)', async () => {

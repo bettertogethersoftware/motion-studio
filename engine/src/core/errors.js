@@ -27,6 +27,14 @@ export const ErrorCodes = Object.freeze({
   FFMPEG_FAILED: 'ffmpeg_failed',
   CANCELLED: 'cancelled',
   DISK_ERROR: 'disk_error',
+  // A fully encoded staging file failed an explicit producer review policy.
+  // Distinct from SHORT_RENDER (which is a corrupt/incomplete encode): this
+  // output can be technically valid, but a chosen delivery rule holds it back.
+  PROMOTION_BLOCKED: 'promotion_blocked',
+  // A requested Stage-A output id is not configured on the film.  This is
+  // deliberately distinct from invalid_film: the document can be healthy,
+  // but the caller asked for a variant it does not contain.
+  UNKNOWN_DELIVERABLE: 'unknown_deliverable',
   INTERNAL: 'internal_error',
   // added in v0.5 — see docs/CHANGELOG.md
   UNSUPPORTED_FORMAT: 'unsupported_format',
@@ -102,6 +110,10 @@ export const ErrorCodes = Object.freeze({
   // stream-copied onto the timeline. Never silently re-encoded: a film that
   // quietly re-encodes one segment has stopped being losslessly assembled.
   FOOTAGE_SIGNATURE_MISMATCH: 'footage_signature_mismatch',
+  // A prepared footage file still exists, but the source used to make it has
+  // changed since its recorded transcode. The plan reports this before a build
+  // so an old trim can never masquerade as a current source edit.
+  FOOTAGE_SOURCE_CHANGED: 'footage_source_changed',
   // added in v0.22 (transcode_asset) — see docs/CHANGELOG.md.
   // ffmpeg ran and did not produce the asked-for file. Distinct from
   // UNSUPPORTED_FORMAT (the destination extension names no format this engine

@@ -79,6 +79,17 @@ process hygiene, and it is why P0-1 leads.
 
 ## P0-1 — Encode to staging, validate, promote atomically
 
+**Status — implemented 2026-07-29 for single-file deliveries.** Scene renders
+(including proxy, partial, and custom-file exports), parallel renders, film
+builds, and mastering re-muxes now stage under `.staging/`, validate before one
+rename promotion, and report `promoted` plus explicit `framesVerified` state.
+Canonical scene sidecars record the promoted file's bytes + mtime identity, so a
+replaced file at identical settings is stale rather than trusted. Regression,
+MCP, Studio, and full-engine tests cover the previous-delivery retry case,
+status fields, and hidden staging output. PNG sequences remain directory
+deliveries and need their own directory-promotion protocol; they are not
+misrepresented as atomically promoted files.
+
 **Build.** Every encode writes to `out/.staging/<base>-<jobId><ext>`. On success:
 verify frame count, then `rename` onto the delivery path, then write the sidecar.
 On failure or cancel: leave the staging file for diagnosis, never touch the
@@ -139,6 +150,17 @@ listing.
 
 ## P0-2 — A review artefact beside every delivery
 
+**Status — implemented 2026-07-29.** Every staged single-file scene delivery
+(including proxy, partial, custom-name, serial and parallel renders) and film
+build now produces a staged `review.json` and contact sheet before promotion.
+The policy gate keeps the prior delivery untouched on a block, and the completed
+job exposes the final review/contact paths and classified warnings. The Studio
+film build panel reads the persisted record through the existing output route,
+showing per-thumbnail context and warning overlays. Global `render.review`
+settings seed the policy; a saved film can override either severity list.
+Regression coverage exercises artefact shape, default promotion of a dark/static
+film, policy blocks, settings validation, and output-route retrieval.
+
 **Build.** Persist what the engine already measures. On promotion write
 `out/<base>.review.json` — frame count and probe result, audio metrics, the
 `measureRenderedPicture` output, and warnings classified `block` / `warn` /
@@ -178,6 +200,28 @@ is an opt-in a particular film can make.
 **Docs:** `film-setup.md`, `user-guide.md`, `mcp-setup.md`.
 
 ## P0-3 — Deliverable variants (16:9 / 9:16 / 1:1) without a second edit
+
+**Stage A status: shipped 2026-07-29. Stage B remains planned.**
+
+The implementation lives in `engine/src/core/deliverables.js`: a film saves
+full version snapshots (geometry, per-segment crop focus, caption style,
+safe-area insets and an independent filename), rather than remembering a global
+preset id and reinterpreting it later. `create_film` resolves named platform
+intent before scenes are created; the Studio API and MCP both accept the same
+input, and an unspecified brief remains master-only by default. The first
+selected version supplies the master canvas only when the caller did not name
+dimensions explicitly.
+
+`build_film { deliverable }` now compiles the resolved timeline into a
+piecewise crop expression, re-encodes the completed master once at the variant
+geometry, applies variant caption styling, and writes independent output/SRT/
+review/contact artifacts. The contact sheet draws title and caption safe guides.
+The completed job exposes `deliverable` and `reEncoded`, so the extra encode is
+visible instead of implicit. Studio adds a New Film platform picker, film-level
+version/crop/caption controls, a selected-version build choice, and an all-version
+action. Evidence: `engine/test/films.test.js` exercises the real portrait
+encode and guide-bearing review output; `mcp.test.js` and `studio.test.js`
+exercise creation/default/error contracts.
 
 The real gap the draft's "layout profiles" pointed at: **nothing lets one film
 emit two aspects.** Today it means copying the film and hand-editing every
@@ -253,6 +297,8 @@ film. Same rule as `newSceneDefaults` and `ffmpeg.defaultCrf`.
 # P1 — close the remaining boundaries
 
 ## P1-1 — Footage segments record where they came from
+
+**Status: shipped 2026-07-29.**
 
 The one field the draft's cut list was really asking for. A footage segment is
 `{ footage, durationInFrames }` with no record of which source and which trim

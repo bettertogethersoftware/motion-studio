@@ -402,3 +402,7 @@ whisper-bin-x64
 # hooks. Binaries, not source.
 /ImageMagick-7.1.2-Q16-HDRI/
 /auto-editor-windows-x86_64/
+
+# Runtime log from comfyui/generate.py starting a headless ComfyUI.
+/comfyui/comfyui-server.log
+/comfyui/.work/

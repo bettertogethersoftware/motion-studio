@@ -1,4 +1,4 @@
-# Motion Studio v0.20 — code-driven video renderer
+# Motion Studio — code-driven video renderer
 
 Motion Studio renders videos from HTML/CSS/JS animations using a
 deterministic, frame-driven model. Animations are authored as **pure
@@ -20,9 +20,13 @@ two kinds of users through one shared render engine:
   image and transparent-video overlays, in-editor narration with
   auto-synced captions, a preview that plays the real rendered scenes with
   the build's exact audio mix, and one-click assembly with measured
-  mastering. Each workspace also has a **shared-asset library** for the large
-  files you want an agent to use without pushing them through the tool
-  channel.
+  mastering. A delivery is staged, validated, reviewed from the encoded file,
+  and only then promoted over its visible output, so a failed revision never
+  destroys the previous good movie. A film can also save **platform versions**
+  (YouTube 16:9, Shorts/TikTok 9:16, Square 1:1) that share one edit and audio
+  timeline rather than becoming hand-maintained copies. Each workspace also has
+  a **shared-asset library** for the large files you want an agent to use
+  without pushing them through the tool channel.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
   tool surface, **bound to one workspace** so two agents never land in each
   other's films: create films and the scenes inside them, author
@@ -42,13 +46,17 @@ two kinds of users through one shared render engine:
   speech), **prepare it** (`transcode_asset` — conform footage to a film's
    encode and colour signature, trim to an exact frame count, crop/scale, or cut and join
   spans of someone's voice into one WAV; named fields only, never a shell),
+  receive a ready-to-insert footage segment that retains its source-transcode
+  record, and stop a build when that original source later changes,
   attach 3D libraries
   (Three.js/Babylon.js, with teapot/glTF/bloom addons), preview frames as
   images, render — including cheap **proxy motion drafts**
   (`proxy: { scale, frameStep }`) — poll, cancel, and assemble the film
   (`build_film`, async, with master audio, captions and overlays) — whose
   timeline now holds **real footage beside the rendered scenes** (v0.22), so a
-  film can be "footage, then a scene, then footage". No shell,
+  film can be "footage, then a scene, then footage". Builds preserve the prior
+  delivery on failure and write a review JSON/contact sheet before promotion.
+  No shell,
   no arbitrary file access.
 
 ### The model: workspace → film → scene
@@ -82,7 +90,9 @@ Output formats: **MP4** (H.264), **WebM** (VP9), **animated GIF**, **ProRes**
 
 Every deliberate change since the v0.2 reference implementation is recorded
 with its rationale in [docs/CHANGELOG.md](docs/CHANGELOG.md) — read it first.
-Headlines: the Windows-only WinForms app became the Studio web UI (v0.5),
+Current production work adds safe staged promotion, encoded-delivery review
+artefacts, Stage-A platform versions, and prepared-footage source provenance.
+Earlier headlines: the Windows-only WinForms app became the Studio web UI (v0.5),
 long-form film assembly (v0.9), vendored-build provenance (v0.13), in-job
 crash recovery (v0.14), the full Studio management surface (v0.15), settings
 that reach every entry point (v0.16), second implementations of both audio
@@ -192,7 +202,9 @@ motion-studio/
 │   │   ├── music-vendors.js       music vendor registry, dispatch and level control (v0.17)
 │   │   ├── sfx.js                 sound effects: pure-JS cue synthesis (v0.12)
 │   │   ├── film.js                scene assembly primitives: validation, lossless concat (v0.9)
-│   │   ├── films.js               film document: validation, planning, overlay/caption finishing pass
+│   │   ├── delivery.js            staged delivery promotion + persistent review evidence
+│   │   ├── deliverables.js        saved Stage-A platform versions + reframe contracts
+│   │   ├── films.js               film document: planning, provenance checks, finishing + reframe pass
 │   │   ├── lock.js                cross-process render lock (v0.11)
 │   │   ├── vendor-lock.js         vendored 3D build provenance: version + sha256 (v0.13)
 │   │   └── errors.js              stable machine-readable error codes
@@ -207,8 +219,12 @@ motion-studio/
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4)
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
+├── comfyui/                       direct local image + paid Wan video generators
+│   └── README.md                  Qwen, Ideogram 4, Krea 2, Wan, editing, setup + CLI
+├── comfyui_music/
+│   └── README.md                  local ACE-Step 1.5 instrumental + vocal generation
 └── docs/
-    ├── CHANGELOG.md               v0.2 → v0.19 decision log (read this first)
+    ├── CHANGELOG.md               decision log + current release notes (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
     ├── user-guide.md              Studio UI: workspaces/films/scenes, library, assets, audio, settings, CLI
     ├── frame-api.md               the authoring contract (v1.4)

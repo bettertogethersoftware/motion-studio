@@ -294,6 +294,12 @@ dialog .note { font-size: 11px; max-width: 420px; margin: 6px 0 0; }
 .fieldrow.right { justify-content: flex-end; }
 label { display: flex; flex-direction: column; gap: 4px; font: 11px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
 label.check { flex-direction: row; align-items: center; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.deliverable-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 12px; margin: 8px 0; }
+.deliverable-options .check { min-height: 26px; padding: 5px 7px; border: 1px solid var(--line); background: rgba(255,255,255,.018); }
+.deliverable-options .check:has(input:checked) { border-color: var(--accent); color: var(--text); background: rgba(222, 167, 50, .07); }
+.deliverable-options .deliverable-size { color: var(--dim); font: 10px var(--mono); margin-left: auto; }
+.deliverable-picker { margin: 12px 0; padding: 8px 10px 2px; border: 1px solid var(--line); }
+.deliverable-picker legend { padding: 0 5px; color: var(--dim); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
 input, select {
   background: var(--ink);
   border: 1px solid var(--line);

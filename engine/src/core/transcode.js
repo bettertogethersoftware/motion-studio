@@ -265,13 +265,19 @@ export function validateTranscode({
  */
 export const transcodeMetaPath = (outPath) => `${outPath}.transcode.json`;
 
-export function readTranscodeMeta(outPath) {
+/** Read a transcode sidecar by its literal `.transcode.json` file path. */
+export function readTranscodeMetaFile(metaPath) {
   try {
-    const meta = JSON.parse(fs.readFileSync(transcodeMetaPath(outPath), 'utf8'));
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     return meta && typeof meta === 'object' ? meta : null;
   } catch {
     return null;
   }
+}
+
+/** Read the sidecar that belongs beside a transcoded output file. */
+export function readTranscodeMeta(outPath) {
+  return readTranscodeMetaFile(transcodeMetaPath(outPath));
 }
 
 /** Identity of a transcode: the source as it was, plus every parameter. */

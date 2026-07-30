@@ -22,7 +22,7 @@ import { pathToFileURL } from 'node:url';
 import { renderComposition, renderParallel, captureSingleFrame } from '../core/renderer.js';
 import { validateConfig, SCENE_CONFIG } from '../core/scene.js';
 import { checkPrerequisites } from '../core/prereqs.js';
-import { resolveFfmpegPath } from '../core/settings.js';
+import { readSettings, resolveFfmpegPath } from '../core/settings.js';
 import { ProgressEmitter } from '../core/progress.js';
 import { EngineError, ErrorCodes } from '../core/errors.js';
 
@@ -68,7 +68,7 @@ const USAGE = `Usage:
 
 Options:
   --frame-range <start> <end>   inclusive frame range (default: full composition)
-  --workers N                   parallel worker processes (default: 1)
+  --workers N                   parallel worker processes (default: 10)
   --proxy [scale]               proxy/motion preview: capture at scale (0.1-1,
                                 default 0.5, dims floored to even), every 2nd
                                 frame, encoded at fps/step so duration is kept.
@@ -130,6 +130,7 @@ async function main() {
     progress.error(e instanceof EngineError ? e : new EngineError(ErrorCodes.INVALID_CONFIG, `Cannot read ${SCENE_CONFIG}: ${e.message}`));
     return 2;
   }
+  const settings = await readSettings().catch(() => null);
 
   // Cooperative cancellation: WinForms sends CTRL_BREAK / SIGTERM before
   // resorting to Job Object termination; SIGINT covers manual runs.
@@ -199,6 +200,7 @@ async function main() {
       // taking its own would deadlock the fan-out against itself.
       lock: !args.segment,
       ffmpegPath,
+      ...(settings?.render?.review ? { reviewPolicy: settings.render.review } : {}),
       ...(browserFactory ? { browserFactory } : {}),
     };
     if (args.workers && args.workers > 1) {

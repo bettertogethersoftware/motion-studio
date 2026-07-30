@@ -28,6 +28,29 @@ media libraries. It was found the same way plans 4 and 5 were — by building re
 films and reading the result back — and it supersedes the overlapping half of
 [prioritized-codebase-todo-2026-07-29.md](prioritized-codebase-todo-2026-07-29.md).
 
+> **Three plans sit behind that backlog**, all found the same way — by building
+> real films (a product spot from supplier photos, a narrated 15 s cut, a 9:16
+> variant of a two-shot) and measuring the result:
+>
+> - **[audio-cue-plan.md](audio-cue-plan.md)** — frame-granular envelope and
+>   emphasis onsets. **Take this one first.** It is the smallest, both signals
+>   already exist at the wrong granularity or on the wrong path, and it caught a
+>   real sync defect: hand-typed stat cards appeared 1.5–2.7 s *before* the voice
+>   named them, which no existing check can see.
+> - **[auto-reframe-plan.md](auto-reframe-plan.md)** — `measure_reframe`, the hard
+>   half of aspect deliverable variants. `transcode_asset`'s `crop` is a constant,
+>   so Env A can only centre-crop; a per-frame argmax strobes on 349 of 955 frame
+>   pairs, so the crop *path* is the feature. Reuses `render-review`'s existing
+>   rawvideo sampling — no new dependency.
+> - **[image-prep-plan.md](image-prep-plan.md)** — `prepare_image`, the still-image
+>   hole: `transcode_asset` has `video`, `audio` and `frames` modes and no `image`
+>   mode, so an Env A agent cannot crop, key or even *measure* a supplied photo.
+>
+> All three are queued below the backlog above, and the last two are
+> capability-shaped — see [the rule](#the-rule-this-implies) — so Env B already has
+> better tools for them. The audio-cue plan is the exception: it is knowledge, and
+> Env B needs it as much as Env A.
+
 > For **why these are ordered the way they are** against the alternatives — and
 > which fronts are deliberately being conceded — see
 > [competitive-position.md](../competitive-position.md). It scores this product

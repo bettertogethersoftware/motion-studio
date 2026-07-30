@@ -194,6 +194,32 @@ test('mcp: resources include frame-api reference', async (t) => {
 
 let sceneId;
 
+test('mcp: create_film snapshots requested platform deliverables before scenes exist', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const made = await callJson('create_film', {
+    name: 'Portrait Intent',
+    deliverables: ['shorts-9x16'],
+  });
+  assert.equal(made.isError, false, JSON.stringify(made.data));
+  // The AI has said "portrait" at film creation, so the first scene it creates
+  // has the corresponding master canvas instead of needing a later rebuild.
+  assert.equal(made.data.sceneDefaults.width, 1080);
+  assert.equal(made.data.sceneDefaults.height, 1920);
+  assert.equal(made.data.deliverables.length, 1);
+  assert.deepEqual(
+    { id: made.data.deliverables[0].id, outputFilename: made.data.deliverables[0].outputFilename },
+    { id: 'shorts-9x16', outputFilename: 'film-shorts-9x16' },
+  );
+  const read = await callJson('get_film', { film: made.data.film });
+  assert.equal(read.isError, false, JSON.stringify(read.data));
+  assert.equal(read.data.deliverables[0].captionStyle.sizePct, 6.5);
+  assert.equal(read.data.deliverables[0].safeAreas.caption.bottomPct, 8);
+  // This contract test runs before the long-lived demo-film test below, whose
+  // workspace count is deliberately exact.
+  const removed = await callJson('remove_film', { film: made.data.film, deleteFiles: true });
+  assert.equal(removed.isError, false, JSON.stringify(removed.data));
+});
+
 test('mcp: create_film + create_scene scaffold, and the workspace lists them', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const film = await callJson('create_film', {
@@ -287,6 +313,8 @@ test('mcp: render → status poll → done → logs', async (t) => {
 
   assert.equal(status.state, 'done', JSON.stringify(status));
   assert.equal(status.framesDone, 10);
+  assert.equal(status.promoted, true, JSON.stringify(status));
+  assert.equal(typeof status.framesVerified, 'boolean', JSON.stringify(status));
   assert.ok(fs.existsSync(outputPath));
 
   const logs = (await callJson('get_logs', { jobId })).data.logs;
@@ -1196,6 +1224,8 @@ test('mcp: build_film concatenates a film\'s rendered scenes', async (t) => {
   assert.equal(res.data.totalFrames, 12);
   const done = await waitJobDone(res.data.jobId);
   assert.ok(fs.existsSync(res.data.outputPath), done.outputPath);
+  assert.equal(done.promoted, true, JSON.stringify(done));
+  assert.equal(typeof done.framesVerified, 'boolean', JSON.stringify(done));
   assert.ok(done.picture, JSON.stringify(done));
   const { stdout } = await execFileP('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', res.data.outputPath]);
   assert.ok(Math.abs(parseFloat(stdout) - 0.4) < 0.2, `film ~0.4s, got ${stdout.trim()}`);
@@ -1213,6 +1243,40 @@ test('mcp: build_film concatenates a film\'s rendered scenes', async (t) => {
   assert.ok(report.motionEnvelope, JSON.stringify(report));
   assert.equal(report.cutsChecked, undefined, 'the detailed report keeps cut data inside cutCheck');
   assert.ok(Array.isArray(report.cutCheck), JSON.stringify(report));
+});
+
+test('mcp: build_film renders a saved Stage-A platform delivery from the same cut', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const made = await callJson('create_film', {
+    name: `MCP Portrait Delivery ${++filmCounter}`,
+    fps: 30, width: 320, height: 240, durationInFrames: 6,
+    // A compact custom target keeps this integration test quick while testing
+    // the exact same snapshot/reframe route used by a 1080×1920 preset.
+    deliverables: [{ id: 'mcp-portrait', label: 'MCP Portrait', width: 180, height: 320 }],
+  });
+  assert.equal(made.isError, false, JSON.stringify(made.data));
+  const scene = await callJson('create_scene', { film: made.data.film, name: 'Product' });
+  assert.equal(scene.isError, false, JSON.stringify(scene.data));
+  await renderToDone(scene.data.scene);
+
+  const started = await callJson('build_film', { film: made.data.film, deliverable: 'mcp-portrait' });
+  assert.equal(started.isError, false, JSON.stringify(started.data));
+  assert.equal(started.data.deliverable.id, 'mcp-portrait');
+  const done = await waitJobDone(started.data.jobId);
+  assert.equal(done.deliverable.id, 'mcp-portrait');
+  assert.equal(done.reEncoded, true);
+  assert.ok(fs.existsSync(started.data.outputPath), started.data.outputPath);
+  const { stdout } = await execFileP('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height',
+    '-of', 'csv=p=0:s=x', started.data.outputPath,
+  ]);
+  assert.equal(stdout.trim(), '180x320');
+
+  const invalid = await callJson('build_film', {
+    film: made.data.film, deliverable: 'mcp-portrait', outputFilename: 'not-allowed-here',
+  });
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid.data.code, 'invalid_config');
 });
 
 test('mcp: build_film reports scene_not_rendered when a scene has no output', async (t) => {
@@ -1585,11 +1649,19 @@ test('mcp: transcode_asset conforms a library clip to a film and puts it on the 
   assert.equal(c.video.height, sig.height);
   assert.equal(c.hasAudio, false, 'footage must be silent, and audio is dropped by default');
   assert.match(c.hint, /update_film/);
+  assert.deepEqual(c.timelineSegment, {
+    footage: 'assets/segment.mp4',
+    durationInFrames: 24,
+    derivedFrom: {
+      asset: 'library:raw-talk.mp4',
+      transcodeMeta: 'assets/segment.mp4.transcode.json',
+    },
+  }, 'the agent gets a ready-to-insert segment, not a provenance recipe to recreate');
 
   // Plan 2: it goes on the timeline between the two scenes.
   const patched = await callJson('update_film', {
     film,
-    scenes: [{ slug: 'open' }, { footage: 'assets/segment.mp4', durationInFrames: 24 }, { slug: 'close' }],
+    scenes: [{ slug: 'open' }, c.timelineSegment, { slug: 'close' }],
   });
   assert.equal(patched.isError, false, JSON.stringify(patched.data));
   const layout = patched.data.plan.sceneLayout;
@@ -1598,6 +1670,7 @@ test('mcp: transcode_asset conforms a library clip to a film and puts it on the 
   assert.ok(!patched.data.plan.problems.some((p) => String(p.code).startsWith('footage_')),
     JSON.stringify(patched.data.plan.problems));
   assert.equal(layout[1].framesVerified, true);
+  assert.equal(layout[1].derivedFrom.sourceVerified, true);
 
   // And the film builds, losslessly, with every frame present.
   const built = await callJson('build_film', { film });

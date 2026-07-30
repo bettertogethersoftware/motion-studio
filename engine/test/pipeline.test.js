@@ -68,11 +68,57 @@ test('pipeline: stdin-streamed render produces a valid MP4', async (t) => {
   assert.equal(v.width, 320);
   assert.equal(Number(v.nb_frames), 24);
 
-  // protocol shape: start → capturing → per-frame progress → encoding → done
+  // protocol shape: start → capturing → per-frame progress → encoding →
+  // staged review → promotion → done. A completed file is not a delivery until
+  // its evidence is checked and its rename onto the visible output path succeeds.
   assert.equal(messages[0].type, 'start');
   assert.equal(messages.filter((m) => m.type === 'progress').length, 24);
-  assert.deepEqual(messages.filter((m) => m.type === 'phase').map((m) => m.phase), ['capturing', 'encoding']);
+  assert.deepEqual(messages.filter((m) => m.type === 'phase').map((m) => m.phase), ['capturing', 'encoding', 'creating-review', 'promoting']);
+  assert.equal(result.promoted, true);
+  assert.ok(result.review?.reviewPath);
   assert.equal(messages.at(-1).type, 'done');
+});
+
+test('pipeline: a review-policy block retains the prior delivery and staged evidence', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const config = makeConfig({ name: 'Static review', fps: 30, width: 160, height: 90, durationInFrames: 90 });
+  const out = path.join(tmp, 'review-block.mp4');
+  const staticBrowser = async () => ({
+    async openPage({ width, height }) {
+      const png = encodePng(width, height, () => [18, 24, 35]);
+      return { async captureFrame() { return png; }, async close() {} };
+    },
+    async close() {},
+  });
+
+  await renderComposition({
+    scenePath: tmp,
+    config,
+    outputPath: out,
+    browserFactory: staticBrowser,
+    preflight: false,
+    reviewPolicy: { block: [], warn: ['static_run'] },
+    jobId: 'review-baseline',
+  });
+  const prior = await fsp.readFile(out);
+  let error;
+  await assert.rejects(
+    renderComposition({
+      scenePath: tmp,
+      config,
+      outputPath: out,
+      browserFactory: staticBrowser,
+      preflight: false,
+      reviewPolicy: { block: ['static_run'], warn: [] },
+      jobId: 'review-blocked',
+    }),
+    (caught) => { error = caught; return caught.code === ErrorCodes.PROMOTION_BLOCKED; },
+  );
+  assert.deepEqual(await fsp.readFile(out), prior, 'a blocked staging file cannot replace the last delivery');
+  assert.ok(fs.existsSync(error.detail.reviewPath), 'the staged report explains the block');
+  const report = JSON.parse(await fsp.readFile(error.detail.reviewPath, 'utf8'));
+  assert.ok(report.warnings.some((warning) => warning.code === 'static_run' && warning.level === 'block'));
+  assert.ok(fs.existsSync(error.detail.contactPath), 'the staged contact sheet is available for diagnosis');
 });
 
 test('pipeline: framesDir mode writes PNG sequence then encodes', async (t) => {

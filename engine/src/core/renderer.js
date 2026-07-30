@@ -56,11 +56,14 @@ import { EngineError, ErrorCodes, asEngineError } from './errors.js';
 import { ProgressEmitter, ProgressStreamParser } from './progress.js';
 import { createPuppeteerBrowser, isBrowserCrash } from './browser.js';
 import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode, measureAudioLevels, probeFrameCount, computeBalanceWarnings } from './encoder.js';
-import { measureRenderedPicture } from './render-review.js';
+import {
+  measureRenderedPicture, createDeliveryReview, assertReviewAllowsPromotion, resolveReviewPolicy,
+} from './render-review.js';
 import { measureWavLevels, wavDurationSeconds } from './tts.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
-import { writeRenderMeta } from './film.js';
+import { sceneOutputPath, writeRenderMeta } from './film.js';
+import { prepareStagingOutput, promoteStagingOutput } from './delivery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -281,6 +284,55 @@ function isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFram
 }
 
 /**
+ * A top-level file output is a delivery even when it is a proxy, a custom
+ * filename, or a deliberately partial range.  Internal parallel-worker
+ * segments are not: their caller owns their temporary directory and does the
+ * eventual promotion.  PNG sequences are directories, so their safe directory
+ * replacement is intentionally a separate concern from file promotion.
+ */
+function isStagedFileDelivery({ isPngSequence, skipAudio, asIntermediate }) {
+  return !isPngSequence && !skipAudio && !asIntermediate;
+}
+
+/** Is this the canonical scene delivery, rather than a proxy, segment, or export? */
+function isCanonicalSceneDelivery({ scenePath, config, outputPath, prx, skipAudio, asIntermediate, startFrame, endFrame, isPngSequence }) {
+  return isStagedFileDelivery({ isPngSequence, skipAudio, asIntermediate })
+    && isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config })
+    && path.resolve(outputPath) === path.resolve(sceneOutputPath(scenePath, config));
+}
+
+/** Keep a failed staging file discoverable through the job's structured error. */
+function withStagingDetail(err, stagingPath, signal) {
+  const e = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
+  if (!stagingPath) return e;
+  e.detail = { ...(e.detail ?? {}), stagingPath };
+  return e;
+}
+
+/** Promote the review pair after the movie; JSON lands last as the ready marker. */
+async function promoteReviewArtifacts(review, progress) {
+  if (!review) return null;
+  try {
+    await promoteStagingOutput({ stagedPath: review.stagedPaths.contactPath, outputPath: review.paths.contactPath });
+    await promoteStagingOutput({ stagedPath: review.stagedPaths.reviewPath, outputPath: review.paths.reviewPath });
+    return null;
+  } catch (err) {
+    const message = err?.message ?? 'Review artefacts could not be promoted';
+    progress.log('warn', message);
+    return message;
+  }
+}
+
+function reviewResult(review) {
+  if (!review) return null;
+  return {
+    reviewPath: review.paths.reviewPath,
+    contactPath: review.paths.contactPath,
+    warnings: review.report.warnings,
+  };
+}
+
+/**
  * Verify the encoded file actually contains the frames we captured (v0.11).
  *
  * A worker killed mid-encode leaves a short but perfectly valid video behind,
@@ -291,21 +343,35 @@ function isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFram
  *
  * Unverifiable (no ffprobe) is not a failure — it is reported as such.
  */
-export async function verifyFrameCount({ outputPath, expected, progress = new ProgressEmitter(null), onChildPid, signal }) {
+export async function verifyFrameCount({
+  outputPath, expected, progress = new ProgressEmitter(null), onChildPid, signal,
+  // Delivery review owns the decision for staged outputs.  Internal segments
+  // retain the historical fail-fast behaviour because no policy-bearing
+  // delivery is being created for them.
+  throwOnMismatch = true,
+}) {
   const actual = await probeFrameCount({ filePath: outputPath, onSpawn: onChildPid, signal }).catch(() => null);
   if (actual === null) {
     progress.log('warn', 'Could not verify the output frame count (ffprobe unavailable?).');
     return { frames: expected, verified: false };
   }
   if (actual !== expected) {
-    throw new EngineError(
+    const error = new EngineError(
       ErrorCodes.SHORT_RENDER,
       `output has ${actual} frames but ${expected} were rendered — the encode did not complete. ` +
         'Re-render this scene; do not assemble this file into a film.',
       { outputPath, expected, actual },
     );
+    if (throwOnMismatch) throw error;
+    progress.log('warn', error.message);
+    return { frames: actual, verified: true, matches: false };
   }
-  return { frames: actual, verified: true };
+  // Preserve the public result shape for existing callers.  A staged delivery
+  // needs the explicit comparison so review can classify it; ordinary renders
+  // already throw on a mismatch and historically returned only these fields.
+  return throwOnMismatch
+    ? { frames: actual, verified: true }
+    : { frames: actual, verified: true, matches: true };
 }
 
 function outputSettings(config) {
@@ -352,6 +418,7 @@ export async function renderComposition(opts) {
     preflight = true,
     preflightCount = 5,
     lock = true,
+    reviewPolicy = null,
   } = opts;
 
   let startFrame, endFrame, settings, prx;
@@ -384,10 +451,21 @@ export async function renderComposition(opts) {
     ? { x: capture.width / config.width, y: capture.height / config.height }
     : null;
   const encodeFps = prx && prx.frameStep > 1 ? `${config.fps}/${prx.frameStep}` : config.fps;
-  const outPath = prx ? proxyOutputPath(outputPath) : outputPath;
+  const deliveryPath = prx ? proxyOutputPath(outputPath) : path.resolve(outputPath);
+  const stagedDelivery = isStagedFileDelivery({ isPngSequence, skipAudio, asIntermediate });
+  const canonicalDelivery = isCanonicalSceneDelivery({
+    scenePath, config, outputPath: deliveryPath, prx, skipAudio, asIntermediate,
+    startFrame, endFrame, isPngSequence,
+  });
+  // Assigned only after the render lock is held. Until promotion, every encoder
+  // and muxer sees this path rather than the existing delivery.
+  let stagingPath = null;
+  let outPath = deliveryPath;
 
   const frameList = steppedFrameList(startFrame, endFrame, prx ? prx.frameStep : 1);
   const totalFrames = frameList.length;
+  const reviewFps = prx && prx.frameStep > 1 ? config.fps / prx.frameStep : config.fps;
+  const effectiveReviewPolicy = resolveReviewPolicy({ globalPolicy: reviewPolicy });
   const startedAt = Date.now();
   const entryUrl = pathToFileURL(path.resolve(scenePath, config.entry)).href;
 
@@ -396,7 +474,7 @@ export async function renderComposition(opts) {
   // the file may not play (crf 0 → Hi444PP), not after shipping black video.
   const encodingWarnings = skipAudio ? [] : encodingCompatibilityWarnings(output);
   for (const w of encodingWarnings) progress.log('warn', w);
-  await fsp.mkdir(isPngSequence ? outPath : path.dirname(outPath), { recursive: true });
+  await fsp.mkdir(isPngSequence ? deliveryPath : path.dirname(deliveryPath), { recursive: true });
 
   // Before Chromium: a lock failure should cost nothing.
   let held = null;
@@ -419,6 +497,10 @@ export async function renderComposition(opts) {
   let sink = null;
 
   try {
+    if (stagedDelivery) {
+      stagingPath = await prepareStagingOutput(deliveryPath, { jobId });
+      outPath = stagingPath;
+    }
     throwIfAborted(signal);
     const openPage = () =>
       browser.openPage({
@@ -552,42 +634,98 @@ export async function renderComposition(opts) {
     // expected is the stepped count, which is what the sink was fed.
     const verified = isPngSequence || skipAudio
       ? { frames: totalFrames, verified: false }
-      : await verifyFrameCount({ outputPath: outPath, expected: totalFrames, progress, onChildPid, signal });
-
-    // Record what landed on disk (v0.21) — only for a render that IS the whole
-    // scene at its current settings. A proxy, a worker segment or a partial
-    // frameRange must never claim to be the scene's canonical output.
-    if (isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config })) {
-      await writeRenderMeta({ scenePath, config, frames: totalFrames });
-    }
+      : await verifyFrameCount({
+        outputPath: outPath,
+        expected: totalFrames,
+        progress,
+        onChildPid,
+        signal,
+        throwOnMismatch: !stagedDelivery,
+      });
 
     let staticFrames = null;
-    if (isFullSceneRender({ prx, skipAudio, asIntermediate, startFrame, endFrame, config }) && !isPngSequence) {
+    let pictureReport = null;
+    let pictureError = null;
+    if (stagedDelivery) {
       try {
         const picture = await measureRenderedPicture({
-          filePath: outPath, fps: config.fps, totalFrames,
+          filePath: outPath, fps: reviewFps, totalFrames,
           sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
           ffmpegPath, signal, onSpawn: onChildPid,
         });
-        staticFrames = picture.summary.staticFrames;
+        pictureReport = picture;
+        if (canonicalDelivery) staticFrames = picture.summary.staticFrames;
       } catch (err) {
         if (signal?.aborted) throw err;
-        progress.log('warn', `Picture measurement unavailable: ${err?.message ?? err}`);
+        pictureError = err?.message ?? String(err);
+        progress.log('warn', `Picture measurement unavailable: ${pictureError}`);
       }
     }
 
+    let review = null;
+    if (stagedDelivery) {
+      progress.phase('creating-review');
+      review = await createDeliveryReview({
+        stagedOutputPath: outPath,
+        deliveryPath,
+        fps: reviewFps,
+        totalFrames,
+        sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
+        captions: [],
+        audio: audio ?? null,
+        picture: pictureReport,
+        pictureError,
+        frameCheck: {
+          expected: totalFrames,
+          actual: verified.verified ? verified.frames : null,
+          verified: verified.verified,
+        },
+        policy: effectiveReviewPolicy,
+        ffmpegPath,
+        signal,
+        onSpawn: onChildPid,
+      });
+      assertReviewAllowsPromotion(review, { stagingPath: outPath });
+    }
+
+    // A top-level file render is only visible at its delivery path after the
+    // output has completed and been frame-checked. The canonical sidecar follows
+    // its video so an interruption can never make metadata vouch for a delivery
+    // that was not promoted.
+    let promoted = false;
+    let reviewArtifactWarning = null;
+    if (stagedDelivery) {
+      throwIfAborted(signal);
+      progress.phase('promoting');
+      await promoteStagingOutput({ stagedPath: outPath, outputPath: deliveryPath });
+      reviewArtifactWarning = await promoteReviewArtifacts(review, progress);
+      if (canonicalDelivery) {
+        await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+      }
+      promoted = true;
+    }
+
+    const deliveredOutputPath = stagedDelivery ? deliveryPath : outPath;
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath: outPath, frames: totalFrames, elapsedMs, audio, ...(staticFrames !== null ? { staticFrames } : {}) });
+    progress.done({
+      outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs, audio,
+      ...(staticFrames !== null ? { staticFrames } : {}),
+      ...(review ? { review: reviewResult(review) } : {}),
+    });
     return {
-      outputPath: outPath, frames: totalFrames, elapsedMs,
+      outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
+      ...(stagedDelivery ? { promoted } : {}),
       ...(audio ? { audio } : {}),
       ...(staticFrames !== null ? { staticFrames } : {}),
+      ...(review ? { review: reviewResult(review) } : {}),
+      ...(reviewArtifactWarning ? { reviewArtifactWarning } : {}),
       ...(prx ? { proxy: prx } : {}),
       ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
   } catch (err) {
-    const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
+    const engineErr = withStagingDetail(err, stagingPath, signal);
     progress.error(engineErr);
     throw engineErr;
   } finally {
@@ -708,6 +846,7 @@ export async function renderParallel(opts) {
     preflight = true,
     preflightCount = 5,
     lock = true,
+    reviewPolicy = null,
   } = opts;
 
   let startFrame, endFrame, settings;
@@ -721,6 +860,7 @@ export async function renderParallel(opts) {
   }
   const { output, fmt, transparent } = settings;
   const totalFrames = endFrame - startFrame + 1;
+  const effectiveReviewPolicy = resolveReviewPolicy({ globalPolicy: reviewPolicy });
   const workerCount = Math.max(1, Math.min(workers, totalFrames));
 
   // Delegating, not locking: renderComposition takes the lock itself, so taking
@@ -734,6 +874,14 @@ export async function renderParallel(opts) {
 
   const isPngSequence = output.format === 'png-sequence';
   const useIntermediate = !isPngSequence && (!fmt.copyConcat || transparent);
+  const deliveryPath = path.resolve(outputPath);
+  const stagedDelivery = isStagedFileDelivery({ isPngSequence, skipAudio: false, asIntermediate: false });
+  const canonicalDelivery = isCanonicalSceneDelivery({
+    scenePath, config, outputPath: deliveryPath, prx: null, skipAudio: false,
+    asIntermediate: false, startFrame, endFrame, isPngSequence,
+  });
+  let stagingPath = null;
+  let workOutputPath = deliveryPath;
 
   // Held for the whole fan-out. Workers run with --segment (lock:false): they
   // write this same scene deliberately, and this lock covers them.
@@ -778,7 +926,6 @@ export async function renderParallel(opts) {
   }
 
   progress.phase('capturing');
-  await fsp.mkdir(isPngSequence ? outputPath : path.dirname(outputPath), { recursive: true });
 
   // Contiguous chunks, remainder spread across the first chunks.
   const base = Math.floor(totalFrames / workerCount);
@@ -861,6 +1008,11 @@ export async function renderParallel(opts) {
 
   let audio;
   try {
+    if (stagedDelivery) {
+      stagingPath = await prepareStagingOutput(deliveryPath, { jobId });
+      workOutputPath = stagingPath;
+    }
+    await fsp.mkdir(isPngSequence ? workOutputPath : path.dirname(workOutputPath), { recursive: true });
     throwIfAborted(signal);
     await Promise.all(chunks.map((_, i) => runWorker(i)));
     throwIfAborted(signal);
@@ -877,15 +1029,15 @@ export async function renderParallel(opts) {
           const globalIdx = a - startFrame + local;
           await fsp.rename(
             path.join(segmentPaths[i], f),
-            path.join(outputPath, `frame-${String(globalIdx).padStart(6, '0')}.png`),
+            path.join(workOutputPath, `frame-${String(globalIdx).padStart(6, '0')}.png`),
           );
         }
       }
     } else {
       progress.phase('concat');
       const wantsAudio = !!config.audio?.length && !!fmt.audioArgs;
-      const ext = path.extname(outputPath);
-      const silentOut = wantsAudio ? outputPath.slice(0, -ext.length) + '.video-only' + ext : outputPath;
+      const ext = path.extname(workOutputPath);
+      const silentOut = wantsAudio ? workOutputPath.slice(0, -ext.length) + '.video-only' + ext : workOutputPath;
 
       if (useIntermediate) {
         const merged = path.join(segDir, `merged${INTERMEDIATE.ext}`);
@@ -903,7 +1055,7 @@ export async function renderParallel(opts) {
           await muxAudio({
             videoPath: silentOut,
             audioTracks: config.audio,
-            outputPath,
+            outputPath: workOutputPath,
             fps: config.fps,
             assetRoot: scenePath,
             output,
@@ -914,7 +1066,7 @@ export async function renderParallel(opts) {
         } finally {
           await fsp.unlink(silentOut).catch(() => {});
         }
-        audio = await reportAudioLevels({ outputPath, config, output, ffmpegPath, assetRoot: scenePath, progress, onChildPid, signal });
+        audio = await reportAudioLevels({ outputPath: workOutputPath, config, output, ffmpegPath, assetRoot: scenePath, progress, onChildPid, signal });
       } else if (config.audio?.length && !fmt.audioArgs) {
         progress.log('warn', `Format "${output.format}" cannot carry audio; audio tracks skipped.`);
       }
@@ -924,39 +1076,93 @@ export async function renderParallel(opts) {
     // a piece that silently came up short would otherwise ship inside the merge.
     const verified = isPngSequence
       ? { frames: totalFrames, verified: false }
-      : await verifyFrameCount({ outputPath, expected: totalFrames, progress, onChildPid, signal });
-
-    if (isFullSceneRender({ prx: null, skipAudio: false, asIntermediate: false, startFrame, endFrame, config })) {
-      await writeRenderMeta({ scenePath, config, frames: totalFrames });
-    }
+      : await verifyFrameCount({
+        outputPath: workOutputPath,
+        expected: totalFrames,
+        progress,
+        onChildPid,
+        signal,
+        throwOnMismatch: !stagedDelivery,
+      });
 
     let staticFrames = null;
-    if (isFullSceneRender({ prx: null, skipAudio: false, asIntermediate: false, startFrame, endFrame, config }) && !isPngSequence) {
+    let pictureReport = null;
+    let pictureError = null;
+    if (stagedDelivery) {
       try {
         const picture = await measureRenderedPicture({
-          filePath: outputPath, fps: config.fps, totalFrames,
+          filePath: workOutputPath, fps: config.fps, totalFrames,
           sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
           ffmpegPath, signal, onSpawn: onChildPid,
         });
-        staticFrames = picture.summary.staticFrames;
+        pictureReport = picture;
+        if (canonicalDelivery) staticFrames = picture.summary.staticFrames;
       } catch (err) {
         if (signal?.aborted) throw err;
-        progress.log('warn', `Picture measurement unavailable: ${err?.message ?? err}`);
+        pictureError = err?.message ?? String(err);
+        progress.log('warn', `Picture measurement unavailable: ${pictureError}`);
       }
     }
 
+    let review = null;
+    if (stagedDelivery) {
+      progress.phase('creating-review');
+      review = await createDeliveryReview({
+        stagedOutputPath: workOutputPath,
+        deliveryPath,
+        fps: config.fps,
+        totalFrames,
+        sceneLayout: [{ sceneId: config.name, name: config.name, filmOffset: 0, durationInFrames: totalFrames }],
+        captions: [],
+        audio: audio ?? null,
+        picture: pictureReport,
+        pictureError,
+        frameCheck: {
+          expected: totalFrames,
+          actual: verified.verified ? verified.frames : null,
+          verified: verified.verified,
+        },
+        policy: effectiveReviewPolicy,
+        ffmpegPath,
+        signal,
+        onSpawn: onChildPid,
+      });
+      assertReviewAllowsPromotion(review, { stagingPath: workOutputPath });
+    }
+
+    let promoted = false;
+    let reviewArtifactWarning = null;
+    if (stagedDelivery) {
+      throwIfAborted(signal);
+      progress.phase('promoting');
+      await promoteStagingOutput({ stagedPath: workOutputPath, outputPath: deliveryPath });
+      reviewArtifactWarning = await promoteReviewArtifacts(review, progress);
+      if (canonicalDelivery) {
+        await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+      }
+      promoted = true;
+    }
+    const deliveredOutputPath = stagedDelivery ? deliveryPath : workOutputPath;
+
     const elapsedMs = Date.now() - startedAt;
-    progress.done({ outputPath, frames: totalFrames, elapsedMs, audio, ...(staticFrames !== null ? { staticFrames } : {}) });
+    progress.done({
+      outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs, audio,
+      ...(staticFrames !== null ? { staticFrames } : {}),
+      ...(review ? { review: reviewResult(review) } : {}),
+    });
     return {
-      outputPath, frames: totalFrames, elapsedMs,
+      outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
+      ...(stagedDelivery ? { promoted } : {}),
       ...(audio ? { audio } : {}),
       ...(staticFrames !== null ? { staticFrames } : {}),
+      ...(review ? { review: reviewResult(review) } : {}),
+      ...(reviewArtifactWarning ? { reviewArtifactWarning } : {}),
       ...(encodingWarnings.length ? { encodingWarnings } : {}),
     };
   } catch (err) {
     killChildren();
-    const engineErr = asEngineError(err, signal?.aborted ? ErrorCodes.CANCELLED : ErrorCodes.INTERNAL);
+    const engineErr = withStagingDetail(err, stagingPath, signal);
     progress.error(engineErr);
     throw engineErr;
   } finally {

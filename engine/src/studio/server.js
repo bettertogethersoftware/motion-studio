@@ -42,11 +42,11 @@
  *   GET    /api/workspaces/:ws/library/file?path=          stream/download
  *   PUT    /api/workspaces/:ws/library/file?path=          raw-body upload (no size cap beyond 2 GB guard)
  *   DELETE /api/workspaces/:ws/library/file?path=
- *   POST   /api/workspaces/:ws/films         {name,fps?,width?,height?,durationInFrames?,slug?}
+ *   POST   /api/workspaces/:ws/films         {name,fps?,width?,height?,durationInFrames?,slug?,deliverables?}
  *   GET    /api/films/:fid                   film document + resolved detail (layout, problems)
  *   PATCH  /api/films/:fid                   {patch} — scenes order/audio/overlays/captions/…
  *   DELETE /api/films/:fid?deleteFiles=1
- *   POST   /api/films/:fid/build             {outputFilename?,audioTargetPeakDb?,burnCaptions?} → job
+ *   POST   /api/films/:fid/build             {outputFilename?,audioTargetPeakDb?,burnCaptions?,deliverable?} → job
  *   POST   /api/films/:fid/preview-audio     master mix as WAV (the build's exact ffmpeg graph)
  *   POST   /api/films/:fid/scenes            {name,fps?,…} → scaffold a scene into the film
  *   GET    /api/scenes/:sid                  config + file list
@@ -82,7 +82,7 @@ import { MAX_ASSET_BYTES } from '../core/scene.js';
 import { WorkspaceStore } from '../core/store.js';
 import {
   readSettings, updateSettings, resolveFfmpegPath, resolveFfprobePath,
-  withNewSceneDefaults, outputSeedFromSettings,
+  withNewSceneDefaults, outputSeedFromSettings, DEFAULT_SETTINGS,
 } from '../core/settings.js';
 import {
   resolvePaths, updateLocations, ensureStableDataDir, PATH_KEYS, PATH_ENV, APP_DATA_DIR,
@@ -111,6 +111,8 @@ import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks } from '../core/films.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
+import { resolveReviewPolicy } from '../core/render-review.js';
+import { resolveDeliverableSelections } from '../core/deliverables.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -186,6 +188,10 @@ const STATUS_FOR_CODE = {
   [ErrorCodes.STORAGE_BUSY]: 409,
   [ErrorCodes.SCENE_ALREADY_EXISTS]: 409,
   [ErrorCodes.FILM_ALREADY_EXISTS]: 409,
+  [ErrorCodes.UNKNOWN_DELIVERABLE]: 404,
+  // A review rule held a technically complete staged delivery; callers can
+  // inspect the retained review evidence and change the policy or source.
+  [ErrorCodes.PROMOTION_BLOCKED]: 409,
   // Films.
   [ErrorCodes.FILM_NOT_FOUND]: 404,
   [ErrorCodes.INVALID_FILM]: 400,
@@ -828,14 +834,25 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
         // fall back to global settings and become the film's sceneDefaults.
         if (req.method === 'POST' && parts[3] === 'films' && parts.length === 4) {
           const body = await readBody(req);
-          const settings = await readSettings(store.dataDir);
-          const { name: _n, ...sceneDefaults } = withNewSceneDefaults(settings, {
-            name: body.name,
+          const settings = await readSettings(store.dataDir).catch(() => structuredClone(DEFAULT_SETTINGS));
+          const deliverables = resolveDeliverableSelections({
+            presets: settings.deliverablePresets,
+            requested: body.deliverables,
+            defaultIds: settings.newFilmDefaults?.deliverableIds ?? [],
+            baseFilename: body.outputFilename ?? 'film',
+          });
+          const sceneDefaults = withNewSceneDefaults(settings, {
             fps: body.fps, width: body.width, height: body.height, durationInFrames: body.durationInFrames,
           });
+          const primary = deliverables[0];
+          if (primary) {
+            if (body.width === undefined) sceneDefaults.width = primary.width;
+            if (body.height === undefined) sceneDefaults.height = primary.height;
+          }
           const film = await store.createFilm(wsId, {
             name: body.name, slug: body.slug, sceneDefaults,
             outputFilename: body.outputFilename,
+            deliverables,
           });
           return sendJson(res, 201, { film });
         }
@@ -891,13 +908,19 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
         if (isFilmRoute && req.method === 'POST' && sub === 'build' && parts.length === 4) {
           const body = await readBody(req);
           const patch = {};
+          if (body.deliverable && body.outputFilename !== undefined) {
+            throw new EngineError(ErrorCodes.INVALID_CONFIG,
+              'outputFilename belongs to the configured deliverable when building a variant; update that deliverable instead');
+          }
           for (const k of ['outputFilename', 'audioTargetPeakDb', 'burnCaptions']) {
             if (body[k] !== undefined) patch[k] = body[k];
           }
           const film = Object.keys(patch).length
             ? await store.updateFilm(targetId, patch)
             : await store.getFilm(targetId);
-          const submitted = await submitFilmBuild({ film, store, jobs, ffmpegPath: await ffmpegPath() });
+          const submitted = await submitFilmBuild({
+            film, store, jobs, ffmpegPath: await ffmpegPath(), deliverableId: body.deliverable ?? null,
+          });
           return sendJson(res, 202, submitted);
         }
 
@@ -1016,6 +1039,12 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           const scene = await store.getScene(targetId);
           const config = await store.readConfig(scene.id);
           const outputPath = path.join(scene.path, config.output.dir, config.output.filename);
+          const settings = await readSettings(store.dataDir);
+          const film = await store.getFilm(scene.film);
+          const reviewPolicy = resolveReviewPolicy({
+            globalPolicy: settings.render.review,
+            filmPolicy: film.review,
+          });
           const submitted = jobs.startRender({
             targetId: scene.id,
             scenePath: scene.path,
@@ -1024,8 +1053,9 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             frameRange: body.frameRange,
             // The UI seeds its form from the global default, but a direct API
             // caller may omit it — fall back here so both paths agree with MCP.
-            workers: body.workers ?? (await readSettings(store.dataDir)).render.defaultWorkers,
+            workers: body.workers ?? settings.render.defaultWorkers,
             ffmpegPath: await ffmpegPath(),
+            reviewPolicy,
             ...(renderFn ? { renderFn } : {}),
           });
           return sendJson(res, 202, { ...submitted, outputPath });
@@ -1060,7 +1090,7 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             const names = await fsp.readdir(outDir);
             files = (
               await Promise.all(
-                names.map(async (n) => {
+                names.filter((n) => !n.startsWith('.')).map(async (n) => {
                   const st = await fsp.stat(path.join(outDir, n)).catch(() => null);
                   if (!st) return null;
                   return { name: n, bytes: st.isFile() ? st.size : null, dir: st.isDirectory(), mtime: st.mtime.toISOString() };

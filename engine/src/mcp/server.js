@@ -83,6 +83,7 @@ import {
 import { checkPrerequisites } from '../core/prereqs.js';
 import {
   readSettings, resolveFfmpegPath, resolveFfprobePath, withNewSceneDefaults, outputSeedFromSettings,
+  DEFAULT_SETTINGS,
 } from '../core/settings.js';
 import { pathToFileURL } from 'node:url';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
@@ -106,7 +107,7 @@ import {
 } from '../core/transcribe-vendors.js';
 import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
 import {
-  transcodeAsset, validateTranscode, formatForExtension, MAX_SPANS, MAX_CROSSFADE_MS,
+  transcodeAsset, transcodeMetaPath, validateTranscode, formatForExtension, MAX_SPANS, MAX_CROSSFADE_MS,
 } from '../core/transcode.js';
 import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
@@ -116,8 +117,10 @@ import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings, probeMedia } 
 import { getFormat } from '../core/formats.js';
 import {
   MAX_RENDER_INSPECTION_FRAMES, reviewFrameList, extractRenderedFrame, measureRenderedPicture,
+  resolveReviewPolicy, REVIEW_WARNING_CODES,
 } from '../core/render-review.js';
 import { ensureStableDataDir } from '../core/paths.js';
+import { resolveDeliverableSelections } from '../core/deliverables.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -248,6 +251,13 @@ async function locateMedia(relPath, target) {
     source: a.target.kind, target: localId(a.target.id), path: a.path,
     abs: a.abs, bytes: a.bytes, mtime: a.mtime, kind: a.kind,
   };
+}
+
+/** A stable, human-readable label for a source stored in a transcode sidecar. */
+function sourceAssetReference(source) {
+  return source.source === 'library'
+    ? `library:${source.path}`
+    : `${source.source}:${source.target}:${source.path}`;
 }
 
 /** Resolve an encoded deliverable, defaulting to the target's canonical out/ file. */
@@ -421,6 +431,7 @@ function planSummary(plan) {
         durationInFrames: s.durationInFrames,
         startSeconds: s.startSeconds,
         ...(s.label ? { label: s.label } : {}),
+        ...(s.derivedFrom ? { derivedFrom: s.derivedFrom } : {}),
         ...(s.probed
           ? {
             width: s.width, height: s.height, fps: s.fps, codec: s.codec, pixFmt: s.pixFmt,
@@ -502,6 +513,43 @@ server.registerTool(
   }),
 );
 
+// A creation request may name a global preset by id or supply a full custom
+// variant. The core resolver snapshots presets into the film document; this
+// input intentionally keeps fields optional so `{ id: "shorts-9x16" }` is the
+// normal agent call while validation still rejects incomplete custom ids.
+const DELIVERABLE_INSETS = z.object({
+  leftPct: z.number().min(0).max(100).optional(),
+  rightPct: z.number().min(0).max(100).optional(),
+  topPct: z.number().min(0).max(100).optional(),
+  bottomPct: z.number().min(0).max(100).optional(),
+}).passthrough();
+const DELIVERABLE_POINT = z.object({
+  xPct: z.number().min(0).max(100).optional(),
+  yPct: z.number().min(0).max(100).optional(),
+}).passthrough();
+const FILM_DELIVERABLE_INPUT = z.union([
+  z.string(),
+  z.object({
+    id: z.string(),
+    label: z.string().optional(),
+    width: z.number().int().min(2).max(7680).optional(),
+    height: z.number().int().min(2).max(4320).optional(),
+    outputFilename: z.string().optional(),
+    captionStyle: z.object({
+      sizePct: z.number().min(1).max(20).optional(),
+      position: z.enum(['bottom', 'top']).optional(),
+    }).passthrough().optional(),
+    safeAreas: z.object({
+      title: DELIVERABLE_INSETS.optional(),
+      caption: DELIVERABLE_INSETS.optional(),
+    }).passthrough().optional(),
+    reframe: z.object({
+      default: DELIVERABLE_POINT.optional(),
+      segments: z.record(DELIVERABLE_POINT).optional(),
+    }).passthrough().optional(),
+  }).passthrough(),
+]);
+
 server.registerTool(
   'create_film',
   {
@@ -513,7 +561,9 @@ server.registerTool(
       'created inside inherits them unless overridden, which keeps scenes concat-compatible (scenes must share ' +
       'resolution/fps/format to stitch losslessly) without restating dimensions per scene. Omitted dimensions ' +
       'fall back to the user\'s global settings (factory: 30fps 1920×1080, 150 frames). ' +
-      'Even a short single-scene video is a film with one scene — a film is always the container.',
+      'Even a short single-scene video is a film with one scene — a film is always the container. ' +
+      'deliverables optionally names platform preset ids (for example youtube-16x9 and shorts-9x16); they are ' +
+      'snapshotted onto the new film before any scene exists, so the editor only reviews/refines the AI choice.',
     inputSchema: {
       name: z.string().min(1).describe('Human-readable film name; the film id is its slug'),
       slug: z.string().optional().describe('Override the derived film slug (lowercase a-z0-9-_)'),
@@ -522,21 +572,40 @@ server.registerTool(
       height: z.number().int().min(2).max(4320).optional().describe('Scene default height (even)'),
       durationInFrames: z.number().int().min(1).optional().describe('Scene default duration'),
       outputFilename: z.string().optional().describe('Bare output filename for builds (default "film")'),
+      deliverables: z.array(FILM_DELIVERABLE_INPUT).optional().describe(
+        'Platform preset ids or full deliverable objects. Example: [{id:"youtube-16x9"},{id:"shorts-9x16"}]. ' +
+        'Omit for the workspace new-film default (normally master only).',
+      ),
     },
   },
-  wrap(async ({ name, slug, fps, width, height, durationInFrames, outputFilename }) => {
+  wrap(async ({ name, slug, fps, width, height, durationInFrames, outputFilename, deliverables }) => {
     await requirePrereqs();
-    const settings = await readSettings(store.dataDir).catch(() => null);
-    const sceneDefaults = settings
-      ? (({ name: _n, ...rest }) => rest)(withNewSceneDefaults(settings, { name, fps, width, height, durationInFrames }))
-      : { fps: fps ?? 30, width: width ?? 1920, height: height ?? 1080, durationInFrames: durationInFrames ?? 150 };
-    const film = await store.createFilm(WORKSPACE, { name, slug, sceneDefaults, outputFilename });
+    const settings = await readSettings(store.dataDir).catch(() => structuredClone(DEFAULT_SETTINGS));
+    const resolvedDeliverables = resolveDeliverableSelections({
+      presets: settings.deliverablePresets,
+      requested: deliverables,
+      defaultIds: settings.newFilmDefaults?.deliverableIds ?? [],
+      baseFilename: outputFilename ?? 'film',
+    });
+    const sceneDefaults = withNewSceneDefaults(settings, { fps, width, height, durationInFrames });
+    const primary = resolvedDeliverables[0];
+    // Platform intent becomes the master canvas only when the caller did not
+    // explicitly choose a dimension. AI calls like "YouTube and TikTok" thus
+    // start landscape, then derive portrait from the same cut.
+    if (primary) {
+      if (width === undefined) sceneDefaults.width = primary.width;
+      if (height === undefined) sceneDefaults.height = primary.height;
+    }
+    const film = await store.createFilm(WORKSPACE, {
+      name, slug, sceneDefaults, outputFilename, deliverables: resolvedDeliverables,
+    });
     return ok({
       film: film.slug,
       name: film.name,
       path: film.path,
       sceneDefaults: film.sceneDefaults,
       outputFilename: film.outputFilename,
+      deliverables: film.deliverables,
       next: 'Add scenes with create_scene { film, name }, then author each with write_composition_file.',
     });
   }),
@@ -596,6 +665,14 @@ const FILM_CAPTION = z.object({
   fromFrame: z.number().int().min(0),
   toFrame: z.number().int().min(1),
 });
+const FILM_DERIVED_FROM = z.object({
+  asset: z.string().min(1).describe('Source asset reference returned by transcode_asset, e.g. library:raw.mp4'),
+  transcodeMeta: z.string().describe('Film-relative .transcode.json sidecar returned by transcode_asset'),
+});
+const FILM_REVIEW_POLICY = z.object({
+  block: z.array(z.enum(REVIEW_WARNING_CODES)).optional(),
+  warn: z.array(z.enum(REVIEW_WARNING_CODES)).optional(),
+}).nullable();
 
 server.registerTool(
   'update_film',
@@ -604,7 +681,7 @@ server.registerTool(
     description:
       'Patch the film document: name, scene ORDER (scenes: [{slug}] — this is how you reorder or drop scenes ' +
       'from the cut; the scene folders themselves are untouched), master audio timeline, overlay track, caption ' +
-      'track, captionStyle, audioTargetPeakDb, burnCaptions, outputFilename, sceneDefaults. Omitted fields keep ' +
+      'track, captionStyle, audioTargetPeakDb, burnCaptions, outputFilename, deliverables, sceneDefaults, and review policy. Omitted fields keep ' +
       'their saved values; ARRAY FIELDS REPLACE WHOLESALE (a timeline edit is a statement of the whole track). ' +
       'Audio/overlay src paths are relative to the FILM\'s assets/ — put master audio there by targeting the ' +
       'film id in synthesize_* / write_asset_file. Times are frames on the film timeline; get scene offsets ' +
@@ -622,13 +699,15 @@ server.registerTool(
           footage: z.string(),
           durationInFrames: z.number().int().positive(),
           label: z.string().optional(),
+          derivedFrom: FILM_DERIVED_FROM.optional(),
         }),
       ])).optional()
         .describe('Play order — a heterogeneous list of SEGMENTS. A scene is {slug:"intro"}; a piece of FOOTAGE is ' +
           '{footage:"assets/clip.mp4", durationInFrames:231} (v0.22), which puts real video on the timeline beside ' +
           'the rendered scenes — that is how you build "footage, then a scene, then footage". Footage must be silent ' +
           'and must match the film signature (get_film reports it); `durationInFrames` is verified against the file, ' +
-          'because every later offset derives from it. Reorder or drop segments here; create scenes with create_scene ' +
+          'because every later offset derives from it. A prepared clip may also carry the `derivedFrom` object returned ' +
+          'by transcode_asset; it makes planFilm flag a source replacement before a build. Reorder or drop segments here; create scenes with create_scene ' +
           'and put footage in the film\'s assets/ first (use_shared_asset or write_asset_file).'),
       outputFilename: z.string().optional().describe('Bare output filename (default "film")'),
       sceneDefaults: z.object({
@@ -644,9 +723,15 @@ server.registerTool(
         sizePct: z.number().min(1).max(20).optional().describe('Font size as % of frame height (default 4.5)'),
         position: z.enum(['bottom', 'top']).optional(),
       }).optional(),
+      deliverables: z.array(FILM_DELIVERABLE_INPUT).optional().describe(
+        'Whole Stage-A deliverable list. Entries are saved platform snapshots; update their output name, caption style, safe areas, or reframe centers here.',
+      ),
       audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
         .describe('Master the mix to this peak on build (e.g. -2); null disables'),
       burnCaptions: z.boolean().optional().describe('Burn captions into the picture (a .srt sidecar is written either way)'),
+      review: FILM_REVIEW_POLICY.optional().describe(
+        'Per-film delivery review policy. block/warn are arrays of stable warning codes; omitted fields inherit the global setting, and null restores full inheritance.',
+      ),
     },
   },
   wrap(async ({ film, ...fields }) => {
@@ -698,7 +783,8 @@ server.registerTool(
       'to have the film measured and re-muxed once to that level instead of guessing gains. ' +
       'Pass plan:true to get the scene layout WITHOUT building — works before the scenes are rendered, which is ' +
       'exactly when you need each filmOffset to place narration and cues; nothing is assembled or written. ' +
-      'Iterating? Re-render only the scene you changed, then build_film again — other scenes\' outputs are reused.',
+      'Pass deliverable to build a configured Stage-A platform variant from the same master cut; it re-encodes to ' +
+      'the target geometry and writes independent captions/review artefacts. Iterating? Re-render only the scene you changed, then build_film again — other scenes\' outputs are reused.',
     inputSchema: {
       film: z.string(),
       plan: z.boolean().optional()
@@ -707,9 +793,10 @@ server.registerTool(
       audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
         .describe('Override + persist the mastering target'),
       burnCaptions: z.boolean().optional().describe('Override + persist caption burn-in'),
+      deliverable: z.string().optional().describe('Configured deliverable id to build (for example "shorts-9x16"); omit for the master'),
     },
   },
-  wrap(async ({ film, plan: planOnly, ...knobs }) => {
+  wrap(async ({ film, plan: planOnly, deliverable, ...knobs }) => {
     await requirePrereqs();
     const id = qualifyFilm(film);
     if (planOnly) {
@@ -717,11 +804,17 @@ server.registerTool(
       const plan = await planFilm({ film: doc, store });
       return ok({ film: doc.slug, plan: true, ...planSummary(plan) });
     }
+    if (deliverable && knobs.outputFilename !== undefined) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG,
+        'outputFilename belongs to the configured deliverable when building a variant; update that deliverable instead');
+    }
     const patch = Object.fromEntries(Object.entries(knobs).filter(([, v]) => v !== undefined));
     const doc = Object.keys(patch).length
       ? await store.updateFilm(id, patch)
       : await store.getFilm(id);
-    const submitted = await submitFilmBuild({ film: doc, store, jobs, ffmpegPath: await ffmpegPathOnly() });
+    const submitted = await submitFilmBuild({
+      film: doc, store, jobs, ffmpegPath: await ffmpegPathOnly(), deliverableId: deliverable ?? null,
+    });
     return ok({
       ...submitted,
       filmId: localId(submitted.filmId),
@@ -1217,6 +1310,11 @@ server.registerTool(
     const outputPath0 = path.join(s.path, config.output.dir, name);
     const outputPath = prx ? proxyOutputPath(outputPath0) : outputPath0;
     const settings = await readSettings(store.dataDir).catch(() => null);
+    const parentFilm = await store.getFilm(s.film);
+    const reviewPolicy = resolveReviewPolicy({
+      globalPolicy: settings?.render?.review,
+      filmPolicy: parentFilm.review,
+    });
     // Proxies are serial by design: already ~1/8 the work, so a Chromium
     // fan-out would cost more in launches than it saves in capture.
     const effectiveWorkers = prx ? 1 : (workers ?? settings?.render?.defaultWorkers ?? 1);
@@ -1224,6 +1322,7 @@ server.registerTool(
       targetId: s.id, scenePath: s.path, config, outputPath, frameRange, preflight,
       workers: effectiveWorkers,
       ffmpegPath: await ffmpegPathOnly(),
+      reviewPolicy,
       // A proxy always goes straight to the serial renderer with the proxy
       // options attached; otherwise the injected-factory split is as before.
       ...(prx
@@ -1909,6 +2008,23 @@ server.registerTool(
     }
 
     const r = status.result;
+    // A timeline segment keeps only pointers to the transcode evidence. The
+    // sidecar remains authoritative for the source identity and transform; do
+    // not copy that manifest into film.json where it could drift.
+    const sidecarExists = mode === 'video' && t.kind === 'film'
+      ? !!(await fsp.stat(transcodeMetaPath(outAbs)).catch(() => null))
+      : false;
+    const timelineSegment = mode === 'video' && signature && t.kind === 'film'
+      && Number.isInteger(r.frames) && r.frames > 0 && sidecarExists
+      ? {
+        footage: normalized,
+        durationInFrames: r.frames,
+        derivedFrom: {
+          asset: sourceAssetReference(source),
+          transcodeMeta: transcodeMetaPath(normalized),
+        },
+      }
+      : null;
     return ok({
       jobId: submitted.jobId,
       target: localId(t.id),
@@ -1931,10 +2047,13 @@ server.registerTool(
       ...(r.frames ? { frames: r.frames } : {}),
       ...(r.notes ? { notes: r.notes } : {}),
       ...(r.assumptions ? { assumptions: r.assumptions } : {}),
+      ...(timelineSegment ? { timelineSegment } : {}),
       hint: mode === 'audio'
         ? `Put it on a timeline with ${t.kind === 'scene' ? 'update_scene_config' : 'update_film'} { audio: [{ src: "${normalized}" }] }, then check the mix with preview_audio.`
         : mode === 'video' && signature
-          ? `Place it on the film timeline with update_film { scenes: [..., { footage: "${normalized}", durationInFrames: ${r.frames ?? '<frames>'} }] }.`
+          ? timelineSegment
+            ? `Place the returned timelineSegment on the film with update_film { scenes: [...] }; it preserves this clip's source provenance.`
+            : `Place it on the film timeline with update_film { scenes: [..., { footage: "${normalized}", durationInFrames: ${r.frames ?? '<frames>'} }] }. Its provenance sidecar was unavailable, so the plan cannot verify later source changes.`
           : `Reference it from a composition as "${normalized}" — drive video with seekVideo(), never play().`,
     });
   }),

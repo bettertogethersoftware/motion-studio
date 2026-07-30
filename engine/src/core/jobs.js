@@ -104,7 +104,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ targetId, scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath }) {
+  startRender({ targetId, scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -142,7 +142,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath },
+      _run: { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -295,11 +295,12 @@ export class JobManager {
       }
     });
 
-    const { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath } = job._run;
+    const { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
       scenePath, config, outputPath, frameRange, workers,
       ...(ffmpegPath ? { ffmpegPath } : {}),
+      ...(reviewPolicy ? { reviewPolicy } : {}),
       ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
       progress,
@@ -356,6 +357,20 @@ export class JobManager {
       // static frames on a scene; static/black/cut summary on a film build.
       ...(job.result?.staticFrames !== undefined ? { staticFrames: job.result.staticFrames } : {}),
       ...(job.result?.picture ? { picture: job.result.picture } : {}),
+      // A successful canonical scene/film render is only delivery-ready after
+      // this staged-file promotion. `framesVerified:false` is intentionally
+      // visible when ffprobe was unavailable rather than implied true.
+      ...(job.result?.promoted !== undefined ? { promoted: job.result.promoted } : {}),
+      ...(job.result?.framesVerified !== undefined ? { framesVerified: job.result.framesVerified } : {}),
+      ...(job.result?.review ? { review: job.result.review } : {}),
+      ...(job.result?.reviewArtifactWarning ? { reviewArtifactWarning: job.result.reviewArtifactWarning } : {}),
+      ...(job.result?.captionSidecarWarning ? { captionSidecarWarning: job.result.captionSidecarWarning } : {}),
+      // A film build may target its master or one persisted Stage-A variant.
+      // These fields let Studio/MCP name the exact delivery and explain the
+      // deliberate full re-encode rather than leaving it as an ffmpeg surprise.
+      ...(job.result?.deliverable ? { deliverable: job.result.deliverable } : {}),
+      ...(job.result?.reEncoded !== undefined ? { reEncoded: job.result.reEncoded } : {}),
+      ...(job.result?.srtPath ? { srtPath: job.result.srtPath } : {}),
       // Player-compatibility advisories (v0.22, e.g. mp4 crf 0 → Hi444PP) —
       // the caller cannot try the file in a consumer player either.
       ...(job.result?.encodingWarnings ? { encodingWarnings: job.result.encodingWarnings } : {}),

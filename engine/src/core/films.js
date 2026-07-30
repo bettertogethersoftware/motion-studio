@@ -36,13 +36,23 @@ import { EngineError, ErrorCodes } from './errors.js';
 import { getFormat, encodingCompatibilityWarnings, outputColorProfile } from './formats.js';
 import {
   sceneSignature, sceneOutputPath, sceneHasAudio, validateScenes, assembleFilm,
-  readRenderMeta, renderStaleness, describeStaleness,
+  readRenderMeta, renderDeliveryStaleness, renderOutputIdentityMatches, describeStaleness,
   probeSignature, engineFormatForProbe, isFootage, segmentFrames, segmentName,
 } from './film.js';
 import { buildVideoArgs, runFfmpeg, probeMedia, probeFrameCount } from './encoder.js';
-import { measureRenderedPicture } from './render-review.js';
+import {
+  measureRenderedPicture, createDeliveryReview, assertReviewAllowsPromotion,
+  resolveReviewPolicy, REVIEW_WARNING_CODES,
+} from './render-review.js';
 import { resolveInTarget } from './sandbox.js';
-import { resolveFfprobePath } from './settings.js';
+import { readSettings, resolveFfprobePath } from './settings.js';
+import { stagingOutputPath, prepareStagingOutput, promoteStagingOutput } from './delivery.js';
+import {
+  MAX_FILM_DELIVERABLES, normalizeDeliverable, validateDeliverable,
+  sanitizeDeliverableBase, resolveFilmDeliverable, compileReframeFilter,
+  captionSafeCapacity,
+} from './deliverables.js';
+import { readTranscodeMetaFile, transcodeIdentity } from './transcode.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits — generous for real work, bounded against runaway callers.   */
@@ -110,6 +120,29 @@ function checkFootage(s, i, problems) {
       '(it is verified against the file, and every later offset depends on it)');
   }
   if (s.label !== undefined && typeof s.label !== 'string') problems.push(`${at}.label must be a string`);
+  if (s.derivedFrom !== undefined) checkFootageDerivedFrom(s.derivedFrom, at, problems);
+}
+
+/**
+ * Provenance is deliberately a pointer, not a second transcode manifest. The
+ * identity, trim and source stat snapshot remain in the `.transcode.json`
+ * created by transcode_asset; the film only says which source and sidecar its
+ * segment depends on.
+ */
+function checkFootageDerivedFrom(value, at, problems) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    problems.push(`${at}.derivedFrom must be { asset, transcodeMeta }`);
+    return;
+  }
+  if (typeof value.asset !== 'string' || !value.asset.trim()) {
+    problems.push(`${at}.derivedFrom.asset must be a non-empty source asset reference`);
+  }
+  const meta = typeof value.transcodeMeta === 'string' ? value.transcodeMeta.replace(/\\/g, '/') : value.transcodeMeta;
+  if (typeof meta !== 'string' || !meta.startsWith('assets/')) {
+    problems.push(`${at}.derivedFrom.transcodeMeta must be a film-relative path under assets/`);
+  } else if (!meta.endsWith('.transcode.json')) {
+    problems.push(`${at}.derivedFrom.transcodeMeta must name a .transcode.json sidecar`);
+  }
 }
 
 function checkOverlay(o, i, problems) {
@@ -233,6 +266,55 @@ export function validateFilm(film) {
   }
   if (film.burnCaptions !== undefined && typeof film.burnCaptions !== 'boolean') problems.push('burnCaptions must be a boolean');
 
+  if (!Array.isArray(film.deliverables)) {
+    problems.push('deliverables must be an array');
+  } else {
+    if (film.deliverables.length > MAX_FILM_DELIVERABLES) problems.push(`deliverables exceeds ${MAX_FILM_DELIVERABLES}`);
+    const ids = new Set();
+    const filenames = new Set();
+    const masterFilename = sanitizeDeliverableBase(film.outputFilename ?? 'film');
+    if (masterFilename) filenames.add(masterFilename);
+    film.deliverables.forEach((deliverable, index) => {
+      const at = `deliverables[${index}]`;
+      validateDeliverable(deliverable, at, problems);
+      if (typeof deliverable?.id === 'string') {
+        if (ids.has(deliverable.id)) problems.push(`${at}.id "${deliverable.id}" is duplicated`);
+        ids.add(deliverable.id);
+      }
+      const filename = sanitizeDeliverableBase(deliverable?.outputFilename);
+      if (filename) {
+        if (filenames.has(filename)) problems.push(`${at}.outputFilename "${filename}" duplicates the master or another deliverable`);
+        filenames.add(filename);
+      }
+    });
+  }
+
+  // A film may inherit the machine policy (null) or override either severity
+  // list. We preserve partial overrides so a producer can, for example, block
+  // black runs without having to duplicate the global warning list.
+  const review = film.review;
+  if (review !== undefined && review !== null) {
+    if (typeof review !== 'object' || Array.isArray(review)) {
+      problems.push('review must be an object with optional block/warn arrays, or null');
+    } else {
+      for (const field of ['block', 'warn']) {
+        if (review[field] === undefined) continue;
+        if (!Array.isArray(review[field])) {
+          problems.push(`review.${field}: array of review warning codes required`);
+          continue;
+        }
+        const unknown = review[field].filter((code) => !REVIEW_WARNING_CODES.includes(code));
+        if (unknown.length) problems.push(`review.${field}: unknown warning code(s) ${unknown.join(', ')}`);
+        if (new Set(review[field]).size !== review[field].length) problems.push(`review.${field}: duplicate warning codes are not allowed`);
+      }
+      const overlap = (review.block ?? []).filter((code) => (review.warn ?? []).includes(code));
+      if (overlap.length) problems.push(`review: a code cannot be both block and warn (${overlap.join(', ')})`);
+      for (const key of Object.keys(review)) {
+        if (!['block', 'warn'].includes(key)) problems.push(`review.${key} is not a review policy field`);
+      }
+    }
+  }
+
   const cs = film.captionStyle;
   if (cs !== undefined && cs !== null) {
     if (typeof cs !== 'object') problems.push('captionStyle must be an object');
@@ -264,10 +346,27 @@ export function validateFilm(film) {
  */
 function normalizeSegment(s) {
   if (s && s.footage !== undefined) {
+    const derivedFrom = s.derivedFrom;
     return {
       footage: typeof s.footage === 'string' ? s.footage.replace(/\\/g, '/') : s.footage,
       durationInFrames: s.durationInFrames,
       ...(s.label !== undefined ? { label: s.label } : {}),
+      ...(derivedFrom !== undefined
+        ? {
+          derivedFrom: derivedFrom && typeof derivedFrom === 'object' && !Array.isArray(derivedFrom)
+            ? {
+              ...(derivedFrom.asset !== undefined
+                ? { asset: typeof derivedFrom.asset === 'string' ? derivedFrom.asset.replace(/\\/g, '/') : derivedFrom.asset }
+                : {}),
+              ...(derivedFrom.transcodeMeta !== undefined
+                ? { transcodeMeta: typeof derivedFrom.transcodeMeta === 'string'
+                  ? derivedFrom.transcodeMeta.replace(/\\/g, '/')
+                  : derivedFrom.transcodeMeta }
+                : {}),
+            }
+            : derivedFrom,
+        }
+        : {}),
       // A segment carrying BOTH keys is a confused caller, not a footage entry
       // with a stray field. Keeping the slug here is what lets validateFilm
       // refuse it: dropping it would silently pick footage and persist a
@@ -283,10 +382,11 @@ export function normalizeFilm(input = {}) {
   const stampIds = (arr) => (Array.isArray(arr) ? arr.map((x) => (x && typeof x === 'object' && !x.id ? { ...x, id: randomUUID() } : x)) : arr);
   const sd = input.sceneDefaults;
   const pickInts = (obj, keys) => Object.fromEntries(keys.filter((k) => obj?.[k] !== undefined).map((k) => [k, obj[k]]));
+  const outputFilename = input.outputFilename ?? 'film';
   return {
     name: typeof input.name === 'string' ? input.name.trim() : input.name,
     scenes: Array.isArray(input.scenes) ? input.scenes.map(normalizeSegment) : [],
-    outputFilename: input.outputFilename ?? 'film',
+    outputFilename,
     sceneDefaults: sd && typeof sd === 'object'
       ? pickInts(sd, ['fps', 'width', 'height', 'durationInFrames'])
       : null,
@@ -296,6 +396,19 @@ export function normalizeFilm(input = {}) {
     captionStyle: { sizePct: 4.5, position: 'bottom', ...(input.captionStyle ?? {}) },
     audioTargetPeakDb: input.audioTargetPeakDb ?? null,
     burnCaptions: input.burnCaptions ?? false,
+    // A saved film stores full preset snapshots.  No build path reads global
+    // settings to reinterpret a variant later, so changing a workspace preset
+    // cannot silently change an existing production.
+    deliverables: Array.isArray(input.deliverables)
+      ? input.deliverables.map((deliverable) => normalizeDeliverable(deliverable, { baseFilename: outputFilename }))
+      : (input.deliverables ?? []),
+    review: input.review === null || input.review === undefined
+      ? null
+      : {
+        ...(input.review?.block !== undefined ? { block: input.review.block } : {}),
+        ...(input.review?.warn !== undefined ? { warn: input.review.warn } : {}),
+        ...Object.fromEntries(Object.entries(input.review ?? {}).filter(([key]) => !['block', 'warn'].includes(key))),
+      },
   };
 }
 
@@ -462,6 +575,95 @@ export function filmSignature(configs) {
 /* Planning — resolve a film against reality without throwing          */
 /* ------------------------------------------------------------------ */
 
+const sameTranscodeIdentity = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
+
+function hasRecordedTranscodeIdentity(identity) {
+  return !!identity
+    && typeof identity === 'object'
+    && typeof identity.source === 'string'
+    && typeof identity.bytes === 'number'
+    && typeof identity.mtimeMs === 'number'
+    && identity.request && typeof identity.request === 'object';
+}
+
+/**
+ * Verify the source behind a prepared footage file without copying its
+ * transcode manifest into the film document. The sidecar is authoritative: it
+ * names the exact source identity and transformation request that produced the
+ * prepared clip. A film only keeps a pointer to that evidence.
+ */
+async function planFootageProvenance({ film, ref, index, rel, problems }) {
+  const derived = ref.derivedFrom;
+  if (!derived) return null;
+  const base = {
+    asset: derived.asset,
+    transcodeMeta: derived.transcodeMeta,
+    sourceVerified: null,
+  };
+  const addProblem = (reason, message, extra = {}) => {
+    problems.push({
+      code: ErrorCodes.FOOTAGE_SOURCE_CHANGED,
+      segment: rel,
+      sourceAsset: derived.asset,
+      transcodeMeta: derived.transcodeMeta,
+      reason,
+      message,
+      ...extra,
+    });
+    return { ...base, sourceVerified: false, reason };
+  };
+
+  let metaPath;
+  try {
+    metaPath = resolveInTarget(film.path, derived.transcodeMeta);
+  } catch {
+    return addProblem(
+      'transcode_metadata_missing',
+      `Footage ${index + 1}: "${rel}" records source "${derived.asset}", but its transcode metadata ` +
+        `"${derived.transcodeMeta}" is not a valid film asset path. Re-run the transcode before building.`,
+    );
+  }
+  const meta = readTranscodeMetaFile(metaPath);
+  const recorded = meta?.identity;
+  if (!hasRecordedTranscodeIdentity(recorded)) {
+    return addProblem(
+      'transcode_metadata_missing',
+      `Footage ${index + 1}: "${rel}" was prepared from "${derived.asset}", but its transcode metadata ` +
+        `"${derived.transcodeMeta}" is missing or unreadable. Re-run the transcode before building.`,
+    );
+  }
+
+  const sourceStat = await fsp.stat(recorded.source).catch(() => null);
+  if (!sourceStat?.isFile()) {
+    return addProblem(
+      'source_missing',
+      `Footage ${index + 1}: the source "${derived.asset}" recorded for "${rel}" is no longer available. ` +
+        'Re-run the transcode from the current source before building.',
+      { recorded: { bytes: recorded.bytes, mtimeMs: recorded.mtimeMs } },
+    );
+  }
+
+  const current = transcodeIdentity({
+    sourceAbs: recorded.source,
+    bytes: sourceStat.size,
+    mtimeMs: sourceStat.mtimeMs,
+    request: recorded.request,
+  });
+  if (!sameTranscodeIdentity(recorded, current)) {
+    return addProblem(
+      'source_identity_changed',
+      `Footage ${index + 1}: source "${derived.asset}" changed after "${rel}" was prepared. ` +
+        'Re-run the transcode so this trim reflects the current source before building.',
+      {
+        recorded: { bytes: recorded.bytes, mtimeMs: recorded.mtimeMs },
+        current: { bytes: current.bytes, mtimeMs: current.mtimeMs },
+      },
+    );
+  }
+
+  return { ...base, sourceVerified: true };
+}
+
 /**
  * Resolve one footage segment: locate it, probe it, and verify the two things a
  * declaration cannot be trusted on (v0.22).
@@ -514,11 +716,20 @@ async function planFootage({ film, ref, index, problems, ffprobePath }) {
     return { ...base, missing: true, durationInFrames: 0 };
   }
 
+  const derivedFrom = await planFootageProvenance({ film, ref, index, rel, problems });
+
   const media = await probeMedia({ filePath: abs, ffprobePath }).catch(() => null);
   if (!media) {
     // Unprobeable is not the same as missing: the file is there, but nothing can
     // be verified about it, and saying so beats inventing a verdict.
-    return { ...base, missing: false, probed: false, framesVerified: null, signature: null };
+    return {
+      ...base,
+      missing: false,
+      probed: false,
+      framesVerified: null,
+      signature: null,
+      ...(derivedFrom ? { derivedFrom } : {}),
+    };
   }
 
   let frames = media.video?.frames ?? null;
@@ -572,6 +783,7 @@ async function planFootage({ film, ref, index, problems, ffprobePath }) {
     actualFrames: frames ?? null,
     framesVerified: frames ? frames === declared : null,
     signature: probeSignature(media),
+    ...(derivedFrom ? { derivedFrom } : {}),
   };
 }
 
@@ -660,12 +872,20 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     // here so the caller sees it while planning, not after a build produced a
     // film whose length disagrees with this very plan.
     const meta = rendered ? readRenderMeta(entry.path, config) : null;
-    const stale = rendered ? renderStaleness(meta, config) : null;
+    const stale = rendered ? renderDeliveryStaleness(meta, config, outFile) : null;
+    // A matching config is not enough after staged promotion: a crash can land
+    // a replacement file before its sidecar.  New sidecars carry the cheap file
+    // identity recorded at promotion; legacy sidecars stay deliberately
+    // unverified rather than being trusted over an unknown file.
+    const identityMatches = rendered && meta ? renderOutputIdentityMatches(meta, outFile) : null;
+    const identityStale = stale?.changed?.includes('outputIdentity') ?? false;
     if (stale) {
       problems.push({
         code: 'stale_render',
         sceneId,
-        message: `Scene "${config.name}" was rendered at different settings (${describeStaleness(stale)}) — re-render it`,
+        message: identityStale
+          ? `Scene "${config.name}" output changed after its render metadata was written — re-render it`
+          : `Scene "${config.name}" was rendered at different settings (${describeStaleness(stale)}) — re-render it`,
         changed: stale.changed,
       });
     }
@@ -680,9 +900,9 @@ export async function planFilm({ film, store, ffprobePath = null }) {
       format: config.output?.format ?? 'mp4',
       signature: sig,
       rendered,
-      // false = rendered but stale; null = rendered by a build that predates
-      // the sidecar, so it cannot be checked either way.
-      renderVerified: rendered ? (meta ? !stale : null) : false,
+      // false = rendered but stale; null = legacy/missing metadata that cannot
+      // prove the file at this path is the file it describes.
+      renderVerified: rendered ? (meta ? (stale ? false : (identityMatches === true ? true : null)) : null) : false,
       ...(stale ? { staleRender: { changed: stale.changed, recorded: stale.recorded, current: stale.current } } : {}),
       hasAudio: sceneHasAudio(config),
       outputFile: config.output?.filename ?? 'output.mp4',
@@ -735,6 +955,34 @@ export async function planFilm({ film, store, ffprobePath = null }) {
   for (const [i, c] of (film.captions ?? []).entries()) {
     if (totalFrames && c.fromFrame >= totalFrames) {
       problems.push({ code: 'caption_out_of_range', message: `Caption ${i + 1} ("${String(c.text).slice(0, 24)}…") starts after the film ends` });
+    }
+  }
+  // This is intentionally a conservative estimate, not a gate.  Real line
+  // breaking belongs to libass at build time; the deliverable contact sheet is
+  // the authoritative visual check.  Still, an obviously long caption should
+  // be visible in the plan before an expensive vertical build is started.
+  const source = scenes.find((scene) => !scene.missing && scene.width && scene.height) ?? null;
+  for (const deliverable of film.deliverables ?? []) {
+    if (!deliverable?.width || !deliverable?.height) continue; // validateFilm names the schema fault on save.
+    const capacity = captionSafeCapacity({
+      width: deliverable.width,
+      height: deliverable.height,
+      captionStyle: { ...(film.captionStyle ?? {}), ...(deliverable.captionStyle ?? {}) },
+      safeArea: deliverable.safeAreas?.caption,
+    });
+    for (const [index, caption] of (film.captions ?? []).entries()) {
+      const text = String(caption?.text ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length > capacity.maxChars) {
+        problems.push({
+          code: 'caption_may_overflow_safe_area',
+          deliverable: deliverable.id,
+          captionId: caption.id ?? null,
+          message: `Caption ${index + 1} is ${text.length} characters; ${deliverable.id}'s caption-safe area is estimated for about ${capacity.maxChars}. Review its contact sheet after build.`,
+          estimatedCapacity: capacity.maxChars,
+          actualChars: text.length,
+          ...(source ? { source: { width: source.width, height: source.height } } : {}),
+        });
+      }
     }
   }
   for (const [i, o] of (film.overlays ?? []).entries()) {
@@ -833,12 +1081,20 @@ export function captionsToAss(captions, fps, { width, height, style = {} } = {})
  * (null = natural size). Time windows are frames, converted here.
  *
  * @param {Array}  overlays  film.overlays, with `isVideo` flagged per entry
- * @param {object} opts      { width, height, fps, subtitlesFile? }
+ * @param {object} opts      { width, height, fps, subtitlesFile?, baseFilter? }
  * @returns {{ filterComplex: string, outLabel: string }}
  */
-export function buildOverlayGraph(overlays, { width, height, fps, subtitlesFile = null } = {}) {
+export function buildOverlayGraph(overlays, { width, height, fps, subtitlesFile = null, baseFilter = null } = {}) {
   const chains = [];
   let prev = '0:v';
+  // Stage-A deliverables compile their crop against the resolved film layout,
+  // then hand that transformed base into the ordinary overlay/subtitle pass.
+  // Keeping this here means overlays are positioned in the target geometry,
+  // never accidentally in the landscape master and cropped afterward.
+  if (baseFilter) {
+    chains.push(`[0:v]${baseFilter}[base]`);
+    prev = 'base';
+  }
   overlays.forEach((o, i) => {
     const from = (o.fromFrame / fps).toFixed(3);
     const to = (o.toFrame / fps).toFixed(3);
@@ -858,9 +1114,7 @@ export function buildOverlayGraph(overlays, { width, height, fps, subtitlesFile 
   });
   if (subtitlesFile) {
     const out = 'vsub';
-    chains.push(overlays.length
-      ? `[${prev}]subtitles=${subtitlesFile}[${out}]`
-      : `[0:v]subtitles=${subtitlesFile}[${out}]`);
+    chains.push(`[${prev}]subtitles=${subtitlesFile}[${out}]`);
     prev = out;
   }
   return { filterComplex: chains.join(';'), outLabel: prev };
@@ -883,9 +1137,24 @@ function sanitizeBase(outputFilename) {
  * Shared by submitFilmBuild (pre-flight, so the API can 4xx before creating a
  * job) and buildFilmArtifact (the job body — state may have changed since).
  */
-async function resolveFilmForBuild({ film, store, requireRendered = true }) {
+async function resolveFilmForBuild({ film, store, requireRendered = true, deliverableId = null }) {
   if (!(film.scenes ?? []).length) {
     throw new EngineError(ErrorCodes.INVALID_FILM, 'a film needs at least one scene before it can build', { problems: ['scenes is empty'] });
+  }
+  // A provenance pointer is explicitly a production-safety contract: the plan
+  // found an outdated trim before a build was submitted, and a direct API call
+  // must not be able to bypass that warning. Old films with no pointer keep the
+  // existing fast path and are not probed here.
+  if (film.scenes.some((segment) => segment?.derivedFrom !== undefined)) {
+    const provenancePlan = await planFilm({ film, store });
+    const changedSources = provenancePlan.problems.filter((problem) => problem.code === ErrorCodes.FOOTAGE_SOURCE_CHANGED);
+    if (changedSources.length) {
+      throw new EngineError(
+        ErrorCodes.FOOTAGE_SOURCE_CHANGED,
+        'One or more prepared footage sources changed after their transcodes. Re-run the affected transcode before building.',
+        { filmId: film.id, problems: changedSources },
+      );
+    }
   }
   // The play order is heterogeneous (v0.22): a segment is a scene (which the
   // engine rendered, and whose config is the source of truth) or footage (a file
@@ -916,7 +1185,8 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
   const hasMasterAudio = !!(film.audio ?? []).length;
   const info = validateScenes(sceneData, { hasMasterAudio, requireRendered });
 
-  const base = sanitizeBase(film.outputFilename);
+  const deliverable = resolveFilmDeliverable(film, deliverableId);
+  const base = sanitizeBase(deliverable?.outputFilename ?? film.outputFilename);
   const ext = getFormat(info.format).ext;
   const outDir = path.join(film.path, 'out');
   const outputPath = path.join(outDir, base + ext);
@@ -945,8 +1215,20 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
     overlays.push({ ...o, abs, isVideo: ['.mp4', '.webm', '.mov'].includes(ext2), isWebm: ext2 === '.webm' });
   }
 
+  const firstScene = sceneData.find((s) => !isFootage(s));
+  const sourceWidth = firstScene?.config.width ?? film.sceneDefaults?.width ?? null;
+  const sourceHeight = firstScene?.config.height ?? film.sceneDefaults?.height ?? null;
+  if (deliverable && (!sourceWidth || !sourceHeight)) {
+    throw new EngineError(ErrorCodes.INVALID_FILM,
+      `Cannot build deliverable "${deliverable.id}" without source dimensions. Set the film's sceneDefaults.`, {
+        deliverable: deliverable.id,
+      });
+  }
   const totalFrames = sceneData.reduce((n, s) => n + segmentFrames(s), 0);
-  return { sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames };
+  return {
+    sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames,
+    deliverable, sourceWidth, sourceHeight,
+  };
 }
 
 /**
@@ -961,33 +1243,54 @@ async function resolveFilmForBuild({ film, store, requireRendered = true }) {
  * parameters (validateScenes enforces it), so scene 1 is the film's encode
  * voice — and the film document needs no duplicate encode block to drift.
  */
-export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', onSpawn, progress, signal }) {
+export async function buildFilmArtifact({
+  film, store, ffmpegPath = 'ffmpeg', onSpawn, progress, signal, jobId = null, reviewPolicy = null,
+  deliverableId = null,
+}) {
   const checkCancel = () => {
     if (signal?.aborted) throw new EngineError(ErrorCodes.CANCELLED, 'film build cancelled');
   };
-  const r = await resolveFilmForBuild({ film, store });
-  const { sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames } = r;
+  const r = await resolveFilmForBuild({ film, store, deliverableId });
+  const {
+    sceneData, info, outDir, outputPath, base, ext, audioTracks, overlays, totalFrames,
+    deliverable, sourceWidth, sourceHeight,
+  } = r;
   await fsp.mkdir(outDir, { recursive: true });
+  // The build never writes an in-progress concat, finishing encode, or mastering
+  // re-mux to the caller-visible delivery name.  A failed job leaves this file
+  // available for diagnosis while the prior delivery remains untouched.
+  const stageId = jobId == null || jobId === '' ? randomUUID() : jobId;
+  const stagedOutputPath = stagingOutputPath(outputPath, { jobId: stageId });
+  const effectiveReviewPolicy = reviewPolicy ?? resolveReviewPolicy({ filmPolicy: film.review });
 
   const fps = info.fps ?? film.sceneDefaults?.fps ?? null;
   const captions = film.captions ?? [];
   const burn = !!film.burnCaptions && captions.length > 0;
-  const finishing = overlays.length > 0 || burn;
+  // A Stage-A variant always needs one target-size encode, even without
+  // overlays/captions. The master path retains the existing lossless concat
+  // fast path whenever no finishing work is requested.
+  const finishing = overlays.length > 0 || burn || !!deliverable;
   // Scene 1 is the film's encode voice — but an all-footage film has no scene
   // config, so the geometry the finishing pass needs comes from the first
   // segment that can supply it, falling back to sceneDefaults.
   const firstScene = sceneData.find((s) => !isFootage(s));
   const firstOutput = firstScene?.config.output ?? {};
-  const width = firstScene?.config.width ?? film.sceneDefaults?.width ?? null;
-  const height = firstScene?.config.height ?? film.sceneDefaults?.height ?? null;
+  const width = deliverable?.width ?? sourceWidth;
+  const height = deliverable?.height ?? sourceHeight;
+  const captionStyle = { ...(film.captionStyle ?? {}), ...(deliverable?.captionStyle ?? {}) };
 
   progress?.phase('assembling');
   checkCancel();
 
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-filmbuild-'));
+  const stagedSrtPath = captions.length
+    ? stagedOutputPath.slice(0, -ext.length) + '.srt'
+    : null;
   let result;
+  let reframe = null;
   try {
-    const assembleTarget = finishing ? path.join(tmp, `master${ext}`) : outputPath;
+    await prepareStagingOutput(outputPath, { jobId: stageId });
+    const assembleTarget = finishing ? path.join(tmp, `master${ext}`) : stagedOutputPath;
     result = await assembleFilm({
       scenes: sceneData,
       format: info.format,
@@ -1004,18 +1307,31 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
 
     let srtPath = null;
     if (captions.length) {
-      srtPath = path.join(outDir, `${base}.srt`);
-      await fsp.writeFile(srtPath, captionsToSrt(captions, fps), 'utf8');
+      await fsp.writeFile(stagedSrtPath, captionsToSrt(captions, fps), 'utf8');
     }
 
     if (finishing) {
-      progress?.phase('finishing');
+      progress?.phase(deliverable ? 'reframing-deliverable' : 'finishing');
       let subtitlesFile = null;
       if (burn) {
         subtitlesFile = 'captions.ass';
-        await fsp.writeFile(path.join(tmp, subtitlesFile), captionsToAss(captions, fps, { width, height, style: film.captionStyle }), 'utf8');
+        await fsp.writeFile(path.join(tmp, subtitlesFile), captionsToAss(captions, fps, { width, height, style: captionStyle }), 'utf8');
       }
-      const { filterComplex, outLabel } = buildOverlayGraph(overlays, { width, height, fps, subtitlesFile });
+      reframe = deliverable
+        ? compileReframeFilter({
+          reframe: deliverable.reframe,
+          sceneLayout: result.sceneLayout,
+          sourceWidth,
+          sourceHeight,
+          targetWidth: width,
+          targetHeight: height,
+          fps,
+        })
+        : null;
+      const { filterComplex, outLabel } = buildOverlayGraph(overlays, {
+        width, height, fps, subtitlesFile,
+        baseFilter: reframe?.filter ?? null,
+      });
       const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', assembleTarget];
       for (const o of overlays) {
         // VP9-in-webm alpha only survives the libvpx decoder — ffmpeg's native
@@ -1028,7 +1344,10 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
         '-map', `[${outLabel}]`, '-map', '0:a?', '-c:a', 'copy',
         ...buildVideoArgs({ ...firstOutput, format: info.format, transparent: firstOutput.transparent }),
         '-r', String(fps),
-        outputPath,
+        // A finishing/reframe pass may otherwise duplicate the terminal frame
+        // while reconciling timestamps. The resolved timeline is authoritative.
+        '-frames:v', String(totalFrames),
+        stagedOutputPath,
       );
       const started = Date.now();
       await runFfmpeg({
@@ -1048,29 +1367,123 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
     // it measures the completed deliverable but never turns a valid build into
     // a failure because a diagnostic pass was unavailable.
     let picture;
+    let pictureReport = null;
+    let pictureError = null;
     try {
       progress?.phase('measuring-picture');
       const measured = await measureRenderedPicture({
-        filePath: outputPath, fps, totalFrames, sceneLayout: result.sceneLayout,
+        filePath: stagedOutputPath, fps, totalFrames, sceneLayout: result.sceneLayout,
         ffmpegPath, signal, onSpawn,
       });
+      pictureReport = measured;
       picture = measured.summary;
     } catch (err) {
       if (signal?.aborted) throw err;
-      picture = { unavailable: true, message: err?.message ?? 'Picture measurement was unavailable' };
+      pictureError = err?.message ?? 'Picture measurement was unavailable';
+      picture = { unavailable: true, message: pictureError };
+    }
+
+    // Same policy as a scene render: ffprobe absence is surfaced as unverified,
+    // not misrepresented as a frame-count match.  A measured mismatch blocks
+    // promotion and leaves the previous delivery intact.
+    const actualFrames = await probeFrameCount({ filePath: stagedOutputPath, onSpawn, signal }).catch(() => null);
+    if (actualFrames !== null && actualFrames !== totalFrames) {
+      // Do not throw before the review is persisted.  A staged delivery gets
+      // the same evidence and policy treatment as a scene render; the default
+      // policy blocks its promotion, while an explicit per-film policy may
+      // deliberately downgrade it to a warning.
+      progress?.log(
+        'warn',
+        `film output has ${actualFrames} frames but the plan requires ${totalFrames}; review policy will decide promotion`,
+      );
+    }
+
+    // Build the artefacts from the staged MP4, never the existing delivery.
+    // A policy block leaves the old output in place while retaining the staged
+    // movie plus its JSON/contact evidence for diagnosis.
+    progress?.phase('creating-review');
+    const review = await createDeliveryReview({
+      stagedOutputPath,
+      deliveryPath: outputPath,
+      fps,
+      totalFrames,
+      sceneLayout: result.sceneLayout,
+      captions,
+      audio: result.audio ?? null,
+      picture: pictureReport,
+      pictureError,
+      frameCheck: { expected: totalFrames, actual: actualFrames, verified: actualFrames !== null },
+      policy: effectiveReviewPolicy,
+      safeAreas: deliverable?.safeAreas ?? null,
+      ffmpegPath,
+      signal,
+      onSpawn,
+    });
+    assertReviewAllowsPromotion(review, { stagingPath: stagedOutputPath });
+
+    checkCancel();
+    progress?.phase('promoting');
+    await promoteStagingOutput({ stagedPath: stagedOutputPath, outputPath });
+    let reviewArtifactWarning = null;
+    try {
+      // JSON is promoted last: a consumer that sees it can rely on the contact
+      // sheet already being beside the freshly promoted movie.
+      await promoteStagingOutput({ stagedPath: review.stagedPaths.contactPath, outputPath: review.paths.contactPath });
+      await promoteStagingOutput({ stagedPath: review.stagedPaths.reviewPath, outputPath: review.paths.reviewPath });
+    } catch (err) {
+      reviewArtifactWarning = err?.message ?? 'Review artefacts could not be promoted';
+      progress?.log('warn', reviewArtifactWarning);
+    }
+    let captionSidecarWarning = null;
+    if (stagedSrtPath) {
+      const finalSrtPath = path.join(outDir, `${base}.srt`);
+      try {
+        await promoteStagingOutput({ stagedPath: stagedSrtPath, outputPath: finalSrtPath });
+        srtPath = finalSrtPath;
+      } catch (err) {
+        // The movie is the primary delivery and is already safely promoted.
+        // A derived caption sidecar must not recast that success as a failed
+        // build after the fact; surface the issue in the terminal result.
+        captionSidecarWarning = err?.message ?? 'Caption sidecar could not be promoted';
+        progress?.log('warn', captionSidecarWarning);
+      }
     }
 
     return {
       ...result,
       filmId: film.id,
       outputPath,
+      deliverable: deliverable
+        ? {
+          id: deliverable.id,
+          label: deliverable.label,
+          width: deliverable.width,
+          height: deliverable.height,
+          outputFilename: deliverable.outputFilename,
+          safeAreas: deliverable.safeAreas,
+          reframe: reframe ? { sourceWidth, sourceHeight, ...reframe } : null,
+        }
+        : { id: 'master', width: sourceWidth, height: sourceHeight, outputFilename: film.outputFilename },
       overlaysApplied: overlays.length,
       captions: captions.length,
       captionsBurned: burn,
       ...(srtPath ? { srtPath } : {}),
       reEncoded: finishing,
+      framesVerified: actualFrames !== null,
+      promoted: true,
+      review: {
+        reviewPath: review.paths.reviewPath,
+        contactPath: review.paths.contactPath,
+        warnings: review.report.warnings,
+      },
+      ...(reviewArtifactWarning ? { reviewArtifactWarning } : {}),
+      ...(captionSidecarWarning ? { captionSidecarWarning } : {}),
       picture,
     };
+  } catch (err) {
+    const e = err instanceof EngineError ? err : new EngineError(ErrorCodes.INTERNAL, String(err?.message ?? err));
+    e.detail = { ...(e.detail ?? {}), stagingPath: stagedOutputPath };
+    throw e;
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
@@ -1084,8 +1497,15 @@ export async function buildFilmArtifact({ film, store, ffmpegPath = 'ffmpeg', on
  *
  * @returns {{ jobId, state, queuePosition?, outputPath, totalFrames, filmId }}
  */
-export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg' }) {
-  const r = await resolveFilmForBuild({ film, store });
+export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg', reviewPolicy = null, deliverableId = null }) {
+  const r = await resolveFilmForBuild({ film, store, deliverableId });
+  const settings = reviewPolicy === null
+    ? await readSettings(store.dataDir).catch(() => null)
+    : null;
+  const effectiveReviewPolicy = reviewPolicy ?? resolveReviewPolicy({
+    globalPolicy: settings?.render?.review,
+    filmPolicy: film.review,
+  });
   const submitted = jobs.startRender({
     targetId: film.id,
     scenePath: film.path,
@@ -1094,10 +1514,21 @@ export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg'
     outputPath: r.outputPath,
     renderFn: (o) => buildFilmArtifact({
       film, store, ffmpegPath,
+      reviewPolicy: effectiveReviewPolicy,
+      deliverableId,
+      jobId: o.jobId,
       onSpawn: o.onChildPid,
       progress: o.progress,
       signal: o.signal,
     }),
   });
-  return { ...submitted, outputPath: r.outputPath, totalFrames: r.totalFrames, filmId: film.id };
+  return {
+    ...submitted,
+    outputPath: r.outputPath,
+    totalFrames: r.totalFrames,
+    filmId: film.id,
+    deliverable: r.deliverable
+      ? { id: r.deliverable.id, label: r.deliverable.label, width: r.deliverable.width, height: r.deliverable.height }
+      : { id: 'master', width: r.sourceWidth, height: r.sourceHeight },
+  };
 }

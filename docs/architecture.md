@@ -125,7 +125,7 @@ Everything the engine reports crosses one contract,
 | `progress` | `frame, totalFrames, framesDone, elapsedMs, renderFps, etaMs` | one per captured frame (aggregated across workers; `etaMs` null until ≥3 frames of signal) |
 | `phase` | `phase` | `capturing` → (`concat`) → `encoding` → (`audio`) |
 | `log` | `level, message` | diagnostics worth showing |
-| `done` | `outputPath, frames, elapsedMs` | terminal success |
+| `done` | `outputPath, frames, elapsedMs, promoted?, framesVerified?` | terminal success; file deliveries only report `promoted: true` after staging has been renamed into place |
 | `error` | `code, message, detail?` | terminal failure — exactly one is emitted, at whichever layer caught it first |
 
 The MCP `JobManager` and the Studio server tap the same emitter in-process to
@@ -207,6 +207,9 @@ need: the vendor is fine and the setup is fine, but the *file* has no readable
 speech in it (not media, no audio stream, a codec this ffmpeg cannot decode). The
 fix is a different file, so it is neither the user's setup to repair nor worth a
 retry — and conflating it with either would send the caller to the wrong place.
+`promotion_blocked` means a complete staged delivery was held by its explicit
+review policy; it retains paths to the staged video, JSON report, and contact
+sheet, and is distinct from `short_render`, which signals an incomplete encode.
 `render_already_in_progress` was retired from the render path in v0.5 and held
 reserved; **v0.11 raises it again for a different condition** — not
 in-process concurrency, which still queues, but a *second OS process* holding
@@ -274,6 +277,40 @@ unmeasurable file is reported as `framesVerified: false`, never as a failure.
 This is what makes "the output exists and has the right length" a trustworthy
 resume condition for a long multi-scene batch.
 
+### 7.2.1 Staged file delivery (unreleased)
+
+Every top-level file delivery (scene render, proxy, partial export, or built
+film) encodes under its destination's `.staging/` sibling first. The capture
+encoder, audio mux, film finishing pass, and delivery review all operate on
+that staging path; only a completed file which passes the explicit review
+policy is renamed onto the caller-visible name.
+Promotion is one native rename — there is deliberately no delete-then-rename
+fallback, because retaining the old delivery is safer than creating a gap.
+
+The terminal result exposes `promoted: true` after that rename and always states
+`framesVerified`. A missing/unusable `ffprobe` produces `framesVerified: false`,
+not a claimed count match, and does not fail a render because ffprobe is not a
+declared prerequisite. A failed/cancelled job retains the staging file and
+returns its `stagingPath`; the Studio output listing hides `.staging`.
+
+This applies to single-file formats. PNG sequences are directory deliveries and
+need a separate directory-promotion protocol rather than a misleading
+delete-and-replace implementation.
+
+### 7.2.2 Delivery review and promotion gate (v0.23)
+
+Before a staged file is promoted, the renderer writes a staged
+`<output>.review.json` and `<output>.contact.png`. The report preserves the
+probe/frame result, audio and picture measurements, warning severities, and the
+exact sampled frames; the contact sheet contains the first and last frames plus
+cut boundaries and caption onsets. The default policy blocks only a frame-count
+mismatch. Picture/probe/audio findings warn by default, so a measurable review
+does not turn an otherwise valid delivery into a false failure. Global
+`render.review` settings establish the policy, while a film's `review` field
+replaces it for that build. A blocked promotion keeps the old delivery intact
+and retains all staged evidence for inspection; the Studio build panel reads
+that saved report and overlays its frame diagnostics on the contact sheet.
+
 ### 7.3 The render sidecar (v0.21)
 
 §7.2 verifies a file against **what was just rendered**. It cannot verify it
@@ -288,7 +325,8 @@ then drifted against the picture, silently.
 So a render that is the **whole scene, at its current settings, to its real
 destination** writes `<output>.render.json` holding
 `{ frames, width, height, fps, format, colorPrimaries, colorTransfer,
-colorMatrix, colorRange, renderedAt }` (`film.writeRenderMeta`).
+colorMatrix, colorRange, outputIdentity: { bytes, mtimeMs }, renderedAt }`
+(`film.writeRenderMeta`).
 `film.renderStaleness` compares it with the live config;
 `films.planFilm` surfaces a `stale_render` problem plus a per-scene
 `renderVerified`, and `film.validateScenes` refuses the build with the
@@ -302,6 +340,9 @@ best-effort (a render that already succeeded must not fail on metadata), and a
 from an older build still assembles. A sidecar from before stated colour likewise
 has no colour fields and is unverified rather than falsely called current; a
 present field that differs (for example `colorMatrix: bt601 → bt709`) is stale.
+The output identity is likewise a cheap `bytes` + `mtimeMs` mismatch detector,
+not a hash or provenance proof: a mismatch is stale, while a legacy sidecar
+without an identity stays unverified.
 
 ## 8. Parallel rendering
 
@@ -946,6 +987,15 @@ owns what that document *means*:
   project" to hold those assets; both are gone, and with them the class of
   bug where a film pointed at a project someone had since deleted or
   re-purposed.
+- **Deliverable variants (Stage A)** are saved snapshots on that same document,
+  not copied films: each has target geometry, output name, caption style,
+  title/caption safe insets, and a default/per-segment reframe focus. Global
+  `deliverablePresets` only seed a new film; `resolveDeliverableSelections()`
+  resolves them before any scene is created, so changing a preset cannot
+  silently change a production already in progress. A request that names
+  YouTube and TikTok therefore produces one landscape master and one named
+  portrait target from the outset, while an unspecified request remains
+  master-only by default.
 - **`validateFilm`** runs on every save and throws `invalid_film` with the
   complete `problems` list. **`planFilm`** resolves a film against reality
   *without throwing* — rendered state, signature mismatches, missing
@@ -978,6 +1028,14 @@ owns what that document *means*:
   from the master timeline), and its declared `durationInFrames` is **verified by
   probe at plan time** — the render-sidecar contract applied to a file the engine
   did not write: declare, then verify, never trust.
+- **Prepared footage retains its source proof.** A footage segment can carry
+  `derivedFrom: { asset, transcodeMeta }`, pointers to the `.transcode.json`
+  sidecar produced by `transcode_asset`. The film intentionally does not copy
+  the source identity or crop/trim request into `film.json`: the sidecar is the
+  one authoritative record. `planFilm` reads it, rechecks the original source,
+  and exposes `derivedFrom.sourceVerified`. A source replacement, edit, missing
+  source, or missing sidecar becomes `footage_source_changed`; direct builds run
+  the same guard, so a caller cannot bypass it by skipping an advisory plan.
 - **That voice is now stated, not just used (v0.22).** `filmSignature()` in
   `core/films.js` publishes the encode contract as `planFilm`'s `signature`:
   `sceneSignature()` supplies `id`, scene 1's `output` the values, and
@@ -1030,7 +1088,14 @@ owns what that document *means*:
   also write a `.srt` sidecar next to the output. Encode settings come from
   the first scene's `output` config via the same `buildVideoArgs` the
   renderer uses; `encoder.runFfmpeg` parses `-progress` so the job reports
-  real frame progress.
+  real frame progress. A Stage-A deliverable deliberately also enters this
+  pass even with no overlays/caption burn: `compileReframeFilter()` turns the
+  resolved `planFilm` scene layout into a piecewise crop expression, then
+  scales it to the saved target before overlays/subtitles are placed in target
+  coordinates. It is one full re-encode of the approved master — reported as
+  `reEncoded: true` — not a second scene render. The variant owns separate
+  output/SRT/review/contact names, and the contact-sheet writer draws its safe
+  guides on the staged encoded image before promotion.
 - **The editor lies as little as possible.** `/film.html` plays the scenes'
   actual rendered files (byte-range serving makes them seekable), draws
   overlays/captions with the same geometry the finishing pass burns, and

@@ -21,7 +21,7 @@ applies it at the **scene** level, across a film.
 ## The scene model
 
 - **One film, many scenes.** Create the film once —
-  `create_film { name, fps?, width?, height?, durationInFrames? }` — then
+  `create_film { name, fps?, width?, height?, durationInFrames?, deliverables? }` — then
   scaffold each scene inside it with the normal tools: `create_scene { film, name }`
   → `write_composition_file` → `capture_preview_frame` → `render`. Nothing new to
   learn per scene; authoring one is identical to authoring the old one-composition
@@ -60,7 +60,8 @@ destination** drops a small JSON sidecar beside its output:
 scenes/<scene>/out/output.mp4
 scenes/<scene>/out/output.mp4.render.json
   { frames, width, height, fps, format, pixFmt, transparent,
-    colorPrimaries, colorTransfer, colorMatrix, colorRange, renderedAt }
+    colorPrimaries, colorTransfer, colorMatrix, colorRange,
+    outputIdentity: { bytes, mtimeMs }, renderedAt }
 ```
 
 Those are exactly the fields the concat signature is built from, plus the frame
@@ -84,6 +85,70 @@ than turning up stale.
   once and it becomes verifiable.
 - The sidecar is advisory metadata. If it cannot be written the render still
   succeeds; deleting it only loses the check.
+
+## Safe delivery promotion and output review
+
+A file that is still encoding is not a delivery. Scene renders, proxies,
+partial exports, and film builds now write their video and any audio re-mux to
+`out/.staging/<base>-<jobId><ext>` first. Only after the file has finished and
+its frame count has been checked does the engine rename it onto the visible
+delivery name. A failed or cancelled job leaves its staging path in the job
+error and leaves the previous delivery untouched.
+
+`promoted: true` in a completed render/build status means that final rename
+happened. `framesVerified` is separate: it is `false` when `ffprobe` could not
+measure the file, rather than pretending the count was checked. FFprobe is not
+a prerequisite, so an otherwise successful file can still promote with that
+explicit unverified state.
+
+A film's `.srt` is a derived caption sidecar, not the primary movie delivery.
+If it cannot be promoted after the movie, the completed job reports
+`captionSidecarWarning` instead of relabelling the already-promoted film as a
+failed build.
+
+For a canonical full-scene output, the video is promoted **before** its render
+sidecar is written. The sidecar records the promoted file's `bytes` and
+`mtimeMs`; if either later differs, the scene is `stale_render`, even when its
+settings are unchanged. This is a cheap mismatch signal, not a cryptographic
+content proof. Legacy sidecars without it remain unverified rather than stale.
+
+The hidden staging folder is intentionally absent from the Studio output list.
+PNG sequences are directory deliveries rather than a single encoded file, so
+their atomic directory replacement remains separate from this file-promotion
+contract.
+
+### Review evidence is made before promotion
+
+Every staged single-file delivery also produces two staged companions before
+the movie can be promoted:
+
+- `out/<base>.review.json` records expected/actual frame count, ffprobe facts,
+  final audio measurements, the full encoded-picture measurement, the effective
+  policy, and findings classified as `block`, `warn`, or `info`.
+- `out/<base>.contact.png` is a contact sheet from the **encoded staging file**:
+  first/last frame, each scene or footage boundary, and every caption onset.
+  Each thumbnail in the JSON records its frame, caption onset (when relevant),
+  and owning segment context.
+
+This is deliberately a delivery check, not another composition preview. It can
+catch a bad concat seam, burned caption, or output that differs from the live
+editor. A contact-sheet extraction has a final-frame fallback for short MP4s
+whose container seeks exactly to the end, so it does not turn an otherwise
+valid delivery into a false failure.
+
+`settings.json` has a global `render.review` policy with `block` and `warn`
+lists of stable finding codes. The default blocks only `frame_count_mismatch`;
+static, black, and cut findings remain warnings because title cards and fades
+are often intentional. A film may save a partial `review` override in
+`film.json` (for example `{ "block": ["black_run"] }`); its supplied list
+wins while an omitted list inherits the global one. A block raises
+`promotion_blocked`, leaves the previous delivery in place, and retains the
+staged movie plus staged review paths in the job error for diagnosis.
+
+For a film, **build film →** shows an **Output review** panel after success.
+It reads these two files through the normal output endpoint — no special route
+or transient browser-only report — and overlays the relevant findings on the
+contact thumbnails.
 
 ## Footage on the timeline (v0.22)
 
@@ -138,6 +203,31 @@ valid with no migration**.
 - **Footage may repeat**; a scene may not. A scene plays once because it has one
   rendered output; the same plate can be a recurring cutaway.
 
+### Source provenance for prepared footage
+
+`transcode_asset` writes a `.transcode.json` sidecar beside every prepared video.
+When you put that video on a film timeline, use the returned `timelineSegment`
+instead of reconstructing a bare `{ footage, durationInFrames }` entry:
+
+```jsonc
+{
+  "footage": "assets/host-trim.mp4",
+  "durationInFrames": 231,
+  "derivedFrom": {
+    "asset": "library:raw-interview.mp4",
+    "transcodeMeta": "assets/host-trim.mp4.transcode.json"
+  }
+}
+```
+
+`derivedFrom` is optional and is deliberately only a pointer. The sidecar remains
+the one record of the original source identity and transcode request; the film
+does not duplicate its trim, crop, or source-stat snapshot. On every plan, Motion
+Studio reads that sidecar and recomputes the identity of the recorded source on
+disk. If the source was edited, replaced, or is no longer available, the plan
+emits `footage_source_changed` before a build. A segment without `derivedFrom`
+continues to behave exactly as older films did.
+
 ### What you get back
 
 `get_film`'s plan reports every segment with `kind` (`"scene"` | `"footage"`) and
@@ -146,6 +236,9 @@ the same `filmOffset` / `durationInFrames` / `startSeconds` fields either way, s
 Footage additionally carries what the probe measured — `width`, `height`, `fps`,
 `codec`, `pixFmt`, `signature`, `actualFrames`, `hasAudio`, and `color`
 (`{ primaries, transfer, matrix, range }`, each `null` when the file does not say).
+Prepared footage also reports its `derivedFrom.sourceVerified` state when it has
+provenance: `true` means the current source matches the sidecar; `false` names a
+reason and appears in the plan problems; `null` means no provenance was supplied.
 `color` is reported so you can see the source properties. `transcode_asset {
 matchFilm: "<film>" }` now converts a footage segment to the stated film colour
 contract; when source colour metadata is incomplete it records the bt709 input
@@ -409,6 +502,47 @@ scenes** — and, only if the film needs one, an automatic **finishing pass**:
 Pick resolution/fps deliberately: 1920×1080@30 is the sweet spot; 4K is ~4× the
 render cost; 60fps doubles frames. Even dimensions are required for mp4/webm/prores.
 
+## Platform versions: one edit, several deliveries (Stage A)
+
+`film.json` can save named **deliverables** beside the one shared timeline. The
+built-in presets are `youtube-16x9` (1920×1080), `shorts-9x16` (1080×1920), and
+`square-1x1` (1080×1080). An agent resolves platform words in the brief *when it
+creates the film*:
+
+```js
+create_film {
+  name: "Car promo",
+  deliverables: ["youtube-16x9", "shorts-9x16"]
+}
+```
+
+The result saves full snapshots — output name, target geometry, caption style,
+title/caption safe insets, a default crop focus and optional per-segment crop
+focus. Changing a global preset later never changes an existing film. When the
+call does not state width/height, the first requested version supplies the master
+scene canvas; the other version is produced later from that same approved cut.
+If the brief names no platform, the normal default is **master only** rather than
+three speculative deliveries.
+
+Build the master normally, or select a saved version:
+
+```js
+build_film { film: "car-promo" }
+build_film { film: "car-promo", deliverable: "shorts-9x16" }
+```
+
+Stage A concatenates the rendered master losslessly, then re-encodes the selected
+variant once at its target geometry with a timeline-aware crop. It does not
+re-render the scenes and does not create a second edit. Each version has an
+independent output filename, `.srt` sidecar, `<base>.review.json`, and
+`<base>.contact.png`; the contact sheet draws the saved safe areas. The completed
+job reports the exact `deliverable` and `reEncoded: true`.
+
+This is deliberately not a responsive scene renderer. Text built into a landscape
+scene can crop badly in a portrait reframe. Use the per-scene crop controls in the
+Studio film inspector, review the safe guides, and reserve a future responsive
+scene rerender for compositions that need a genuinely different layout.
+
 ## Tool contract
 
 `build_film` is an **async job**: it validates and returns
@@ -426,11 +560,12 @@ currently has.
 | `outputFilename` | override + persist the film's output filename (bare; extension is forced to the scenes' format; default `film.<ext>`) |
 | `audioTargetPeakDb` | −60..0 or `null`. Override + persist the mastering target — measure the mixed film and re-mux **once** so it peaks here (e.g. `-2`), shifting every track by the same offset so the balance is preserved |
 | `burnCaptions` | override + persist caption burn-in (a `.srt` sidecar is written whenever the film has captions, whether or not this is set) |
+| `deliverable` | saved platform version id to build (for example `shorts-9x16`). Omit for the master. Do not combine it with `outputFilename`; edit the saved version's filename instead. |
 
 `plan: true`'s response is `{ film, plan: true, totalFrames, durationSeconds, fps, format, sceneLayout, problems }` — no `jobId`, since nothing was submitted.
 
 The **finished** job's status (from `get_render_status`/`wait_for_render`) carries
-`{ outputPath, filmId, … }`, plus — whenever the film has a master timeline —
+`{ outputPath, filmId, promoted, framesVerified, … }`, plus — whenever the film has a master timeline —
 **`audio: { tracks, limiter, peakDb, meanDb, clipping, targetPeakDb?, appliedOffsetDb? }`**.
 Errors from the initial call (before a job is even created): `scene_not_rendered`, `stale_render`,
 `inconsistent_scenes`, `invalid_film` (a malformed `audioTargetPeakDb`,
