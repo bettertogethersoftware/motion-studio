@@ -2,9 +2,29 @@
 
 Use this guide when handing this repository to another AI agent with MCP,
 filesystem, and shell access. The agent may use Motion Studio MCP tools and
-directly run the bundled FFmpeg and Whisper.cpp binaries. ALso read readme.md, it usually contain how to use tool next to it.
+directly run the bundled FFmpeg and Whisper.cpp binaries.
 
+## Required Motion Studio orientation
 
+Before performing any Motion Studio task, read
+`<MOTION_STUDIO_ROOT>\docs\SKILL.md` completely and follow its workflow,
+authoring contract, verification requirements, and error-handling guidance.
+
+Read `<MOTION_STUDIO_ROOT>\docs\mcp-setup.md` before configuring,
+troubleshooting, or directly using the Motion Studio MCP server. It is the
+complete connection and MCP tool reference.
+
+Before writing composition HTML, CSS, or JavaScript, also read
+`<MOTION_STUDIO_ROOT>\docs\frame-api.md`.
+
+If Motion Studio concepts or capabilities are unfamiliar, consult the relevant
+documents under `<MOTION_STUDIO_ROOT>\docs\` before acting. Start with
+`user-guide.md`, `film-setup.md`, and `architecture.md`, then use the
+capability-specific guides such as `tts-setup.md`, `music-setup.md`,
+`transcribe-setup.md`, `sfx-setup.md`, or `3d-libraries.md`.
+
+Read the `README.md` beside every local helper before using it; those files
+contain the helper-specific commands, prerequisites, and current limitations.
 
 ## Read the root path from the environment
 
@@ -27,17 +47,25 @@ if ([string]::IsNullOrWhiteSpace($MotionStudioRoot)) {
 if (-not (Test-Path (Join-Path $MotionStudioRoot 'engine\src\mcp\server.js'))) {
   throw "MotionStudioRoot does not point to a Motion Studio repository: $MotionStudioRoot"
 }
+
+# The bundled media and generation tools are stored beside the app repository.
+$MotionStudioToolsRoot = Split-Path -Parent $MotionStudioRoot
+if (-not (Test-Path (Join-Path $MotionStudioToolsRoot 'ffmpeg-8.1.2-full_build\bin\ffmpeg.exe'))) {
+  throw "Motion Studio bundled tools were not found beside the repository: $MotionStudioToolsRoot"
+}
 ```
 
-The examples below use `$MotionStudioRoot`. MCP client configuration formats
-require literal absolute paths, so replace every `<MOTION_STUDIO_ROOT>`
-placeholder in the TOML example with this resolved value before saving it.
+The examples below use `$MotionStudioRoot` for the app, documents, workspaces,
+and temporary assets, and `$MotionStudioToolsRoot` for the sibling tool bundle.
+MCP client configuration formats require literal absolute paths, so replace
+every `<MOTION_STUDIO_ROOT>` and `<MOTION_STUDIO_TOOLS_ROOT>` placeholder in the
+TOML example with the corresponding resolved value before saving it.
 
 ## Repository and data model
 
 Skill location
-<MOTION_STUDIO_ROOT>\motion-studio\docs\SKILL.md
-<MOTION_STUDIO_ROOT>\motion-studio\motion-studio\docs\SKILL-shell.md
+<MOTION_STUDIO_ROOT>\docs\SKILL.md
+<MOTION_STUDIO_ROOT>\docs\SKILL-shell.md
 
 Motion Studio stores work as `workspace → film → scene`:
 
@@ -86,9 +114,9 @@ startup_timeout_sec = 120
 
 [mcp_servers.motion_studio.env]
 MOTION_STUDIO_WORKSPACE = "<UNIQUE_AGENT_WORKSPACE>"
-MOTION_STUDIO_FFMPEG = "<MOTION_STUDIO_ROOT>\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe"
-MOTION_STUDIO_WHISPER_BIN = "<MOTION_STUDIO_ROOT>\\whisper-bin-x64\\Release\\whisper-cli.exe"
-MOTION_STUDIO_WHISPER_MODEL = "<MOTION_STUDIO_ROOT>\\whisper-bin-x64\\Release\\models\\ggml-small.bin"
+MOTION_STUDIO_FFMPEG = "<MOTION_STUDIO_TOOLS_ROOT>\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe"
+MOTION_STUDIO_WHISPER_BIN = "<MOTION_STUDIO_TOOLS_ROOT>\\whisper-bin-x64\\Release\\whisper-cli.exe"
+MOTION_STUDIO_WHISPER_MODEL = "<MOTION_STUDIO_TOOLS_ROOT>\\whisper-bin-x64\\Release\\models\\ggml-small.bin"
 MOTION_STUDIO_SOUNDFONT = "<MOTION_STUDIO_ROOT>\\data\\workspaces\\default\\library\\MuseScore_General.sf3"
 ```
 
@@ -169,8 +197,8 @@ Run the following commands from this repository root.
 ```powershell
 $skill = Join-Path $env:USERPROFILE '.codex\skills\motion-studio-video-shell'
 New-Item -ItemType Directory -Force -Path (Join-Path $skill 'references')
-Copy-Item '.\docs\SKILL-shell.md' (Join-Path $skill 'SKILL.md') -Force
-Copy-Item '.\docs\frame-api.md' (Join-Path $skill 'references\frame-api.md') -Force
+Copy-Item (Join-Path $MotionStudioRoot 'docs\SKILL-shell.md') (Join-Path $skill 'SKILL.md') -Force
+Copy-Item (Join-Path $MotionStudioRoot 'docs\frame-api.md') (Join-Path $skill 'references\frame-api.md') -Force
 ```
 
 Other AI products use different skill locations. Keep the same structure:
@@ -186,16 +214,16 @@ allows it.
 ### FFmpeg
 
 ```text
-ffmpeg-8.1.2-full_build\bin\ffmpeg.exe
-ffmpeg-8.1.2-full_build\bin\ffprobe.exe
-ffmpeg-8.1.2-full_build\bin\ffplay.exe
+<MOTION_STUDIO_TOOLS_ROOT>\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe
+<MOTION_STUDIO_TOOLS_ROOT>\ffmpeg-8.1.2-full_build\bin\ffprobe.exe
+<MOTION_STUDIO_TOOLS_ROOT>\ffmpeg-8.1.2-full_build\bin\ffplay.exe
 ```
 
 PowerShell example:
 
 ```powershell
-$ffmpeg = Join-Path $MotionStudioRoot 'ffmpeg-8.1.2-full_build\bin\ffmpeg.exe'
-$ffprobe = Join-Path $MotionStudioRoot 'ffmpeg-8.1.2-full_build\bin\ffprobe.exe'
+$ffmpeg = Join-Path $MotionStudioToolsRoot 'ffmpeg-8.1.2-full_build\bin\ffmpeg.exe'
+$ffprobe = Join-Path $MotionStudioToolsRoot 'ffmpeg-8.1.2-full_build\bin\ffprobe.exe'
 
 & $ffprobe -v error -show_format -show_streams input.mp4
 & $ffmpeg -i input.mp4 -c:v libvpx-vp9 -c:a libopus prepared.webm
@@ -208,10 +236,10 @@ has no fontconfig support. Use HTML/CSS canvas text in Motion Studio instead.
 
 Use Auto-Editor to prepare supplied video footage by removing or speeding up
 silent sections before it is added to a Motion Studio film. Resolve the
-executable from the same root variable:
+executable from the tools root:
 
 ```powershell
-$autoEditor = Join-Path $MotionStudioRoot 'auto-editor-windows-x86_64\auto-editor-windows-x86_64.exe'
+$autoEditor = Join-Path $MotionStudioToolsRoot 'auto-editor-windows-x86_64\auto-editor-windows-x86_64.exe'
 
 # Review the proposed cuts first.
 & $autoEditor input.mp4 --preview
@@ -227,10 +255,10 @@ blindly apply automatic cuts to interviews, narration, or timed footage.
 
 Use ImageMagick to inspect and prepare still-image assets for Motion Studio,
 such as resizing, cropping, or converting a Pexels image before it is placed
-in a scene. Resolve the executable from the same root variable:
+in a scene. Resolve the executable from the tools root:
 
 ```powershell
-$magick = Join-Path $MotionStudioRoot 'ImageMagick-7.1.2-Q16-HDRI\magick.exe'
+$magick = Join-Path $MotionStudioToolsRoot 'ImageMagick-7.1.2-Q16-HDRI\magick.exe'
 
 # Inspect dimensions and metadata.
 & $magick identify input.jpg
@@ -252,22 +280,23 @@ textures, lifestyle context — through a local ComfyUI. It prints one JSON obje
 per call and needs no Python packages beyond the standard library:
 
 ```powershell
-$gen = Join-Path $MotionStudioRoot 'comfyui\generate.py'
+$gen = Join-Path $MotionStudioToolsRoot 'comfyui\generate.py'
 
 # Reachable? Starts a headless ComfyUI if nothing is listening.
 python $gen check
 
 # One image, 16:9, written where you ask.
 python $gen image --prompt "a calm modern clinic waiting room, soft daylight" `
-    --aspect 16:9 --out data\temp\clinic.png
+    --aspect 16:9 --out (Join-Path $MotionStudioTemp 'clinic.png')
 
 # Four candidates to choose between.
-python $gen image --prompt "..." --batch 4 --out-dir data\temp\plates
+python $gen image --prompt "..." --batch 4 `
+    --out-dir (Join-Path $MotionStudioTemp 'plates')
 
 # Anything that must contain readable words needs the Qwen preset.
 python $gen image --preset qwen-image-fast `
     --prompt 'a white product box labelled "YUVNICE" and "BP-814", studio lighting' `
-    --out data\temp\box.png
+    --out (Join-Path $MotionStudioTemp 'box.png')
 ```
 
 Four verified presets: `z-image-turbo` (default, 13–20 s), `z-image`,
@@ -289,10 +318,12 @@ and are unusable in client work.
 To change an image you already have, use the companion `comfyui\img2img.py`:
 
 ```powershell
-$edit = Join-Path $MotionStudioRoot 'comfyui\img2img.py'
+$edit = Join-Path $MotionStudioToolsRoot 'comfyui\img2img.py'
 
 # Remove a supplier's burned-in graphic instead of cropping around it.
-python $edit inpaint --in data\temp\p5.jpg --out data\temp\p5_clean.png `
+python $edit inpaint `
+    --in (Join-Path $MotionStudioTemp 'p5.jpg') `
+    --out (Join-Path $MotionStudioTemp 'p5_clean.png') `
     --mask-rect-pct 0.50,0.13,0.49,0.29 `
     --prompt "plain bright interior wall, soft window light, no text"
 ```
@@ -313,7 +344,7 @@ loads `qwen_image_2512_fp8_e4m3fn.safetensors` with the
 `qwen_image_vae.safetensors`. It is fully local and does not need API credits:
 
 ```powershell
-$qwen = Join-Path $MotionStudioRoot 'comfyui\generate_qwen.py'
+$qwen = Join-Path $MotionStudioToolsRoot 'comfyui\generate_qwen.py'
 
 python $qwen check
 python $qwen models
@@ -321,12 +352,12 @@ python $qwen models
 # Four-step Lightning mode (default).
 python $qwen image --mode fast `
     --prompt "original science-fantasy anime party beneath a violet moon" `
-    --aspect 9:16 --out data\temp\qwen-fast.png
+    --aspect 9:16 --out (Join-Path $MotionStudioTemp 'qwen-fast.png')
 
 # Twenty-step model without the Lightning LoRA.
 python $qwen image --mode quality `
     --prompt "original science-fantasy anime party beneath a violet moon" `
-    --aspect 9:16 --out data\temp\qwen-quality.png
+    --aspect 9:16 --out (Join-Path $MotionStudioTemp 'qwen-quality.png')
 ```
 
 The helper supports seeded batches, custom dimensions divisible by 16,
@@ -340,8 +371,8 @@ dual-model guidance, `Ideogram4Scheduler`, Qwen3-VL 8B conditioning, and the
 Flux 2 VAE from ComfyUI's installed reference workflow:
 
 ```powershell
-$ideogram = Join-Path $MotionStudioRoot 'comfyui\generate_ideogram4.py'
-$caption = Join-Path $MotionStudioRoot 'data\temp\ideogram4-prompt.json'
+$ideogram = Join-Path $MotionStudioToolsRoot 'comfyui\generate_ideogram4.py'
+$caption = Join-Path $MotionStudioTemp 'ideogram4-prompt.json'
 
 python $ideogram check
 python $ideogram models
@@ -352,7 +383,7 @@ $json = @'
 [System.IO.File]::WriteAllText($caption, $json)
 
 python $ideogram image --mode turbo --prompt-file $caption `
-    --aspect 9:16 --out data\temp\ideogram4-poster.png
+    --aspect 9:16 --out (Join-Path $MotionStudioTemp 'ideogram4-poster.png')
 ```
 
 Modes are `turbo` (12 steps), `default` (20), and `quality` (48). Use structured
@@ -381,21 +412,22 @@ confirm that the node is available. A video command prints its estimated USD
 cost and exits without submitting until `--confirm-cost` is explicitly added:
 
 ```powershell
-$krea = Join-Path $MotionStudioRoot 'comfyui\generate_krea2.py'
-$wan = Join-Path $MotionStudioRoot 'comfyui\generate_wan.py'
+$krea = Join-Path $MotionStudioToolsRoot 'comfyui\generate_krea2.py'
+$wan = Join-Path $MotionStudioToolsRoot 'comfyui\generate_wan.py'
 
 python $krea check
 python $krea models
 python $krea image `
     --prompt "original cinematic fantasy party facing a colossal crystal guardian" `
-    --model turbo --aspect 9:16 --out data\temp\krea2-party.png
+    --model turbo --aspect 9:16 `
+    --out (Join-Path $MotionStudioTemp 'krea2-party.png')
 
 python $wan check
 python $wan models
 python $wan video `
     --prompt "original anime fantasy heroes charge a crystal guardian, vertical cinematic shot" `
     --model wan2.6-t2v --resolution 720p --aspect 9:16 --duration 5 `
-    --out data\temp\wan-battle.mp4
+    --out (Join-Path $MotionStudioTemp 'wan-battle.mp4')
 ```
 
 For Wan, review the printed estimate and rerun the same command with
@@ -413,14 +445,14 @@ helper, it prints one JSON result, starts ComfyUI when needed, and writes an
 idempotency sidecar beside every output:
 
 ```powershell
-$musicGen = Join-Path $MotionStudioRoot 'comfyui_music\generate_music.py'
+$musicGen = Join-Path $MotionStudioToolsRoot 'comfyui_music\generate_music.py'
 
 python $musicGen check
 
 python $musicGen music `
     --prompt "original cinematic fantasy orchestral score, grief becoming resolve, instrumental" `
     --duration 60 --bpm 112 --key "D minor" `
-    --out data\temp\score.wav
+    --out (Join-Path $MotionStudioTemp 'score.wav')
 ```
 
 ACE-Step durations are 10–600 seconds. Generated audio is an authoring-time
@@ -441,7 +473,7 @@ $lyrics = @'
 python $musicGen music `
     --prompt "original Mandarin symphonic metal rock, distorted guitars, cinematic choir, clear Mandarin diction" `
     --lyrics $lyrics --language zh --duration 60 --bpm 148 --key "D minor" `
-    --out data\temp\mandarin-metal.wav
+    --out (Join-Path $MotionStudioTemp 'mandarin-metal.wav')
 ```
 
 Instrumental and vocal examples, batch generation, sidecars, output
@@ -451,17 +483,17 @@ measurements, environment overrides, and troubleshooting:
 ### Whisper.cpp
 
 ```text
-whisper-bin-x64\Release\whisper-cli.exe
-whisper-bin-x64\Release\models\ggml-small.en.bin
-whisper-bin-x64\Release\models\ggml-small.bin
+<MOTION_STUDIO_TOOLS_ROOT>\whisper-bin-x64\Release\whisper-cli.exe
+<MOTION_STUDIO_TOOLS_ROOT>\whisper-bin-x64\Release\models\ggml-small.en.bin
+<MOTION_STUDIO_TOOLS_ROOT>\whisper-bin-x64\Release\models\ggml-small.bin
 ```
 
 Convert an input to Whisper-friendly mono WAV, then transcribe it:
 
 ```powershell
-$ffmpeg = Join-Path $MotionStudioRoot 'ffmpeg-8.1.2-full_build\bin\ffmpeg.exe'
-$whisper = Join-Path $MotionStudioRoot 'whisper-bin-x64\Release\whisper-cli.exe'
-$model = Join-Path $MotionStudioRoot 'whisper-bin-x64\Release\models\ggml-small.en.bin'
+$ffmpeg = Join-Path $MotionStudioToolsRoot 'ffmpeg-8.1.2-full_build\bin\ffmpeg.exe'
+$whisper = Join-Path $MotionStudioToolsRoot 'whisper-bin-x64\Release\whisper-cli.exe'
+$model = Join-Path $MotionStudioToolsRoot 'whisper-bin-x64\Release\models\ggml-small.en.bin'
 
 & $ffmpeg -i input.mp4 -ar 16000 -ac 1 speech.wav
 & $whisper -m $model -f speech.wav -l en -otxt -oj
@@ -472,8 +504,13 @@ This writes text and JSON transcript files beside `speech.wav`. The installed
 speech and set the appropriate language instead of using the `.en` model.
 
 ### youtube upload
-The tool is available here, it is setup to upload to the user's account
-C:\Users\jerry\source\repos\bettertogethersoftware\motion-studio\motion-studio\youtube
+The uploader is configured for the user's account. Resolve it from the tools
+root instead of using a machine-specific absolute path:
+
+```powershell
+$youtubeTools = Join-Path $MotionStudioToolsRoot 'youtube'
+$youtubeUploader = Join-Path $youtubeTools 'upload_to_youtube.py'
+```
 
 
 ## SFX restriction

@@ -1,251 +1,653 @@
 ---
 name: motion-studio-video
-description: Use this skill whenever the user wants to create, edit, or render a code-driven animated video, motion graphic, GIF, or transparent overlay using Motion Studio — a local renderer that exposes workspace/film/scene/composition/asset/render tools over MCP. Trigger this any time the user mentions "Motion Studio," asks for an animated video, motion graphic, title sequence, lower third, explainer animation, animated GIF, alpha overlay, or programmatic/HTML-based video generation, even if they don't name the app directly, as long as Motion Studio's MCP tools (list_films, create_film, create_scene, write_composition_file, capture_preview_frame, render, etc.) are available in this session. Do not use this skill for editing existing video footage (trimming, cutting, color grading) — Motion Studio only authors animations from HTML/CSS/JS, it does not edit pre-recorded video. If the request is to build a video AROUND footage or audio the user supplied (a talk, an interview, a screen recording) and you also have shell access to ffmpeg, use the motion-studio-video-shell skill instead — it covers cutting real footage and interleaving it with rendered scenes, which this skill cannot do.
+description: Use this skill whenever the user wants to create, edit, preview, render, or assemble a code-driven video with Motion Studio MCP, including motion graphics, GIFs, transparent overlays, generated audio, and supplied-media workflows that use probe_asset, transcribe_asset, transcode_asset, seekVideo, or signature-matched footage on a film timeline. Use the separate shell skill only for media operations the MCP schema cannot express.
 ---
 
-# Motion Studio — authoring and rendering videos via MCP
-
-> **You reach Motion Studio through its MCP tools, and you have no shell.** Where
-> this skill tells you to hand a command to the user, that is the reason — the
-> command is still required, so give it to them and say why, rather than treating
-> the problem as unfixable or proceeding as though the file will work.
-
-Motion Studio renders videos (MP4/WebM/GIF/ProRes/PNG-sequence, including true alpha-channel overlays) from HTML/CSS/JS animations using a deterministic, frame-driven model (similar to Remotion). As an agent, you author the animation as code, then use the MCP tools to preview and render it — you do not need a human to drive the Studio UI.
-
-## The five checks nothing else will do for you
-
-Almost every broken deliverable comes from one of these, and **none of them raise an error**: the write succeeds, the lint is clean, the render reports `done`, and the file plays. Nothing downstream will tell you. They are expanded at the step where each belongs; read them here first, and re-read them before you call `render`.
-
-1. **Is the thing the user asked for actually on screen?** A preview frame that *renders* is not a preview frame that is *right*. Check every capture against the brief, not just against exceptions and layout.
-2. **Is something visible that no `Sequence` ever turned off?** The visibility rule cuts both ways. A container left visible in CSS stays visible for the entire video, stacked under every later section — and looks deliberate in any single frame.
-3. **Does the audio run as long as the picture?** Narration and beds come out *shorter* than the composition far more often than longer. `preview_audio` reports the dead tail in seconds; a finished render does not report it at all.
-4. **Did a `warnings` array come back that you kept going past?** Every rule in it fires on code that looks perfect in a single frame and fails under parallel rendering.
-5. **Did you ask what the user already chose?** `list_vendors` carries their starred voices and instruments. Skipping it means narrating their film in a voice they never picked, when the one they did pick was one call away.
-
-## When this skill applies
-
-Use it when the user asks for something like:
-- "Make me a 10-second animated intro with our logo scaling in"
-- "Create a title card animation that fades text in over a gradient"
-- "Render a short explainer animation showing X"
-- "Make a transparent lower-third / alpha overlay for my stream" (webm + transparent)
-- "Turn this idea into a short looping GIF"
-- Any request for a motion-graphics-style video built from scratch, where code-driven animation (not editing existing footage) is the right tool
-
-Don't use it for: editing/trimming existing video files, live-action footage, or anything that isn't composed from HTML/CSS/JS elements.
-
-## How work is organised: film → scene
-
-Everything you make lives in a **workspace** — your own tree, fixed for the session (the human named it; you don't choose it and can't reach another). Inside it:
-
-- A **film** is the thing you're making — it owns ordered **scenes**, a master audio/caption/overlay timeline, its own `assets/` (master audio, overlays), and its own `out/` where the deliverable lands. Film ids are bare slugs, e.g. `"my-film"`.
-- A **scene** is one composition — the unit that actually renders, and the thing you author code into. Scene ids are `"<film>/<scene>"`, e.g. `"my-film/intro"`.
-- **Even a ten-second one-off video is a film with a single scene.** There is no standalone unit below a film, and nothing extra to scaffold to hold the output — the film folder already has `assets/` and `out/`.
-- A per-workspace **library** holds large files the human drops in directly (footage, photo sets, long soundtracks) — see "Using large user-provided assets" below.
-
-Confirm the Motion Studio MCP tools are present in your tool list before proceeding (they'll be named things like `get_workspace`, `list_films`, `create_film`, `create_scene`, `write_composition_file`, `capture_preview_frame`, `capture_preview_frames`, `render`, `get_render_status`). If they aren't available, tell the user Motion Studio doesn't appear to be connected in this session rather than trying to fake the workflow with generic file tools.
-
-## The frame-driven authoring contract
-
-Every composition you write must read animation state from an injected frame number, never from wall-clock time (`Date.now()`, `setInterval`, CSS `animation`/`transition` with real-time durations, etc.). This is what makes rendering deterministic and parallelizable — the render engine calls your composition's frame function once per frame, in any order, possibly across multiple worker processes.
-
-**Read the Frame API reference before writing your first composition.** It documents the primitives you'll use in every scene; do not guess at this API from general Remotion knowledge — Motion Studio's helper signatures differ. Three ways to get it, in order of preference:
-1. `references/frame-api.md`, if it ships alongside this skill;
-2. the MCP resource `motion-studio://reference/frame-api`, if your client supports MCP resources;
-3. always available through plain MCP tools: every scene scaffold contains the implementation itself — `read_composition_file { scene: "<film>/<scene>", path: "frame-api.js" }` returns the source with its documentation comments (create a film and a scene first; you need one anyway).
-
-The essentials:
-
-- Register your frame function with `MotionStudio.registerComposition(fn)` — the harness owns the `frameReady` handshake, including for `async` frame functions (make the function async and await image/font loading inside it). Do not hand-roll `window.setFrame`/`window.frameReady` unless you have a specific reason; the harness also converts thrown errors into structured `composition_error`s instead of frame timeouts.
-- Animate values with `interpolate(frame, inputRange, outputRange, { easing, extrapolate })` — multi-segment ranges and named easings (`easeOutBack`, `easeOutElastic`, etc.) are supported.
-- Time-offset sections with `Sequence(from, durationInFrames, fn)`; hide/reset elements at the top of every frame so each frame is fully self-determined. **If one composition holds several sections, the only safe visibility pattern is: section containers hidden by DEFAULT in CSS (class present in the markup, `opacity: 0`), each Sequence turning its own section on — never `classList.add`/`remove` inside the frame function** (a class added at frame N persists forever after and never exists for a worker starting mid-render; a reset loop that selects a runtime-added class selects nothing until it is too late). Better still, split those sections into real scenes of a film. The lint flags `classList.add/remove` and checks literal `Sequence` calls against the duration — treat both warning types as real bugs.
-- **That rule cuts both ways, and the second direction has no lint at all: every element that belongs to a section must be hidden by default, and exactly one `Sequence` must own it.** An `<img>` or panel left visible in the markup/CSS — no `opacity: 0`, no code touching it — is on screen for *every frame of the video*, centred under each section in turn. It renders, it never errors, and in any single preview frame it reads as an intentional layer. Two rules make it impossible: nothing in `#content` is visible until a `Sequence` says so, and every element that appears is turned off by the same `Sequence` that turned it on (or by the reset at the top of the frame). If you cannot name the `Sequence` that owns an element, that element is a bug.
-- **On canvas, pair every `ctx.save()` with a `ctx.restore()`.** An unrestored transform/clip/style leaks into every later draw call *in the same frame*, so one greedy helper silently relocates or hides the title, letterbox and overlays drawn after it — valid JavaScript that still renders, which is why the lint checks it (`canvas-save-restore`).
-- Never use `Math.random()` — use `MotionStudio.random(seed)` seeded from `frame` or a constant.
-- For physical motion use `spring(frame, { fps, stiffness, damping })` (closed-form, 0→1 — no simulation state); for color blends `interpolateColors(frame, inputRange, colors)`; for repeating sub-animations `Loop(durationInFrames, fn)`. All are pure functions of frame — never accumulate per-frame physics state yourself.
-- For particle-style effects (steam, dust, sparks, rain) use `particles(frame, { count, lifeFrames, seed })` — a deterministic looping emitter returning per-particle `{ phase, cycle, u[4] }` states. Library particle systems are wall-clock based and banned; don't hand-roll a seeded loop either.
-- Every scene scaffold already includes `frame-api.js` and loads it before `composition.js`; keep that ordering if you rewrite the HTML.
-
-## Workflow
-
-1. **Find or create the film and scene.**
-   Call `list_films` to see what already exists in this workspace (`get_workspace` gives a lighter-weight overview plus a library summary). If the user is iterating on an existing video, use `get_film` to see its scenes and master timeline, then `get_scene` for one scene's config and files. Otherwise create both: `create_film { name, fps?, width?, height?, durationInFrames? }` first, then `create_scene { film, name }` for each scene it needs — even a single ten-second video is one film with one scene.
-
-   The fps/dimensions/duration you pass to `create_film` become the film's **`sceneDefaults`**, inherited by every scene created inside it unless you override them on `create_scene`. This is what keeps scenes losslessly concatenable later without you having to restate `1920×1080@30` on every one of them. Pass whatever the video actually needs — anything you omit falls back to the user's global settings rather than a fixed 1920×1080/30fps, so **read the response instead of assuming what you got**: someone who works in 4K or 24fps has set that once and expects it to hold. Duration is the field to think hardest about, since it's the one a global default is least likely to be right about. Dimensions must be even numbers for mp4/webm/prores.
-
-   **Resolve platform intent before creating scenes.** If the brief says “YouTube and TikTok”, create the film with `deliverables: ["youtube-16x9", "shorts-9x16"]`; if it says only TikTok/Shorts, use `deliverables: ["shorts-9x16"]`. These are saved snapshots on the new film, not a later human choice. With dimensions omitted, the first selected platform supplies the master canvas; every chosen version then shares one timeline/edit/audio. Do **not** silently create every platform when the brief does not name one — omit `deliverables` and the workspace remains master-only unless the user deliberately configured new-film defaults. Stage A is a crop/reframe of the completed master, so call it out when text-heavy compositions may need a true responsive rerender later.
-
-   **If `create_scene`'s (or `update_scene_config`'s) response carries `structureWarnings`, stop and restructure before authoring anything.** It fires when a scene's duration exceeds ~90 seconds: a video that long should be **many short scenes in one film**, stitched with `build_film` (see "Long-form: multi-scene films" below), not one giant composition. Ignoring it means one DOM juggling every scene's visibility — the highest-risk structure there is — and any later fix re-renders the whole length.
-
-   **Pick the output format for the deliverable** via `update_scene_config { scene, patch: { output: { format, transparent? } } }`: `mp4` (default) for general video, `webm` for smaller files, `gif` for short loops, `prores` for editorial hand-off, `png-sequence` for compositing. For a transparent overlay set `output: { format: "webm", transparent: true }` (or prores/png-sequence) and give the composition a transparent background — no `background` on `html`/`body`; everything unpainted becomes alpha 0. The output filename's extension follows the format automatically.
-
-   **If the video will carry any audio, call `list_vendors` now — before you author anything.** One call, once per film, and it answers three questions you would otherwise guess at: which speech/music vendors actually work on this machine (so you find out now, not at the first `synthesize_speech`), whether the user configured a preference *chain* (so you can name one vendor for the whole film instead of letting availability change the voice partway through), and — the part that is easy to skip and most worth having — the user's **`favoriteVoices`** and **`favoritePrograms`**: voices and General MIDI instruments they auditioned in the Studio and *starred*. When the brief doesn't name a voice or instrumentation, those starred choices are the answer, and they beat any vendor default you would otherwise land on. An explicit request still wins over a starred favourite; a vendor default never should.
-
-2. **Author the composition.**
-   Use `write_composition_file { scene, path, content }` to write the HTML entry point and any JS/CSS it needs, built against the Frame API reference. The write result may include a **`warnings`** array flagging frame-driven contract violations (`Date.now`, `setInterval`, `Math.random`, `requestAnimationFrame`, `THREE.Clock`, real-time CSS transitions…) and structural bugs (`classlist-mutation`, `sequence-gap`, `canvas-save-restore`). The file is written either way, but treat each warning as a real bug unless you are certain the code runs outside the frame function — these are exactly the mistakes that look fine in a single-frame capture and only break under parallel rendering. `sequence-gap` deliberately leaves literal calls in mutually exclusive helper scopes alone; same-scope holes still need fixing. Keep the composition's visual logic as pure functions of `frame` — no external state, no randomness unseeded by frame number. To change fps, duration, dimensions, or audio/output settings, use `update_scene_config { scene, patch }` — raw writes to `scene.json` (the file backing a scene's config) are rejected by design so config invariants stay validated.
-
-   **An empty `warnings` array is not a passing grade.** The lint is a pattern matcher over the source you just wrote, and it is blind to the bugs that actually ship: a composition that calls **no** `Sequence` at all (the `sequence-gap` check only compares *literal* `Sequence(start, duration)` calls against the duration — write zero of them and it has nothing to compare), an element that is **never turned on** (`opacity: 0` in CSS and no code path setting it back), an element that is **never turned off** (visible in CSS, no `Sequence` owning it), canvas state like `shadowBlur`/`globalAlpha`/`filter` set once and never reset (save/restore counts stay balanced, so `canvas-save-restore` says nothing), and any number that is simply wrong — a bar chart scaled by `/100` against a value of `500000` renders happily as a bar two million pixels wide. The lint catches known-bad *patterns*; only your eyes on `capture_preview_frames` catch a wrong *picture*.
-
-   **Everything the composition loads must live under `assets/`.** A `<script src="https://…">` or a remote image works when you preview and is a coin-flip at render time: workers run many browsers at once against rate-limited hosts, and a library that fails to load turns into a `composition_error` or a frame of blank background hundreds of frames in. Vendor the library into the scene (`write_asset_file`, or `use_shared_asset` for anything large) and reference it relatively. Nothing in the lint checks this — a hotlinked CDN URL passes silently.
-
-   If the user supplies a logo, a short music bed, or a font, ingest it with `write_asset_file { target, path, contentBase64 }` (base64, lands under the target's `assets/`, 25 MB cap) and reference it as `assets/<name>` from the composition — `target` is a scene id for a scene-local asset, or a film id to put it on the film's own `assets/`. **For anything larger, check the workspace library first** (see "Using large user-provided assets" below) instead of asking the user to paste it through chat. To see what a scene or film already holds, `list_assets { target }` returns every file under `assets/` with its `kind` and **`audioRefs`** — the number of audio tracks using it (`config.audio` for a scene, the master timeline for a film) — which is how you tell a load-bearing file from an abandoned take. Clean up with `rename_asset { target, from, to, updateAudio? }` / `delete_asset { target, path, updateAudio? }`; both report `audioRefs`, and **pass `updateAudio: true` whenever it is non-zero** so the timeline is fixed in the same call. Deleting a referenced file without it does not fail — it leaves a dangling `src` that surfaces much later as an ffmpeg mux error on the next render, which is far harder to diagnose than it was to prevent.
-
-3. **Wire the audio, then audition it.**
-   Audio is not a garnish applied after the picture is finished — for anything with narration it is the other way round: **the voiceover's length determines the video's length**, which is why you synthesize before you finalize timing, not after. Details for each generator are in the three sections below; this is the order and the arithmetic.
-
-   Synthesize narration first and take its `durationInFrames` as the source of truth — that is the scene's duration (or the `Sequence` the speech plays under), not a number you chose up front. Then **make three numbers agree before you render**: the scene's `durationInFrames`, `startInFrames + durationInFrames` of every speech track, and the coverage of the music bed. A bed shorter than the video is the normal case, not the exception — a 40-second piece under a 90-second film leaves 50 seconds of dry narration unless you tile the same `src` at stepped `startInFrames` (step by `musicalDurationSeconds × fps`, the *note* length, so each repeat starts while the previous reverb tail decays). A bed longer than the video gets `fadeOutFrames` so it resolves instead of hard-cutting. A film that ends with the narration ends silent for however many frames you left over — decide that deliberately or trim the scene.
-
-   **Then run `preview_audio { target }` — on every render that carries audio, without exception.** It mixes the real render graph (fades, ducking, limiter) to a WAV in seconds, and its measurements are the only ears you have: `peakDb`/`clipping` (too hot), `balanceWarnings` (a track buried ≥8 dB under an overlapping one — an inaudible bed reads as "no music" and never fails anything), each clip's `clipMeanDb` (so `gainDb` compensates a *measured* level instead of encoding a template), `mix.envelopeDb` (per-second RMS; `null` is digital silence), and **`mix.silentTailSeconds`** — a healthy peak with a non-zero silent tail is the single most common audio defect there is. It runs as a cancellable task: if it returns `stillRunning`, call `wait_for_render` and read the mix from `result`. A bad mix caught here costs seconds; caught after a 15-minute render it costs the render. When the stakes are high, hand the user the returned `outputPath` — it is bit-identical to what the render will mux, so they can listen before you commit.
-
-4. **Check your work before rendering.**
-   This is the step that matters most for an agent working without eyes on a live preview: call **`capture_preview_frames { scene, count: 5 }`** (or an explicit `frames` list) covering the first frame, midpoints, the last frame, and any frame where a `Sequence` starts/ends — then look at the returned images. Use the plural tool whenever you want more than one frame: each single `capture_preview_frame` launches Chromium, loads the page, and re-runs the composition's one-time setup, so five separate captures pay that cost five times. Don't skip straight to a full render on a composition you haven't visually checked — a layout mistake found via a full render wastes far more time than one found via a capture. If something looks wrong, fix the composition file and re-capture before moving on.
-
-   **Looking is not checking.** A frame that renders without throwing tells you the code ran, which you already knew. Put each capture against these, and treat a "no" as a bug to fix before rendering:
-   - **Is the subject of the brief on screen?** For a product video: is the *product* visible — not at 20% opacity behind a caption, not cropped, not replaced by a spec sheet. This sounds too obvious to check. It is the single most common way a promo ships broken.
-   - **Is anything on screen that shouldn't be?** Compare frames from different sections: an element that appears in *every* capture, in the same place, is almost certainly one no `Sequence` owns.
-   - **Do the values read correctly?** Numbers, labels, percentages, bar widths — a mis-scaled bar or a `500000%` label is plainly visible and easy to skim straight past.
-   - **Did the frames actually change?** Two captures 5 frames apart should differ in the way you intended. Identical captures across a `Sequence` boundary mean the section never turned on.
-   - **Are the claims yours to make?** If you generated marketing copy — statistics, ratings, user counts, certifications — it must come from the user's own material (their `product info.txt`, their spec image), not from you. Inventing "98% accuracy, 500,000 users" about a real product, especially a medical device, is a fabrication with the user's name on it. Use the numbers in their assets, or write copy that makes no numeric claim.
-
-5. **Render.**
-   Call `render { scene }`; optionally pass `frameRange: [start, end]` for a partial pass. **Omit `workers`** — the server then applies the user's configured default itself (you cannot read that value over MCP, and you don't need to; omission is the mechanism). Pass an explicit value only when the user asks for one or you have a concrete reason (e.g. `1` to keep the machine responsive during a background render). For a first pass on a longer composition, render a short `frameRange` first to confirm pacing before committing to the full length. If a job is already running your submission is **queued** (the response says `state: "queued"` with a `queuePosition`) and starts automatically — you don't need to poll-then-submit. Then **wait with `wait_for_render`** (pass every jobId you submitted — up to 16; it blocks until all are `done`/`error`/`cancelled`/**`not_found`**, or returns current snapshots with `timedOut: true` — just call it again, that is the normal way to wait out a long render). **`timeoutMs` is capped at 50000 and defaults to 30000**: the ceiling sits deliberately under the MCP client's ~60s request timeout, so asking for 60000 is rejected outright as a validation error and asking for more than the client allows would return a transport error that tells you nothing about the jobs. Long render? Call it again in a loop; each call is one round trip and reports live `percent`/`etaMs` you can relay. **Job ids live only in the server's memory**: if the MCP server restarts, a batch wait reports each lost id as terminal `not_found` while preserving the surviving snapshots; `get_render_status` still returns `job_not_found` for its one lost id. Confirm finished work by its *output file*, never by assuming a submitted job survived (for a multi-scene film, `get_film` — or `build_film { film, plan: true }` — will name any scene still missing rendered output, so you don't have to track job ids by hand). Use `wait_for_render` instead of a `get_render_status` polling loop — keep `get_render_status` for one-off progress checks (`framesDone`, `percent`, `renderFps`, `etaMs`) you can relay to the user mid-render. Don't assume completion; wait for the terminal state, and check each job's state in the result — one failed scene doesn't stop the others. For a poster frame or thumbnail, `render_still { scene, frame }` writes a single frame as a PNG into the scene's `out/`. Transient Chromium crashes mid-capture self-heal: the engine relaunches and retries the same frame, so a `browser_crashed` error means the machine kept crashing through the retry budget — worth telling the user, not blind-retrying forever (though one scene-level retry is reasonable).
-
-   **To check that the *motion* reads — not just that a frame looks right — render a proxy**: `proxy: { scale, frameStep }` (defaults 0.5 and 2) renders a half-size draft of every other frame at a rational frame rate, so wall-clock pacing is exact while the render costs roughly an eighth as much. It writes to `output.proxy.<ext>`, so it can never overwrite the deliverable, and it is deliberately serial with no pre-flight and no audio mux (`workers` is ignored). You can inspect selected proxy frames with `inspect_render`, passing its returned `out/...proxy...` path, but no tool plays it as motion: its purpose is still to give the user a cheap draft to watch before the full render. Your own motion checks are `measure_render` (static runs and motion envelope), `capture_preview_frames` at closely spaced frames, and timing math against `sentenceTimings`/`durationInFrames`.
-
-   Renders of 30+ frames **pre-flight** first: a few evenly-spaced frames (both endpoints included) are probed before the render commits, so a composition that only throws at frame 90 fails in seconds rather than after 90 frames of work. A pre-flight failure is a normal `composition_error`/`frame_timeout` with `detail.phase: "preflight"` — fix the composition and re-render. It is on by default; pass `preflight: false` when you have *just* checked the composition with `capture_preview_frames` — the probe would re-verify what you looked at seconds ago, at one Chromium launch per queued scene.
-
-   **After a full render or `build_film`, check the encoded deliverable too.** Call `inspect_render { target }` for representative frames — films default to known cut boundaries — and `measure_render { target }` for static, black, and cut facts across the whole file. `measure_render` is a cancellable task like `preview_audio`; if it returns `stillRunning`, pass its `jobId` to `wait_for_render` and read the report from `result`. Treat a black/static finding as evidence to inspect, not an automatic defect: title cards and fades are often intentional.
-
-6. **Handle errors explicitly.** Errors come back as structured JSON with a stable `code`:
-   - `syntax_error` from `write_composition_file`: the write was rejected before touching disk (the previous file version is intact) — fix the JS and rewrite.
-   - `queue_full`: ten jobs are already queued — wait for jobs to finish or `cancel_render` stale ones; don't keep submitting.
-   - `asset_too_large` from `write_asset_file`: the decoded asset exceeds 25 MB — this is what the **workspace library** is for. Ask the user to add the file to it (the Studio's upload panel, or dropping it directly under `<workspace>/library` on disk), then pull it in with `use_shared_asset` instead of pushing it through base64. See "Using large user-provided assets" below.
-   - `prereqs_missing`: tell the user Node.js/FFmpeg aren't detected on their system rather than retrying — this isn't fixable from inside the MCP session.
-   - `composition_error` / `frame_timeout` from a render or capture: your composition threw at a specific frame, or never signalled ready — for timeouts the near-universal cause is unawaited async work; use an async `registerComposition` function. **Read the whole message**: assets that failed to load are listed in it by name (`assets/host.webm (net::ERR_FILE_NOT_FOUND)`), and a missing file a `<video>`/`<img>` was waiting on is the other common cause of a frame that never becomes ready. `detail.phase: "preflight"` means it was caught by the pre-render probe; the named frame is where to look.
-   - `path_not_allowed`: you attempted a path outside the scene or film folder you targeted — use paths relative to that target only (scene-relative for composition files; target-relative under `assets/` for asset tools).
-   - `render_already_in_progress`: a **different process** is already rendering that scene (the pid is in `detail`). Two renders writing one scene corrupt each other's frames, so this is a refusal, not a queue — wait for it, or cancel it. If you're certain that process is gone, the fix is deleting the stale `.render.lock` in the scene folder — **no MCP tool can do that**: ask the user to delete it (scene path from `get_scene`), or use your own filesystem access only if your harness provides one.
-   - `short_render`: the encoded file has fewer frames than were rendered, so the encode did not complete (`detail` has `expected`/`actual`). Re-render that scene; do **not** assemble it into a film.
-   - `stale_render` from `build_film`: a scene's output exists but was rendered *before* you changed its duration/size/fps/format, so the file is no longer that scene. `detail.stale[]` names each offender and what diverged. Re-render exactly those scenes. (`build_film { plan: true }` reports the same thing as a `stale_render` problem, before you commit to a build.)
-   - `browser_crashed`: Chromium crashed during capture *and* the engine's own relaunch-and-retry budget (3 relaunches, same-frame resume) was already spent before this surfaced. One scene-level re-render is a reasonable retry; if it recurs, the machine is genuinely unstable (memory, GPU/driver) — read `get_logs` and tell the user rather than looping.
-   - `tts_unavailable` from `synthesize_speech`/`list_voices`: the selected speech vendor isn't configured on this machine — tell the user rather than retrying. Call `list_vendors` first: it names what is missing, and another vendor may already be usable (the Windows exe needs `MOTION_STUDIO_TTS_EXE`; Piper needs `pip install piper-tts` plus voices in `MOTION_STUDIO_PIPER_VOICES`; the cloud vendors need an API key in the environment — `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION`, `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`). Never ask the user for the key itself — it goes in their environment, not into a tool call, and a key written into settings is refused with `invalid_config`.
-   - `music_unavailable` from `synthesize_music`: the selected music vendor isn't usable — the user sets it up, don't retry. Call `list_vendors`: the default `node` vendor only needs a SoundFont (`MOTION_STUDIO_SOUNDFONT`), while `fluidsynth` needs its two Windows executables, and the error names any vendor that *is* ready. `invalid_music_spec` means the note spec was empty/malformed — `detail.problems` lists every bad field; fix the spec.
-   - `invalid_sfx_spec` from `synthesize_sfx`: the cue list is malformed — `detail.cue` gives the index. Common causes: setting both `atFrame` and `at` (or neither), passing a dB value to `gain` (it's an amplitude 0..1), setting both `pitch` and `hz`, or a cue placed past the end of the bed. There is no `sfx_unavailable` — this generator has no dependencies and always runs.
-   - If `get_render_status` reports `error`, call `get_logs` for the job and read the actual output before guessing at a fix — Chromium launch failures and FFmpeg encoding errors look different and need different fixes.
-
-7. **Report back concretely.**
-   Tell the user the output file path (returned by `render` and confirmed in the `done` status) and roughly what the render contains, rather than just "done." If you rendered a short preview range first, say so and offer to render the full length.
-
-   The `done` status may carry `encodingWarnings` — player-compatibility problems like mp4 `crf: 0` (lossless Hi444PP: most players show black video with working audio). **Relay them to the user and fix the config**; the render itself succeeded. If the render carried audio, the status also includes `audio: { tracks, limiter, peakDb, meanDb, clipping, balanceWarnings }`. **Check it** — you cannot hear the output, and this is the only signal that the mix is wrong in either direction. `clipping: true` means peaks hit full scale: lower the offending track's `gainDb` (or re-enable `output.audioLimiter`) and re-render. A non-empty `balanceWarnings` means the opposite failure: a track is buried ≥8 dB under a louder overlapping one and is likely inaudible — fix the gains (measure, don't guess) and re-render.
-
-## Using large user-provided assets (the workspace library)
-
-When the user says they've already given you a file — footage, a photo set, a long soundtrack, a background plate — or hands you something too big for `write_asset_file`'s 25 MB cap, check the **workspace library** before asking them to resend anything through chat. It's a per-workspace folder of shared assets the human places directly (the Studio has an upload panel; on disk it's `<workspace>/library`) — exactly for the large files that don't fit through a base64 tool call.
-
-- **`list_shared_assets`** (no arguments) enumerates it: `path`, `bytes`, `mtime`, and a coarse `kind` per file. Check here first whenever the user mentions having provided something.
-- **`probe_asset { path }`** then tells you what the file actually *is* — duration, dimensions, fps, codecs, whether it carries audio. `kind: "video"` and a byte count cannot tell you a clip is 14.7 s at 60 fps, and a scene's duration has to be built around that number. Same tool for an asset already pulled into a scene or film: `probe_asset { target, path: "assets/…" }`.
-- **Footage goes in with `seekVideo`, never `play()`.** A composition can layer real video (a talking-head PIP, a background plate) by seeking one frame of footage per output frame: `await seekVideo(el, from + frame / fps, { fps })` inside an async `registerComposition`. Playing it would make the picture wall-clock dependent and break under parallel rendering; hand-rolling the seek is how you get a render that hangs forever on a missing file. See frame-api.md §11.
-- **Probe before you build a `<video>` around footage, then fix it yourself.** `probe_asset` returns a `notes` entry when the codec cannot be decoded by the render browser — H.264/HEVC is the common case, and the failure mode is nasty: the page's own `canPlayType()` answers `"probably"`, the composition looks fine in a still, and the render then hangs or draws nothing. **`transcode_asset` is the fix, and it is yours** (v0.22 — you no longer hand this to the human): `transcode_asset { target, from: "<library path>", to: "assets/clip.webm", mode: "video", video: { gop: 10 } }` writes a VP9/WebM the browser can decode, and reports the measured result so you know it worked. Crop and scale in the same call to the size the scene actually shows — footage costs render time per frame.
-- **`use_shared_asset { target, path, as? }`** links a library file into a scene's or film's `assets/` — default destination `assets/library/<path>`, or pass `as` to place it elsewhere. Hardlinked when the filesystem allows (a 500 MB plate costs no extra disk), copied otherwise — either way the scene/film stays self-contained and renders hermetically. Pulling the same file again refreshes the link/copy, so an updated library file propagates on request.
-- Once pulled in, reference it exactly like any other asset — `assets/library/<name>` from the composition, or as an `audio`/`overlays` track `src`.
-- The library is **read-only from MCP**: you list and pull, but adding to it is the human's job (Studio upload panel, or dropping the file directly under `<workspace>/library`). Fails with `file_not_found` if the path you name isn't there — `list_shared_assets` shows what is.
-
-This is also the escape hatch `write_asset_file` itself points to when a file trips `asset_too_large`.
-
-## Reading speech in a supplied recording (transcription)
-
-**If a recording is part of the film, transcribe it before you choose a single duration** — the same rule as narration, which you synthesize before timing anything to it. `transcribe_asset { path }` (library-relative, or `{ target, path: "assets/…" }`) returns the words *with timing*, and it accepts video directly.
-
-Without it you are guessing twice over: you do not know what the person is saying, and every in-point is arithmetic against the clip length. A real session had to stop and ask the user what was in their own clip, and its four cut-in points encoded exactly one fact — that the clip was 12.4 s long.
-
-- **`sentences[]` is the field you build against.** It is re-segmented on sentence boundaries and mirrors `synthesize_speech`'s `timings` field-for-field (`text`, `startSeconds`, `startInFrames`, `durationSeconds`, `durationInFrames`), so recorded and generated narration are the same problem. Cut on those boundaries and a splice lands in the pause instead of mid-clause.
-- **`rawSegments[]` are NOT edit points.** They are the vendor's own decode windows — ~7.5 s chunks that routinely start mid-sentence — and they are returned for debugging a sentence that looks wrong. Splice on them and you will cut mid-word.
-- **`words[]` is how a graphic lands on a spoken word.** Sentence timing cannot place a label on a name spoken *inside* a sentence; per-word `startInFrames` can. `wordsMatching: "acme"` returns just the words you are hunting for.
-- **`speechRanges[]`, `leadingSilenceFrames`, `trailingSilenceFrames`** answer "where can I cut" — trim the dead head, find the gap for a cutaway, cut on a pause rather than a syllable.
-- **Never quote a low-confidence sentence on screen.** Each sentence carries `minTokenP`/`meanTokenP` and each word a `p`. Measured failures from real runs: "cutting-edge OLED" came back as "cutting, HOLED", "24/7" as "20/47" — both flagged by a low `minTokenP`. **Timing is far more reliable than spelling.** If you are putting a transcribed line on screen, either use a sentence the model was confident about or show the user the text first.
-- It is a **job**, and it never waits behind a render. The call usually returns the transcript inline; a long recording comes back as `stillRunning: true` with a `jobId` — poll it with `wait_for_render` and the transcript arrives as the job's `result`.
-- Asking twice is free (results are cached), which makes one habit worth having: **after building a cut from someone's speech, transcribe the finished render** and check that the sentences you meant to keep are the sentences that are there. It is the only way to catch a splice that lost a word.
-- `transcription_unavailable` means whisper.cpp is not installed on this machine — **the user's setup, not a retry.** `list_vendors { capability: "transcription" }` reports it and what to fix, plus which `models` are installed if you want to name a bigger one for accuracy. `transcription_input_unsupported` means that file has no readable speech (a silent video, a still image): different file, not a different call.
-
-## Adding narration (text-to-speech)
-
-If the video needs a spoken voiceover, synthesize it with `synthesize_speech` rather than asking the user for an audio file. Speech comes from a **vendor** — six are supported: `system` (the Windows speech exe, offline), `piper` (neural voices running locally — offline and free, any OS), and four cloud vendors billed per character, `azure`, `elevenlabs`, `openai`, and `deepgram`. If the active vendor isn't configured the tool returns `tts_unavailable` (the user configures it — don't retry blindly).
-
-- Call `list_vendors` if you don't know what this machine has: it reports the active vendor, whether each is available, and what to fix. Omit `vendor` on the tools to use the configured default; pass it only when the user asks for a specific one.
-- The user may have configured a **preference chain** rather than one vendor (`chain` / `preferred` / `fellBack` in `list_vendors`). A vendor-less call then uses the highest-ranked *available* vendor, and the result carries `vendorChain` plus a `vendorNote` if anything was skipped — **relay that note**, since it means narration is not coming from the user's first choice. A vendor you name explicitly is never redirected: it runs or it fails with `tts_unavailable`. In a multi-scene film, prefer naming one vendor for the whole film so a mid-film availability change cannot alter the voice partway through.
-- **Use the user's starred voices** — this is what the step-1 `list_vendors` call was for. Its speech settings carry **`favoriteVoices`** (vendor → voice names): voices the user auditioned in the Studio and deliberately starred. Pick in this order, every time: (1) a voice named in the request, (2) a starred voice for the active vendor, (3) the vendor default. Reaching (3) while (2) exists means the film is narrated by a voice the user never chose, which they will hear immediately and you cannot hear at all. If you skipped `list_vendors`, you are at (3) by accident rather than by reasoning.
-- Call `list_voices` to see the voices, then pass one as `voice` (omit for the vendor default). For `azure`, filter with `locale` (e.g. `"en-US"`) — the catalogue is several hundred voices — and check a voice's `styles` before passing `style`. Azure voice names are ShortNames like `en-US-AvaNeural`; Piper names look like `en_US-lessac-medium` and are whatever the user has downloaded; ElevenLabs takes a voice_id or unique display name from the user's own library; `openai` has 13 fixed voices and turns `style` into a natural-language instruction; `deepgram` uses `aura-2-<speaker>-<lang>` names.
-- **Pass `deterministic: true` whenever you will compute cue frames from a clip and might synthesize it again.** Clip length drifts between identical runs on Piper (±2%) and ElevenLabs; the flag pins it. Vendors that can't honour it say so in `warnings` rather than silently dropping it.
-- `synthesize_speech { target, text, voice }` writes a WAV into the target's `assets/` and returns the clip length as both `durationSeconds` and `durationInFrames`, plus the clip's measured `peakDb`/`meanDb`. Target a **scene** (`"<film>/<scene>"`) for scene-local narration, or the **film** (`"<film>"`) to write master-timeline narration placed by absolute film frame — the normal choice for long-form. **Use `durationInFrames` to size the `Sequence()` the narration plays under — and, for a scene target, often the scene's own `durationInFrames`** — so the on-screen animation lasts exactly as long as the voiceover. Synthesizing before you finalize timing is the whole point: it's how you sync visuals to speech. Use `peakDb` to set the music bed's `gainDb` relative to the narration instead of guessing.
-- For multi-sentence narration pass **`sentenceTimings: true`**: the response adds `timings` — each sentence's `startInFrames`/`durationInFrames` inside the clip — so captions and per-sentence visuals land exactly on the speech instead of being eyeballed. Add the track's `startInFrames` to each timing to get composition (or film) frames. Word-level timing is not available; sentence-level is the truth on offer.
-- `mode` (default `attach`) also appends the clip to the target's audio tracks (a scene's `config.audio`, or the film's master timeline), so the next `render`/`build_film` mixes it in automatically; pass `startInFrames` to offset it and `gainDb` to balance it against a music bed. Use `mode: "asset-only"` to inspect the duration first and wire the track yourself later via `update_scene_config` or `update_film`.
-- Audio is muxed at the final render only — `capture_preview_frame` is silent. mp4/webm/prores carry audio; gif and png-sequence do not.
-
-## Adding a music bed (generated music)
-
-If the video wants music, compose a short piece with `synthesize_music` instead of asking for an audio file — **you author the notes**. Like speech it has vendors: `node` (default, in-process, any OS, needs only a SoundFont) and `fluidsynth` (the Windows exe chain). An unusable vendor returns `music_unavailable` (the user sets it up — don't retry blindly); `list_vendors` says which is active and what to fix. The result reports the measured `peakDb` — check it against your narration level rather than assuming.
-
-- **The quickest route is a chord progression, not hand-written notes**: `spec: { bpm: 96, progression: ['D','A','Bm','G'], style: 'pad-ballad', bars: 8 }`. Chord symbols may be letters (`F#m`, `Bb7`, `Dmaj7`, `C/E`) or roman numerals (`I`, `vi`, `bVII`) with `key`; `style` is one of `pad`, `pad-ballad`, `arp`, `drive`, `lullaby`, and `layers`/`beatsPerBar`/`seed` refine the take. It compiles to the same note spec, deterministically, and the response reports the `compiled` result. Pass exactly one of `progression` or `tracks`; unknown chords/styles fail as `invalid_music_spec` naming the offender.
-- To write the notes yourself, author a `spec`: `{ bpm, tracks: [ { program, notes: [ { pitch, start, duration, velocity? } ] } ] }`. `program` is a General MIDI instrument `0..127` (0 piano, 32 acoustic bass, 40 violin, 48 strings, 56 trumpet, 73 flute…); `drums:true` routes a track to percussion. `pitch` is a MIDI note (60 = middle C); `start`/`duration` are in **beats** (quarter notes). Keep it simple and diatonic — a melody track plus a bass/chord track reads as "music" far more than one dense track.
-- **Voice the tracks with the user's starred instruments** — again from the step-1 `list_vendors` call, whose music settings carry **`favoritePrograms`**: General MIDI programs the user auditioned and starred. Same precedence: (1) instruments the brief names, (2) starred programs, (3) the piano-and-strings default you would otherwise reach for. This applies to `progression`-compiled pieces too — the compiled `tracks` come back in the response, so you can see which programs a style chose and re-voice them.
-- `synthesize_music { target, spec, mode, gainDb }` writes a WAV into the target's `assets/` and returns `durationInFrames` — but note it reflects the **rendered** length including a reverb tail, which is longer than the notes (`musicalDurationSeconds`). Target a **scene** for scene-local music, or a **film** to write the score straight into the master timeline — the normal choice for long-form. **To score a whole film from one short piece, list the same `src` several times at stepped `startInFrames`**, stepping by `musicalDurationSeconds × fps` (the *note* length, not the WAV length — the WAV is longer because it carries the reverb tail). Each repeat then starts in time while the previous tail decays underneath it, which is a free crossfade at every seam. **A bed longer than the video doesn't have to hard-cut**: set `fadeOutFrames` on its track (via `update_scene_config`, or `update_film` for a master-timeline track) and it resolves at the composition end.
-- As a **background bed under narration**, attach it at a low `gainDb` (e.g. `-8` to `-14`) so speech stays intelligible, and use `startInFrames` to place it. `mode` works exactly as for speech (`attach` vs `asset-only`). Better: pass **`duck: true`** at attach time and the bed is sidechain-compressed under the narration automatically — it dips while speech plays and recovers in the gaps, so it can sit a few dB hotter than a static gain would allow.
-- **Check the mix before rendering with `preview_audio { target }`**: target a scene to mix its `config.audio`, or target the **film** to mix its whole master timeline at the full film length, to a WAV in the target's `out/`, using the exact render graph (fades, ducking, limiter) in seconds. **You cannot listen to that WAV over MCP — the tool's measurements are your ears**: the mixed `peakDb`/`clipping`, each clip's own level, `balanceWarnings`, `mix.envelopeDb` (per-second RMS, `null` = digital silence), and `mix.silentTailSeconds` (a healthy peak with a non-zero silent tail means the mix dies before the composition ends). Run it after wiring narration + music + sfx; a bad balance found here costs seconds, not a render. When the numbers look right but the stakes are high (a full film), give the user the returned `outputPath` so *they* can listen before the long render — the preview is bit-identical to what the render will mux. For a **film**, build the master timeline by targeting the film id directly in `synthesize_speech`/`synthesize_music`/`synthesize_sfx` (or set it explicitly with `update_film { audio: [...] }`), audition it with `preview_audio { target: "<film>" }`, then `build_film` — the build uses that exact same timeline, so what you heard is what assembles.
-- **`gainDb` must compensate each file's measured level, never encode a template.** Source clips arrive at wildly different loudness (11 dB spread between three "similar" music WAVs is real); a template like "lead −2, layers −6/−10" applied blind can bury a track completely, and *nothing fails* — the mix only gets quieter, so it renders clean and never clips. Measure first (each clip's `clipMeanDb` from `preview_audio`, or `peakDb`/`meanDb` returned at synthesis time), then set gains so effective levels (`clipMeanDb + gainDb`) land where you intend. `preview_audio` and the render's `audio` report both return **`balanceWarnings`** naming any track sitting ≥8 dB under a louder overlapping track — treat a non-empty list as a bug in your gains: fix and re-preview before rendering (an intentional background layer should carry `duck: true`, which exempts it).
-- **Track gains sum.** The mixer runs with `normalize=0`, so three tracks at `gainDb: 0` add up rather than averaging. `output.audioLimiter` (default on) brick-walls the result at −1 dBFS so it cannot distort, but a limiter working hard still sounds squashed — set deliberate levels (one foreground element, everything else below it) and confirm with the `audio.peakDb` reported when the render finishes.
-
-## Adding sound effects
-
-For the noises that are neither speech nor music — a whoosh on a cut, a chime between scenes, a thud on an impact, a shimmer under a reveal — use `synthesize_sfx { target, spec }`. Unlike speech and music it is **pure JS with nothing to install**, works on every OS, and has no "unavailable" error, so there is no reason to skip it or ask the user to configure anything.
-
-- **One call makes the whole bed.** Pass a list of `cues` and you get a single audio track holding all of them at their absolute times — target the **film** and that's what you want for its master timeline, rather than one track per cue.
-- **Time is in frames.** `atFrame` matches `startInFrames` and a scene's `filmOffset` (from `get_film`'s plan), so "a chime on every scene cut" is a plain map over your scene offsets. (`at` in seconds is accepted instead — set exactly one.) `fps` and the default bed length come from the target — the scene's duration, or the whole film length when you target a film.
-- **`gain` is a peak amplitude 0..1, not dB.** Every cue is scaled so its peak equals its `gain`, so `0.4` means the same thing for a bell, a noise sweep, or a sub thud. Track-level dB still goes on `gainDb` when attaching.
-- Types: `chime`, `whoosh`, `shimmer`, `thud`, `tone`. Pitched cues take `pitch` (MIDI, same as `synthesize_music`) **or** `hz`, never both. Keep chime pitches in the key of your music bed and the cues stop sounding bolted on.
-- **Levels:** by default a quiet bed is *left quiet* — only a mix hotter than `ceilingDb` gets pulled down — so the returned `peakDb` is a real number you can balance against. Read `peakDb`/`appliedGainDb` and set `gainDb` from them; don't reuse a number from a previous video.
-- A 10-minute 44.1 kHz bed is ~53 MB; pass `sampleRate: 22050` for long beds. Bad specs fail with `invalid_sfx_spec` naming the offending cue index.
-
-## Long-form: multi-scene films
-
-A composition is one `frame → state` function — right for a shot or a scene, not for minutes of video. To build anything longer than a single composition, create **one film** and give it **many scenes** (`create_scene { film, name }` for each), then stitch the rendered scenes with `build_film`. Don't try to cram a whole film into one giant timeline.
-
-- **Scenes are concat-compatible by construction.** `build_film` concatenates losslessly (`-c copy`) and rejects mismatches with `inconsistent_scenes`, but since every scene inherits the film's `sceneDefaults` (`width`, `height`, `fps` — set once on `create_film`) unless you explicitly override them, you get matching scenes for free as long as you don't fight the defaults per scene. `output.format` (mp4/webm/prores) must also match across scenes.
-- **Render each scene first** (`render { scene }` → poll to `done`). `build_film` only assembles; an unrendered scene fails with `scene_not_rendered`.
-- **The film IS the master container — there's nothing extra to create.** Master audio, captions and overlays live on the film document itself, and the film folder already has its own `assets/` and `out/`. Write master-timeline assets by passing the **film id** as `target` to `synthesize_speech`/`synthesize_music`/`synthesize_sfx` (they land in the film's `assets/` and append to its master timeline), or set the timeline directly with `update_film { audio: [...] }`. Master audio takes **the same per-track shaping as a scene's `config.audio`** (`startInFrames`, `gainDb`, `trimEndInFrames`, `fadeInFrames`, `fadeOutFrames`, `duck`), so a mix you audition with `preview_audio` reproduces exactly at build time. Otherwise keep per-scene audio consistent (all scenes carry audio, or none do).
-- **Footage can go ON the timeline, not just inside a composition (v0.22).** `update_film { scenes: [...] }` takes a heterogeneous play order: `{slug:"intro"}` for a rendered scene, `{footage:"assets/clip.mp4", durationInFrames:231}` for a supplied video that joins as-is. That is how you build "footage, then a scene, then footage" — the shape most films built around someone's recording actually take, and previously impossible. Three rules, all reported at plan time before a build is paid for: the file must live under the film's `assets/` (`use_shared_asset` or `write_asset_file` puts it there), it must **match the film signature** (`get_film`'s `plan.signature` states it; `transcode_asset { matchFilm: "<film>" }` uses the film's encoder arguments **and converts its stated bt709/sRGB colour profile**), and it must be **silent** — extract its audio to a WAV and put that on the master timeline. If source colour tags are incomplete, inspect the returned bt709 assumption rather than treating it as a measured fact. When `transcode_asset` returns `timelineSegment`, insert that object unchanged: its `derivedFrom` pointer is the source-of-truth link to the transcode sidecar. Before a build, require `get_film`/`planFilm` to report `derivedFrom.sourceVerified: true`; a changed or missing original correctly returns `footage_source_changed` and must be re-transcoded rather than hand-waved away.
-- **Never accumulate scene offsets by hand.** `get_film` (or `build_film { film, plan: true }`) returns the resolved **`plan`**, whose `sceneLayout` carries each scene's `filmOffset`, `durationInFrames` and `startSeconds` — place narration and cue frames against `filmOffset` (`atFrame: filmOffset`, narration at `filmOffset + leadIn`), never arithmetic you did yourself. `plan: true` assembles nothing and works **before the scenes are even rendered**, which is exactly when you need the numbers to place narration.
-- **Set the film's level by measurement, not by guessing.** With a master audio timeline, `build_film`'s finished job status carries `audio: { peakDb, meanDb, clipping, … }` for the assembled film — check it exactly as you check a render's. Better, pass **`audioTargetPeakDb: -2`** to `build_film` (or persist it with `update_film`): it measures the mix, shifts every track by one offset (so your balance survives), re-muxes and re-measures. Never carry a master gain over from a previous film — different voices condition to very different peaks, and a gain that was right for one can push speech past full scale in the next, where the limiter quietly dulls every consonant.
-- **Preview one frame per distinct scene *type* before rendering the film.** Scenes sharing a `composition.js` share its bugs, so a single bad drawing helper corrupts every scene that uses it. A 16-scene film is a ~30-minute render; a text label colliding with artwork is a few seconds to spot in `capture_preview_frames` and very expensive to discover afterwards.
-- **`build_film` is an async job.** It returns `{ jobId, state, outputPath, totalFrames, filmId }` immediately — poll with `get_render_status` or block with `wait_for_render`, exactly like a render. Its finished status includes `picture: { staticFrames, blackFrames, cutsChecked, cutsSuspect }`; follow any suspect cut with `inspect_render { target: "<film>", around: "cuts" }`, and use `measure_render` when you need the full motion/static/black report. The picture concat itself is always a lossless stream copy; `build_film` runs **one** extra finishing encode of the picture after it only when the film has overlays or burns captions. Iterating? Re-render only the scene you changed, then `build_film` again — other scenes' outputs are reused and it re-stitches in seconds.
-- **Platform delivery is a build selection, not a second edit (Stage A).** Build the master with `build_film { film }`, or one saved variant with `build_film { film, deliverable: "shorts-9x16" }`. A variant forces one target-size finishing encode and produces its own filename, caption sidecar, review JSON and contact sheet; its result says `reEncoded: true`. Review the contact sheet’s safe-area guides before calling it delivered. `update_film { deliverables: [...] }` replaces the full saved version list, so preserve existing entries when changing one.
-- **Don't hand-write a composition per scene.** Write **one** shared `composition.js` that reads a per-scene `window.SCENE` config (loaded from a small `scene.js`), so every scene ships the same engine and a scene is just data. Then iterate one scene at a time: fix its config, re-render *only that scene*, and call `build_film` again.
-- **Every film is a persistent, editable document from the moment you `create_film` it** — there's no separate "save" step. `update_film` edits the same document the Studio's visual film editor shows; `get_film`'s response includes an `editorUrl` you can hand the user. Captions (`.srt` sidecar always written; `burnCaptions` to also burn them in) and image/video overlays (transparent `.webm` keeps alpha) live on the film document too via `update_film { captions: [...] }` / `{ overlays: [...] }`. `get_film`'s `plan` lists **`problems`** (unrendered scenes, signature mismatches, missing assets) — resolve them before `build_film` will succeed. It also carries **`plan.signature`**, the film's encode contract: resolution, fps, format, pixel format, and the exact `ffmpegArgs` the engine's own encoder uses. You have no shell, so this is what you hand the *user* when a file has to be prepared to join the film — give them `signature.ffmpegArgs` verbatim rather than composing flags yourself, and note that `signature.neednotMatch` (GOP, profile, level, bitrate) are deliberately not worth pinning. If the user mentions editing the film visually, hand them the editor link.
-- **Fixing a shared engine: use `sync_shared_files`.** Every scene holds its own *copy*, so editing the one you wrote first reaches nothing already created. `sync_shared_files { sourceScene, targetScenes, files: ["composition.js"] }` pushes it to all of them with the same syntax check and lint as a normal write. It deliberately does **not** touch `scene.js` (that's the per-scene data) and does **not** invalidate rendered output — re-render the affected scenes yourself.
-- **Working with image assets (backgrounds/sprites):** put files under the scene's or film's `assets/` and reference `assets/<name>` (or pull a large one from the workspace library with `use_shared_asset` — see above); **preload every image and only then call `registerComposition`** (so `setFrame` waits for them). **Never use an animated GIF live** — it advances on the wall clock and breaks determinism; it must be converted to a still and animated from `frame`. **MCP gives you no shell**, so conversions like GIF→PNG (`ffmpeg -i x.gif -frames:v 1 x.png`) or keying a sprite off a solid colour (`colorkey=…,format=rgba`) are commands to hand the user — run them yourself only if your own harness has shell access, then ingest the result with `write_asset_file` (or point the user at the workspace library for anything large). For pixel art set `image-rendering: pixelated` + `ctx.imageSmoothingEnabled=false`.
-
-## Iterating on an existing scene
-
-If the user asks to change something about a video they already made ("make the title fade in slower"), use `get_scene` (and `get_film` too, if the change touches scene order or the master timeline) and `read_composition_file` to see the current code before editing — don't rewrite from scratch and don't assume you remember the prior version's exact structure from earlier in the conversation. Note the human may have the same scene open in the Studio web UI; your writes hot-reload their preview live. Re-check with `capture_preview_frame` after the edit, same as initial authoring.
-
-## What not to do
-
-- Don't use wall-clock time, `setTimeout`, `Math.random()`, or CSS real-time transitions anywhere in composition code — see the Frame API reference for why and what to use instead.
-- Don't manage scene visibility with `classList.add`/`remove` inside the frame function, and don't rely on a reset loop selecting classes that are only added at runtime — scene containers must be hidden by default in CSS and turned on only by their own `Sequence`. The lint warns (`classlist-mutation`); heed it.
-- Don't leave an element visible by default that no `Sequence` turns off — it is on screen for the whole video, under every section, and no tool reports it. If you can't name the `Sequence` that owns an element, that's the bug.
-- Don't leave a `ctx.save()` unmatched in a canvas helper — the leaked transform/clip moves or hides everything drawn after it in that frame, and it renders without erroring (`canvas-save-restore` warning). Same for `shadowBlur`/`shadowColor`/`globalAlpha`/`filter` set and never reset: save/restore counts stay balanced, so the lint stays quiet.
-- Don't load scripts, fonts, or images from a URL — vendor them into `assets/` (`write_asset_file`, or `use_shared_asset` for large files). A CDN `<script src>` previews fine and is a coin-flip across parallel render workers, and nothing lints it.
-- Don't treat an empty `warnings` array as "correct" — the lint matches known-bad patterns and cannot see a composition with no `Sequence` calls, an element never turned on or off, or a number that's simply wrong.
-- Don't render audio you haven't put through `preview_audio` — `clipping`, `balanceWarnings` and `mix.silentTailSeconds` are the only ears you have, and a mix that dies before the picture does is invisible in the finished render.
-- Don't synthesize speech or music before calling `list_vendors` — the user's starred `favoriteVoices`/`favoritePrograms` are one call away, and a vendor default chosen in ignorance is a choice you made on their behalf.
-- Don't invent statistics, ratings, certifications or user counts for a promotional video — take claims from the user's own assets or make none. Fabricated numbers about a real product ship under their name, not yours.
-- Don't accumulate scene offsets by hand for a film — `get_film` (or `build_film { plan: true }`) returns `sceneLayout` with each `filmOffset` before anything is rendered.
-- Don't put a multi-minute video in one composition — `create_scene`/`update_scene_config` return `structureWarnings` past ~90 seconds; the answer is many short scenes in one film, stitched with `build_film`.
-- Don't create a second scene or a spare film just to hold a film's master audio or output — the film folder already has its own `assets/` and `out/`. Target the film id directly.
-- Don't write composition files outside the scene folder returned by `create_scene`/`get_scene` — the tool sandboxing will reject it anyway, but don't attempt path tricks to work around it.
-- Don't write `scene.json` (a scene's config file) directly — use `update_scene_config`. There's no file-write path to a film's `film.json` either — always go through `update_film`.
-- Don't kick off a full render without a `capture_preview_frames` check first, except for trivial single-static-frame compositions.
-- Don't call `capture_preview_frame` in a loop to inspect several frames — that pays a Chromium launch and a full page setup per frame. Use `capture_preview_frames` once.
-- Don't ignore the `warnings` from `write_composition_file` or the `audio.clipping` flag on a finished render; both report problems that are invisible in a still frame.
-- Don't fire renders in a loop without polling — one render runs at a time and further submissions queue (bounded at 10, then `queue_full`); check `list_render_jobs` if you lose track of a jobId.
-- Don't request `transparent` output on `mp4` or `gif` — validation rejects it; use `webm`, `prores`, or `png-sequence`.
-- Don't ask the user to paste a large file through chat/base64 — check `list_shared_assets` first (the workspace library) and pull it in with `use_shared_asset`; `write_asset_file` is for small assets only (25 MB cap, `asset_too_large` beyond that).
-- Don't delete a film or scene (`remove_film` / `remove_scene`, especially with `deleteFiles: true`) without explicit user confirmation — it's irreversible.
+# Motion Studio MCP production guide
+
+Motion Studio authors deterministic HTML/CSS/JS compositions and renders them
+through a workspace → film → scene model. The MCP tools are the production
+interface: use them to create documents, ingest media, author compositions,
+preview, render, inspect, and assemble the final film.
+
+This guide is procedural. The live MCP tool schema is the argument-level source
+of truth. Before a call, use the tool name and fields actually exposed by the
+client; never invent an argument from memory or substitute a similarly named
+filesystem operation.
+
+## Non-negotiable rules
+
+1. **A film is always the container.** Even a five-second animation is one film
+   with one scene. Film ids are bare slugs such as `launch-film`; scene ids are
+   `<film>/<scene>` such as `launch-film/intro`.
+2. **Use MCP document tools for Motion Studio state.** Do not hand-edit
+   `film.json` or `scene.json`. Use `update_film` and `update_scene_config`.
+3. **Animation is a pure function of frame.** Read the Frame API, register with
+   `MotionStudio.registerComposition(fn)`, and never use wall-clock animation,
+   `Date.now`, `setTimeout`, `setInterval`, `requestAnimationFrame`,
+   `Math.random`, CSS animations/transitions, `THREE.Clock`, or library render
+   loops.
+4. **Treat returned warnings and plan problems as work, not commentary.** Fix
+   every unexplained `warnings`, `structureWarnings`, `problems`,
+   `encodingWarnings`, audio warning, and blocked delivery before proceeding.
+5. **Preview the composition and inspect the encoded file.** A successful write,
+   lint, or render does not prove that the requested subject is visible, text is
+   correct, motion reads, audio covers the timeline, or the final encode is
+   healthy.
+6. **Keep renders hermetic.** Composition dependencies must be local under the
+   scene or film `assets/`. Do not hotlink scripts, fonts, images, audio, or
+   video.
+7. **Never claim completion from submission.** Wait for every asynchronous job
+   to reach a terminal state and confirm the output and review evidence.
+
+If Motion Studio tools such as `get_workspace`, `create_film`,
+`write_composition_file`, and `render` are absent, say that Motion Studio is not
+connected in this task. Do not imitate the MCP workflow with arbitrary file
+writes. A shell-capable agent may instead load the separate
+`motion-studio-video-shell` skill when the request needs operations outside the
+MCP surface.
+
+## Current MCP surface
+
+Use this map to choose the right tool. Read the live schema before calling it.
+
+- Workspace and documents: `get_workspace`, `list_films`, `create_film`,
+  `get_film`, `update_film`, `remove_film`, `create_scene`, `get_scene`,
+  `update_scene_config`, `remove_scene`
+- Composition authoring: `read_composition_file`, `write_composition_file`,
+  `sync_shared_files`, `add_library`
+- Assets and supplied media: `write_asset_file`, `list_assets`, `probe_asset`,
+  `transcribe_asset`, `transcode_asset`, `rename_asset`, `delete_asset`,
+  `list_shared_assets`, `use_shared_asset`
+- Audio: `list_vendors`, `list_voices`, `synthesize_speech`,
+  `synthesize_music`, `synthesize_sfx`, `preview_audio`
+- Preview and delivery: `capture_preview_frame`, `capture_preview_frames`,
+  `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`
+- Jobs and diagnostics: `get_render_status`, `wait_for_render`,
+  `list_render_jobs`, `get_logs`, `cancel_render`
+- Reference resource: `motion-studio://reference/frame-api`
+
+Deletion through `remove_film`, `remove_scene`, or `delete_asset` is destructive.
+Get explicit user confirmation before deleting material.
+
+## The correct end-to-end workflow
+
+### 1. Inspect the workspace and the brief
+
+Start every task by discovering what already exists:
+
+```json
+get_workspace {}
+list_films {}
+list_shared_assets {}
+```
+
+Use `get_film` and `get_scene` before changing an existing project:
+
+```json
+get_film { "film": "launch-film" }
+get_scene { "scene": "launch-film/intro" }
+read_composition_file {
+  "scene": "launch-film/intro",
+  "path": "composition.js"
+}
+```
+
+If the user says they supplied media, check `list_shared_assets` before asking
+them to resend it. The workspace library is the MCP entry point for large user
+files.
+
+Probe media before designing around it:
+
+```json
+probe_asset { "path": "recordings/interview.mp4" }
+```
+
+When speech is present, transcribe before choosing durations or edit points:
+
+```json
+list_vendors { "capability": "transcription" }
+transcribe_asset {
+  "path": "recordings/interview.mp4",
+  "language": "en",
+  "words": true
+}
+```
+
+Use `sentences` as edit blocks, `words` for word-synchronised graphics, and
+`speechRanges` for safe cuts. `rawSegments` are decoder windows, not edit
+points. Do not quote low-confidence transcription on screen without review. An
+English-only model rejects an explicit non-English language; choose a
+multilingual model or omit `language` for auto-detection.
+
+### 2. Create the film before its scenes
+
+Resolve the requested platform before creation. Save only the deliverables the
+brief names:
+
+```json
+create_film {
+  "name": "Launch Film",
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "durationInFrames": 150,
+  "deliverables": ["youtube-16x9", "shorts-9x16"]
+}
+```
+
+Omit `deliverables` when the user did not request a platform version. Omitted
+fps, dimensions, duration, and worker counts use user settings; read the
+response instead of assuming factory defaults. When dimensions are omitted and
+deliverables are selected, the first selected deliverable supplies the master
+canvas.
+
+Create one short scene per shot or coherent visual section:
+
+```json
+create_scene {
+  "film": "launch-film",
+  "name": "Intro",
+  "durationInFrames": 150
+}
+```
+
+Scene dimensions and fps should normally inherit the film defaults. Diverging
+them can make lossless film assembly impossible. If `create_scene` or
+`update_scene_config` returns `structureWarnings` for a long scene, split it
+before authoring.
+
+Choose scene output through validated config:
+
+```json
+update_scene_config {
+  "scene": "launch-film/intro",
+  "patch": {
+    "output": {
+      "format": "mp4"
+    }
+  }
+}
+```
+
+For alpha, use `webm`, `prores`, or `png-sequence`, set
+`output.transparent: true`, and leave the composition background transparent.
+MP4 and GIF do not support transparent output here.
+
+### 3. Ingest and prepare assets through MCP
+
+Use `write_asset_file` for small base64 assets only. It writes beneath the
+target's `assets/` and rejects decoded files above 25 MB.
+
+Use the workspace library for large files:
+
+```json
+use_shared_asset {
+  "target": "launch-film/intro",
+  "path": "plates/city.png",
+  "as": "assets/city.png"
+}
+```
+
+Reference it from the scene as `assets/city.png`. Film master audio, overlays,
+and timeline footage belong in the film's own assets; target the film id rather
+than inventing a spare scene.
+
+`probe_asset` reads media. `transcribe_asset` hears it. `transcode_asset` changes
+it. Do not ask the user to perform a conversion that the MCP schema supports.
+
+#### Video inside a composition
+
+H.264 and HEVC commonly cannot be decoded by the render browser. If
+`probe_asset` warns about browser decoding, transcode to VP9/WebM and seek it by
+frame:
+
+```json
+transcode_asset {
+  "target": "launch-film/intro",
+  "from": "recordings/interview.mp4",
+  "to": "assets/interview.webm",
+  "mode": "video",
+  "audio": false,
+  "video": { "gop": 10 }
+}
+```
+
+Inside an async registered composition, use:
+
+```js
+await seekVideo(videoElement, sourceStartSeconds + frame / fps, { fps });
+```
+
+Never call `video.play()`. Playback is wall-clock based and breaks parallel
+rendering.
+
+#### Supplied footage on the film timeline
+
+For footage that should sit beside rendered scenes, conform it to the film's
+actual encode signature:
+
+```json
+transcode_asset {
+  "target": "launch-film",
+  "from": "recordings/interview.mp4",
+  "to": "assets/interview-prepared.mp4",
+  "mode": "video",
+  "matchFilm": "launch-film",
+  "audio": false
+}
+```
+
+Insert the returned `timelineSegment` into the complete `scenes` array without
+rewriting it:
+
+```json
+update_film {
+  "film": "launch-film",
+  "scenes": [
+    { "slug": "intro" },
+    {
+      "footage": "assets/interview-prepared.mp4",
+      "durationInFrames": 231,
+      "derivedFrom": {
+        "asset": "library:recordings/interview.mp4",
+        "transcodeMeta": "assets/interview-prepared.mp4.transcode.json"
+      }
+    },
+    { "slug": "outro" }
+  ]
+}
+```
+
+The example values illustrate the response shape; use the exact returned
+object. The `derivedFrom` link lets the planner detect replaced or changed
+source media. Before building, `get_film` or `build_film { "plan": true }` must
+show `derivedFrom.sourceVerified: true`. A `footage_source_changed` problem
+requires re-transcoding the source.
+
+Timeline footage must be silent. Extract wanted speech/music separately with
+`transcode_asset` in `audio` mode, then place the resulting WAV on the film
+master audio timeline. Prefer exact frame trims. `trim.durationInFrames` means
+source frames; it is safer than a seconds duration when later offsets depend on
+an exact frame count.
+
+### 4. Author against the Frame API
+
+Read the Frame API before writing the first composition, in this order:
+
+1. `references/frame-api.md` when installed beside this skill
+2. MCP resource `motion-studio://reference/frame-api`
+3. `read_composition_file` for the scaffolded `frame-api.js`
+
+Every scene scaffold loads `frame-api.js` before `composition.js`. Keep that
+ordering.
+
+Use `write_composition_file` for scene-relative HTML, CSS, and JavaScript:
+
+```json
+write_composition_file {
+  "scene": "launch-film/intro",
+  "path": "composition.js",
+  "content": "MotionStudio.registerComposition((frame) => { /* frame-driven state */ });"
+}
+```
+
+The authoring contract:
+
+- Register exactly through `MotionStudio.registerComposition(fn)`. Make the
+  function `async` and await image, font, or video readiness when needed.
+- Use `interpolate`, `interpolateColors`, `spring`, `Sequence`, `Loop`,
+  `particles`, and `MotionStudio.random(seed)` from the supplied Frame API.
+- Reset all mutable DOM/canvas state from the frame value on every call.
+- Hide section containers by default. Let the owning `Sequence` make them
+  visible. Do not use `classList.add/remove` inside the frame function.
+- Pair every `ctx.save()` with `ctx.restore()` and reset canvas styles that
+  could leak into later drawing.
+- Preload local images and fonts before registering the composition.
+- Never load a CDN dependency. Use assets or `add_library`.
+- Fix every returned lint warning. A successful write still writes files when
+  warnings are present.
+
+Lint is not visual review. It cannot detect a missing product, incorrect copy,
+an always-visible layer, a hidden element, bad crop, or mathematically wrong
+chart.
+
+For 3D, vendor the supported library instead of using a CDN:
+
+```json
+add_library {
+  "scene": "launch-film/intro",
+  "library": "three",
+  "addons": ["loaders", "postprocessing"],
+  "scaffold": true
+}
+```
+
+The generated starter is frame-driven. Do not reintroduce
+`requestAnimationFrame`, clocks, or wall-clock particle systems. Model loaders
+also require the server's local-fetch setting, as reported by the tool.
+
+For repeated scene structures, keep one shared `composition.js` and small
+per-scene data files. After fixing the shared code, propagate it:
+
+```json
+sync_shared_files {
+  "sourceScene": "launch-film/intro",
+  "targetScenes": ["launch-film/body", "launch-film/outro"],
+  "files": ["composition.js"]
+}
+```
+
+Then re-render every affected scene. Synchronising source does not invalidate
+or refresh old renders automatically.
+
+### 5. Visually verify the composition before rendering
+
+Use one plural capture call for representative frames and every sequence
+boundary:
+
+```json
+capture_preview_frames {
+  "scene": "launch-film/intro",
+  "frames": [0, 29, 30, 89, 90, 149]
+}
+```
+
+Use `count: 5` only when uniform coverage is enough. The maximum is 24 frames.
+Do not call `capture_preview_frame` repeatedly; each call launches and prepares
+a new browser.
+
+Actually inspect the returned images. Check:
+
+- the subject requested by the user is visible, correctly cropped, and
+  recognisable;
+- elements appear only in their intended section;
+- titles, captions, numbers, and claims are correct;
+- first/last frames and sequence boundaries are intentional;
+- nearby frames change in the intended way;
+- supplied and generated images have passed human visual review.
+
+Never invent product statistics, ratings, certifications, or user counts.
+
+### 6. Build and audition audio before picture rendering
+
+Call `list_vendors` before speech, music, or transcription. Prefer the user's
+explicit request, then their starred `favoriteVoices` or `favoritePrograms`,
+then the configured default. Omit `vendor` to use the configured available
+preference chain; if the response says it fell back, report that.
+
+For narration, synthesize before finalising timing:
+
+```json
+synthesize_speech {
+  "target": "launch-film",
+  "text": "Welcome to the launch.",
+  "sentenceTimings": true,
+  "mode": "attach",
+  "startInFrames": 0
+}
+```
+
+Use the returned `durationInFrames` and sentence timings. Film targets place
+audio on the absolute master timeline; scene targets place audio in that
+scene's config. When cue frames depend on repeatable clip timing, pass
+`deterministic: true` only to a vendor that reports support for it (currently
+Piper or ElevenLabs); other vendors return a warning rather than pretending to
+honour it.
+
+When a film has a master audio timeline, `build_film` uses it in place of
+per-scene audio; it does not sum both timelines. Put the authoritative long-form
+mix on the film and preview that target.
+
+For generated music, pass either a note `tracks` spec or a `progression` spec,
+never both:
+
+```json
+synthesize_music {
+  "target": "launch-film",
+  "spec": {
+    "bpm": 96,
+    "progression": ["D", "A", "Bm", "G"],
+    "style": "pad-ballad",
+    "bars": 8
+  },
+  "mode": "attach",
+  "gainDb": -10,
+  "duck": true
+}
+```
+
+The returned WAV duration includes its reverb tail;
+`musicalDurationSeconds` is the note length. When repeating a short score, step
+new instances by musical duration so one tail can decay under the next entry.
+
+Repository policy: although the current `synthesize_sfx` schema exposes
+`chime`, `whoosh`, `shimmer`, `thud`, and `tone`, agents must not use the first
+four cue types. Use `tone` only, or ingest an approved sound asset.
+
+Audition every real audio timeline:
+
+```json
+preview_audio { "target": "launch-film" }
+```
+
+If it returns `stillRunning`, wait on its `jobId`. Fix:
+
+- `clipping: true`;
+- non-empty `balanceWarnings`;
+- unintended `mix.silentTailSeconds`;
+- digital-silence entries (`null`) in `mix.envelopeDb`;
+- speech/music coverage that does not match the picture.
+
+Track gains add; they are not averaged. Measure source levels and balance with
+`gainDb`, fades, trims, and `duck`. Do not reuse a gain template from another
+film. If the MCP client cannot play the returned WAV, use the measurements as
+the minimum check and give the user the returned `outputPath` for a listening
+review before a long render.
+
+### 7. Render scenes and wait correctly
+
+For a cheap motion draft:
+
+```json
+render {
+  "scene": "launch-film/intro",
+  "proxy": { "scale": 0.5, "frameStep": 2 }
+}
+```
+
+A proxy is serial, silent, skips preflight, preserves pacing, and writes a
+separate `.proxy` output. It is not the deliverable.
+
+For the full scene:
+
+```json
+render { "scene": "launch-film/intro" }
+```
+
+Normally omit `workers` so the user's setting applies. Use `frameRange` for a
+deliberate partial test, not as a finished scene. Preflight is enabled for
+eligible full renders; disable it only when an immediately preceding preview
+already covered the same frames.
+
+Wait on submitted jobs:
+
+```json
+wait_for_render {
+  "jobIds": ["<job-id>"],
+  "timeoutMs": 50000
+}
+```
+
+`timeoutMs` is capped at 50,000 ms. `timedOut: true` is a progress snapshot, not
+a failure; call `wait_for_render` again. Check each job independently. A server
+restart can turn an in-memory job id into `not_found`, so confirm work by the
+output and document plan rather than trusting an old id.
+
+On `error`, call `get_logs` and read the structured error. On `done`, inspect:
+
+- `outputPath`;
+- `encodingWarnings`;
+- final `audio.clipping` and `audio.balanceWarnings`;
+- `review.reviewPath`, `review.contactPath`, and review warnings;
+- `reviewArtifactWarning`, if present.
+
+Do not call a render complete while any of those indicates unresolved work.
+
+### 8. Inspect the encoded scene
+
+Preview captures re-run the composition; they do not inspect the file FFmpeg
+wrote. After a full render:
+
+```json
+inspect_render {
+  "target": "launch-film/intro",
+  "count": 5
+}
+measure_render {
+  "target": "launch-film/intro"
+}
+```
+
+If `measure_render` returns a running task, wait for its result. Static, black,
+or solid runs are facts to inspect, not automatic defects.
+
+Successful single-file deliveries are encoded in `out/.staging`, reviewed, and
+then promoted. The final output receives a `.review.json` report and
+`.contact.png` contact sheet. A policy block returns `promotion_blocked`, keeps
+the previous promoted movie intact, and leaves staged evidence for diagnosis.
+Do not disable review policy just to make a build pass.
+
+### 9. Plan and assemble the film
+
+Never calculate scene offsets yourself. Ask the planner before placing master
+timeline material and again before building:
+
+```json
+build_film {
+  "film": "launch-film",
+  "plan": true
+}
+```
+
+Use returned `sceneLayout[].filmOffset`. Resolve every `problems` entry. In
+particular:
+
+- each rendered scene must exist and still match its current config;
+- scene and footage signatures must match the film;
+- timeline footage frame counts must verify;
+- provenance-linked footage must show `sourceVerified: true`;
+- master audio, overlays, and captions must reference existing film assets.
+
+Render every scene, then assemble:
+
+```json
+build_film {
+  "film": "launch-film",
+  "audioTargetPeakDb": -2
+}
+```
+
+`build_film` is asynchronous. Wait for its `jobId`, inspect the terminal status,
+and review the returned audio and delivery evidence.
+
+For a saved platform version:
+
+```json
+build_film {
+  "film": "launch-film",
+  "deliverable": "shorts-9x16"
+}
+```
+
+Do not combine `deliverable` with `outputFilename`; a version owns its output
+name. A platform version re-encodes the same edit to its target geometry and
+creates independent captions, review JSON, and a contact sheet. Inspect the
+safe-area guides. Stage-A reframe is a crop/scale of the master; text-heavy
+work may require a genuinely responsive composition instead.
+
+After building:
+
+```json
+inspect_render {
+  "target": "launch-film",
+  "around": "cuts"
+}
+measure_render {
+  "target": "launch-film"
+}
+```
+
+Inspect before/at/after scene and footage boundaries. Re-transcribe a finished
+speech-led cut when practical to confirm that intended words survived the edit.
+
+## Update semantics agents commonly get wrong
+
+- `update_film` is a patch, but array fields such as `scenes`, `audio`,
+  `overlays`, `captions`, and `deliverables` replace the whole saved array.
+  Read the film, preserve wanted entries, and submit the complete new array.
+- `update_scene_config.patch` changes only provided fields.
+- A film can save with plan `problems`; it cannot build successfully until
+  those problems are resolved.
+- `create_scene` appends the scene to the film order. Use `update_film.scenes`
+  to reorder or mix scene and footage segments.
+- Scene source changes do not refresh old rendered output. Re-render the
+  affected scene.
+- Asset paths are target-relative and must remain under `assets/`; inspection
+  paths must begin with `out/` or `assets/`.
+- `rename_asset` and `delete_asset` report audio references. When changing a
+  referenced asset, use the tool's `updateAudio` option so timelines do not
+  retain dangling paths.
+- The workspace library is read-only over MCP. The user adds files; agents list,
+  probe, transcode, or link them.
+- Job ids live only in server memory. Persistent documents and output files are
+  the durable record.
+
+## Error handling
+
+Read the structured `code`, `message`, and `detail`; do not blind-retry.
+
+- `syntax_error`: the JavaScript write was rejected and the prior file remains.
+- `composition_error` / `frame_timeout`: inspect the named frame and missing
+  assets; await asynchronous setup inside the registered composition.
+- `path_not_allowed`: use target-relative composition paths or paths under
+  `assets/`/`out/` as required by the tool.
+- `asset_too_large`: use the workspace library, then `use_shared_asset` or
+  direct `transcode_asset`.
+- `queue_full`: wait or cancel stale jobs instead of resubmitting.
+- `render_already_in_progress`: another process owns the scene render; do not
+  start a competing writer.
+- `short_render`: re-render; never assemble an output with fewer encoded frames
+  than expected.
+- `scene_not_rendered`, `stale_render`, `inconsistent_scenes`: use the film plan,
+  re-render only named scenes, and restore a common signature.
+- `footage_source_changed`: re-transcode from the current source and replace the
+  timeline entry with the new returned `timelineSegment`.
+- `promotion_blocked`: inspect its staged review/contact evidence, fix the
+  finding, and render/build again. The prior promoted delivery is preserved.
+- `tts_unavailable`, `music_unavailable`, `transcription_unavailable`: call
+  `list_vendors`, report the missing configuration, and never ask the user to
+  paste a credential into chat.
+- `browser_crashed`: one job-level retry is reasonable; repeated crashes require
+  `get_logs` and machine-level diagnosis.
+- `prereqs_missing`: report the missing Node/FFmpeg prerequisite. Retrying the
+  same call cannot install it.
+
+## Final delivery checklist
+
+Before saying the work is complete, verify all of the following:
+
+- the film and intended scene ids are correct;
+- no unexplained write warnings, structure warnings, or plan problems remain;
+- representative source frames were visually checked;
+- every audio timeline passed `preview_audio`;
+- every render/build job reached `done`;
+- final audio has no unintended clipping, buried track, or silent tail;
+- encoded output was checked with `inspect_render` and `measure_render`;
+- for a single-file delivery, the review report and contact sheet were produced
+  and inspected;
+- no `promotion_blocked`, `reviewArtifactWarning`, or encoding warning remains
+  unresolved;
+- supplied-footage provenance is verified;
+- the user receives the exact final output path and a clear statement of what
+  was rendered.

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### MCP render-tool discovery compatibility
+
+`render.frameRange` now publishes as a homogeneous integer array constrained to
+exactly two entries. Its previous Zod tuple emitted draft-07 `items: [...]`;
+strict MCP tool importers rejected that schema and silently omitted the entire
+`render` tool, even though the official MCP SDK accepted it. The runtime
+`[startFrame, endFrame]` contract is unchanged, and the integration suite now
+guards the advertised schema shape.
+
 ### Direct ComfyUI image, video, and music generators
 
 The shell-capable authoring workflow now has dedicated helpers for local Qwen

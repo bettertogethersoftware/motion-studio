@@ -56,6 +56,12 @@ pollable job state; the Studio server exposes the same calls over local HTTP
 for the UI. Because all paths share the fragile parts (Puppeteer lifecycle,
 process trees, encoding), they cannot drift apart.
 
+The MCP boundary deliberately uses portable JSON Schema shapes. Fixed-size
+vectors such as `render.frameRange` are emitted as homogeneous arrays with
+`minItems`/`maxItems`, rather than draft-07 tuple-style `items: [...]`. Some
+strict MCP importers reject the latter and omit the entire tool even though the
+official SDK accepts it.
+
 v0.2 shipped a Windows-only C# WinForms app on the human path; v0.5 replaces
 it with the Studio web UI — see [CHANGELOG.md](CHANGELOG.md) for the full
 rationale (cross-platform, one toolchain, and strictly better preview

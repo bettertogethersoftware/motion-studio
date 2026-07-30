@@ -1271,7 +1271,11 @@ server.registerTool(
     inputSchema: {
       scene: z.string(),
       frameRange: z
-        .tuple([z.number().int().min(0), z.number().int().min(0)])
+        // Keep this a homogeneous, fixed-length array rather than a Zod tuple.
+        // Zod emits tuples as draft-07 `items: [...]`; strict MCP importers that
+        // accept only a schema object in `items` reject the whole render tool.
+        .array(z.number().int().min(0))
+        .length(2)
         .optional()
         .describe('[startFrame, endFrame] inclusive; omit for the full composition'),
       workers: z.number().int().min(1).max(16).optional()

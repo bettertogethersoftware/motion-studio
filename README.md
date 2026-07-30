@@ -59,6 +59,11 @@ two kinds of users through one shared render engine:
   No shell,
   no arbitrary file access.
 
+The MCP surface emits importer-compatible JSON Schema. In particular,
+`render.frameRange` is advertised as an integer array with exactly two entries,
+not a draft-07 tuple schema, so strict clients retain the `render` tool during
+discovery.
+
 ### The model: workspace → film → scene
 
 ```

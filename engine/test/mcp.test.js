@@ -134,6 +134,20 @@ test('mcp: nullable numeric fields publish numeric JSON schemas', async () => {
   assert.ok(schemaHasType(widthPct, 'null'), 'update_film.overlays[].widthPct must permit null');
 });
 
+test('mcp: render publishes a client-compatible fixed-length frameRange schema', async () => {
+  const { tools } = await client.listTools();
+  const render = tools.find((candidate) => candidate.name === 'render');
+  assert.ok(render, 'render tool must be advertised');
+
+  const frameRange = render.inputSchema?.properties?.frameRange;
+  assert.equal(frameRange?.type, 'array');
+  assert.equal(Array.isArray(frameRange?.items), false, 'frameRange.items must be one schema object, not a tuple array');
+  assert.equal(frameRange?.items?.type, 'integer');
+  assert.equal(frameRange?.items?.minimum, 0);
+  assert.equal(frameRange?.minItems, 2);
+  assert.equal(frameRange?.maxItems, 2);
+});
+
 test('mcp: exposes the full spec tool surface', async (t) => {
   if (!haveFfmpeg) return t.skip('ffmpeg missing');
   const { tools } = await client.listTools();
