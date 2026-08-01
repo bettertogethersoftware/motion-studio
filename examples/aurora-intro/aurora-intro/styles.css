@@ -1,0 +1,168 @@
+/* Aurora Intro — reference composition.
+   No CSS transitions/animations/keyframes anywhere: every visual change is
+   computed per frame in composition.js and written directly to inline
+   styles. This file only holds static layout, geometry, and typography. */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #05060a;
+}
+
+#stage {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+#aurora, #stars {
+  position: absolute;
+  inset: 0;
+}
+
+#vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(120% 100% at 50% 45%,
+    rgba(0, 0, 0, 0) 45%,
+    rgba(0, 0, 0, 0.55) 100%);
+}
+
+.layer {
+  position: absolute;
+  left: 50%;
+  will-change: transform, opacity;
+}
+
+/* Status badge, top-left */
+#badge {
+  top: 64px;
+  left: 64px;
+  transform: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px 10px 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+}
+#badge-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #6bffb0;
+  box-shadow: 0 0 12px rgba(107, 255, 176, 0.9);
+  display: inline-block;
+}
+#badge-text {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Top rule line */
+#rule-top {
+  top: 30%;
+  height: 2px;
+  width: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.7), transparent);
+  transform: translate(-50%, 0);
+}
+
+/* Kicker */
+#kicker {
+  top: 34.5%;
+  transform: translate(-50%, 0);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.5em;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+}
+
+/* Title */
+#title {
+  top: 48%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  font-size: 148px;
+  font-weight: 800;
+  color: #fff;
+}
+.word {
+  display: inline-block;
+  will-change: transform, opacity;
+}
+#word-1 { margin-right: 0.28em; }
+
+/* Underline accent beneath title */
+#underline {
+  top: 60.5%;
+  height: 8px;
+  width: 0;
+  border-radius: 4px;
+  transform: translate(-50%, 0);
+}
+
+/* Subtitle */
+#subtitle {
+  top: 66%;
+  transform: translate(-50%, 0);
+  font-size: 32px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.72);
+  white-space: nowrap;
+}
+
+/* Feature chips row */
+#chips {
+  top: 76%;
+  transform: translate(-50%, 0);
+  display: flex;
+  gap: 18px;
+  white-space: nowrap;
+}
+.chip {
+  display: inline-block;
+  padding: 12px 24px;
+  border-radius: 999px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  will-change: transform, opacity;
+}
+
+/* Outro card */
+#outro {
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+}
+#outro-mark {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #7c9cff, #ff6b9e);
+}
+#outro-text {
+  font-size: 40px;
+  font-weight: 300;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.92);
+  text-transform: uppercase;
+  white-space: nowrap;
+}

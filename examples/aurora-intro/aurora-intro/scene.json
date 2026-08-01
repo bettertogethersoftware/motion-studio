@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "name": "Aurora Intro",
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "durationInFrames": 300,
+  "entry": "composition.html",
+  "output": {
+    "dir": "out",
+    "filename": "aurora-intro.mp4",
+    "format": "mp4",
+    "transparent": false,
+    "crf": 16,
+    "preset": "slow",
+    "pixFmt": "yuv420p"
+  },
+  "audio": []
+}

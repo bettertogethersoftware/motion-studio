@@ -226,6 +226,8 @@ motion-studio/
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
 ├── comfyui/                       direct local image + paid Wan video generators
 │   └── README.md                  Qwen, Ideogram 4, Krea 2, Wan, editing, setup + CLI
+├── comfyui_video/                 direct local Wan 2.1 T2V 1.3B video generator
+│   └── README.md                  RTX 3080-friendly local video setup + CLI
 ├── comfyui_music/
 │   └── README.md                  local ACE-Step 1.5 instrumental + vocal generation
 └── docs/

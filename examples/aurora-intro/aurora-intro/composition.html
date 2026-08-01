@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Aurora Intro — Motion Studio reference composition</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="aurora" width="1920" height="1080"></canvas>
+    <canvas id="stars" width="1920" height="1080"></canvas>
+    <div id="vignette"></div>
+
+    <div id="badge" class="layer">
+      <span id="badge-dot"></span>
+      <span id="badge-text">NOW RENDERING</span>
+    </div>
+
+    <div id="rule-top" class="layer"></div>
+    <div id="kicker" class="layer">INTRODUCING</div>
+    <div id="title" class="layer">
+      <span class="word" id="word-1">AURORA</span>
+      <span class="word" id="word-2">ENGINE</span>
+    </div>
+    <div id="underline" class="layer"></div>
+    <div id="subtitle" class="layer">frame-accurate motion, composed entirely in code</div>
+
+    <div id="chips" class="layer">
+      <span class="chip" id="chip-1">deterministic</span>
+      <span class="chip" id="chip-2">parallel-safe</span>
+      <span class="chip" id="chip-3">zero wall-clock</span>
+    </div>
+
+    <div id="outro" class="layer">
+      <div id="outro-mark"></div>
+      <div id="outro-text">built frame by frame</div>
+    </div>
+  </div>
+  <script src="frame-api.js"></script>
+  <script src="composition.js"></script>
+</body>
+</html>
