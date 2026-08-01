@@ -1,9 +1,13 @@
-/* Motion Studio — Film Editor.
+/* Motion Studio — the film page.
    Same film-lab instrument panel language as styles.css (which loads first):
    near-black ink, amber record-light accent, hard corners, hairline rules,
-   monospace numerals. This sheet only adds the editor-specific chrome:
-   the three-band layout (stage / inspector / timeline), track lanes, blocks,
-   playhead, and the preview's overlay + caption layers. */
+   monospace numerals. This sheet adds the page-specific chrome: the three-band
+   layout (tree / stage / inspector, then timeline), track lanes, blocks,
+   playhead, the preview's overlay + caption layers, and the human's half of
+   the production loop — sequence tree, advice markers, version strip.
+
+   One surface, no modes (v0.23.2). The page is always the full editor and the
+   advice controls live in the inspector beside whatever is selected. */
 
 /* ------------------------------- layout ------------------------------- */
 
@@ -96,8 +100,8 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .scene-rail-list .sr-flag { color: var(--accent); }
 .scene-rail-list .sr-flag.unlisted { color: var(--ok); }
 
-.rail-foot { border-top: 1px solid var(--line); padding: 8px 10px; }
-.rail-foot button { width: 100%; }
+.rail-foot { border-top: 1px solid var(--line); padding: 8px 10px; display: flex; gap: 6px; }
+.rail-foot button { flex: 1; white-space: nowrap; }
 
 @keyframes rail-pulse {
   0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
@@ -398,3 +402,205 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .review-warning-list li.warn { color: var(--accent); }
 .review-warning-code { flex: 0 0 auto; color: var(--text); font-size: 9px; }
 .review-loading { margin: 0; font: 11px var(--mono); }
+
+/* ====================================================================== */
+/* Watch and advise: mode chrome, sequence tree, advice, versions         */
+/* ====================================================================== */
+
+/* The watch/advanced mode switch is gone (v0.23.2): it only hid buttons, and
+   made a reader work out which mode they were in before trusting the screen.
+   The page is always the full editor; advising is driven from the inspector. */
+
+.source-switch { display: inline-flex; flex-shrink: 0; border: 1px solid var(--line); }
+.mode-btn {
+  background: none; border: none; color: var(--dim);
+  font: 10px var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 5px 9px; cursor: pointer;
+}
+.mode-btn + .mode-btn { border-left: 1px solid var(--line); }
+.mode-btn:hover { color: var(--text); }
+.mode-btn.on { color: var(--accent-ink); background: var(--accent); }
+.source-switch { margin-left: 10px; }
+.source-switch .mode-btn { padding: 3px 8px; font-size: 9px; }
+
+/* What the AI is doing, in the words a human uses — never a queue or a lease. */
+.fe-production { font-size: 11px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.fe-production .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+.fe-production.live .dot { background: var(--ok); animation: pulse-dot 1.6s ease-in-out infinite; }
+.fe-production.live { color: var(--ok); }
+.fe-production.pending .dot { background: var(--accent); }
+.fe-production.pending { color: var(--accent); }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+.fe-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 16px; font-size: 12px;
+  border-bottom: 1px solid var(--accent); background: rgba(255, 180, 84, 0.10); color: var(--accent);
+}
+.fe-banner.ok { border-bottom-color: var(--ok); background: rgba(90, 190, 130, 0.10); color: var(--ok); }
+.fe-banner span:first-child { margin-right: auto; }
+.fe-banner.hidden { display: none; }
+/* While aiming, the whole page is a target: say so with the cursor. */
+.fe-frame.aiming .fe-tree, .fe-frame.aiming .tl-inner, .fe-frame.aiming #player-box { cursor: crosshair; }
+
+/* ------------------------------- the tree ------------------------------- */
+
+.fe-tree { overflow-y: auto; flex: 1; min-height: 0; padding: 4px 0; }
+.tree-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px 3px 6px; cursor: pointer;
+  border-left: 2px solid transparent;
+  font-size: 12.5px; color: var(--text);
+}
+.tree-row:hover { background: var(--ink-3); }
+.tree-row.selected { background: var(--ink-3); border-left-color: var(--accent); }
+.tree-twist { width: 11px; flex-shrink: 0; color: var(--dim); font-size: 9px; text-align: center; }
+.tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-meta { font-size: 10px; color: var(--dim); flex-shrink: 0; }
+.tree-vers { font-size: 9px; color: var(--dim); border: 1px solid var(--line); padding: 0 3px; flex-shrink: 0; }
+
+.tree-film { font-weight: 600; letter-spacing: 0.03em; }
+.tree-seq { padding-left: 14px; color: var(--accent); font: 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.tree-seq.anon { color: var(--dim); text-transform: none; letter-spacing: 0.02em; cursor: default; }
+.tree-seq.anon:hover { background: none; }
+.tree-seg { padding-left: 30px; }
+.tree-seg .tree-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+.tree-seg.unready .tree-dot { background: var(--err); }
+.tree-seg.footage .tree-dot { border-radius: 0; background: var(--accent); }
+
+.fe-rail-split {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  background: var(--ink);
+}
+.fe-rail-split.hidden { display: none; }
+.rail-collapsed .fe-tree, .rail-collapsed .fe-rail-split { display: none; }
+.scene-rail-list.hidden { display: none; }
+
+/* ------------------------ sequence and advice lanes --------------------- */
+
+.row-sequences { height: 26px; }
+.row-advice { height: 22px; }
+
+.seq-band {
+  position: absolute; top: 3px; bottom: 3px;
+  display: flex; align-items: center; gap: 5px; padding: 0 7px;
+  background: rgba(255, 180, 84, 0.13); border: 1px solid rgba(255, 180, 84, 0.42);
+  color: var(--accent); cursor: pointer; overflow: hidden;
+}
+.seq-band:hover { background: rgba(255, 180, 84, 0.2); }
+.seq-band.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.seq-band.anon { background: rgba(124, 131, 148, 0.09); border-color: rgba(124, 131, 148, 0.28); color: var(--dim); cursor: default; }
+.seq-band .seq-name {
+  font: 10px var(--mono); letter-spacing: 0.09em; text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* A pinned build that no longer matches the cut must not look authoritative. */
+.tl-inner.stale-delivery .row-scenes .lane,
+.tl-inner.stale-delivery .row-sequences .lane { opacity: 0.45; }
+
+.adv-marker {
+  position: absolute; top: 5px; width: 11px; height: 11px; margin-left: -5px;
+  background: var(--accent); border: 1px solid var(--ink);
+  clip-path: polygon(50% 0, 100% 45%, 50% 100%, 0 45%);
+  cursor: pointer; z-index: 3;
+}
+.adv-marker:hover { transform: scale(1.35); }
+.adv-marker.resolved { background: var(--ok); opacity: 0.6; }
+
+.adv-badge {
+  flex-shrink: 0; min-width: 14px; text-align: center;
+  background: var(--accent); color: var(--accent-ink);
+  font: 9px/14px var(--mono); border-radius: 7px; padding: 0 4px;
+}
+.blk .adv-badge { position: absolute; top: 2px; right: 2px; z-index: 3; }
+
+.fe-delivery-tag {
+  position: absolute; left: 6px; bottom: 6px; z-index: 4;
+  background: rgba(12, 14, 18, 0.82); border: 1px solid var(--line);
+  color: var(--dim); font-size: 10px; padding: 2px 7px; pointer-events: none;
+}
+.fe-delivery-tag.warn { color: var(--accent); border-color: var(--accent); }
+.fe-delivery-tag.hidden { display: none; }
+
+/* --------------------------- inspector sections ------------------------- */
+
+.insp-title { font: 13px var(--sans); color: var(--text); margin: -4px 0 10px; word-break: break-word; }
+.adv-head-row { display: flex; align-items: center; gap: 8px; }
+.adv-head-row h3 { flex: 1; margin-bottom: 0; }
+.adv-scope { font-size: 10px; margin: 3px 0 8px; }
+
+.adv-list { list-style: none; margin: 0; padding: 0; }
+.adv {
+  padding: 8px; margin-bottom: 7px; cursor: pointer;
+  border: 1px solid var(--line); border-left: 2px solid var(--dim);
+  background: rgba(255, 255, 255, 0.018);
+}
+.adv:hover { border-left-color: var(--accent); }
+.adv.open { border-left-color: var(--accent); cursor: default; }
+.adv-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.adv-status { font: 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.adv-status.sent { color: var(--dim); }
+.adv-status.received, .adv-status.working { color: var(--accent); }
+.adv-status.question { color: var(--err); }
+.adv-status.done { color: var(--ok); }
+.adv-status.reviewed { color: var(--dim); }
+.adv-when { margin-left: auto; font-size: 10px; color: var(--dim); }
+.adv-close { cursor: pointer; margin-top: 6px; }
+.adv-msg { font: 12px/1.5 var(--sans); color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.adv-clar { margin-top: 6px; font: 11px/1.5 var(--sans); color: var(--accent); }
+.adv-clar .q { font: 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; margin-right: 5px; }
+.adv-reply { display: flex; gap: 5px; margin-top: 6px; }
+.adv-reply input { flex: 1; min-width: 0; }
+.adv-resolution { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--line); font: 11px/1.5 var(--sans); color: var(--dim); }
+.adv-resolution b { color: var(--ok); font-weight: 400; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+.adv-evidence { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.adv-evidence figure { margin: 0; }
+.adv-evidence img { width: 100%; display: block; border: 1px solid var(--line); background: var(--ink); }
+.adv-evidence figcaption { font: 9px var(--mono); color: var(--dim); margin-top: 2px; }
+
+/* Takes. Previewing one changes nothing; asking for one back is advice. */
+.rev-strip { display: flex; flex-direction: column; gap: 7px; max-height: 340px; overflow-y: auto; }
+.rev-card { display: flex; gap: 8px; padding: 6px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.018); }
+.rev-card.playing { border-color: var(--accent); }
+.rev-thumb {
+  width: 72px; flex-shrink: 0; min-height: 44px; cursor: pointer;
+  background: var(--ink); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center;
+}
+.rev-thumb img { width: 100%; display: block; }
+.rev-thumb .no-thumb { color: var(--dim); font-size: 14px; }
+.rev-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.rev-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.rev-badge { font: 8px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; padding: 1px 4px; border: 1px solid var(--line); color: var(--dim); }
+.rev-badge.current { color: var(--ok); border-color: var(--ok); }
+.rev-note { font: 11px/1.4 var(--sans); color: var(--text); }
+.rev-meta { font-size: 9px; color: var(--dim); }
+.rev-body button { align-self: flex-start; font-size: 10px; padding: 2px 6px; }
+
+/* ------------------------------ advice popup ---------------------------- */
+
+.advice-dialog { min-width: 420px; max-width: 560px; }
+.adv-target-card { border: 1px solid var(--line); border-left: 2px solid var(--accent); padding: 8px 10px; margin-bottom: 10px; }
+.adv-target-title { display: block; font: 13px var(--sans); color: var(--text); }
+.adv-target-card .mono { font-size: 10px; }
+.advice-dialog textarea {
+  width: 100%; min-height: 90px;
+  background: var(--ink); border: 1px solid var(--line); color: var(--text);
+  font: 13px/1.45 var(--sans); padding: 8px;
+}
+.advice-dialog textarea:focus { border-color: var(--accent); outline: none; }
+.advice-dialog .note { margin: 8px 0 0; font-size: 10px; }
+.adv-prev { margin-bottom: 10px; }
+.adv-prev.hidden { display: none; }
+.adv-prev-head { display: block; font: 9px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px; }
+.adv-prev-body { display: flex; gap: 8px; align-items: flex-start; }
+.adv-prev-body .rev-thumb { width: 96px; }
+
+/* Taking advice back. Deliberately quiet — withdrawing is a correction, not a
+   primary action, and it must never be easier to hit than sending. */
+.adv-withdraw { margin-top: 6px; font-size: 10px; padding: 1px 6px; }
+.adv-clear-all { width: 100%; margin-top: 10px; font-size: 10px; }
+button.ghost.danger { color: var(--err); border-color: rgba(255,107,94,0.45); }
+button.ghost.danger:hover { border-color: var(--err); }

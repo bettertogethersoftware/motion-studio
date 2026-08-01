@@ -104,7 +104,7 @@ export class JobManager {
    *
    * @returns {{jobId: string, state: 'running'|'queued', queuePosition?: number}}
    */
-  startRender({ targetId, scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy }) {
+  startRender({ targetId, scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy, revision }) {
     if (this.totalStarted >= this.maxJobsPerSession) {
       throw new EngineError(
         ErrorCodes.QUEUE_FULL,
@@ -142,7 +142,7 @@ export class JobManager {
       logs: [],
       controller: new AbortController(),
       childPids: new Set(),
-      _run: { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy },
+      _run: { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy, revision },
     };
     this.jobs.set(jobId, job);
     this.totalStarted++;
@@ -295,12 +295,13 @@ export class JobManager {
       }
     });
 
-    const { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy } = job._run;
+    const { scenePath, config, outputPath, frameRange, workers, renderFn, preflight, ffmpegPath, reviewPolicy, revision } = job._run;
     const doRender = renderFn ?? (workers && workers > 1 ? renderParallel : renderComposition);
     doRender({
       scenePath, config, outputPath, frameRange, workers,
       ...(ffmpegPath ? { ffmpegPath } : {}),
       ...(reviewPolicy ? { reviewPolicy } : {}),
+      ...(revision ? { revision } : {}),
       ...(preflight === undefined ? {} : { preflight }),
       signal: job.controller.signal,
       progress,
@@ -361,6 +362,10 @@ export class JobManager {
       // this staged-file promotion. `framesVerified:false` is intentionally
       // visible when ffprobe was unavailable rather than implied true.
       ...(job.result?.promoted !== undefined ? { promoted: job.result.promoted } : {}),
+      // The immutable history entry this delivery became (v0.23) — a scene
+      // render's archived revision, or a film build's archived delivery.
+      ...(job.result?.revisionId ? { revisionId: job.result.revisionId } : {}),
+      ...(job.result?.deliveryId ? { deliveryId: job.result.deliveryId } : {}),
       ...(job.result?.framesVerified !== undefined ? { framesVerified: job.result.framesVerified } : {}),
       ...(job.result?.review ? { review: job.result.review } : {}),
       ...(job.result?.reviewArtifactWarning ? { reviewArtifactWarning: job.result.reviewArtifactWarning } : {}),

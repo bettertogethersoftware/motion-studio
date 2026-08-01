@@ -1,15 +1,31 @@
-/* Motion Studio — Film Editor (vanilla JS, no build step).
+/* Motion Studio — the film page (vanilla JS, no build step).
  *
- * Edits ONE saved film (/film.html?id=<filmId>, the id a "ws/film" slug path
- * sent URL-encoded as one segment): an ordered scene list plus master audio /
- * caption / overlay tracks, persisted through PATCH /api/films/:id. Scenes
- * and assets belong to the film's own folder (scenes/, assets/, out/); a
- * scene's full id is `${filmId}/${slug}`. The timeline is the document; every
- * block is data first (film.audio[n], film.captions[n], …) and pixels second.
+ * ONE page per film (/film.html?id=<filmId>, the id a "ws/film" slug path sent
+ * URL-encoded as one segment), in two modes over the same document, timeline
+ * and player:
+ *
+ *   watch & advise (default) — the human half of an AI-directed production.
+ *     Play the film, walk the Film → Sequence → Scene/Footage tree, click the
+ *     thing that looks wrong, and leave plain-language advice. Read-only:
+ *     nothing here mutates production, and nothing waits for approval.
+ *   advanced editing — every production control this editor has always had:
+ *     add, trim, reorder, render, build.
+ *
+ * There is no second review page. A mode is a CSS class plus a handful of
+ * guards, not a separate surface with its own idea of the same timeline.
+ *
+ * The document: an ordered segment list (scenes and footage) plus master
+ * audio / caption / overlay tracks, persisted through PATCH /api/films/:id.
+ * Scenes and assets belong to the film's own folder (scenes/, assets/, out/);
+ * a scene's full id is `${filmId}/${slug}`. The timeline IS the document —
+ * every block is data first (film.audio[n], film.captions[n], …) and pixels
+ * second. A sequence is a label on segments, so grouping moves no files.
  *
  * Preview honesty:
- *  - Video plays the scenes' REAL rendered outputs back to back (two <video>
- *    elements double-buffer across cuts).
+ *  - "preview" plays the scenes' REAL rendered outputs back to back (two
+ *    <video> elements double-buffer across cuts).
+ *  - "built film" plays one archived delivery and pins to it — it never swaps
+ *    beneath the playhead, and advice records exactly which one was visible.
  *  - Master audio auditions through POST /api/films/:id/preview-audio — the
  *    build's exact ffmpeg mix (gains, fades, trims, sidechain ducking,
  *    limiter). A WebAudio approximation of that graph would lie about
@@ -87,7 +103,8 @@ const state = {
   playhead: 0,       // float frames
   playing: false,
   play: { t0: 0, frame0: 0, raf: 0 },
-  selection: null,   // {kind:'scene',index} | {kind:'audio'|'caption'|'overlay', id} | null
+  // {kind:'scene',index} | {kind:'sequence',sequence} | {kind:'audio'|'caption'|'overlay', id} | null
+  selection: null,
   undo: [], redo: [],
   saveTimer: null,
   saving: false,
@@ -102,12 +119,38 @@ const state = {
   inspectorMode: null,   // null = selection properties | 'build'
   sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
+
+  /* ---- the production loop (v0.23): what the AI did, what the human says --- */
+  advice: [],               // this film's advice, newest first
+  adviceSummary: null,
+  revisions: {},            // scene slug -> { count, currentRevisionId, latestAt }
+  sceneRevisions: new Map(),// scene slug -> full revision list (loaded on demand)
+  status: null,             // production status projection (agent activity, readiness)
+  deliveries: [],
+  latestDeliveryId: null,
+  pinnedDelivery: null,     // the delivery "built film" is locked to
+  manifest: null,           // that delivery's frozen manifest
+  updatedDismissed: false,
+  source: 'preview',        // 'preview' (live scene outputs) | 'delivery' (a build)
+  watchingRevision: null,   // { slug, revision } while auditioning an older take
+  aiming: false,            // "advise AI" pressed with nothing selected
+  adviceCtx: null,          // what the open popup is aimed at
+  collapsedSequences: new Set(),
+  openAdviceId: null,
 };
 
 let reviewRequestId = 0;
 
 const fps = () => state.detail?.fps || 30;
-const totalFrames = () => state.detail?.totalFrames || 0;
+// One frame domain for the whole page. In "built film" mode the archived file
+// is what scrubs, so its length wins; when the cut has moved on since that
+// build the two disagree, and `deliveryIsStale()` says so out loud rather than
+// letting the timeline quietly mislabel the picture.
+const totalFrames = () => (state.source === 'delivery' && state.manifest?.totalFrames
+  ? state.manifest.totalFrames
+  : state.detail?.totalFrames || 0);
+const deliveryIsStale = () => !!(state.source === 'delivery' && state.manifest
+  && state.manifest.totalFrames !== (state.detail?.totalFrames ?? state.manifest.totalFrames));
 // Ids are slug paths ("ws/film", "ws/film/scene") sent as ONE encoded segment.
 const fid = encodeURIComponent(filmId ?? '');
 const sceneApi = (slug) => `/api/scenes/${encodeURIComponent(`${filmId}/${slug}`)}`;
@@ -131,7 +174,9 @@ function frameOfEvent(ev) {
 /* ------------------------------ persistence ---------------------------- */
 
 const EDITABLE = ['name', 'scenes', 'audio', 'overlays', 'captions', 'captionStyle',
-  'audioTargetPeakDb', 'burnCaptions', 'outputFilename', 'deliverables'];
+  // `sequences` carries the narrative labels' intent text. The labels themselves
+  // live on the segments inside `scenes`, so a regrouping is one atomic patch.
+  'sequences', 'audioTargetPeakDb', 'burnCaptions', 'outputFilename', 'deliverables'];
 
 function snapshot() {
   return JSON.parse(JSON.stringify(Object.fromEntries(EDITABLE.map((k) => [k, state.film[k]]))));
@@ -156,23 +201,54 @@ async function doSave() {
   setSaveState('saving…', 'dirty');
   const sent = JSON.stringify(snapshot());
   try {
-    const { film, detail } = await api(`/api/films/${fid}`, { method: 'PATCH', body: { patch: JSON.parse(sent) } });
+    const { film, detail } = await api(`/api/films/${fid}`, {
+      method: 'PATCH',
+      // The revision this page last read. A patch replaces whole arrays, so
+      // without it a tab left open across an agent's edit would save its
+      // page-load-old `scenes` back and silently undo that work.
+      body: { patch: JSON.parse(sent), revision: state.film.revision },
+    });
     // Only adopt the server's film if nothing changed while the PATCH was in
     // flight — otherwise the response would clobber keystrokes.
     if (JSON.stringify(snapshot()) === sent) {
       state.film = film;
       state.dirty = false;
       setSaveState('saved ✓');
+    } else {
+      // Keystrokes landed mid-flight, so the local document stays authoritative
+      // — but it is now based on `film`, and the next save must say so.
+      state.film.revision = film.revision;
     }
     adoptDetail(detail);
     renderTimeline(); // scene offsets / problems may have moved
   } catch (err) {
-    setSaveState('save failed', 'err');
-    toastError(err);
+    if (err?.data?.code === 'film_conflict') await handleSaveConflict();
+    else { setSaveState('save failed', 'err'); toastError(err); }
   } finally {
     state.saving = false;
     if (state.dirty) scheduleSave();
   }
+}
+
+/**
+ * The film moved under us. There is no honest merge available: a patch is a
+ * statement about whole lists, so re-sending ours would revert whatever we did
+ * not see, and keeping ours locally would make every later save do the same.
+ * So we drop the unsaved edit — at most one debounce of work — reload the truth,
+ * and say plainly that it was dropped. Undo history goes too: those snapshots
+ * describe a document that no longer exists.
+ */
+async function handleSaveConflict() {
+  state.dirty = false;
+  clearTimeout(state.saveTimer);
+  state.undo.length = 0;
+  state.redo.length = 0;
+  syncUndoButtons();
+  setSaveState('reloaded — last edit not saved', 'err');
+  await refresh().catch(toastError);
+  toast('This film changed elsewhere (the AI, another tab, or an edit on disk) while you had it open. '
+    + 'The page has been reloaded and your last unsaved change was NOT applied — saving it would have reverted '
+    + 'the change you had not seen. Please make that edit again.');
 }
 
 /** One mutation = one undo step = one (debounced) save. */
@@ -252,9 +328,50 @@ async function refresh() {
   lastAudioJson = JSON.stringify(film.audio ?? []);
   adoptDetail(detail);
   $('#film-name').value = film.name;
-  document.title = `${film.name} — Motion Studio Film Editor`;
+  document.title = `${film.name} — Motion Studio`;
   await loadAssets();
+  await loadOverview();
   renderAll();
+}
+
+/**
+ * The production-loop snapshot: advice, per-scene revision counts, archived
+ * deliveries and the AI's activity, in one call. Deliberately separate from
+ * the film document — an event on this side must never overwrite the edits
+ * the human is in the middle of making on that side.
+ */
+let catchingUp = false;
+
+async function loadOverview() {
+  let snap;
+  try { snap = await api(`/api/films/${fid}/overview`); }
+  catch { return; } // a film that will not plan still edits fine
+  // The overview carries the current film document, so this is also where an
+  // open tab notices the AI edited the film under it. Catching up while clean
+  // costs nothing and keeps the page from drifting for hours until its next
+  // save conflicts. While dirty we say so and leave the human's edit alone —
+  // adopting the server's document would be the very clobber we are avoiding.
+  const moved = snap.film?.revision && state.film?.revision && snap.film.revision !== state.film.revision;
+  if (moved && !catchingUp) {
+    if (state.dirty) {
+      setSaveState('changed elsewhere', 'err');
+    } else {
+      catchingUp = true;
+      try { await refresh(); } finally { catchingUp = false; }
+      return; // refresh() re-ran this function with the new document
+    }
+  }
+  state.advice = snap.advice ?? [];
+  state.revisions = snap.revisions ?? {};
+  state.status = snap.status ?? null;
+  state.deliveries = snap.deliveries ?? [];
+  state.latestDeliveryId = snap.currentDeliveryId ?? null;
+  if (!state.pinnedDelivery) state.pinnedDelivery = state.latestDeliveryId;
+  if (state.pinnedDelivery && (!state.manifest || state.manifest.id !== state.pinnedDelivery)) {
+    try { state.manifest = await api(`/api/films/${fid}/deliveries/${encodeURIComponent(state.pinnedDelivery)}`); }
+    catch { state.pinnedDelivery = null; state.manifest = null; }
+  }
+  if (!state.latestDeliveryId) { state.pinnedDelivery = null; state.manifest = null; }
 }
 
 async function loadAssets() {
@@ -291,6 +408,8 @@ function renderHeader() {
     ul.appendChild(li);
   }
   if (!problems.length) $('#problems-panel').classList.add('hidden');
+  renderProductionLine();
+  renderUpdatedBanner();
 }
 
 $('#btn-problems').addEventListener('click', () => $('#problems-panel').classList.toggle('hidden'));
@@ -321,7 +440,45 @@ function sceneAt(frame) {
   return { scene: null, index: -1 };
 }
 
+/**
+ * "built film" playback: one archived delivery, pinned. It is the only place
+ * the human sees the real mix, the real overlays and the real burned captions,
+ * so it must not silently become a different film — a newer build offers
+ * itself in a banner and is never swapped in beneath the playhead.
+ */
+function syncDeliveryVideo(frame) {
+  const v = $('#video-film');
+  videoEls.forEach((el) => { el.classList.remove('active'); el.pause(); });
+  activeVideo = null;
+  const ph = $('#scene-placeholder');
+  if (!state.manifest) {
+    v.classList.remove('active');
+    v.pause();
+    ph.classList.remove('hidden');
+    ph.querySelector('.ph-name').textContent = 'no built film yet';
+    ph.querySelector('.ph-note').textContent = 'The AI has not assembled one. Switch to “preview” to watch the scenes as they stand.';
+    return;
+  }
+  ph.classList.add('hidden');
+  v.classList.add('active');
+  const src = `/api/films/${fid}/deliveries/${encodeURIComponent(state.pinnedDelivery)}/file`;
+  if (v.dataset.src !== src) { v.dataset.src = src; v.src = src; }
+  v.muted = false;
+  const t = frame / (state.manifest.fps || fps());
+  const drift = Math.abs(v.currentTime - t);
+  if (state.playing) {
+    if (drift > 0.4 && v.readyState >= 1) v.currentTime = t;
+    if (v.paused) v.play().catch(() => {});
+  } else {
+    if (!v.paused) v.pause();
+    if (drift > 0.03 && v.readyState >= 1) v.currentTime = t;
+  }
+}
+
 function syncVideo(frame) {
+  if (state.source === 'delivery') return syncDeliveryVideo(frame);
+  $('#video-film').classList.remove('active');
+  $('#video-film').pause();
   const { scene, index } = sceneAt(frame);
   const ph = $('#scene-placeholder');
   const playable = scene && (scene.kind === 'footage' ? !scene.missing : scene.rendered);
@@ -337,7 +494,12 @@ function syncVideo(frame) {
   }
   ph.classList.add('hidden');
 
-  const src = sceneSrc(scene);
+  // Auditioning an older take substitutes ONLY that scene's picture, in place,
+  // so the human compares it against the cut it actually sits in. Nothing is
+  // written — asking for it back is advice, made from the inspector.
+  const src = state.watchingRevision?.slug === scene.slug
+    ? `${sceneApi(scene.slug)}/revisions/${encodeURIComponent(state.watchingRevision.revision.id)}/file`
+    : sceneSrc(scene);
   let el = videoEls.find((v) => v.dataset.src === src);
   if (!el) {
     el = videoEls.find((v) => v !== activeVideo) ?? videoEls[0];
@@ -381,6 +543,23 @@ function updateLayers(frame) {
   if (!film) return;
   const pb = $('#player-box');
   const layer = $('#overlay-layer');
+
+  // A built film already HAS its overlays composited and, when burnCaptions is
+  // on, its captions burned. Drawing them again would double them — so in that
+  // mode the DOM layers show only what the file genuinely lacks.
+  if (state.source === 'delivery') {
+    for (const [id, el] of state.overlayEls) { el.remove(); state.overlayEls.delete(id); }
+    const capEl = $('#caption-layer');
+    const m = state.manifest;
+    const burned = m ? m.burnCaptions : film.burnCaptions;
+    const list = m ? (m.captions ?? []) : (film.captions ?? []);
+    capEl.textContent = burned ? '' : list.filter((c) => frame >= c.fromFrame && frame < c.toFrame).map((c) => c.text).join('\n');
+    const st = (m ? m.captionStyle : film.captionStyle) ?? {};
+    capEl.style.fontSize = `${(pb.clientHeight * (st.sizePct ?? 4.5)) / 100}px`;
+    if ((st.position ?? 'bottom') === 'top') { capEl.style.top = '4.5%'; capEl.style.bottom = 'auto'; }
+    else { capEl.style.bottom = '4.5%'; capEl.style.top = 'auto'; }
+    return;
+  }
 
   // Overlays — keyed elements so a playing video overlay isn't recreated per frame.
   const live = new Set();
@@ -478,6 +657,15 @@ function startPlayback() {
   state.play.t0 = performance.now();
   state.play.frame0 = state.playhead;
 
+  // A delivery carries its own finished mix; the file is the clock and the
+  // preview mixer stays out of it entirely.
+  if (state.source === 'delivery') {
+    syncVideo(state.playhead);
+    $('#video-film').play().catch(() => {});
+    state.play.raf = requestAnimationFrame(tick);
+    return;
+  }
+
   const hasMaster = (state.film.audio ?? []).length > 0;
   if (hasMaster) {
     if (state.mix.el && !state.mix.dirty) {
@@ -500,13 +688,17 @@ function stopPlayback() {
   state.mix.el?.pause();
   state.mix.active = false;
   videoEls.forEach((v) => v.pause());
+  $('#video-film').pause();
   for (const el of state.overlayEls.values()) el.pause?.();
 }
 
 function tick(now) {
   if (!state.playing) return;
   let f;
-  if (state.mix.active && state.mix.el && !state.mix.el.ended) {
+  const dv = $('#video-film');
+  if (state.source === 'delivery' && state.manifest && !dv.paused && !dv.ended) {
+    f = dv.currentTime * (state.manifest.fps || fps()); // the built file is the clock
+  } else if (state.mix.active && state.mix.el && !state.mix.el.ended) {
     f = state.mix.el.currentTime * fps(); // audio is the master clock
   } else {
     f = state.play.frame0 + ((now - state.play.t0) / 1000) * fps();
@@ -712,15 +904,28 @@ function renderTimeline() {
     inner.appendChild(r);
   }
 
+  /* sequences — the narrative band above the cut (v0.23) */
+  {
+    const { row: r, head, lane } = row('row-sequences', 'sequences', laneW);
+    const addSeq = document.createElement('button');
+    addSeq.className = 'lane-add';
+    addSeq.textContent = '+';
+    addSeq.title = 'group the selected segment onward into a new sequence';
+    addSeq.addEventListener('click', createSequenceFromSelection);
+    head.appendChild(addSeq);
+    for (const band of sequenceBands()) lane.appendChild(sequenceBlock(band));
+    inner.appendChild(r);
+  }
+
   /* scenes */
   {
     const { row: r, head, lane } = row('row-scenes', 'scenes', laneW);
-    const add = document.createElement('button');
-    add.className = 'lane-add';
-    add.textContent = '+';
-    add.title = 'add scenes — drag one from the left rail, or create a new one there';
-    add.addEventListener('click', revealScenesRail);
-    head.appendChild(add);
+    const addScene = document.createElement('button');
+    addScene.className = 'lane-add';
+    addScene.textContent = '+';
+    addScene.title = 'add scenes — drag one from the left rail, or create a new one there';
+    addScene.addEventListener('click', revealScenesRail);
+    head.appendChild(addScene);
     addCutlines(lane);
     (state.detail?.scenes ?? []).forEach((s, i) => lane.appendChild(sceneBlock(s, i)));
     inner.appendChild(r);
@@ -788,6 +993,23 @@ function renderTimeline() {
     });
   }
 
+  /* advice — where the human has spoken (v0.23) */
+  {
+    const { row: r, lane } = row('row-advice', 'advice', laneW);
+    for (const a of state.advice ?? []) {
+      const frame = adviceFilmFrame(a);
+      if (frame == null) continue;
+      const m = document.createElement('div');
+      m.className = `adv-marker${a.status === 'resolved' ? ' resolved' : ''}`;
+      m.style.left = `${frame * state.pxf}px`;
+      m.title = `${humanAdviceStatus(a).label} — ${a.message.slice(0, 120)}`;
+      m.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+      m.addEventListener('click', (ev) => { ev.stopPropagation(); focusAdvice(a); });
+      lane.appendChild(m);
+    }
+    inner.appendChild(r);
+  }
+
   /* playhead */
   const ph = document.createElement('div');
   ph.className = 'tl-playhead';
@@ -795,8 +1017,112 @@ function renderTimeline() {
   ph.style.left = `${HEAD_W + state.playhead * state.pxf}px`;
   inner.appendChild(ph);
 
+  inner.classList.toggle('stale-delivery', deliveryIsStale());
   sc.scrollLeft = keepScroll.left;
   sc.scrollTop = keepScroll.top;
+}
+
+/* --------------------------- narrative sequences ------------------------ */
+
+/**
+ * Consecutive segments sharing a `sequence` label form one band — the same
+ * rule the engine's `sequenceBands` uses, so the picture here and the plan the
+ * AI reads can never disagree. Unlabeled runs become anonymous bands so the
+ * timeline is always fully covered: a half-labeled film still navigates.
+ */
+function sequenceBands() {
+  const bands = [];
+  (state.detail?.scenes ?? []).forEach((s, i) => {
+    const label = s.sequence ?? null;
+    const last = bands[bands.length - 1];
+    if (last && last.label === label) {
+      last.to = i;
+      last.frames += s.durationInFrames ?? 0;
+      last.segments.push(s);
+      return;
+    }
+    bands.push({
+      label, from: i, to: i, offset: s.filmOffset ?? 0,
+      frames: s.durationInFrames ?? 0, segments: [s],
+    });
+  });
+  return bands;
+}
+
+function sequenceBlock(band) {
+  const el = document.createElement('div');
+  const selected = state.selection?.kind === 'sequence' && state.selection.sequence === band.label;
+  el.className = `seq-band${band.label ? '' : ' anon'}${selected ? ' selected' : ''}`;
+  el.style.left = `${band.offset * state.pxf}px`;
+  el.style.width = `${Math.max(6, band.frames * state.pxf)}px`;
+  const name = document.createElement('span');
+  name.className = 'seq-name';
+  name.textContent = band.label ?? '—';
+  el.appendChild(name);
+  if (band.label) {
+    const n = unresolvedCount((a) => a.target?.type === 'sequence' && a.target.sequence === band.label);
+    if (n) el.appendChild(adviceBadge(n));
+    el.title = `sequence “${band.label}” — ${band.segments.length} segment${band.segments.length === 1 ? '' : 's'}`
+      + `${state.film?.sequences?.[band.label]?.intent ? `\n${state.film.sequences[band.label].intent}` : ''}`;
+    el.addEventListener('pointerdown', (ev) => {
+      ev.stopPropagation();
+      select({ kind: 'sequence', sequence: band.label });
+      stopPlayback();
+      setPlayhead(band.offset);
+    });
+  } else {
+    el.title = 'not in a sequence yet — select a segment and use “+ seq”';
+  }
+  return el;
+}
+
+/** Group the selected segment and every following one into a named sequence. */
+function createSequenceFromSelection() {
+  const sel = state.selection;
+  const from = sel?.kind === 'scene' ? sel.index : 0;
+  const seg = state.detail?.scenes?.[from];
+  if (!seg) return toast('Add a scene or clip first.', { kind: 'error' });
+  const name = prompt('Name this sequence (it groups from the selected segment onward):');
+  if (!name || !name.trim()) return;
+  const label = name.trim().slice(0, 80);
+  mutate((film) => {
+    for (let i = from; i < film.scenes.length; i++) film.scenes[i].sequence = label;
+    film.sequences = { ...(film.sequences ?? {}), [label]: film.sequences?.[label] ?? {} };
+  }, { structural: true, silent: true });
+  for (let i = from; i < state.detail.scenes.length; i++) state.detail.scenes[i].sequence = label;
+  select({ kind: 'sequence', sequence: label });
+  renderAll();
+}
+
+function renameSequence(oldLabel) {
+  const name = prompt(`Rename sequence “${oldLabel}” to:`, oldLabel);
+  if (!name || !name.trim() || name.trim() === oldLabel) return;
+  const label = name.trim().slice(0, 80);
+  mutate((film) => {
+    for (const s of film.scenes) if (s.sequence === oldLabel) s.sequence = label;
+    const meta = { ...(film.sequences ?? {}) };
+    meta[label] = meta[oldLabel] ?? {};
+    delete meta[oldLabel];
+    film.sequences = meta;
+  }, { structural: true, silent: true });
+  for (const s of state.detail.scenes) if (s.sequence === oldLabel) s.sequence = label;
+  if (state.selection?.kind === 'sequence' && state.selection.sequence === oldLabel) {
+    state.selection = { kind: 'sequence', sequence: label };
+  }
+  renderAll();
+}
+
+/** Drop the grouping. The segments stay exactly where they are. */
+function ungroupSequence(label) {
+  mutate((film) => {
+    for (const s of film.scenes) if (s.sequence === label) delete s.sequence;
+    const meta = { ...(film.sequences ?? {}) };
+    delete meta[label];
+    film.sequences = meta;
+  }, { structural: true, silent: true });
+  for (const s of state.detail.scenes) if (s.sequence === label) delete s.sequence;
+  if (state.selection?.kind === 'sequence' && state.selection.sequence === label) state.selection = null;
+  renderAll();
 }
 
 /* ------------------------------- blocks -------------------------------- */
@@ -909,6 +1235,8 @@ function sceneBlock(s, index) {
     ? `render ${job.percent ?? 0}%`
     : `${s.durationInFrames ?? 0}f`;
   el.append(dot, label, dur);
+  const advN = unresolvedCount(segmentAdviceMatcher(s));
+  if (advN) el.appendChild(adviceBadge(advN));
 
   // Drag to reorder: scenes are butt-joined, so the only degree of freedom is order.
   el.addEventListener('pointerdown', (ev) => {
@@ -1165,16 +1493,25 @@ function renderSelectionAffected(kind, id) {
 function select(sel) {
   state.selection = sel;
   state.inspectorMode = null; // picking a block always shows its properties
+  state.openAdviceId = null;
   for (const b of document.querySelectorAll('.blk')) {
     const on = !!sel && sel.kind === b.dataset.kind
       && String(sel.kind === 'scene' ? sel.index : sel.id) === b.dataset.id;
     b.classList.toggle('selected', on);
   }
+  for (const b of document.querySelectorAll('.seq-band')) {
+    b.classList.toggle('selected', sel?.kind === 'sequence' && b.querySelector('.seq-name')?.textContent === sel.sequence);
+  }
+  renderTree();
   renderInspector();
+  // "Advise AI" with nothing selected arms one click: whatever the human picks
+  // next becomes the target, and the popup opens on it immediately.
+  if (state.aiming) { disarmAim(); openAdviceDialog(); }
 }
 
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
+  if ($('#advice-dialog')?.open) return; // the popup owns the keyboard while it is up
   if (e.code === 'Space') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
   else if (e.code === 'ArrowLeft') { stopPlayback(); setPlayhead(Math.floor(state.playhead) - (e.shiftKey ? 10 : 1)); }
   else if (e.code === 'ArrowRight') { stopPlayback(); setPlayhead(Math.floor(state.playhead) + (e.shiftKey ? 10 : 1)); }
@@ -1186,7 +1523,8 @@ document.addEventListener('keydown', (e) => {
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); scheduleSave({ now: true }); }
-  else if (e.code === 'Escape') select(null);
+  else if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); startAdvice(); }
+  else if (e.code === 'Escape') { if (state.aiming) disarmAim(); else select(null); }
 });
 document.addEventListener('keydown', (e) => {
   // Ctrl+Z/S must work while typing in inspector fields too.
@@ -1209,6 +1547,9 @@ function reflowLocalScenes() {
 function deleteSelection() {
   const sel = state.selection;
   if (!sel) return;
+  // Deleting a sequence would read as "delete these scenes". It only ever
+  // means "stop grouping them", which has its own, honestly named action.
+  if (sel.kind === 'sequence') return ungroupSequence(sel.sequence);
   if (sel.kind === 'scene') {
     mutate((film) => film.scenes.splice(sel.index, 1), { structural: true, silent: true });
     state.detail.scenes.splice(sel.index, 1);
@@ -1253,11 +1594,18 @@ function renderInspector() {
   box.innerHTML = '';
   if (state.inspectorMode === 'build') return renderBuildInspector(box);
   const sel = state.selection;
-  if (!sel) return renderFilmInspector(box);
-  if (sel.kind === 'scene') return renderSceneInspector(box, sel.index);
-  if (sel.kind === 'audio') return renderAudioInspector(box, sel.id);
-  if (sel.kind === 'caption') return renderCaptionInspector(box, sel.id);
-  if (sel.kind === 'overlay') return renderOverlayInspector(box, sel.id);
+  // Properties first, then the conversation about this exact thing: which
+  // takes of it exist, and what the human has already said. Advising is
+  // driven from here because the inspector already knows the selection —
+  // that is why there is no separate advise button in the header.
+  if (!sel) renderFilmInspector(box);
+  else if (sel.kind === 'sequence') renderSequenceInspector(box, sel.sequence);
+  else if (sel.kind === 'scene') renderSceneInspector(box, sel.index);
+  else if (sel.kind === 'audio') renderAudioInspector(box, sel.id);
+  else if (sel.kind === 'caption') renderCaptionInspector(box, sel.id);
+  else if (sel.kind === 'overlay') renderOverlayInspector(box, sel.id);
+  renderVersionsSection(box);
+  renderAdviceSection(box);
 }
 
 const cloneJson = (value) => JSON.parse(JSON.stringify(value));
@@ -1827,10 +2175,10 @@ for (const btn of document.querySelectorAll('[data-close]')) {
 
 /* ---- scenes ---- */
 
-/* The scenes rail: every scene folder in the film, one drag away from the
- * play order. Folders the document lists are flagged "in film" (a scene
- * plays once, so they are inert); folders on disk the play order does not
- * reference are `unlisted` and can be dragged in (or appended with +).
+/* The unused-scenes rail: scene folders on disk that the play order does NOT
+ * reference. Listed scenes moved up into the tree (v0.23.1) — showing them in
+ * both places was the confusion, since the tree is the play order and this is
+ * the shelf beside it. A row here is one drag (or +) away from the timeline.
  * "+ new scene" scaffolds a fresh folder — the server appends it. */
 
 function sceneCompat(f) {
@@ -1853,24 +2201,21 @@ function renderScenesRail() {
   const ul = $('#fe-scene-list');
   if (!ul || !state.film) return;
   ul.innerHTML = '';
-  const rows = state.sceneFolders ?? [];
+  const listedSlugs = new Set(state.film.scenes.map((s) => s.slug));
+  const rows = (state.sceneFolders ?? []).filter((f) => !listedSlugs.has(f.slug));
+  document.querySelector('.fe-rail-split')?.classList.toggle('hidden', !rows.length);
   if (!rows.length) {
-    ul.innerHTML = '<li class="pick-empty">no scenes yet — start with “+ new scene” below</li>';
+    ul.classList.add('hidden');
     return;
   }
-  const listedSlugs = new Set(state.film.scenes.map((s) => s.slug));
+  ul.classList.remove('hidden');
   for (const f of rows) {
     const li = document.createElement('li');
-    const listed = listedSlugs.has(f.slug);
-    if (listed) li.classList.add('listed');
-    li.title = listed
-      ? 'in the play order — select its block on the timeline'
-      : 'drag onto the timeline to place, or + to append';
+    li.title = 'drag onto the timeline to place, or + to append';
     const compat = sceneCompat(f);
     if (compat.ok === false || f.missing) li.classList.add('incompat');
-    const name = el('span', { class: 'sr-name', text: f.name ?? f.slug });
-    li.appendChild(name);
-    if (!listed && !f.missing) {
+    li.appendChild(el('span', { class: 'sr-name', text: f.name ?? f.slug }));
+    if (!f.missing) {
       const add = el('button', {
         class: 'sr-add', text: '+', title: 'append as the last scene',
         onclick: (ev) => { ev.stopPropagation(); insertSceneAt(f.slug, state.film.scenes.length); },
@@ -1882,12 +2227,9 @@ function renderScenesRail() {
       class: 'sr-meta',
       text: (f.missing ? 'unreadable ' : compat.ok === false ? '≠ film format ' : '') || ' ',
     });
-    meta.appendChild(el('span', {
-      class: `sr-flag${listed ? '' : ' unlisted'}`,
-      text: listed ? 'in film' : 'unlisted',
-    }));
+    meta.appendChild(el('span', { class: 'sr-flag unlisted', text: 'unused' }));
     li.appendChild(meta);
-    if (!listed && !f.missing) li.addEventListener('pointerdown', (ev) => dragSceneFromRail(ev, f));
+    if (!f.missing) li.addEventListener('pointerdown', (ev) => dragSceneFromRail(ev, f));
     ul.appendChild(li);
   }
 }
@@ -1938,7 +2280,14 @@ async function insertSceneAt(slug, index) {
   if (state.film.scenes.some((s) => s.slug === slug)) {
     return toast('That scene is already in the play order — a scene plays once.', { kind: 'error' });
   }
-  mutate((film) => film.scenes.splice(index, 0, { slug }), { structural: true, silent: true });
+  mutate((film) => {
+    // Land inside whatever sequence surrounds the drop, so placing a scene in
+    // the middle of "Opening" does not silently cut the band in three.
+    const before = film.scenes[index - 1]?.sequence;
+    const after = film.scenes[index]?.sequence;
+    const sequence = before && before === after ? before : (after ?? before);
+    film.scenes.splice(index, 0, { slug, ...(sequence ? { sequence } : {}) });
+  }, { structural: true, silent: true });
   await waitForSaved(); // the save returns the recomputed layout
   renderAll();
 }
@@ -2527,13 +2876,795 @@ function pollBuild() {
   state.buildPoll = setInterval(poll, 700);
 }
 
+/* ------------------------------------------------------------------------ */
+/* The production loop: tree, advice, versions, deliveries                   */
+/*                                                                           */
+/* Motion Studio is AI-directed and human-advised. Everything below is the    */
+/* human's half of that: see what the AI made, say what is wrong in plain     */
+/* language, and read what it did about it. Nothing here approves, claims,    */
+/* promotes or blocks — asking for an older take is advice too.               */
+/* ------------------------------------------------------------------------ */
+
+const fmtWhen = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return (Date.now() - d.getTime()) < 86400000
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+};
+
+/** Internal advice state → the four words the human actually needs. */
+function humanAdviceStatus(a) {
+  if (a.status === 'open') return { cls: 'sent', label: 'advice sent' };
+  if (a.status === 'acknowledged') return { cls: 'received', label: 'AI received it' };
+  if (a.status === 'working') return { cls: 'working', label: 'AI is working on it' };
+  if (a.status === 'needs-clarification') return { cls: 'question', label: 'AI needs more information' };
+  // A withdrawn item was never the AI's to answer — saying "AI reviewed it"
+  // would credit a decision nobody made.
+  if (a.resolution?.withdrawnByHuman) return { cls: 'reviewed', label: 'you withdrew this' };
+  const outcome = a.resolution?.outcome;
+  return (outcome === 'applied' || outcome === 'partially-applied')
+    ? { cls: 'done', label: 'updated' }
+    : { cls: 'reviewed', label: 'AI reviewed it' };
+}
+
+const unresolvedCount = (pred) => (state.advice ?? []).filter((a) => a.status !== 'resolved' && pred(a)).length;
+
+/** Which advice belongs to this timeline segment — slug for scenes, id for clips. */
+function segmentAdviceMatcher(seg) {
+  if (seg.kind === 'footage') return (a) => a.target?.type === 'footage' && a.target.itemId === seg.id;
+  return (a) => a.target?.type === 'scene' && a.target.scene === seg.slug;
+}
+
+function adviceBadge(n) {
+  const b = document.createElement('span');
+  b.className = 'adv-badge';
+  b.textContent = String(n);
+  b.title = `${n} unresolved piece${n === 1 ? '' : 's'} of advice`;
+  return b;
+}
+
+/** Where a piece of advice sits on the film, if it can be placed at all. */
+function adviceFilmFrame(a) {
+  if (a.observation?.filmFrame != null) return a.observation.filmFrame;
+  if (a.target?.filmFrame != null) return a.target.filmFrame;
+  const segs = state.detail?.scenes ?? [];
+  const seg = a.target?.type === 'scene' ? segs.find((s) => s.slug === a.target.scene)
+    : a.target?.type === 'footage' ? segs.find((s) => s.id === a.target.itemId)
+      : a.target?.type === 'sequence' ? segs.find((s) => s.sequence === a.target.sequence)
+        : null;
+  if (seg) return (seg.filmOffset ?? 0) + (a.target?.sceneFrame ?? 0);
+  const item = a.target?.itemId
+    ? [...(state.film?.audio ?? []), ...(state.film?.captions ?? []), ...(state.film?.overlays ?? [])]
+      .find((x) => x.id === a.target.itemId)
+    : null;
+  if (item) return item.startInFrames ?? item.fromFrame ?? 0;
+  return null;
+}
+
+/* ------------------------------ status line ----------------------------- */
+
+function renderProductionLine() {
+  const box = $('#production-line');
+  if (!box) return;
+  const s = state.status;
+  if (!s) { box.textContent = ''; box.className = 'fe-production mono'; return; }
+  const live = (s.activity ?? []).filter((a) => !a.stale);
+  let cls = 'idle';
+  let text;
+  if (live.length) {
+    cls = 'live';
+    text = `${live[0].activity}${live.length > 1 ? ` (+${live.length - 1})` : ''}`;
+  } else if ((s.advice?.unresolved ?? 0) > 0) {
+    cls = 'pending';
+    text = `${s.advice.unresolved} advice waiting for the next AI run`;
+  } else if (!s.currentDelivery) {
+    text = 'no film built yet';
+  } else if (s.newerWorkThanDelivery) {
+    cls = 'pending';
+    text = 'newer work awaits a film build';
+  } else {
+    text = 'waiting for the next AI run';
+  }
+  box.className = `fe-production mono ${cls}`;
+  box.innerHTML = '<span class="dot"></span>';
+  box.appendChild(document.createTextNode(text));
+}
+
+function renderUpdatedBanner() {
+  const stale = state.latestDeliveryId && state.pinnedDelivery && state.latestDeliveryId !== state.pinnedDelivery;
+  $('#film-updated')?.classList.toggle('hidden', !(stale && !state.updatedDismissed));
+  const tag = $('#delivery-tag');
+  if (!tag) return;
+  if (state.source !== 'delivery' || !state.manifest) { tag.classList.add('hidden'); return; }
+  tag.classList.remove('hidden');
+  const parts = [`built ${fmtWhen(state.manifest.createdAt)}`];
+  if (state.pinnedDelivery !== state.latestDeliveryId) parts.push('pinned · a newer build exists');
+  if (deliveryIsStale()) parts.push(`the cut has changed since (${state.manifest.totalFrames}f built → ${state.detail?.totalFrames ?? '?'}f now)`);
+  tag.textContent = parts.join(' · ');
+  tag.classList.toggle('warn', deliveryIsStale());
+}
+
+/* --------------------------------- tree --------------------------------- */
+
+/**
+ * Film → Sequence → Scene/Footage. It is the same play order the timeline
+ * draws, read vertically: the human picks a thing here or there and both
+ * highlight, because both are views of `film.scenes[]`.
+ */
+function renderTree() {
+  const box = $('#fe-tree');
+  if (!box || !state.detail) return;
+  box.innerHTML = '';
+  const sel = state.selection;
+
+  const rootRow = el('div', {
+    class: `tree-row tree-film${sel ? '' : ' selected'}`,
+    onpointerdown: () => select(null),
+  },
+  el('span', { class: 'tree-twist', text: '▾' }),
+  el('span', { class: 'tree-name', text: state.film?.name ?? 'film' }),
+  el('span', { class: 'tree-meta mono', text: state.detail.totalFrames ? timecode(state.detail.totalFrames) : '—' }));
+  const filmAdvice = unresolvedCount((a) => a.target?.type === 'film');
+  if (filmAdvice) rootRow.appendChild(adviceBadge(filmAdvice));
+  box.appendChild(rootRow);
+
+  for (const band of sequenceBands()) {
+    const key = band.label ?? `__anon-${band.from}`;
+    const collapsed = state.collapsedSequences.has(key);
+    const bandRow = el('div', {
+      class: `tree-row tree-seq${band.label ? '' : ' anon'}`
+        + `${sel?.kind === 'sequence' && sel.sequence === band.label ? ' selected' : ''}`,
+    });
+    bandRow.appendChild(el('span', {
+      class: 'tree-twist',
+      text: collapsed ? '▸' : '▾',
+      onpointerdown: (ev) => {
+        ev.stopPropagation();
+        if (collapsed) state.collapsedSequences.delete(key); else state.collapsedSequences.add(key);
+        renderTree();
+      },
+    }));
+    bandRow.appendChild(el('span', { class: 'tree-name', text: band.label ?? 'not in a sequence' }));
+    bandRow.appendChild(el('span', { class: 'tree-meta mono', text: `${band.segments.length}` }));
+    if (band.label) {
+      const n = unresolvedCount((a) => a.target?.type === 'sequence' && a.target.sequence === band.label);
+      if (n) bandRow.appendChild(adviceBadge(n));
+      bandRow.title = state.film?.sequences?.[band.label]?.intent ?? 'a narrative sequence';
+      bandRow.addEventListener('pointerdown', () => {
+        select({ kind: 'sequence', sequence: band.label });
+        stopPlayback();
+        setPlayhead(band.offset);
+      });
+    }
+    box.appendChild(bandRow);
+    if (collapsed) continue;
+
+    for (let i = band.from; i <= band.to; i++) {
+      const seg = state.detail.scenes[i];
+      if (!seg) continue;
+      const footage = seg.kind === 'footage';
+      const ready = footage ? !seg.missing : seg.rendered;
+      const row = el('div', {
+        class: `tree-row tree-seg${footage ? ' footage' : ''}${ready ? '' : ' unready'}`
+          + `${sel?.kind === 'scene' && sel.index === i ? ' selected' : ''}`,
+        onpointerdown: () => {
+          select({ kind: 'scene', index: i });
+          stopPlayback();
+          setPlayhead(seg.filmOffset ?? 0);
+        },
+      },
+      el('span', { class: 'tree-dot' }),
+      el('span', { class: 'tree-name', text: seg.missing ? `⚠ ${seg.slug ?? seg.footage}` : seg.name }),
+      el('span', { class: 'tree-meta mono', text: `${seg.durationInFrames ?? 0}f` }));
+      row.title = footage
+        ? `footage — ${seg.footage}`
+        : `${seg.slug}${seg.rendered ? '' : ' — not rendered yet'}`;
+      const n = unresolvedCount(segmentAdviceMatcher(seg));
+      if (n) row.appendChild(adviceBadge(n));
+      const revs = footage ? null : state.revisions[seg.slug];
+      if (revs?.count > 1) {
+        row.appendChild(el('span', { class: 'tree-vers mono', text: `v${revs.count}`, title: `${revs.count} archived takes` }));
+      }
+      box.appendChild(row);
+    }
+  }
+}
+
+/* ------------------------- inspector: shared bits ----------------------- */
+
+const itemLabel = (kind, item) => {
+  if (!item) return '(gone)';
+  if (kind === 'audio') return item.label ?? item.src?.split('/').pop() ?? 'audio';
+  if (kind === 'caption') return `“${String(item.text ?? '').slice(0, 48)}”`;
+  return item.src?.split('/').pop() ?? 'overlay';
+};
+
+function renderSequenceInspector(box, label) {
+  const band = sequenceBands().find((b) => b.label === label);
+  box.appendChild(el('h3', { text: 'sequence' }));
+  box.appendChild(el('div', { class: 'insp-title', text: label }));
+  if (!band) {
+    box.appendChild(el('p', { class: 'dim note', text: 'This sequence no longer has any segments.' }));
+    return;
+  }
+  const dl = el('dl', { class: 'insp-facts' });
+  const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
+  fact('segments', String(band.segments.length));
+  fact('starts at', timecode(band.offset));
+  fact('length', `${band.frames}f · ${timecode(band.frames)}`);
+  box.appendChild(dl);
+
+  const ta = el('textarea', {
+    rows: '2', maxlength: '500',
+    placeholder: 'What is this sequence for? (the AI reads it)',
+  });
+  ta.value = state.film?.sequences?.[label]?.intent ?? '';
+  ta.addEventListener('change', () => mutate((film) => {
+    const meta = { ...(film.sequences ?? {}) };
+    const text = ta.value.trim();
+    meta[label] = text ? { intent: text.slice(0, 500) } : {};
+    film.sequences = meta;
+  }, { silent: true }));
+  box.appendChild(labelled('intent', ta));
+  const row = el('div', { class: 'insp-row' });
+  row.appendChild(el('button', { class: 'ghost', text: 'rename…', onclick: () => renameSequence(label) }));
+  row.appendChild(el('button', { class: 'ghost danger', text: 'ungroup', onclick: () => ungroupSequence(label) }));
+  box.appendChild(row);
+}
+
+/* ---------------------------- versions section --------------------------- */
+
+/**
+ * Every promoted render is archived, so a scene has takes. Previewing one
+ * changes nothing; asking for one back is ADVICE — Studio never repoints
+ * production, because that decision is the director's.
+ */
+function renderVersionsSection(box) {
+  const sel = state.selection;
+  if (sel?.kind !== 'scene') return;
+  const seg = state.detail?.scenes?.[sel.index];
+  if (!seg || seg.kind === 'footage' || seg.missing) return;
+  const summary = state.revisions[seg.slug];
+  if (!summary?.count) return;
+
+  box.appendChild(el('hr', { class: 'sep' }));
+  box.appendChild(el('h3', { text: `versions · ${summary.count}` }));
+  const list = state.sceneRevisions.get(seg.slug);
+  if (!list) {
+    box.appendChild(el('p', { class: 'dim note', text: 'loading takes…' }));
+    loadSceneRevisions(seg.slug);
+    return;
+  }
+  const strip = el('div', { class: 'rev-strip' });
+  for (const rev of list) {
+    const card = el('div', {
+      class: `rev-card${state.watchingRevision?.revision?.id === rev.id ? ' playing' : ''}`,
+    });
+    const thumb = el('div', {
+      class: 'rev-thumb',
+      title: 'watch this take in the player (changes nothing)',
+      onclick: () => watchRevision(seg.slug, rev),
+    });
+    if (rev.hasContactSheet) {
+      const img = el('img', { loading: 'lazy', src: `${sceneApi(seg.slug)}/revisions/${encodeURIComponent(rev.id)}/contact` });
+      thumb.appendChild(img);
+    } else {
+      thumb.appendChild(el('span', { class: 'no-thumb', text: '▶' }));
+    }
+    card.appendChild(thumb);
+    const body = el('div', { class: 'rev-body' });
+    const badges = el('div', { class: 'rev-badges' });
+    if (rev.current) badges.appendChild(el('span', { class: 'rev-badge current', text: 'in the film' }));
+    if (rev.adviceIds?.length) badges.appendChild(el('span', { class: 'rev-badge', text: 'answers advice' }));
+    body.appendChild(badges);
+    if (rev.note) body.appendChild(el('div', { class: 'rev-note', text: rev.note }));
+    body.appendChild(el('div', { class: 'rev-meta mono', text: `${fmtWhen(rev.createdAt)}${rev.agent ? ` · ${rev.agent}` : ''} · ${rev.frames}f` }));
+    if (!rev.current) {
+      body.appendChild(el('button', {
+        class: 'ghost',
+        text: 'ask AI to use this',
+        title: 'sends advice naming this exact take — the AI decides, and answers with its reasoning',
+        onclick: (ev) => askForRevision(seg.slug, rev, ev.currentTarget),
+      }));
+    }
+    card.appendChild(body);
+    strip.appendChild(card);
+  }
+  box.appendChild(strip);
+  if (state.watchingRevision?.slug === seg.slug) {
+    const back = el('button', {
+      class: 'ghost', text: '↩ back to the take in the film',
+      onclick: () => { state.watchingRevision = null; renderInspector(); setPlayhead(state.playhead); },
+    });
+    box.appendChild(back);
+  }
+}
+
+async function loadSceneRevisions(slug) {
+  try {
+    const { revisions } = await api(`${sceneApi(slug)}/revisions`);
+    state.sceneRevisions.set(slug, revisions);
+  } catch {
+    state.sceneRevisions.set(slug, []);
+  }
+  if (state.selection?.kind === 'scene' && state.detail?.scenes?.[state.selection.index]?.slug === slug) renderInspector();
+}
+
+function watchRevision(slug, rev) {
+  state.watchingRevision = rev.current ? null : { slug, revision: rev };
+  const seg = (state.detail?.scenes ?? []).find((s) => s.slug === slug);
+  stopPlayback();
+  if (seg) setPlayhead(seg.filmOffset ?? 0);
+  renderInspector();
+  setPlayhead(state.playhead);
+}
+
+async function askForRevision(slug, rev, btn) {
+  btn.disabled = true;
+  try {
+    await api(`${sceneApi(slug)}/revisions/${encodeURIComponent(rev.id)}/prefer`, { method: 'POST', body: {} });
+    btn.textContent = '✓ asked the AI';
+    await loadOverview();
+    renderTree();
+    renderTimeline();
+  } catch (err) {
+    btn.disabled = false;
+    toastError(err);
+  }
+}
+
+/* ----------------------------- advice section ---------------------------- */
+
+/** Which advice belongs to the current selection. */
+function adviceScope() {
+  const sel = state.selection;
+  if (!sel) return { name: 'this film', pred: () => true };
+  if (sel.kind === 'sequence') {
+    const members = new Set(sequenceBands().find((b) => b.label === sel.sequence)?.segments.map((s) => s.slug ?? s.id) ?? []);
+    return {
+      name: `sequence “${sel.sequence}”`,
+      pred: (a) => (a.target?.type === 'sequence' && a.target.sequence === sel.sequence)
+        || members.has(a.target?.scene) || members.has(a.target?.itemId),
+    };
+  }
+  if (sel.kind === 'scene') {
+    const seg = state.detail?.scenes?.[sel.index];
+    if (!seg) return { name: 'this film', pred: () => true };
+    return { name: seg.name ?? seg.slug, pred: segmentAdviceMatcher(seg) };
+  }
+  return { name: 'this item', pred: (a) => a.target?.itemId === sel.id };
+}
+
+function renderAdviceSection(box) {
+  const scope = adviceScope();
+  const scoped = (state.advice ?? []).filter(scope.pred);
+  const open = scoped.filter((a) => a.status !== 'resolved');
+  const openAnywhere = (state.advice ?? []).filter((a) => a.status !== 'resolved');
+  box.appendChild(el('hr', { class: 'sep' }));
+  box.appendChild(el('div', { class: 'adv-head-row' },
+    el('h3', { text: open.length ? `advice · ${open.length} open` : 'advice' }),
+    // The only "advise" button on the page. With nothing selected it arms one
+    // targeting click instead of guessing what you meant.
+    el('button', { class: 'primary tiny-btn', text: '✎ advise', onclick: startAdvice })));
+  box.appendChild(el('div', { class: 'mono dim adv-scope', text: `on ${scope.name}` }));
+
+  if (scoped.length) {
+    const ul = el('ul', { class: 'adv-list' });
+    for (const a of scoped) ul.appendChild(adviceCard(a));
+    box.appendChild(ul);
+  } else {
+    box.appendChild(el('p', {
+      class: 'dim note',
+      text: 'Nothing said about this yet. What you send is kept together with what you were watching.',
+    }));
+  }
+
+  // Clearing the board. Without this, a typo or a note you thought better of
+  // is re-served to every later AI run, forever.
+  if (openAnywhere.length) {
+    box.appendChild(el('button', {
+      class: 'ghost danger adv-clear-all',
+      text: `withdraw all ${openAnywhere.length} open across the film`,
+      title: 'Closes every open item so the next AI run does not pick them up. '
+        + 'The wording and evidence stay on record.',
+      onclick: withdrawAllAdvice,
+    }));
+  }
+}
+
+function adviceCard(a) {
+  const st = humanAdviceStatus(a);
+  const li = el('li', { class: `adv${state.openAdviceId === a.id ? ' open' : ''}` });
+  li.appendChild(el('div', { class: 'adv-top' },
+    el('span', { class: `adv-status ${st.cls}`, text: st.label }),
+    el('span', { class: 'adv-when mono', text: fmtWhen(a.createdAt) })));
+  li.appendChild(el('div', { class: 'adv-msg', text: a.message }));
+
+  if (a.status === 'needs-clarification' && a.clarification) {
+    const clar = el('div', { class: 'adv-clar' }, el('span', { class: 'q', text: 'AI asks' }),
+      document.createTextNode(` ${a.clarification.question}`));
+    li.appendChild(clar);
+    const input = el('input', { placeholder: 'answer the AI…', maxlength: '4000' });
+    const reply = el('div', { class: 'adv-reply' }, input, el('button', {
+      class: 'ghost',
+      text: 'reply',
+      onclick: async (ev) => {
+        ev.stopPropagation();
+        const text = input.value.trim();
+        if (!text) return;
+        try {
+          await api(`/api/films/${fid}/advice`, {
+            method: 'POST',
+            body: { message: text, target: a.target, followUpOf: a.id, observation: { source: 'none' } },
+          });
+          await loadOverview();
+          renderInspector();
+        } catch (err) { toastError(err); }
+      },
+    }));
+    reply.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    li.appendChild(reply);
+  }
+
+  // Taking one back. Only offered while it is still open — a resolved item is
+  // the AI's answer, and withdrawing a question already answered would just
+  // hide the answer.
+  if (a.status !== 'resolved') {
+    const undo = el('button', {
+      class: 'ghost tiny-btn adv-withdraw',
+      text: 'withdraw',
+      title: 'Close this so the next AI run does not act on it. What you wrote stays on record.',
+      onclick: (ev) => { ev.stopPropagation(); withdrawOneAdvice(a, ev.currentTarget); },
+    });
+    undo.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    li.appendChild(undo);
+  }
+
+  if (state.openAdviceId === a.id) hydrateAdviceDetail(li, a);
+  else li.addEventListener('click', () => { state.openAdviceId = a.id; renderInspector(); });
+  return li;
+}
+
+/** Withdraw one item. The request text and evidence are never deleted. */
+async function withdrawOneAdvice(a, btn) {
+  btn.disabled = true;
+  btn.textContent = 'withdrawing…';
+  try {
+    await api(`/api/films/${fid}/advice/${encodeURIComponent(a.id)}/withdraw`, { method: 'POST', body: {} });
+    await loadOverview();
+    renderTree();
+    renderTimeline();
+    renderInspector();
+    renderProductionLine();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'withdraw';
+    toastError(err);
+  }
+}
+
+/** Withdraw every open item on the film, after one confirmation. */
+async function withdrawAllAdvice() {
+  const open = (state.advice ?? []).filter((x) => x.status !== 'resolved').length;
+  if (!open) return;
+  const ok = confirm(
+    `Withdraw all ${open} open piece${open === 1 ? '' : 's'} of advice on this film?\n\n`
+    + 'The next AI run will not pick them up. What you wrote stays on record.',
+  );
+  if (!ok) return;
+  try {
+    const r = await api(`/api/films/${fid}/advice/withdraw-all`, { method: 'POST', body: {} });
+    await loadOverview();
+    renderTree();
+    renderTimeline();
+    renderInspector();
+    renderProductionLine();
+    toast(`Withdrew ${r.count} piece${r.count === 1 ? '' : 's'} of advice.`, { kind: 'info' });
+  } catch (err) { toastError(err); }
+}
+
+/** The AI's answer plus the before/after frames, fetched only when opened. */
+async function hydrateAdviceDetail(li, a) {
+  li.appendChild(el('div', { class: 'adv-when adv-close mono', text: 'close ×', onclick: (ev) => { ev.stopPropagation(); state.openAdviceId = null; renderInspector(); } }));
+  let full;
+  try { full = await api(`/api/films/${fid}/advice/${encodeURIComponent(a.id)}`); }
+  catch { return; }
+  if (state.openAdviceId !== a.id) return;
+  if (full.resolution) {
+    li.appendChild(el('div', { class: 'adv-resolution' },
+      el('b', { text: full.resolution.outcome.replace(/-/g, ' ') }),
+      document.createTextNode(` — ${full.resolution.explanation}`)));
+  }
+  const shots = el('div', { class: 'adv-evidence' });
+  for (const which of ['before', 'after']) {
+    if (!full.evidence?.[which]?.image) continue;
+    shots.appendChild(el('figure', {},
+      el('img', { loading: 'lazy', src: `/api/films/${fid}/advice/${encodeURIComponent(a.id)}/evidence/${which}` }),
+      el('figcaption', { text: which === 'before' ? 'what you saw' : 'after the change' })));
+  }
+  if (shots.children.length) li.appendChild(shots);
+}
+
+/** Jump the whole page to whatever a piece of advice was about. */
+function focusAdvice(a) {
+  const t = a.target ?? {};
+  const segs = state.detail?.scenes ?? [];
+  if (t.type === 'sequence') select({ kind: 'sequence', sequence: t.sequence });
+  else if (t.type === 'scene') {
+    const i = segs.findIndex((s) => s.slug === t.scene);
+    select(i >= 0 ? { kind: 'scene', index: i } : null);
+  } else if (t.type === 'footage') {
+    const i = segs.findIndex((s) => s.id === t.itemId);
+    select(i >= 0 ? { kind: 'scene', index: i } : null);
+  } else if (t.itemId) select({ kind: t.type, id: t.itemId });
+  else select(null);
+  const frame = adviceFilmFrame(a);
+  if (frame != null) { stopPlayback(); setPlayhead(frame); }
+  state.openAdviceId = a.id;
+  renderInspector();
+}
+
+/* ------------------------------ advice popup ----------------------------- */
+
+function armAim() {
+  state.aiming = true;
+  $('#aim-banner').classList.remove('hidden');
+  document.querySelector('.fe-frame').classList.add('aiming');
+}
+function disarmAim() {
+  state.aiming = false;
+  $('#aim-banner').classList.add('hidden');
+  document.querySelector('.fe-frame').classList.remove('aiming');
+}
+
+/** The toolbar button: advise on the selection, or arm one targeting click. */
+function startAdvice() {
+  if (state.selection) return openAdviceDialog();
+  armAim();
+}
+
+/**
+ * Everything the request needs, derived from the selection — the human never
+ * types an id, picks a target type, or chooses what has to be re-rendered.
+ */
+function currentAdviceTarget() {
+  const sel = state.selection;
+  const frame = Math.floor(state.playhead);
+  const observedFrom = state.source === 'delivery' && state.pinnedDelivery
+    ? { source: 'delivery', deliveryId: state.pinnedDelivery, filmFrame: frame, timeSeconds: Number((frame / fps()).toFixed(3)) }
+    : { source: 'scene-preview', filmFrame: frame, timeSeconds: Number((frame / fps()).toFixed(3)) };
+
+  if (sel?.kind === 'sequence') {
+    const band = sequenceBands().find((b) => b.label === sel.sequence);
+    return {
+      target: { type: 'sequence', sequence: sel.sequence },
+      observation: observedFrom,
+      title: `Sequence “${sel.sequence}”`,
+      detail: band
+        ? `${band.segments.length} segment${band.segments.length === 1 ? '' : 's'} from ${timecode(band.offset)}`
+        : 'the whole sequence',
+    };
+  }
+  if (sel?.kind === 'scene') {
+    const seg = state.detail?.scenes?.[sel.index];
+    if (seg?.kind === 'footage') {
+      return {
+        target: { type: 'footage', itemId: seg.id, label: seg.name, filmFrame: frame, sceneFrame: Math.max(0, frame - (seg.filmOffset ?? 0)) },
+        observation: observedFrom,
+        title: `Clip “${seg.name}”`,
+        detail: `${seg.footage} · at ${timecode(frame)}`,
+      };
+    }
+    if (seg) {
+      const sceneFrame = Math.max(0, frame - (seg.filmOffset ?? 0));
+      const watching = state.watchingRevision?.slug === seg.slug ? state.watchingRevision.revision : null;
+      return {
+        target: { type: 'scene', scene: seg.slug, sceneFrame, filmFrame: frame },
+        observation: watching
+          ? { source: 'revision-preview', revisionId: watching.id, sceneFrame, filmFrame: frame }
+          : { ...observedFrom, sceneFrame, ...(state.revisions[seg.slug]?.currentRevisionId ? { revisionId: state.revisions[seg.slug].currentRevisionId } : {}) },
+        title: `${seg.sequence ? `${seg.sequence} → ` : ''}${seg.name}`,
+        detail: `scene ${seg.slug} · at ${timecode(frame)} (frame ${sceneFrame} of the scene)`
+          + (watching ? ` · watching take ${watching.id}` : ''),
+        scene: seg.slug,
+      };
+    }
+  }
+  if (sel && ['audio', 'caption', 'overlay'].includes(sel.kind)) {
+    const key = { audio: 'audio', caption: 'captions', overlay: 'overlays' }[sel.kind];
+    const item = (state.film?.[key] ?? []).find((x) => x.id === sel.id);
+    const label = itemLabel(sel.kind, item);
+    return {
+      target: { type: sel.kind, itemId: sel.id, label, filmFrame: frame },
+      observation: observedFrom,
+      title: `${sel.kind} — ${label}`,
+      detail: `at ${timecode(frame)} · advice names this exact ${sel.kind} item`,
+    };
+  }
+  return {
+    target: { type: 'film', filmFrame: frame },
+    observation: observedFrom,
+    title: state.film?.name ?? 'the film',
+    detail: `the whole film · at ${timecode(frame)}`,
+  };
+}
+
+function openAdviceDialog() {
+  const ctx = currentAdviceTarget();
+  state.adviceCtx = ctx;
+  $('#adv-target-title').textContent = ctx.title;
+  $('#adv-target-detail').textContent = ctx.detail;
+  $('#advice-state').textContent = '';
+  $('#advice-state').className = 'mono dim';
+  $('#advice-text').value = '';
+
+  // The previous take, right in the popup: "the last one was better" is the
+  // single most common thing a human wants to say, and it should not require
+  // finding a history panel first.
+  const prev = $('#adv-prev-result');
+  const body = $('#adv-prev-body');
+  body.innerHTML = '';
+  prev.classList.add('hidden');
+  if (ctx.scene) {
+    const list = state.sceneRevisions.get(ctx.scene);
+    if (!list) loadSceneRevisions(ctx.scene).then(() => { if ($('#advice-dialog').open && state.adviceCtx?.scene === ctx.scene) fillPrevResult(ctx.scene); });
+    else fillPrevResult(ctx.scene);
+  }
+  $('#advice-dialog').showModal();
+  $('#advice-text').focus();
+}
+
+function fillPrevResult(slug) {
+  const prev = $('#adv-prev-result');
+  const body = $('#adv-prev-body');
+  const list = state.sceneRevisions.get(slug) ?? [];
+  const older = list.find((r) => !r.current);
+  if (!older) { prev.classList.add('hidden'); return; }
+  body.innerHTML = '';
+  const thumb = el('div', { class: 'rev-thumb', title: 'the take before the current one' });
+  if (older.hasContactSheet) {
+    thumb.appendChild(el('img', { loading: 'lazy', src: `${sceneApi(slug)}/revisions/${encodeURIComponent(older.id)}/contact` }));
+  } else thumb.appendChild(el('span', { class: 'no-thumb', text: '▶' }));
+  body.appendChild(thumb);
+  body.appendChild(el('div', { class: 'rev-body' },
+    el('div', { class: 'rev-meta mono', text: `${fmtWhen(older.createdAt)} · ${older.frames}f` }),
+    el('button', {
+      class: 'ghost',
+      text: 'ask AI to use this previous result',
+      onclick: async (ev) => {
+        await askForRevision(slug, older, ev.currentTarget);
+        $('#advice-dialog').close();
+      },
+    })));
+  prev.classList.remove('hidden');
+}
+
+async function sendAdvice() {
+  const text = $('#advice-text').value.trim();
+  const stateEl = $('#advice-state');
+  if (!text) { stateEl.textContent = 'write something first'; stateEl.className = 'mono err'; return; }
+  const ctx = state.adviceCtx ?? currentAdviceTarget();
+  const btn = $('#btn-send-advice');
+  btn.disabled = true;
+  stateEl.textContent = 'sending…';
+  stateEl.className = 'mono dim';
+  try {
+    await api(`/api/films/${fid}/advice`, {
+      method: 'POST',
+      body: {
+        message: text,
+        target: ctx.target,
+        observation: ctx.observation,
+        requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      },
+    });
+    $('#advice-dialog').close();
+    toast('Advice sent — the AI picks it up at its next checkpoint.', { kind: 'info' });
+    await loadOverview();
+    renderTree();
+    renderTimeline();
+    renderInspector();
+    renderProductionLine();
+  } catch (err) {
+    stateEl.textContent = `failed: ${err.message}`;
+    stateEl.className = 'mono err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ------------------------------ mode & source ---------------------------- */
+
+function setSource(src) {
+  const wanted = src === 'delivery' ? 'delivery' : 'preview';
+  if (wanted === 'delivery' && !state.manifest) {
+    toast('No built film yet — the AI has not assembled one.', { kind: 'info' });
+    return;
+  }
+  if (state.source === wanted) return;
+  stopPlayback();
+  state.source = wanted;
+  $('#btn-src-preview').classList.toggle('on', wanted === 'preview');
+  $('#btn-src-delivery').classList.toggle('on', wanted === 'delivery');
+  state.watchingRevision = null;
+  renderHeader();
+  renderTimeline();
+  setPlayhead(Math.min(state.playhead, Math.max(0, totalFrames() - 1)));
+}
+
+/* -------------------------------- live feed ------------------------------ */
+
+/**
+ * The AI works in another process, so the page listens rather than polls.
+ * Events are refetch triggers only — and they refetch the PRODUCTION side,
+ * never the document, so an agent's activity can't overwrite the sentence the
+ * human is in the middle of typing.
+ */
+let overviewRefetch = null;
+function connectEvents() {
+  const source = new EventSource('/api/events');
+  const mine = (e) => {
+    try { const d = JSON.parse(e.data); return d?.filmId === filmId || d?.type === 'activity'; }
+    catch { return false; }
+  };
+  const bump = () => {
+    clearTimeout(overviewRefetch);
+    overviewRefetch = setTimeout(async () => {
+      await loadOverview();
+      state.sceneRevisions.clear();
+      renderProductionLine();
+      renderUpdatedBanner();
+      renderTree();
+      renderTimeline();
+      renderInspector();
+    }, 400);
+  };
+  for (const type of ['advice', 'revision', 'delivery', 'film-output', 'scene-output', 'activity']) {
+    source.addEventListener(type, (e) => { if (mine(e)) bump(); });
+  }
+  source.addEventListener('reset', bump);
+  source.onerror = () => { /* EventSource reconnects on its own */ };
+  // Heartbeats go stale on a clock, not on a disk write.
+  setInterval(async () => {
+    if (!state.status) return;
+    try { state.status = await api(`/api/films/${fid}/status`); renderProductionLine(); } catch { /* transient */ }
+  }, 60_000);
+}
+
+function wireProductionLoop() {
+  $('#btn-aim-cancel').addEventListener('click', disarmAim);
+  $('#btn-send-advice').addEventListener('click', sendAdvice);
+  $('#btn-src-preview').addEventListener('click', () => setSource('preview'));
+  $('#btn-src-delivery').addEventListener('click', () => setSource('delivery'));
+  $('#btn-new-sequence').addEventListener('click', createSequenceFromSelection);
+  $('#btn-dismiss-updated').addEventListener('click', () => { state.updatedDismissed = true; renderUpdatedBanner(); });
+  $('#btn-watch-latest').addEventListener('click', async () => {
+    state.pinnedDelivery = state.latestDeliveryId;
+    state.manifest = null;
+    state.updatedDismissed = false;
+    await loadOverview();
+    $('#video-film').removeAttribute('src');
+    $('#video-film').dataset.src = '';
+    setSource('delivery');
+    renderAll();
+  });
+  // Clicking the picture aims advice at exactly what is on screen.
+  $('#fe-viewport').addEventListener('click', () => {
+    if (!state.aiming) return; // a plain viewport click is not a selection gesture
+    stopPlayback();
+    const { index } = sceneAt(Math.floor(state.playhead));
+    select(index >= 0 ? { kind: 'scene', index } : null);
+  });
+}
+
 /* --------------------------------- name --------------------------------- */
 
 $('#film-name').addEventListener('change', () => {
   const v = $('#film-name').value.trim();
   if (!v) { $('#film-name').value = state.film.name; return; }
   mutate((film) => { film.name = v; }, { silent: true });
-  document.title = `${v} — Motion Studio Film Editor`;
+  document.title = `${v} — Motion Studio`;
 });
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
@@ -2552,6 +3683,7 @@ function renderAll() {
     setZoomSlider();
   }
   renderTimeline();
+  renderTree();
   renderInspector();
   renderScenesRail();
   fitPlayerBox();
@@ -2564,10 +3696,25 @@ function renderAll() {
     document.body.innerHTML = '<p style="padding:40px" class="dim">No film id — open a film from the Studio (<a href="/">back</a>).</p>';
     return;
   }
+  wireProductionLoop();
   try {
     await refresh();
   } catch (err) {
     toastError(err);
     document.body.innerHTML = `<p style="padding:40px" class="dim">Could not load film: ${err.message} (<a href="/">back to the Studio</a>)</p>`;
+    return;
+  }
+  connectEvents();
+  // A deep link from anywhere else in the Studio lands on the exact thing.
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('scene')) {
+    const i = (state.detail?.scenes ?? []).findIndex((s) => s.slug === qs.get('scene'));
+    if (i >= 0) { select({ kind: 'scene', index: i }); setPlayhead(state.detail.scenes[i].filmOffset ?? 0); }
+  } else if (qs.get('sequence')) {
+    select({ kind: 'sequence', sequence: qs.get('sequence') });
+  }
+  if (qs.get('advice')) {
+    const a = state.advice.find((x) => x.id === qs.get('advice'));
+    if (a) focusAdvice(a);
   }
 })();

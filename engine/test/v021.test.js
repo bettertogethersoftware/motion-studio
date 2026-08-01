@@ -29,7 +29,7 @@ import { makeFakeBrowserFactory } from './helpers/fake-browser.js';
 import { formatPageDiagnostics } from '../src/core/browser.js';
 import { makeStore, makeScene, TEST_WS } from './helpers/workspace.mjs';
 import { ErrorCodes } from '../src/core/errors.js';
-import { stagingOutputPath } from '../src/core/delivery.js';
+import { stagingOutputPath, promoteStagingOutput } from '../src/core/delivery.js';
 
 const execFileP = promisify(execFile);
 
@@ -53,6 +53,123 @@ test('stagingOutputPath gives direct callers a unique path when they have no job
   const b = stagingOutputPath(out, { jobId: null });
   assert.notEqual(a, b);
   assert.match(a, /[\\/]\.staging[\\/]output-[0-9a-f-]+\.mp4$/i);
+});
+
+/* ------------------------------------------------------------------ *
+ * Promotion retry (v0.23): a transient scanner lock on the destination
+ * (EPERM on rename-over-existing, with no real owner) is waited out with
+ * a bounded backoff; anything non-transient still fails immediately.
+ * ------------------------------------------------------------------ */
+
+test('promoteStagingOutput rides out a transient EPERM, then succeeds', async () => {
+  let attempts = 0;
+  let renamed = null;
+  const flaky = async (from, to) => {
+    attempts += 1;
+    if (attempts <= 2) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    renamed = [from, to];
+  };
+  const result = await promoteStagingOutput({
+    stagedPath: path.join(tmp, 'p', '.staging', 'output-x.mp4'),
+    outputPath: path.join(tmp, 'p', 'output.mp4'),
+    renameImpl: flaky,
+  });
+  assert.equal(attempts, 3);
+  assert.equal(result, path.resolve(path.join(tmp, 'p', 'output.mp4')));
+  assert.equal(renamed[1], result);
+});
+
+test('promoteStagingOutput gives up honestly after the retry budget', async () => {
+  let attempts = 0;
+  const locked = async () => {
+    attempts += 1;
+    throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  };
+  await assert.rejects(
+    () => promoteStagingOutput({
+      stagedPath: path.join(tmp, 'q', '.staging', 'output-x.mp4'),
+      outputPath: path.join(tmp, 'q', 'output.mp4'),
+      renameImpl: locked,
+    }),
+    (e) => e.code === ErrorCodes.DISK_ERROR,
+  );
+  assert.equal(attempts, 6, 'first try + five backoff retries');
+});
+
+/* The lock the backoff CANNOT wait out (v0.23.1): a reader holding the
+ * destination open. Measured in production — the Studio streaming a scene's
+ * output to a <video> made every re-render of that scene fail EPERM, so a
+ * human watching the film page could fail the director's render. These use a
+ * REAL read stream, because the whole bug is a platform rename semantic that
+ * a mocked rename cannot reproduce. */
+
+test('promoteStagingOutput replaces a destination a reader is holding open', async () => {
+  const dir = path.join(tmp, 'held');
+  await fsp.mkdir(path.join(dir, '.staging'), { recursive: true });
+  const outputPath = path.join(dir, 'output.mp4');
+  const stagedPath = path.join(dir, '.staging', 'output-job.mp4');
+  await fsp.writeFile(outputPath, Buffer.alloc(512 * 1024, 1));   // the old delivery
+  await fsp.writeFile(stagedPath, Buffer.alloc(512 * 1024, 2));   // the new one
+
+  // Exactly what studio/server.js streamFile does while a human watches.
+  const reader = fs.createReadStream(outputPath);
+  await new Promise((resolve) => reader.once('readable', resolve));
+  try {
+    const result = await promoteStagingOutput({ stagedPath, outputPath });
+    assert.equal(result, path.resolve(outputPath));
+    // The NEW bytes are at the delivery name…
+    assert.equal((await fsp.readFile(outputPath))[0], 2);
+    // …the staged copy is consumed, and no litter is left behind.
+    assert.equal(fs.existsSync(stagedPath), false);
+    const leftovers = (await fsp.readdir(dir)).filter((f) => f.includes('.superseded-'));
+    assert.deepEqual(leftovers, [], 'the moved-aside delivery is cleaned up');
+    // The reader keeps streaming the bytes it opened — its handle follows the
+    // inode, so a human mid-playback is not corrupted by the swap.
+    assert.equal(reader.readable, true);
+  } finally {
+    reader.destroy();
+  }
+});
+
+test('promoteStagingOutput keeps the old delivery when the side-step cannot finish', async () => {
+  const dir = path.join(tmp, 'held-fail');
+  await fsp.mkdir(dir, { recursive: true });
+  const outputPath = path.join(dir, 'output.mp4');
+  await fsp.writeFile(outputPath, Buffer.from('the previous good delivery'));
+
+  // Every rename onto the delivery name fails; moving it aside is allowed.
+  const renameImpl = async (from, to) => {
+    if (path.resolve(to) === path.resolve(outputPath) && !String(from).includes('.superseded-')) {
+      throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    }
+    return fsp.rename(from, to);
+  };
+  await assert.rejects(
+    () => promoteStagingOutput({
+      stagedPath: path.join(dir, 'missing-staged.mp4'), outputPath, renameImpl,
+    }),
+    (e) => e.code === ErrorCodes.DISK_ERROR,
+  );
+  // The guarantee that matters: a failed promotion never leaves a gap.
+  assert.equal(fs.existsSync(outputPath), true, 'the previous delivery is restored');
+  assert.equal(await fsp.readFile(outputPath, 'utf8'), 'the previous good delivery');
+});
+
+test('promoteStagingOutput does not retry a non-transient failure', async () => {
+  let attempts = 0;
+  const missing = async () => {
+    attempts += 1;
+    throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+  };
+  await assert.rejects(
+    () => promoteStagingOutput({
+      stagedPath: path.join(tmp, 'r', '.staging', 'output-x.mp4'),
+      outputPath: path.join(tmp, 'r', 'output.mp4'),
+      renameImpl: missing,
+    }),
+    (e) => e.code === ErrorCodes.DISK_ERROR,
+  );
+  assert.equal(attempts, 1, 'a missing staged file will not appear by waiting');
 });
 
 /* ------------------------------------------------------------------ */

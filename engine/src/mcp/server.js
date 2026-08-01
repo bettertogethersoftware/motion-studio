@@ -121,6 +121,13 @@ import {
 } from '../core/render-review.js';
 import { ensureStableDataDir } from '../core/paths.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
+import {
+  createAdvice, listAdvice, getAdvice, acknowledgeAdvice, beginAdviceWork, resolveAdvice,
+  ADVICE_OUTCOMES, writeAdviceEvidence, recordEvidenceFailure,
+} from '../core/advice.js';
+import { listRevisions, useRevision, currentRevisionId } from '../core/revisions.js';
+import { listDeliveries, getDeliveryManifest, currentDeliveryId } from '../core/deliveries.js';
+import { reportActivity, productionStatus } from '../core/activity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -147,6 +154,11 @@ if (migration?.migrated) {
 }
 // This server works inside exactly one workspace, named by the environment.
 const WORKSPACE = (await store.ensureWorkspace(process.env.MOTION_STUDIO_WORKSPACE || 'default')).id;
+// Who this director is (v0.23). Stamped on revisions, deliveries, advice
+// events, and activity heartbeats so evidence names its author. Distinct from
+// the workspace on purpose: a workspace is a production space, and two agents
+// may legitimately share one.
+const AGENT = (process.env.MOTION_STUDIO_AGENT || WORKSPACE).trim();
 
 const jobs = new JobManager({
   maxConcurrent: 1,
@@ -466,7 +478,10 @@ server.registerTool(
       'Describe the workspace this server is bound to (MOTION_STUDIO_WORKSPACE): its name, folder, films, and ' +
       'the shared-asset library summary. Every other tool operates inside this workspace — films are addressed ' +
       'as "<film>" and scenes as "<film>/<scene>". The human\'s Studio UI shows all workspaces; this server ' +
-      'sees only this one. Returns prereqs_missing if Node/FFmpeg are not installed.',
+      'sees only this one. Returns prereqs_missing if Node/FFmpeg are not installed. ' +
+      'Production protocol (v0.23): after this call, run check_human_advice before planning new work — the ' +
+      'human may have left advice while no agent was running — and again at each checkpoint. There is no ' +
+      'approval gate; never wait for a human response.',
     inputSchema: {},
   },
   wrap(async () => {
@@ -618,7 +633,9 @@ server.registerTool(
     description:
       'The full film document (scene order, master audio, overlays, captions, mastering options) plus the ' +
       'resolved plan: per-scene filmOffset/duration/rendered state and a `problems` list. filmOffset is what ' +
-      'master audio, sfx cues and captions are placed against — never accumulate scene durations by hand.',
+      'master audio, sfx cues and captions are placed against — never accumulate scene durations by hand. ' +
+      'Also returns `revision`: pass it to update_film as expectedRevision so your patch cannot silently ' +
+      'revert edits the human made in the Studio while you were thinking.',
     inputSchema: { film: z.string().describe('Film id (slug) from list_films/create_film') },
   },
   wrap(async ({ film }) => {
@@ -634,6 +651,25 @@ server.registerTool(
     });
   }),
 );
+
+/**
+ * A number-or-null argument that survives schema-flattening clients (v0.23).
+ *
+ * The union publishes as anyOf[number, null] — the portable shape, and the
+ * one the schema test guards — but a client that flattens anyOf to `{}` has
+ * no type to coerce against and delivers the model's argument as a STRING
+ * ("-2"), which the plain union then rejects. Measured in production: a
+ * build_film call with audioTargetPeakDb -2 failed input validation because
+ * it arrived as "-2". The preprocess accepts those string forms at runtime
+ * ("-2" → -2, "null"/"" → null) while leaving the published schema and every
+ * well-typed caller untouched; a non-numeric string still fails with the
+ * normal typed error.
+ */
+const nullableNumber = (inner) => z.preprocess((v) => {
+  if (v === 'null' || v === '') return null;
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+  return v;
+}, z.union([inner, z.null()]));
 
 const FILM_AUDIO_TRACK = z.object({
   id: z.string().optional().describe('Stable track id (assigned if omitted)'),
@@ -655,7 +691,9 @@ const FILM_OVERLAY = z.object({
   yPct: z.number().min(-100).max(200).optional().describe('Top-left y as % of frame height (default 0)'),
   // Do not use `.nullable()` here: the MCP SDK's Zod → JSON Schema conversion
   // publishes that form as `{}`, so clients cannot coerce a numeric argument.
-  widthPct: z.union([z.number().min(0.1).max(400), z.null()]).optional()
+  // nullableNumber further accepts the string forms sent by clients that
+  // flattened the published anyOf anyway — see its definition above.
+  widthPct: nullableNumber(z.number().min(0.1).max(400)).optional()
     .describe('Width as % of frame width, aspect kept; null = natural size'),
   opacity: z.number().min(0).max(1).optional(),
 });
@@ -694,11 +732,18 @@ server.registerTool(
       // single loose shape would silently discard whichever half the caller sent
       // — which for footage means the entry vanishes before the handler runs.
       scenes: z.array(z.union([
-        z.object({ slug: z.string() }),
         z.object({
+          slug: z.string(),
+          sequence: z.string().max(80).optional()
+            .describe('Narrative sequence label (v0.23) — consecutive segments sharing one form a story band the human navigates by'),
+        }),
+        z.object({
+          id: z.string().optional()
+            .describe('Stable clip id (assigned if omitted). Keep it when reordering — human advice on this clip is bound to it'),
           footage: z.string(),
           durationInFrames: z.number().int().positive(),
           label: z.string().optional(),
+          sequence: z.string().max(80).optional(),
           derivedFrom: FILM_DERIVED_FROM.optional(),
         }),
       ])).optional()
@@ -708,7 +753,9 @@ server.registerTool(
           'and must match the film signature (get_film reports it); `durationInFrames` is verified against the file, ' +
           'because every later offset derives from it. A prepared clip may also carry the `derivedFrom` object returned ' +
           'by transcode_asset; it makes planFilm flag a source replacement before a build. Reorder or drop segments here; create scenes with create_scene ' +
-          'and put footage in the film\'s assets/ first (use_shared_asset or write_asset_file).'),
+          'and put footage in the film\'s assets/ first (use_shared_asset or write_asset_file). ' +
+          'Footage segments are stamped with a stable `id` — echo it back when you rewrite the array, or the human\'s ' +
+          'advice on that clip loses its anchor.'),
       outputFilename: z.string().optional().describe('Bare output filename (default "film")'),
       sceneDefaults: z.object({
         fps: z.number().int().min(1).max(240).optional(),
@@ -723,25 +770,37 @@ server.registerTool(
         sizePct: z.number().min(1).max(20).optional().describe('Font size as % of frame height (default 4.5)'),
         position: z.enum(['bottom', 'top']).optional(),
       }).optional(),
+      sequences: z.record(z.object({
+        intent: z.string().max(500).optional().describe('What this sequence is for — shown to the human, and to future directors'),
+      })).optional().describe(
+        'Narrative sequence metadata keyed by the labels used on segments (v0.23). Label segments via ' +
+        'scenes[i].sequence; describe each label\'s intent here. Presentation only — renders nothing, moves no files.',
+      ),
       deliverables: z.array(FILM_DELIVERABLE_INPUT).optional().describe(
         'Whole Stage-A deliverable list. Entries are saved platform snapshots; update their output name, caption style, safe areas, or reframe centers here.',
       ),
-      audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
+      audioTargetPeakDb: nullableNumber(z.number().min(-60).max(0)).optional()
         .describe('Master the mix to this peak on build (e.g. -2); null disables'),
       burnCaptions: z.boolean().optional().describe('Burn captions into the picture (a .srt sidecar is written either way)'),
       review: FILM_REVIEW_POLICY.optional().describe(
         'Per-film delivery review policy. block/warn are arrays of stable warning codes; omitted fields inherit the global setting, and null restores full inheritance.',
       ),
+      expectedRevision: z.string().optional().describe(
+        'The `revision` from your get_film. Array fields replace wholesale, so a patch written against a stale ' +
+        'read silently reverts whatever the human changed in the Studio meanwhile. Pass this and you get a ' +
+        'film_conflict error instead — re-read, re-apply, retry. Omit only for a field you know nobody else touches.',
+      ),
     },
   },
-  wrap(async ({ film, ...fields }) => {
+  wrap(async ({ film, expectedRevision, ...fields }) => {
     const provided = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
-    const doc = await store.updateFilm(qualifyFilm(film), provided);
+    const doc = await store.updateFilm(qualifyFilm(film), provided, { expectedRevision });
     const plan = await planFilm({ film: doc, store });
     return ok({
       film: doc.slug,
       name: doc.name,
       updatedAt: doc.updatedAt,
+      revision: doc.revision,
       plan: planSummary(plan),
     });
   }),
@@ -784,13 +843,15 @@ server.registerTool(
       'Pass plan:true to get the scene layout WITHOUT building — works before the scenes are rendered, which is ' +
       'exactly when you need each filmOffset to place narration and cues; nothing is assembled or written. ' +
       'Pass deliverable to build a configured Stage-A platform variant from the same master cut; it re-encodes to ' +
-      'the target geometry and writes independent captions/review artefacts. Iterating? Re-render only the scene you changed, then build_film again — other scenes\' outputs are reused.',
+      'the target geometry and writes independent captions/review artefacts. Iterating? Re-render only the scene you changed, then build_film again — other scenes\' outputs are reused. ' +
+      'Every successful build is also archived as an immutable delivery (v0.23) with a frozen manifest of the ' +
+      'exact scene revisions it played; the finished job status carries its deliveryId — link it when resolving advice.',
     inputSchema: {
       film: z.string(),
       plan: z.boolean().optional()
         .describe('Return the resolved layout + problems without building (works before scenes are rendered)'),
       outputFilename: z.string().optional().describe('Override + persist the film\'s output filename'),
-      audioTargetPeakDb: z.union([z.number().min(-60).max(0), z.null()]).optional()
+      audioTargetPeakDb: nullableNumber(z.number().min(-60).max(0)).optional()
         .describe('Override + persist the mastering target'),
       burnCaptions: z.boolean().optional().describe('Override + persist caption burn-in'),
       deliverable: z.string().optional().describe('Configured deliverable id to build (for example "shorts-9x16"); omit for the master'),
@@ -814,6 +875,7 @@ server.registerTool(
       : await store.getFilm(id);
     const submitted = await submitFilmBuild({
       film: doc, store, jobs, ffmpegPath: await ffmpegPathOnly(), deliverableId: deliverable ?? null,
+      agent: AGENT,
     });
     return ok({
       ...submitted,
@@ -1294,9 +1356,13 @@ server.registerTool(
         })
         .optional()
         .describe('Proxy/motion preview: cheap low-res + frame-skip draft. {} takes both defaults. No audio, no pre-flight, serial, output gets ".proxy" before the extension.'),
+      note: z.string().max(200).optional()
+        .describe('One-line summary of what this attempt changes ("slower title fade") — shown on the revision card in the human\'s history view'),
+      adviceIds: z.array(z.string()).max(20).optional()
+        .describe('Advice ids this render responds to; the archived revision links to them as evidence'),
     },
   },
-  wrap(async ({ scene, frameRange, workers, outputFilename, preflight, proxy }) => {
+  wrap(async ({ scene, frameRange, workers, outputFilename, preflight, proxy, note, adviceIds }) => {
     await requirePrereqs();
     // Validate the proxy request FIRST so bad values fail this call with
     // invalid_config and a named value, instead of surfacing later as a
@@ -1327,6 +1393,10 @@ server.registerTool(
       workers: effectiveWorkers,
       ffmpegPath: await ffmpegPathOnly(),
       reviewPolicy,
+      // Provenance for the archived revision (v0.23): who, why, and which
+      // advice it answers. A completed full-scene render reports the archived
+      // `revisionId` in its job status.
+      revision: { agent: AGENT, ...(note ? { note } : {}), ...(adviceIds?.length ? { adviceIds } : {}) },
       // A proxy always goes straight to the serial renderer with the proxy
       // options attached; otherwise the injected-factory split is as before.
       ...(prx
@@ -2818,6 +2888,423 @@ server.registerTool(
     },
   },
   wrap(async ({ scene, library, scaffold, addons }) => ok(await store.addLibrary(qualifyScene(scene), { library, scaffold, addons }))),
+);
+
+/* ------------------------------------------------------------------ */
+/* The production loop (v0.23): advice, revisions, deliveries, status  */
+/*                                                                     */
+/* Motion Studio's working model is AI-directed, human-advised: this   */
+/* agent plans and produces the film unattended, and the human watches */
+/* in the Studio and leaves plain-language advice on what they see.    */
+/* Advice never blocks production — there is NO approval gate and no   */
+/* waiting loop. The contract these tools implement:                   */
+/*                                                                     */
+/*   check_human_advice at your checkpoints: task start, after         */
+/*   publishing a plan, before expensive generation, after each scene  */
+/*   revision, before build_film, before reporting completion.         */
+/*   Acknowledge what you received, lease what you work on, and        */
+/*   resolve every item with an outcome — including "not-applied with  */
+/*   a reason". Never silently ignore advice; never wait for it.       */
+/* ------------------------------------------------------------------ */
+
+/** Resolve a film's document + path for the advice/status tools. */
+async function filmForAdvice(film) {
+  return store.getFilm(qualifyFilm(film));
+}
+
+/** Advice listing entry in workspace-local vocabulary. */
+function localAdvice(a, filmDoc) {
+  return {
+    adviceId: a.id,
+    film: filmDoc.slug,
+    status: a.status,
+    from: a.from,
+    message: a.message,
+    target: a.target,
+    observation: a.observation,
+    suggestedAction: a.suggestedAction,
+    ...(a.preferredRevisionId ? { preferredRevisionId: a.preferredRevisionId } : {}),
+    ...(a.followUpOf ? { followUpOf: a.followUpOf } : {}),
+    ...(a.lease ? { lease: a.lease } : {}),
+    ...(a.clarification ? { clarification: a.clarification } : {}),
+    ...(a.resolution ? { resolution: a.resolution } : {}),
+    createdAt: a.createdAt,
+  };
+}
+
+/**
+ * Best-effort "after" evidence for a resolved advice: the same scene frame
+ * the human flagged, extracted from the scene's CURRENT output. Failure is
+ * recorded on the advice and never fails the resolution.
+ */
+async function captureAfterEvidence(filmDoc, adviceId) {
+  try {
+    const full = await getAdvice({ filmPath: filmDoc.path, adviceId });
+    const slug = full.request.target?.scene;
+    if (!slug) return; // film/sequence/track advice has no single after-frame
+    const sceneId = `${filmDoc.id}/${slug}`;
+    const scene = await store.getScene(sceneId);
+    const config = await store.readConfig(sceneId);
+    const outPath = path.join(scene.path, config.output?.dir ?? 'out', config.output?.filename ?? 'output.mp4');
+    const st = await fsp.stat(outPath).catch(() => null);
+    if (!st?.isFile()) throw new Error('scene has no rendered output');
+    const frame = Math.min(
+      full.request.target?.sceneFrame ?? Math.floor(config.durationInFrames / 2),
+      Math.max(0, config.durationInFrames - 1),
+    );
+    const png = await extractRenderedFrame({
+      filePath: outPath, frame, fps: config.fps, ffmpegPath: await ffmpegPathOnly(),
+    });
+    await writeAdviceEvidence({
+      filmPath: filmDoc.path, adviceId, which: 'after',
+      png,
+      meta: {
+        scene: slug, sceneFrame: frame,
+        revisionId: await currentRevisionId(scene.path).catch(() => null),
+      },
+    });
+  } catch (err) {
+    await recordEvidenceFailure({
+      filmPath: filmDoc.path, adviceId, which: 'after', reason: err?.message ?? String(err),
+    }).catch(() => {});
+  }
+}
+
+server.registerTool(
+  'get_capabilities',
+  {
+    title: 'What this Motion Studio can do',
+    description:
+      'One call that tells a director what it is working with: engine version, agent/workspace identity, ' +
+      'supported output formats, scene/footage/sequence model, configured speech/music/transcription vendors ' +
+      '(names only — no probing, no secrets), media limits, and which production-loop features (advice, ' +
+      'revisions, deliveries, activity) are live. Call this once at task start, then check_human_advice.',
+    inputSchema: {},
+  },
+  wrap(async () => {
+    const settings = await readSettings(store.dataDir).catch(() => structuredClone(DEFAULT_SETTINGS));
+    return ok({
+      engine: enginePkg.version,
+      workspace: WORKSPACE,
+      agent: AGENT,
+      model: {
+        hierarchy: 'workspace → film → scene',
+        atomicRenderUnit: 'scene — one composition folder, rendered and revised independently',
+        narrativeGrouping: 'sequence — a label on film segments (film.scenes[i].sequence) plus optional film.sequences metadata; groups scenes for human navigation and advice, renders nothing',
+        segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list; a scene is addressed by slug, a footage clip by its stable id',
+        adviceTargets: 'film, sequence, scene, footage, audio, caption, overlay — the human clicks, Studio fills the ids',
+      },
+      formats: ['mp4', 'webm', 'gif', 'prores', 'png-sequence'],
+      vendors: {
+        speech: { configured: settings?.tts?.vendor ?? 'system', available: TTS_VENDORS },
+        music: { configured: settings?.music?.vendor ?? 'node', available: MUSIC_VENDORS },
+        transcription: { configured: settings?.transcription?.vendor ?? 'whisper-cpp', available: TRANSCRIPTION_VENDORS },
+      },
+      productionLoop: {
+        advice: 'check_human_advice / acknowledge_human_advice / begin_advice_work / resolve_human_advice / list_human_advice',
+        revisions: 'every promoted full-scene render is archived immutably; list_scene_revisions / use_scene_revision',
+        deliveries: 'every build_film is archived with a frozen manifest; the Studio pins review to one delivery',
+        activity: 'report_agent_activity keeps the human\'s progress line honest; heartbeats expire after 180s',
+        checkpoints: [
+          'task start', 'after publishing the plan', 'before expensive generation',
+          'after each scene revision', 'before build_film', 'before reporting completion',
+        ],
+        approvalGate: 'none — never wait for a human response; unresolved advice is handled at the next checkpoint',
+      },
+      limits: {
+        maxAssetBytes: 25 * 1024 * 1024,
+        maxAdviceMessageChars: 4000,
+        renderQueue: 'one at a time, FIFO, bounded at 10',
+      },
+    });
+  }),
+);
+
+server.registerTool(
+  'check_human_advice',
+  {
+    title: 'Check for human advice (non-blocking)',
+    description:
+      'Unresolved human advice, oldest first — the reconciliation read. Call at your checkpoints (task start, ' +
+      'after planning, before expensive generation, after each scene revision, before build_film, before ' +
+      'reporting done). Read-only: it marks nothing and hides nothing, including items another agent ' +
+      'acknowledged and then abandoned (their lease expires and the advice becomes actionable again). ' +
+      'Each item carries the human\'s wording, the structural target (film / sequence / scene / footage / ' +
+      'audio / caption / overlay + frames), and the exact delivery/revision they were looking at — compare that ' +
+      'observation with current state before acting, and prefer-revision items name the exact revision the ' +
+      'human wants reconsidered. No advice = continue immediately. NEVER poll this in a wait loop.',
+    inputSchema: {
+      film: z.string().optional().describe('Limit to one film; omit to sweep every film in this workspace'),
+      limit: z.number().int().min(1).max(100).optional().describe('Cap the result (default 25)'),
+    },
+  },
+  wrap(async ({ film, limit }) => {
+    const films = film
+      ? [await filmForAdvice(film)]
+      : await Promise.all((await store.listFilms(WORKSPACE))
+        .filter((f) => !f.broken)
+        .map((f) => store.getFilm(f.id)));
+    const out = [];
+    for (const doc of films) {
+      const items = await listAdvice({ filmPath: doc.path, status: 'unresolved' });
+      out.push(...items.map((a) => localAdvice(a, doc)));
+    }
+    out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    const capped = out.slice(0, limit ?? 25);
+    return ok({
+      unresolved: out.length,
+      returned: capped.length,
+      advice: capped,
+      ...(out.length === 0 ? { note: 'No unresolved advice — continue immediately; do not wait or poll.' } : {}),
+    });
+  }),
+);
+
+server.registerTool(
+  'acknowledge_human_advice',
+  {
+    title: 'Acknowledge advice receipt',
+    description:
+      'Record that this agent has SEEN an advice item. The human\'s Studio then shows "AI received it" instead ' +
+      'of a silent void. Acknowledging does not commit you to applying it and does not hide it from other ' +
+      'agents — take a lease with begin_advice_work before actually working on it. Idempotent.',
+    inputSchema: {
+      film: z.string().describe('The film the advice belongs to'),
+      adviceId: z.string(),
+    },
+  },
+  wrap(async ({ film, adviceId }) => {
+    const doc = await filmForAdvice(film);
+    return ok(await acknowledgeAdvice({ filmPath: doc.path, adviceId, agent: AGENT }));
+  }),
+);
+
+server.registerTool(
+  'begin_advice_work',
+  {
+    title: 'Lease an advice item for work',
+    description:
+      'Take a renewable TTL lease on one advice item so two agents cannot process it concurrently. Fails with ' +
+      'advice_lease_held (naming the holder and expiry) while another agent\'s lease is live; an expired lease ' +
+      'is taken over silently — that is the crash recovery. Renew by calling again. The human sees ' +
+      '"AI is working on it".',
+    inputSchema: {
+      film: z.string(),
+      adviceId: z.string(),
+      ttlSeconds: z.number().int().min(30).max(86400).optional()
+        .describe('Lease length (default 900). Renew before it expires for long work.'),
+    },
+  },
+  wrap(async ({ film, adviceId, ttlSeconds }) => {
+    const doc = await filmForAdvice(film);
+    return ok(await beginAdviceWork({ filmPath: doc.path, adviceId, agent: AGENT, ttlSeconds }));
+  }),
+);
+
+server.registerTool(
+  'resolve_human_advice',
+  {
+    title: 'Resolve advice with an outcome',
+    description:
+      'Record what happened to an advice item. Outcomes: "applied", "partially-applied", "not-applied" (you ' +
+      'considered it and chose otherwise — say why), "superseded" (a later change made it moot), or ' +
+      '"needs-clarification" (NOT terminal: the explanation is your question, the human answers with linked ' +
+      'follow-up advice, and the item stays open). Link every revision you created or selected via ' +
+      '`revisionIds` and the resulting build via `deliveryId` — that linkage is the human\'s ' +
+      '"what the AI changed" evidence, and an after-frame is captured automatically for scene targets. ' +
+      'One revision may resolve several compatible items: resolve each, listing the others in ' +
+      '`combinedAdviceIds`. Terminal resolutions are immutable; retry safely with the same requestId.',
+    inputSchema: {
+      film: z.string(),
+      adviceId: z.string(),
+      outcome: z.enum(ADVICE_OUTCOMES),
+      explanation: z.string().min(1).max(2000)
+        .describe('One or two sentences the human will read — what you did, or why you did not'),
+      revisionIds: z.array(z.string()).max(20).optional()
+        .describe('Scene revision ids this resolution produced or selected'),
+      deliveryId: z.string().optional().describe('The film delivery that includes the change'),
+      combinedAdviceIds: z.array(z.string()).max(20).optional()
+        .describe('Other advice ids answered by the same change'),
+      requestId: z.string().max(120).optional().describe('Idempotency key for safe retries'),
+    },
+  },
+  wrap(async ({ film, adviceId, outcome, explanation, revisionIds, deliveryId, combinedAdviceIds, requestId }) => {
+    const doc = await filmForAdvice(film);
+    const result = await resolveAdvice({
+      filmPath: doc.path, adviceId, agent: AGENT, outcome, explanation,
+      revisionIds: revisionIds ?? [], deliveryId: deliveryId ?? null,
+      combinedAdviceIds: combinedAdviceIds ?? [], requestId: requestId ?? null,
+    });
+    if (result.status === 'resolved' && !result.deduplicated) {
+      // After-evidence rides behind the durable resolution, like all evidence.
+      await captureAfterEvidence(doc, adviceId);
+    }
+    return ok(result);
+  }),
+);
+
+server.registerTool(
+  'list_human_advice',
+  {
+    title: 'List advice history',
+    description:
+      'A film\'s advice at any scope — unresolved, resolved, or all; optionally filtered to one scene, ' +
+      'sequence, or timeline item. History order (newest first) unless status is "unresolved". Use it to ' +
+      'review past direction before reworking an area the human has already commented on.',
+    inputSchema: {
+      film: z.string(),
+      status: z.enum(['unresolved', 'resolved', 'all']).optional(),
+      scene: z.string().optional().describe('Filter: advice targeting this scene slug'),
+      sequence: z.string().optional().describe('Filter: advice targeting this sequence'),
+      itemId: z.string().optional().describe('Filter: advice targeting this footage/audio/caption/overlay item id'),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+  },
+  wrap(async ({ film, status, scene, sequence, itemId, limit }) => {
+    const doc = await filmForAdvice(film);
+    const target = (scene || sequence || itemId)
+      ? { ...(scene ? { scene } : {}), ...(sequence ? { sequence } : {}), ...(itemId ? { itemId } : {}) }
+      : null;
+    const items = await listAdvice({ filmPath: doc.path, status: status ?? 'all', target, limit: limit ?? 50 });
+    return ok({ film: doc.slug, count: items.length, advice: items.map((a) => localAdvice(a, doc)) });
+  }),
+);
+
+server.registerTool(
+  'list_scene_revisions',
+  {
+    title: 'List a scene\'s archived revisions',
+    description:
+      'Every archived revision of one scene, newest first: id, creation time, creating agent, frame count, ' +
+      'note, linked advice, and which one is current. Every promoted full-scene render archives one ' +
+      'automatically (output + source snapshot + review evidence). Previewing an old revision changes ' +
+      'nothing; switch with use_scene_revision.',
+    inputSchema: { scene: z.string() },
+  },
+  wrap(async ({ scene }) => {
+    const s = await store.getScene(qualifyScene(scene));
+    const revisions = await listRevisions(s.path);
+    return ok({
+      scene: localId(s.id),
+      count: revisions.length,
+      currentRevisionId: revisions.find((r) => r.current)?.id ?? null,
+      revisions: revisions.map(({ path: _p, renderMeta: _m, ...r }) => r),
+    });
+  }),
+);
+
+server.registerTool(
+  'use_scene_revision',
+  {
+    title: 'Make an archived revision current',
+    description:
+      'Repoint a scene\'s live output at an archived revision — the normal answer to prefer-revision advice. ' +
+      'Copies the archived bytes back to the canonical output (staged + atomic rename), re-stamps the render ' +
+      'sidecar, and moves the current pointer. Never regenerates media and never deletes newer history; the ' +
+      'newer revision stays in the list. Fails with revision_mismatch if the scene\'s settings changed since ' +
+      'that revision was rendered. Afterwards run build_film so the film picks it up, and resolve the advice ' +
+      'linking this revisionId.',
+    inputSchema: {
+      scene: z.string(),
+      revisionId: z.string(),
+    },
+  },
+  wrap(async ({ scene, revisionId }) => {
+    const s = await store.getScene(qualifyScene(scene));
+    const config = await store.readConfig(s.id);
+    const result = await useRevision({ scenePath: s.path, config, revisionId, agent: AGENT });
+    return ok({
+      scene: localId(s.id),
+      ...result,
+      note: 'The scene\'s live output now holds this revision. Run build_film to update the film, then resolve the advice with this revisionId.',
+    });
+  }),
+);
+
+server.registerTool(
+  'list_deliveries',
+  {
+    title: 'List archived film deliveries',
+    description:
+      'Every archived build of a film, newest first, with the current (review-pinned) one flagged. Each ' +
+      'delivery is immutable and its manifest froze the exact scene revisions, tracks, captions, and overlays ' +
+      'that produced it — which is what human advice observations reference. build_film archives one ' +
+      'automatically; its job status carries the new deliveryId.',
+    inputSchema: {
+      film: z.string(),
+      manifest: z.string().optional().describe('Return one delivery\'s full frozen manifest instead of the listing'),
+    },
+  },
+  wrap(async ({ film, manifest }) => {
+    const doc = await filmForAdvice(film);
+    if (manifest) {
+      const m = await getDeliveryManifest(doc.path, manifest);
+      const { path: _p, ...body } = m;
+      return ok(body);
+    }
+    return ok({
+      film: doc.slug,
+      currentDeliveryId: await currentDeliveryId(doc.path),
+      deliveries: await listDeliveries(doc.path),
+    });
+  }),
+);
+
+server.registerTool(
+  'report_agent_activity',
+  {
+    title: 'Report what you are doing',
+    description:
+      'A heartbeat for the human\'s progress line: one short present-tense phrase ("Creating scene demo-shot", ' +
+      '"Revising opening narration", "Building film"). Cheap and overwrite-in-place — call it when your ' +
+      'activity changes and every minute or two during long work. Heartbeats expire after ~3 minutes, after ' +
+      'which the Studio shows "Waiting for the next AI run"; a stale heartbeat never blocks anything.',
+    inputSchema: {
+      activity: z.string().min(1).max(120),
+      film: z.string().optional().describe('The film this work is for'),
+      scene: z.string().optional().describe('The scene this work is on ("<film>/<scene>")'),
+      detail: z.string().max(300).optional(),
+    },
+  },
+  wrap(async ({ activity, film, scene, detail }) => {
+    const workspacePath = store.workspacePath(WORKSPACE);
+    const body = await reportActivity({
+      workspacePath,
+      agent: AGENT,
+      activity,
+      filmId: film ? qualifyFilm(film) : null,
+      sceneId: scene ? qualifyScene(scene) : null,
+      detail,
+    });
+    return ok(body);
+  }),
+);
+
+server.registerTool(
+  'get_production_status',
+  {
+    title: 'Production status snapshot',
+    description:
+      'One film\'s production facts: segment readiness (rendered / stale / missing / problems), unresolved ' +
+      'advice counts, archived deliveries, the current review-pinned delivery, whether promoted work is newer ' +
+      'than that delivery (build_film would publish it), and live agent activity. The same projection the ' +
+      'Studio header renders. Use it to decide "is there anything left to do" before reporting completion.',
+    inputSchema: { film: z.string() },
+  },
+  wrap(async ({ film }) => {
+    const doc = await filmForAdvice(film);
+    const status = await productionStatus({ store, film: doc });
+    return ok({
+      ...status,
+      filmId: undefined,
+      film: doc.slug,
+      activity: status.activity.map(({ filmId, sceneId, ...a }) => ({
+        ...a,
+        ...(filmId ? { film: localId(filmId) } : {}),
+        ...(sceneId ? { scene: localId(sceneId) } : {}),
+      })),
+    });
+  }),
 );
 
 /* ------------------------------------------------------------------ */

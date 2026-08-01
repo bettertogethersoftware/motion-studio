@@ -256,12 +256,14 @@ function appendFilmRows(ul, f) {
   chev.title = fOpen ? 'hide scenes' : 'show scenes';
   chev.addEventListener('click', (e) => { e.stopPropagation(); toggleFilm(f.id); });
   const name = el('span', 'p-name', f.name);
-  name.title = f.broken ? `${f.name} — film.json is broken or missing` : `${f.name} — open the film editor`;
+  name.title = f.broken ? `${f.name} — film.json is broken or missing` : `${f.name} — watch, advise, and edit`;
   const meta = el('span', 'p-meta', f.broken ? 'broken' : `${f.scenes}sc`);
   const del = el('button', 'film-del', '✕');
   del.title = 'delete this film…';
   del.addEventListener('click', (e) => { e.stopPropagation(); deleteFilm(f); });
   row.append(chev, name, meta, del);
+  // One page per film (v0.23.1). It opens in watch & advise and carries the
+  // production editor behind a toggle — there is no second surface to choose.
   row.addEventListener('click', () => { location.href = `/film.html?id=${enc(f.id)}`; });
   ul.appendChild(row);
   if (!fOpen) return;
@@ -1601,6 +1603,20 @@ function defList(dl, rows) {
 /** "westeurope (from AZURE_SPEECH_REGION)" — a value is only useful with its origin. */
 const withSource = (value, source) => (value == null ? null : source && source !== 'settings' ? `${value}  ← ${source}` : value);
 
+/* A filesystem path is routinely longer than any field we can give it, and an
+ * <input> cannot wrap. So every path box carries its current value as a
+ * tooltip: hovering answers "what is actually in there" without selecting the
+ * text and scrolling through it. Done on hover rather than on paint so it is
+ * correct while typing and needs no hook in each painter. */
+const PATH_INPUTS = '.path-fields input, .path-field input, .storage-field input';
+const syncPathTitle = (el) => { el.title = el.value || el.placeholder || ''; };
+document.addEventListener('mouseover', (e) => {
+  if (e.target?.matches?.(PATH_INPUTS)) syncPathTitle(e.target);
+}, true);
+document.addEventListener('input', (e) => {
+  if (e.target?.matches?.(PATH_INPUTS)) syncPathTitle(e.target);
+});
+
 /* ---------------------------- preference chain ---------------------------- */
 /* Each card used to carry an "in use: yes (from settings)" fact row. It is gone
  * as of v0.19: the row was painted from the server's report, so the moment a box
@@ -1990,7 +2006,10 @@ function paintTranscription(report, meta = vendorState.whisperMeta) {
 
     const c = v.config ?? {};
     defList(vendorEl.facts(v.id), [
-      ['command', withSource(c.command, c.commandSource)],
+      // `commandFolder` is set when the setting named a folder and the engine
+      // found the binary inside it — say so, so a working setup that does not
+      // literally match what is typed in the box is not a mystery.
+      ['command', withSource(c.command, c.commandFolder ? `found in ${c.commandFolder}` : c.commandSource)],
       ['models folder', withSource(c.modelsDir, c.modelsDirSource)],
       ['model in use', v.available ? `${c.activeModel} · ${fmtModelBytes(c.activeModelBytes)}` : null],
       ['models found', c.modelCount == null ? null : String(c.modelCount)],

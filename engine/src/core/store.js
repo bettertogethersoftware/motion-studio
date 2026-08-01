@@ -38,15 +38,26 @@
  *     film document is its own file), where the shared registries were a
  *     lost-update hazard.
  *
- * Concurrency: writes are atomic (temp + rename). Two writers editing the
- * SAME film.json remain last-write-wins, unchanged from the registry model
- * and surfaced to the human via the Studio's refresh; cross-process render
+ * Concurrency: writes are atomic (temp + rename). Cross-process render
  * collisions are prevented by core/lock.js, not by this store.
+ *
+ * Two writers editing the SAME film.json used to be last-write-wins. That is
+ * not survivable for films specifically, because a film patch REPLACES whole
+ * arrays: a writer holding a page-load-old `scenes` snapshot does not lose its
+ * own field, it reverts every scene edit anyone made in between, silently. An
+ * open Studio tab did exactly that to an agent's scene reorder. So getFilm now
+ * returns a `revision` (a hash of the stored document) and updateFilm takes an
+ * optional `expectedRevision`; a mismatch is FILM_CONFLICT rather than a write.
+ * Optional, not mandatory: internal single-field callers below (createScene,
+ * removeScene, renameAsset) read-modify-write in the same tick and would only
+ * be made noisier by it. The two writers that hold a snapshot across human or
+ * agent think-time — the Studio film page and the update_film tool — send it.
  */
 
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { EngineError, ErrorCodes } from './errors.js';
 import { resolveInTarget } from './sandbox.js';
 import { defaultDataDir, workspacesRootFor } from './paths.js';
@@ -95,6 +106,22 @@ export function parseId(id, depth, what) {
   const names = ['workspace', 'film', 'scene'];
   parts.forEach((p, i) => checkSlug(p, names[i]));
   return parts;
+}
+
+/**
+ * An opaque tag for one state of a film document, used for optimistic
+ * concurrency (see updateFilm). Derived, never stored — the file on disk stays
+ * the plain document it always was, and an editor that hand-edits film.json
+ * gets a new revision for free.
+ *
+ * Hashes the document as read. That includes `updatedAt`, so two saves that
+ * change nothing still produce different revisions; that costs a caller one
+ * harmless re-read and is the safe direction to be wrong in. Key order comes
+ * from the file, and every write here goes through JSON.stringify of the
+ * validated document, so it round-trips stably.
+ */
+export function filmRevision(doc) {
+  return createHash('sha1').update(JSON.stringify(doc ?? null)).digest('hex').slice(0, 12);
 }
 
 /**
@@ -350,12 +377,14 @@ export class WorkspaceStore {
     return out.sort((a, b) => a.slug.localeCompare(b.slug));
   }
 
-  /** The full film document plus its identity/paths. */
+  /** The full film document plus its identity/paths and its `revision`. */
   async getFilm(filmId) {
     const [ws, slug] = parseId(filmId, 2, 'film');
     const filmPath = this.filmPath(filmId);
     const doc = await this._readFilmDoc(filmPath, filmId);
-    return { ...doc, id: `${ws}/${slug}`, workspace: ws, slug, path: filmPath };
+    return {
+      ...doc, id: `${ws}/${slug}`, workspace: ws, slug, path: filmPath, revision: filmRevision(doc),
+    };
   }
 
   /**
@@ -363,15 +392,29 @@ export class WorkspaceStore {
    * and array fields REPLACE (a timeline edit is a statement of the whole
    * track — merging item-by-item would need addressing semantics no caller
    * wants).
+   *
+   * Because arrays replace, a caller that read the film and then thought for a
+   * while is proposing to undo everything written in between. Pass the
+   * `revision` from that read as `expectedRevision` and this refuses with
+   * FILM_CONFLICT instead. Omitting it keeps the old last-write-wins behaviour,
+   * which is correct only for read-modify-write within the same tick.
    */
-  async updateFilm(filmId, patch) {
+  async updateFilm(filmId, patch, { expectedRevision = undefined } = {}) {
     const ALLOWED = new Set(['name', 'scenes', 'outputFilename', 'audio', 'overlays', 'captions',
-      'captionStyle', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables']);
+      'captionStyle', 'sequences', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables']);
     for (const k of Object.keys(patch ?? {})) {
       if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_FILM, `Film field "${k}" cannot be updated`, { field: k });
     }
     const cur = await this.getFilm(filmId);
-    const { id, workspace, slug, path: filmPath, ...doc } = cur;
+    if (expectedRevision !== undefined && expectedRevision !== null && expectedRevision !== cur.revision) {
+      throw new EngineError(
+        ErrorCodes.FILM_CONFLICT,
+        `"${filmId}" changed since you read it (you have ${expectedRevision}, current is ${cur.revision}). `
+        + 'Re-read the film and re-apply your edit — patching now would revert the change you have not seen.',
+        { filmId, expectedRevision, revision: cur.revision, updatedAt: cur.updatedAt ?? null },
+      );
+    }
+    const { id, workspace, slug, path: filmPath, revision, ...doc } = cur;
     const merged = validateFilm({
       ...normalizeFilm({ ...doc, ...patch }),
       schemaVersion: FILM_SCHEMA_VERSION,
@@ -379,7 +422,7 @@ export class WorkspaceStore {
       updatedAt: new Date().toISOString(),
     });
     await this._writeFilmDoc(filmPath, merged);
-    return { ...merged, id, workspace, slug, path: filmPath };
+    return { ...merged, id, workspace, slug, path: filmPath, revision: filmRevision(merged) };
   }
 
   /**

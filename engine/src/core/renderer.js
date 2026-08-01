@@ -64,6 +64,7 @@ import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './format
 import { acquireRenderLock } from './lock.js';
 import { sceneOutputPath, writeRenderMeta } from './film.js';
 import { prepareStagingOutput, promoteStagingOutput } from './delivery.js';
+import { archiveRevision } from './revisions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -309,6 +310,31 @@ function withStagingDetail(err, stagingPath, signal) {
   return e;
 }
 
+/**
+ * Archive the just-promoted canonical delivery as an immutable revision
+ * (v0.23). Best-effort by the same rule as the render sidecar: a render that
+ * already succeeded must not be failed by history-keeping. Returns the
+ * revision id, or null when archiving was not possible.
+ */
+async function archiveCanonicalRevision({
+  scenePath, config, frames, outputPath, renderMeta, revision, jobId, progress,
+}) {
+  try {
+    const archived = await archiveRevision({
+      scenePath, config, frames, outputPath, renderMeta,
+      jobId: jobId ?? null,
+      ...(revision?.agent !== undefined ? { agent: revision.agent } : {}),
+      ...(revision?.note ? { note: revision.note } : {}),
+      ...(revision?.adviceIds?.length ? { adviceIds: revision.adviceIds } : {}),
+      ...(revision?.parentRevisionId ? { parentRevisionId: revision.parentRevisionId } : {}),
+    });
+    return archived.id;
+  } catch (err) {
+    progress.log('warn', `revision archive failed (delivery is unaffected): ${err?.message ?? err}`);
+    return null;
+  }
+}
+
 /** Promote the review pair after the movie; JSON lands last as the ready marker. */
 async function promoteReviewArtifacts(review, progress) {
   if (!review) return null;
@@ -419,6 +445,7 @@ export async function renderComposition(opts) {
     preflightCount = 5,
     lock = true,
     reviewPolicy = null,
+    revision = null,
   } = opts;
 
   let startFrame, endFrame, settings, prx;
@@ -694,13 +721,17 @@ export async function renderComposition(opts) {
     // that was not promoted.
     let promoted = false;
     let reviewArtifactWarning = null;
+    let revisionId = null;
     if (stagedDelivery) {
       throwIfAborted(signal);
       progress.phase('promoting');
       await promoteStagingOutput({ stagedPath: outPath, outputPath: deliveryPath });
       reviewArtifactWarning = await promoteReviewArtifacts(review, progress);
       if (canonicalDelivery) {
-        await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+        const renderMeta = await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+        revisionId = await archiveCanonicalRevision({
+          scenePath, config, frames: totalFrames, outputPath: deliveryPath, renderMeta, revision, jobId, progress,
+        });
       }
       promoted = true;
     }
@@ -712,11 +743,13 @@ export async function renderComposition(opts) {
       outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs, audio,
       ...(staticFrames !== null ? { staticFrames } : {}),
       ...(review ? { review: reviewResult(review) } : {}),
+      ...(revisionId ? { revisionId } : {}),
     });
     return {
       outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(stagedDelivery ? { promoted } : {}),
+      ...(revisionId ? { revisionId } : {}),
       ...(audio ? { audio } : {}),
       ...(staticFrames !== null ? { staticFrames } : {}),
       ...(review ? { review: reviewResult(review) } : {}),
@@ -847,6 +880,7 @@ export async function renderParallel(opts) {
     preflightCount = 5,
     lock = true,
     reviewPolicy = null,
+    revision = null,
   } = opts;
 
   let startFrame, endFrame, settings;
@@ -1132,13 +1166,17 @@ export async function renderParallel(opts) {
 
     let promoted = false;
     let reviewArtifactWarning = null;
+    let revisionId = null;
     if (stagedDelivery) {
       throwIfAborted(signal);
       progress.phase('promoting');
       await promoteStagingOutput({ stagedPath: workOutputPath, outputPath: deliveryPath });
       reviewArtifactWarning = await promoteReviewArtifacts(review, progress);
       if (canonicalDelivery) {
-        await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+        const renderMeta = await writeRenderMeta({ scenePath, config, frames: totalFrames, outputPath: deliveryPath });
+        revisionId = await archiveCanonicalRevision({
+          scenePath, config, frames: totalFrames, outputPath: deliveryPath, renderMeta, revision, jobId, progress,
+        });
       }
       promoted = true;
     }
@@ -1149,11 +1187,13 @@ export async function renderParallel(opts) {
       outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs, audio,
       ...(staticFrames !== null ? { staticFrames } : {}),
       ...(review ? { review: reviewResult(review) } : {}),
+      ...(revisionId ? { revisionId } : {}),
     });
     return {
       outputPath: deliveredOutputPath, frames: totalFrames, elapsedMs,
       framesVerified: verified.verified,
       ...(stagedDelivery ? { promoted } : {}),
+      ...(revisionId ? { revisionId } : {}),
       ...(audio ? { audio } : {}),
       ...(staticFrames !== null ? { staticFrames } : {}),
       ...(review ? { review: reviewResult(review) } : {}),

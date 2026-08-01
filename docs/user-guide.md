@@ -69,8 +69,9 @@ separate registry to fall out of sync. Data lives under
 used Motion Studio before v0.22 your existing `~/.motion-studio` keeps being
 used, and the settings page shows it.
 
-Clicking a film's row opens the [film editor](#the-film-editor); clicking a
-scene opens the workbench below. The film row's ✕ deletes it — a confirm
+Clicking a film's row opens its [film page](#watching-and-advising-the-film-page-v023)
+— player, tree, timeline and [editor](#the-film-editor) on one surface;
+clicking a scene opens the workbench below. The film row's ✕ deletes it — a confirm
 asks whether to also delete its scenes, assets and output, or just the film
 definition (the folder then stays on disk, listed as `broken` until cleaned
 up).
@@ -471,11 +472,14 @@ is what lets an agent cut your talk on sentence boundaries and land a caption on
 the word being spoken.
 
 It runs **whisper.cpp** entirely on this machine: one binary plus one model file,
-no account, no API key, no network. Point `MOTION_STUDIO_WHISPER_BIN` at
-`whisper-cli`, keep a `ggml-*.bin` model in a `models` folder beside it (the layout
-every prebuilt release already has, and the page finds it automatically), and
-restart. Until then the page says exactly what is missing and every transcription
-call fails with `transcription_unavailable` rather than half-working.
+no account, no API key, no network. Point the page's **executable** box (or
+`MOTION_STUDIO_WHISPER_BIN`) at `whisper-cli` — **or at the folder holding it**,
+including the root you unzipped; the engine looks inside for the binary and
+tells you where it found it. Keep a `ggml-*.bin` model in a `models` folder
+beside it (the layout every prebuilt release already has, and the page finds it
+automatically), and restart. Until then the page says exactly what is missing
+and every transcription call fails with `transcription_unavailable` rather than
+half-working.
 
 The page's test is the inverse of the tts page's: instead of typing a line and
 hearing it, you **choose a recording and read what came back**. It shows the
@@ -510,6 +514,81 @@ supplied rather than animation it wrote:
 Together these mean a film built around your own recording no longer needs anyone
 to run ffmpeg by hand. See [film-setup.md](film-setup.md#footage-on-the-timeline-v022).
 
+## Watching and advising: the film page (v0.23)
+
+Clicking a film opens **its one page**. It exists for the workflow Motion
+Studio is built around: an AI directs production unattended, and you return
+whenever you like, watch what it made, and tell it what you think. Nothing
+here asks for approval, and nothing waits for you.
+
+Everything is on one surface — player, tree, timeline, and the full editor.
+There is no separate review screen and no mode to pick: one film, one
+timeline, one set of rules.
+
+### Watch & advise
+
+- **The tree is the film.** The left rail reads `Film → Sequence →
+  Scene/Footage`. Click a sequence and the playhead jumps to its start and
+  its band lights up; click a scene or clip and the matching timeline block
+  selects. Scene folders the film does not play sit below as **unused
+  scenes**. The timeline gains a **sequences** band above the scenes row and
+  an **advice** row of markers below the tracks.
+- **Click to aim, then say it.** Select anything — a sequence, a scene, a
+  supplied clip, an audio item, a caption, an overlay, or just the film at
+  this moment — and press **✎ advise AI** (or `A`). A small popup opens on
+  exactly that thing, showing what it is and where you are in the film, with
+  one comment box. Press advise with nothing selected and the next click on
+  the tree, timeline or picture becomes the target; `Esc` cancels.
+- **Nothing to fill in.** The target, the frame, and what you were watching
+  are captured from your selection, and a frame grab of that exact moment is
+  stored with your words. Close the browser whenever — advice is on disk and
+  the AI finds it at its next checkpoint. Statuses are the human ones:
+  *advice sent → AI received it → AI is working on it → updated* (or *AI
+  reviewed it* with a short reason, or *AI needs more information* with a
+  question you answer inline). Opening one shows the AI's explanation and
+  the before/after frames.
+- **You can take it back.** Every still-open item has a **withdraw** button,
+  and the section foot has **withdraw all N open across the film**. Use it for
+  a typo, a duplicate, or a note you thought better of — otherwise it is
+  re-served to every later AI run. Withdrawing *closes* rather than deletes:
+  your wording, the event log and the evidence stay on record, the timeline
+  marker turns resolved instead of vanishing, and the card reads *you withdrew
+  this* rather than crediting the AI with a decision it never made.
+- **Every version is kept.** Select a scene and the inspector lists its
+  **versions** — each completed render, archived with its date, author and
+  the AI's one-line note. Click a take to watch it *in place* in the film;
+  previewing changes nothing. If an older one was better, **ask AI to use
+  this** (also offered right in the advice popup as *previous result*). That
+  sends high-priority advice naming the exact take; the AI normally switches
+  to it (no re-rendering — it is archived), may derive something better from
+  it, or explains why not. The page never changes production itself.
+- **Preview or the real thing.** The player normally stitches the scenes as
+  they stand right now. Switch it to **built film** to watch the last film
+  the AI actually assembled, with its real mix, overlays and burned
+  captions; that player pins one archived build and never switches beneath
+  you. A newer build offers itself in a banner, and a build whose length no
+  longer matches the cut says so rather than pretending.
+- **Honest progress.** The header shows what the AI reports it is doing
+  ("Creating scene demo-shot"), live; when its heartbeat goes stale you see
+  *waiting for the next AI run* — completed work and your advice are
+  unaffected.
+- **No film built yet?** Everything above still works against the scene
+  preview: the tree, the timeline, and advice on any scene, clip or track
+  item.
+
+### The production controls
+
+They are always available: the add row (`+
+scene`, `+ narration`, `+ audio`, `+ caption`, `+ footage`, `+ overlay`),
+snap, drag-to-reorder and edge-trim, the full property inspector, undo/redo,
+per-scene render and **build film**. Sequences gain `+ seq` (group the
+selected segment onward), plus rename, ungroup, and an **intent** note the AI
+reads. The advice and version sections stay visible in this mode too, so the
+conversation is never a mode away.
+
+In watch mode none of that can fire: dragging a block only selects it, and
+Delete does nothing.
+
 ## Long-form films (multiple scenes)
 
 A single composition is the right size for a shot, not for minutes of video.
@@ -523,19 +602,27 @@ in seconds.
 
 ### The film editor
 
-Creating a film (**+ film** in a workspace, or `create_film` over MCP) opens
-the visual editor right away — there's no separate save step and no more
-dedicated "…— Master" project: the film folder itself holds the assets and
-output. The editor's info bar shows the film's **workspace** and name. The
-left rail lists **the film's own scenes** — every folder under its
-`scenes/`, not a global pool — flagging each as `in film` (already in the
-play order) or `unlisted` (a scene folder that exists but isn't placed yet,
-e.g. made by an agent or copied in by hand). The right panel is the context
-inspector — and the **build panel** docks there too, so assembling never
-covers the timeline. The timeline contains scene/footage blocks plus audio,
-caption, and overlay tracks:
+The editor *is* the film page — the same surface you watch and advise on (see
+[Watching and advising](#watching-and-advising-the-film-page-v023)).
 
-- **scenes and footage** — **drag a scene from the left rail onto the
+Creating a film (**+ film** in a workspace, or `create_film` over MCP) opens
+it right away — there's no separate save step and no more dedicated "…—
+Master" project: the film folder itself holds the assets and output. The info
+bar shows the film's **workspace** and name. The left rail is the `Film →
+Sequence → Scene/Footage` tree — the play order, read top to bottom — with
+any scene folder the film does *not* play listed below it as an **unused
+scene** (made by an agent, or copied in by hand) ready to drag in. The right
+panel is the context inspector — and the **build panel** docks there too, so
+assembling never covers the timeline. The timeline holds a sequence band row,
+scene/footage blocks, audio, caption and overlay tracks, and an advice row:
+
+- **sequences** — the narrative band above the cut. Consecutive segments
+  sharing a label are one sequence; there is nothing else to it, which is why
+  regrouping never moves a file or invalidates a render. **+ seq** groups the
+  selected segment and everything after it; the inspector renames, ungroups,
+  and holds an **intent** note the AI reads. A scene dropped inside a
+  sequence joins it rather than splitting the band in three.
+- **scenes and footage** — **drag a scene from the unused list onto the
   timeline** to place it (an insert marker shows where it lands), or hit the
   row's **+** to append it; drag blocks to reorder. **+ new scene** at the
   foot of the rail scaffolds a fresh scene folder directly into the film.
@@ -560,6 +647,9 @@ caption, and overlay tracks:
 - **overlay** — images (logo, watermark) or videos (a transparent `.webm`
   stinger keeps its alpha) composited over the film: position/width in % of
   frame, opacity, frame-accurate window.
+- **advice** — a marker per piece of human advice, wherever on the film it
+  was left. Clicking one selects what it was about and opens it. Blocks and
+  tree rows carry a small count badge while advice on them is unresolved.
 
 The **preview plays your real rendered scenes** back to back with overlays
 and captions drawn in place. With a master timeline, pressing play builds the
@@ -567,6 +657,16 @@ mix through **the exact ffmpeg graph the final film uses** (gains, fades,
 ducking, limiter) — what you hear is what ships. Snap, zoom, undo/redo and
 autosave behave the way you'd expect from an NLE; Space plays, arrows step,
 Del removes the selected block.
+
+**You and the AI share this document, so the page watches for its edits.**
+When the AI changes the film while you have the page open, a page with nothing
+unsaved quietly catches up on its next refresh. If you *are* mid-edit, the save
+indicator reads **changed elsewhere** and your work is left alone. Should you
+save anyway, the save is refused rather than applied: an edit here is a
+statement about the *whole* scene order, so letting it through would wipe out
+whatever the AI just did. The page then reloads and tells you that last change
+was not saved — make it again on top of the new version. Losing one edit is
+the point; the alternative is silently losing the AI's.
 
 The empty right-side inspector also contains **platform versions**. It shows the
 versions the AI or new-film dialog chose, lets you add/remove a saved preset,

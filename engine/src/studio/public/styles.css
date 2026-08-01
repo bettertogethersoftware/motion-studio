@@ -502,18 +502,23 @@ dialog .fieldrow { margin-bottom: 10px; }
   max-height: 180px; overflow-y: auto;
 }
 .env-list dt { color: var(--dim); white-space: nowrap; }
-.env-list dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* These values are mostly absolute paths, and half a path answers nothing —
+   "is it pointing at the right place" is the entire question a reader has
+   here. Wrap rather than ellipsis; the list already scrolls if it grows. */
+.env-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 
 /* Storage locations (v0.22). One per row rather than a .fieldrow: these are
    long absolute paths that need the full width, and each carries a hint line
    under it saying where the value came from. */
-.storage-fields { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+.storage-fields { display: flex; flex-direction: column; gap: 10px; }
 .storage-field { display: grid; grid-template-columns: 120px 1fr; gap: 2px 12px; align-items: center; }
 .storage-field .storage-name { justify-self: start; }
-.storage-field input { width: 100%; }
+.storage-field input { width: 100%; font: 12px var(--mono); }
+/* The resolved path wraps: a truncated one cannot answer "did it land where I
+   meant", which is the only reason this line exists. */
 .storage-field .storage-hint {
   grid-column: 2; font-size: 10px; letter-spacing: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow-wrap: anywhere; word-break: break-word;
 }
 /* Locked by an env var: still readable, visibly not yours to edit here. */
 .storage-field.locked input { opacity: 0.55; cursor: not-allowed; }
@@ -599,7 +604,12 @@ button.ghost.tiny {
 .vendor-cards.tabbed .vendor-card { display: none; }
 .vendor-cards.tabbed .vendor-card.tab-active { display: block; }
 /* The settings page reuses the vendors-page shell; keep the form readable. */
+/* 720px is a comfortable reading measure for the prose and the small knobs,
+   but the storage block holds absolute paths — it opts out rather than making
+   every paragraph on the page span the window. */
 #settings-page form { max-width: 720px; }
+#settings-page form .storage-fields,
+#settings-page form .path-fields { width: min(1200px, calc(100vw - 320px)); }
 button.ghost.tiny:disabled { opacity: 0.25; cursor: default; }
 .chain-note { font-size: 11px; color: var(--dim); margin: 0 0 14px; }
 .chain-note.warn { color: var(--warn, var(--err)); }
@@ -617,6 +627,15 @@ label.radio input { accent-color: var(--accent); }
 .vendor-grid { margin: 12px 0 4px; grid-template-columns: repeat(3, minmax(140px, 240px)); }
 .vendor-grid label.wide { grid-column: span 2; }
 .vendor-grid select, .vendor-grid input { width: 100%; }
+/* Filesystem paths get their own full-width stack, NOT a cell in the knob
+   grid — same reasoning (and shape) as .storage-fields on the settings page.
+   The grid caps its columns at 240px so that a "threads" box is not comically
+   wide, which cut every real Windows path off around "C:\Users\name\so" —
+   exactly the part that tells you nothing. Monospace, full card width, and
+   each input carries its own value as a tooltip for the genuinely long ones. */
+.path-fields { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+.path-fields label { display: block; }
+.path-fields input { width: 100%; font: 12px var(--mono); }
 .vendor-test { margin-top: 12px; align-items: end; }
 .vendor-test .grow input { width: 100%; }
 /* min-width so a select that is still loading (or has no voices) stays a

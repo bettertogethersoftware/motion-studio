@@ -294,6 +294,7 @@ export function filmLayout(scenes, fps = null) {
       kind: s.kind ?? 'scene',
       ...(isFootage(s) ? { footage: s.footage } : { sceneId: s.sceneId }),
       ...(s.slug ? { slug: s.slug } : {}),
+      ...(s.sequence ? { sequence: s.sequence } : {}),
       name: segmentName(s),
       filmOffset,
       durationInFrames,

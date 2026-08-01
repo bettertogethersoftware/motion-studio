@@ -69,6 +69,30 @@
  *   GET    /api/jobs/:id/logs?tail=
  *   POST   /api/jobs/:id/cancel
  *   GET    /preview/:sid/<path>              sandboxed scene file serving (iframe)
+ *
+ * The production loop (v0.23 — AI-directed, human-advised). These feed the
+ * ONE film page: there is no separate review route or review document.
+ *   GET    /api/films/:fid/overview          one-call film-page snapshot (doc, plan,
+ *                                            deliveries, advice, revisions, status)
+ *   GET    /api/films/:fid/status            production status projection
+ *   GET    /api/films/:fid/deliveries        archived immutable builds + current
+ *   GET    /api/films/:fid/deliveries/:did          frozen manifest
+ *   GET    /api/films/:fid/deliveries/:did/file     pinned playback video (ranges)
+ *   GET    /api/films/:fid/deliveries/:did/contact  contact sheet PNG
+ *   GET    /api/films/:fid/resolve?frame=&delivery= film frame → scene/sequence/
+ *                                            revision/track items, via the manifest
+ *   POST   /api/films/:fid/advice            {message,target?,observation?,…} → receipt
+ *                                            (evidence captured asynchronously)
+ *   GET    /api/films/:fid/advice?status=&scene=&…  list + summary
+ *   GET    /api/films/:fid/advice/:aid              request+state+events+resolution
+ *   GET    /api/films/:fid/advice/:aid/evidence/:which  before/after PNG
+ *   GET    /api/scenes/:sid/revisions        immutable revision history
+ *   GET    /api/scenes/:sid/revisions/:rid/file     archived output (ranges)
+ *   GET    /api/scenes/:sid/revisions/:rid/contact  archived contact sheet
+ *   POST   /api/scenes/:sid/revisions/:rid/prefer   "Ask AI to use this version"
+ *                                            → prefer-revision ADVICE (never a direct switch)
+ *   GET    /api/workspaces/:ws/activity      agent heartbeats
+ *   GET    /api/events                       SSE production stream (Last-Event-ID replay)
  */
 
 import http from 'node:http';
@@ -111,8 +135,19 @@ import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks } from '../core/films.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
-import { resolveReviewPolicy } from '../core/render-review.js';
+import { resolveReviewPolicy, extractRenderedFrame } from '../core/render-review.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
+import {
+  createAdvice, listAdvice, getAdvice, adviceSummary,
+  writeAdviceEvidence, recordEvidenceFailure, adviceEvidencePath,
+  withdrawAdvice, withdrawAllAdvice,
+} from '../core/advice.js';
+import { listRevisions, revisionFilePath, getRevision, currentRevisionId } from '../core/revisions.js';
+import {
+  listDeliveries, getDeliveryManifest, currentDeliveryId, deliveryFilePath, resolveDeliveryFrame,
+} from '../core/deliveries.js';
+import { listActivity, productionStatus } from '../core/activity.js';
+import { ProductionEvents, startWorkspaceWatcher, sseFrame } from '../core/events.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -195,10 +230,20 @@ const STATUS_FOR_CODE = {
   // Films.
   [ErrorCodes.FILM_NOT_FOUND]: 404,
   [ErrorCodes.INVALID_FILM]: 400,
+  // Classic optimistic-concurrency 409: re-read and retry, don't resend.
+  [ErrorCodes.FILM_CONFLICT]: 409,
   [ErrorCodes.SCENE_NOT_RENDERED]: 409,
   [ErrorCodes.INCONSISTENT_SCENES]: 409,
   [ErrorCodes.NO_AUDIO_TRACKS]: 400,
   [ErrorCodes.MIGRATION_FAILED]: 500,
+  // The production loop (v0.23): advice, revisions, deliveries.
+  [ErrorCodes.ADVICE_NOT_FOUND]: 404,
+  [ErrorCodes.INVALID_ADVICE]: 400,
+  [ErrorCodes.ADVICE_LEASE_HELD]: 409,
+  [ErrorCodes.ADVICE_ALREADY_RESOLVED]: 409,
+  [ErrorCodes.REVISION_NOT_FOUND]: 404,
+  [ErrorCodes.REVISION_MISMATCH]: 409,
+  [ErrorCodes.DELIVERY_NOT_FOUND]: 404,
 };
 
 /** Preview clips are for auditioning a voice, not for rendering a script. */
@@ -333,6 +378,77 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
   // would read as "it did not work".
   let store = initialStore ?? new WorkspaceStore();
 
+  // The production event stream (v0.23): one bus per server, fed by (a) this
+  // process's own writes at their call sites and (b) a recursive watcher on
+  // the workspaces root, which is how an MCP server's work in ANOTHER process
+  // becomes visible here without polling. Events are refetch triggers, never
+  // truth, so double-emission for our own writes is harmless.
+  const events = new ProductionEvents();
+  let watcher = startWorkspaceWatcher({ root: store.workspacesRoot, events });
+
+  /**
+   * Best-effort before/after frame evidence for advice. Runs AFTER the advice
+   * request is durable, detached from the request/response cycle; failure is
+   * recorded on the advice rather than surfaced as an error.
+   */
+  const captureAdviceEvidence = async (film, adviceId, which, observation, target) => {
+    try {
+      let filePath = null;
+      let frame = null;
+      let fps = null;
+      const meta = {};
+      if (observation?.deliveryId && observation?.filmFrame !== undefined) {
+        const manifest = await getDeliveryManifest(film.path, observation.deliveryId);
+        filePath = deliveryFilePath(film.path, observation.deliveryId, manifest.outputFile);
+        frame = Math.max(0, Math.min(observation.filmFrame, (manifest.totalFrames ?? 1) - 1));
+        fps = manifest.fps ?? 30;
+        Object.assign(meta, { deliveryId: observation.deliveryId, filmFrame: frame });
+      } else if (target?.scene && (target?.sceneFrame !== undefined || observation?.sceneFrame !== undefined)) {
+        const sceneId = `${film.id}/${target.scene}`;
+        const scene = await store.getScene(sceneId);
+        const config = await store.readConfig(sceneId);
+        filePath = path.join(scene.path, config.output?.dir ?? 'out', config.output?.filename ?? 'output.mp4');
+        frame = Math.max(0, Math.min(target.sceneFrame ?? observation.sceneFrame, config.durationInFrames - 1));
+        fps = config.fps;
+        Object.assign(meta, {
+          scene: target.scene, sceneFrame: frame,
+          revisionId: observation?.revisionId ?? await currentRevisionId(scene.path).catch(() => null),
+        });
+      } else if (target?.type === 'footage' && target?.itemId) {
+        // A footage clip has no scene folder and no revision — the frame the
+        // human saw lives in the film's own asset. Resolved from the document
+        // by id, never from a client-supplied path.
+        const doc = await store.getFilm(film.id);
+        const seg = (doc.scenes ?? []).find((s) => s.id === target.itemId && s.footage);
+        if (!seg) throw new EngineError(ErrorCodes.FILE_NOT_FOUND, 'that footage segment is no longer in the play order');
+        filePath = resolveInTarget(film.path, String(seg.footage).replace(/\\/g, '/'), { asAsset: true });
+        frame = Math.max(0, Math.min(target.sceneFrame ?? 0, (seg.durationInFrames ?? 1) - 1));
+        fps = (await planFilm({ film: doc, store }).catch(() => null))?.fps ?? 30;
+        Object.assign(meta, { footage: seg.footage, itemId: target.itemId, segmentFrame: frame });
+      } else if (observation?.revisionId && target?.scene) {
+        const sceneId = `${film.id}/${target.scene}`;
+        const scene = await store.getScene(sceneId);
+        const config = await store.readConfig(sceneId);
+        const rev = await getRevision(scene.path, observation.revisionId);
+        filePath = path.join(rev.path, rev.outputFile);
+        frame = Math.max(0, Math.min(target.sceneFrame ?? Math.floor((rev.frames ?? 2) / 2), (rev.frames ?? 1) - 1));
+        fps = rev.config?.fps ?? config.fps;
+        Object.assign(meta, { scene: target.scene, revisionId: observation.revisionId, sceneFrame: frame });
+      }
+      if (!filePath || !fs.existsSync(filePath)) {
+        throw new EngineError(ErrorCodes.FILE_NOT_FOUND, 'no visible media to capture evidence from');
+      }
+      const png = await extractRenderedFrame({
+        filePath, frame: frame ?? 0, fps: fps ?? 30, ffmpegPath: (await resolveFfmpegPath({ dataDir: store.dataDir })).path,
+      });
+      await writeAdviceEvidence({ filmPath: film.path, adviceId, which, png, meta });
+    } catch (err) {
+      await recordEvidenceFailure({
+        filmPath: film.path, adviceId, which, reason: err?.message ?? String(err),
+      }).catch(() => {});
+    }
+  };
+
   /**
    * Where everything lives, plus — for each of the three storage locations —
    * which layer decided it and what the settings page may do about it (v0.22).
@@ -439,6 +555,9 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
     if (moved) {
       store = new WorkspaceStore(p.dataDir, { workspacesRoot: p.workspacesRoot });
       await store.ready();
+      // The event watcher follows the tree it reports on.
+      watcher.close();
+      watcher = startWorkspaceWatcher({ root: store.workspacesRoot, events });
     }
     return {
       moved,
@@ -878,14 +997,217 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             return sendJson(res, 200, { film, detail, sceneFolders: scenes });
           }
           if (req.method === 'PATCH') {
-            const { patch } = await readBody(req);
-            const film = await store.updateFilm(targetId, patch ?? {});
+            // `revision` is what the client last read. Sending it turns a
+            // stale whole-array patch into a 409 instead of a silent revert
+            // of everything an agent changed while the tab sat open.
+            const { patch, revision } = await readBody(req);
+            const film = await store.updateFilm(targetId, patch ?? {}, { expectedRevision: revision });
             const detail = await planFilm({ film, store });
             return sendJson(res, 200, { film, detail });
           }
           if (req.method === 'DELETE') {
             const deleteFiles = url.searchParams.get('deleteFiles') === '1';
             return sendJson(res, 200, await store.removeFilm(targetId, { deleteFiles }));
+          }
+        }
+
+        /* ---- production loop (v0.23): deliveries, advice, resolution ---- */
+
+        // GET /api/films/:fid/overview — one snapshot the film page opens on:
+        // document + plan + deliveries + advice summary + activity + per-scene
+        // revision counts. One call, because the human just clicked a film.
+        if (isFilmRoute && req.method === 'GET' && sub === 'overview' && parts.length === 4) {
+          const film = await store.getFilm(targetId);
+          const plan = await planFilm({ film, store });
+          const deliveries = await listDeliveries(film.path);
+          const currentId = await currentDeliveryId(film.path);
+          const advice = await listAdvice({ filmPath: film.path, status: 'all', order: 'newest', limit: 200 });
+          const revisions = {};
+          for (const seg of plan.scenes) {
+            if (seg.kind !== 'scene' || seg.missing) continue;
+            const revs = await listRevisions(store.scenePath(seg.sceneId)).catch(() => []);
+            revisions[seg.slug] = {
+              count: revs.length,
+              currentRevisionId: revs.find((r) => r.current)?.id ?? null,
+              latestAt: revs[0]?.createdAt ?? null,
+            };
+          }
+          const status = await productionStatus({ store, film, plan });
+          return sendJson(res, 200, {
+            film, plan, deliveries, currentDeliveryId: currentId, advice, revisions, status,
+            lastEventId: events.nextId - 1,
+          });
+        }
+
+        // GET /api/films/:fid/status — the light header refresh.
+        if (isFilmRoute && req.method === 'GET' && sub === 'status' && parts.length === 4) {
+          const film = await store.getFilm(targetId);
+          return sendJson(res, 200, await productionStatus({ store, film }));
+        }
+
+        // Deliveries: list, manifest, pinned playback file, contact sheet.
+        if (isFilmRoute && sub === 'deliveries') {
+          const film = await store.getFilm(targetId);
+          if (req.method === 'GET' && parts.length === 4) {
+            return sendJson(res, 200, {
+              currentDeliveryId: await currentDeliveryId(film.path),
+              deliveries: await listDeliveries(film.path),
+            });
+          }
+          const deliveryId = parts[4];
+          if (req.method === 'GET' && parts.length === 5) {
+            const { path: _p, ...manifest } = await getDeliveryManifest(film.path, deliveryId);
+            return sendJson(res, 200, manifest);
+          }
+          if (req.method === 'GET' && parts[5] === 'file' && parts.length === 6) {
+            const manifest = await getDeliveryManifest(film.path, deliveryId);
+            const abs = deliveryFilePath(film.path, deliveryId, manifest.outputFile);
+            return await streamFile(res, abs, { range: req.headers.range, download: url.searchParams.get('download') === '1' });
+          }
+          if (req.method === 'GET' && parts[5] === 'contact' && parts.length === 6) {
+            return await streamFile(res, deliveryFilePath(film.path, deliveryId, 'film.contact.png'));
+          }
+        }
+
+        // GET /api/films/:fid/resolve?frame=N[&delivery=ID] — what is the
+        // human looking at? Resolved against the PINNED delivery's manifest,
+        // never against the film's present state (snapshot consistency).
+        if (isFilmRoute && req.method === 'GET' && sub === 'resolve' && parts.length === 4) {
+          const film = await store.getFilm(targetId);
+          const deliveryId = url.searchParams.get('delivery') || await currentDeliveryId(film.path);
+          if (!deliveryId) {
+            throw new EngineError(ErrorCodes.DELIVERY_NOT_FOUND,
+              'This film has no built delivery yet — scene previews are still advisable individually');
+          }
+          const manifest = await getDeliveryManifest(film.path, deliveryId);
+          const hit = resolveDeliveryFrame(manifest, Number(url.searchParams.get('frame') ?? 0));
+          return sendJson(res, 200, { deliveryId, ...hit });
+        }
+
+        // Advice: create (durable receipt first, evidence async), list, detail.
+        if (isFilmRoute && sub === 'advice') {
+          const film = await store.getFilm(targetId);
+          if (req.method === 'POST' && parts.length === 4) {
+            const body = await readBody(req);
+            const receipt = await createAdvice({
+              filmPath: film.path,
+              filmId: film.id,
+              message: body.message,
+              target: body.target ?? { type: 'film' },
+              observation: body.observation ?? { source: 'none' },
+              suggestedAction: body.suggestedAction ?? 'rework',
+              preferredRevisionId: body.preferredRevisionId ?? null,
+              followUpOf: body.followUpOf ?? null,
+              requestId: body.requestId ?? null,
+              from: 'human',
+            });
+            events.emit('advice', { filmId: film.id, adviceId: receipt.id });
+            if (!receipt.deduplicated) {
+              // Detached on purpose: the receipt IS the durable commitment;
+              // evidence lands (or records its failure) when it lands.
+              void captureAdviceEvidence(film, receipt.id, 'before', body.observation ?? {}, body.target ?? {});
+            }
+            return sendJson(res, 201, receipt);
+          }
+          if (req.method === 'GET' && parts.length === 4) {
+            const target = ['scene', 'sequence', 'itemId', 'type'].some((k) => url.searchParams.get(k))
+              ? {
+                ...(url.searchParams.get('type') ? { type: url.searchParams.get('type') } : {}),
+                ...(url.searchParams.get('scene') ? { scene: url.searchParams.get('scene') } : {}),
+                ...(url.searchParams.get('sequence') ? { sequence: url.searchParams.get('sequence') } : {}),
+                ...(url.searchParams.get('itemId') ? { itemId: url.searchParams.get('itemId') } : {}),
+              }
+              : null;
+            const items = await listAdvice({
+              filmPath: film.path,
+              status: url.searchParams.get('status') ?? 'all',
+              order: url.searchParams.get('order') ?? null,
+              target,
+              limit: Number(url.searchParams.get('limit')) || 0,
+            });
+            return sendJson(res, 200, { advice: items, summary: await adviceSummary(film.path) });
+          }
+          // POST /api/films/:fid/advice/withdraw-all — the human clears the
+          // board. Advice is otherwise one-way: without this, a typo or a
+          // note they changed their mind about is re-served to every later
+          // AI run forever.
+          if (req.method === 'POST' && parts[4] === 'withdraw-all' && parts.length === 5) {
+            const body = await readBody(req);
+            const result = await withdrawAllAdvice({ filmPath: film.path, reason: body.reason ?? null });
+            events.emit('advice', { filmId: film.id });
+            return sendJson(res, 200, result);
+          }
+          const adviceId = parts[4];
+          if (req.method === 'GET' && parts.length === 5) {
+            const full = await getAdvice({ filmPath: film.path, adviceId });
+            const { path: _p, ...body } = full;
+            return sendJson(res, 200, body);
+          }
+          // POST /api/films/:fid/advice/:aid/withdraw — take one back. Closes
+          // it terminally; the wording and evidence stay on disk.
+          if (req.method === 'POST' && parts[5] === 'withdraw' && parts.length === 6) {
+            const body = await readBody(req);
+            const result = await withdrawAdvice({
+              filmPath: film.path, adviceId, reason: body.reason ?? null,
+            });
+            events.emit('advice', { filmId: film.id, adviceId });
+            return sendJson(res, 200, result);
+          }
+          if (req.method === 'GET' && parts[5] === 'evidence' && parts.length === 7) {
+            return await streamFile(res, adviceEvidencePath(film.path, adviceId, parts[6]));
+          }
+        }
+
+        // Scene revisions: history, artefacts, and "Ask AI to use this version".
+        if (isSceneRoute && sub === 'revisions') {
+          const scene = await store.getScene(targetId);
+          if (req.method === 'GET' && parts.length === 4) {
+            const revisions = await listRevisions(scene.path);
+            return sendJson(res, 200, {
+              scene: scene.id,
+              currentRevisionId: revisions.find((r) => r.current)?.id ?? null,
+              revisions: revisions.map(({ path: _p, renderMeta: _m, ...r }) => r),
+            });
+          }
+          const revisionId = parts[4];
+          if (req.method === 'GET' && parts[5] === 'file' && parts.length === 6) {
+            const rev = await getRevision(scene.path, revisionId);
+            return await streamFile(res, path.join(rev.path, rev.outputFile), { range: req.headers.range });
+          }
+          if (req.method === 'GET' && parts[5] === 'contact' && parts.length === 6) {
+            return await streamFile(res, revisionFilePath(scene.path, revisionId, 'output.contact.png'));
+          }
+          // POST …/revisions/:rid/prefer — "Ask AI to use this version".
+          // Studio NEVER repoints production; it records high-priority advice
+          // naming the exact revision, and the next director decides.
+          if (req.method === 'POST' && parts[5] === 'prefer' && parts.length === 6) {
+            const body = await readBody(req);
+            const rev = await getRevision(scene.path, revisionId); // 404s before advice is created
+            const film = await store.getFilm(scene.film);
+            const revisions = await listRevisions(scene.path);
+            const current = revisions.find((r) => r.current)?.id ?? null;
+            const receipt = await createAdvice({
+              filmPath: film.path,
+              filmId: film.id,
+              message: String(body.message ?? '').trim()
+                || `Please use this earlier version of "${scene.slug}" (${revisionId}) — it reads better than the current one.`,
+              target: { type: 'scene', scene: scene.slug },
+              observation: {
+                source: 'revision-preview',
+                revisionId,
+                ...(current ? { currentRevisionId: current } : {}),
+              },
+              suggestedAction: 'prefer-revision',
+              preferredRevisionId: revisionId,
+              requestId: body.requestId ?? null,
+              from: 'human',
+            });
+            events.emit('advice', { filmId: film.id, adviceId: receipt.id });
+            if (!receipt.deduplicated) {
+              void captureAdviceEvidence(film, receipt.id, 'before',
+                { revisionId, sceneFrame: Math.floor((rev.frames ?? 2) / 2) }, { scene: scene.slug });
+            }
+            return sendJson(res, 201, receipt);
           }
         }
 
@@ -1253,6 +1575,43 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
         }
       }
 
+      // GET /api/events — the production event stream (v0.23). One
+      // reconnectable SSE feed for every workspace: advice, revisions,
+      // deliveries, film documents, outputs, and activity heartbeats.
+      // Reconnect with Last-Event-ID (or ?lastEventId=): buffered events are
+      // replayed; a gap sends `reset` and the client refetches canonical
+      // state. Events are notifications — the client always refetches.
+      if (req.method === 'GET' && parts[1] === 'events' && parts.length === 2) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-store',
+          Connection: 'keep-alive',
+        });
+        res.write('retry: 1500\n\n');
+        const lastId = req.headers['last-event-id'] ?? url.searchParams.get('lastEventId');
+        if (lastId) {
+          const missed = events.since(lastId);
+          if (missed === null) {
+            res.write(`event: reset\ndata: ${JSON.stringify({ reason: 'event gap — refetch state' })}\n\n`);
+          } else {
+            for (const e of missed) res.write(sseFrame(e));
+          }
+        }
+        const unsubscribe = events.subscribe((e) => res.write(sseFrame(e)));
+        const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+        req.on('close', () => {
+          clearInterval(ping);
+          unsubscribe();
+        });
+        return;
+      }
+
+      // GET /api/workspaces/:ws/activity — agent heartbeats (v0.23).
+      if (req.method === 'GET' && parts[1] === 'workspaces' && parts[3] === 'activity' && parts.length === 4) {
+        const ws = await store.getWorkspace(parts[2]);
+        return sendJson(res, 200, { activity: await listActivity(ws.path) });
+      }
+
       // /api/jobs...
       if (parts[1] === 'jobs') {
         if (req.method === 'GET' && parts.length === 2) return sendJson(res, 200, { jobs: jobs.listJobs() });
@@ -1271,6 +1630,10 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
       res.destroy();
     }
   });
+
+  // The watcher holds an OS handle; a closed server (tests, shutdown) must
+  // not leak it or keep the process alive.
+  server.on('close', () => watcher.close());
 
   return server;
 }

@@ -217,6 +217,64 @@ test('film documents: create → get → update → list → remove (folder surv
   });
 });
 
+/* ------------------------- optimistic concurrency ------------------------ */
+
+test('a stale film patch is refused instead of reverting the other writer', async () => {
+  await withTmp(async (home) => {
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, { name: 'Contested' });
+    await store.updateFilm(film.id, { scenes: [{ slug: 'a' }, { slug: 'b' }, { slug: 'c' }] });
+
+    // Reader A opens the film (a Studio tab loading the page).
+    const readA = await store.getFilm(film.id);
+    assert.ok(readA.revision, 'getFilm hands out a revision');
+
+    // Writer B reorders it while that tab sits open.
+    const afterB = await store.updateFilm(film.id, { scenes: [{ slug: 'c' }, { slug: 'b' }, { slug: 'a' }] });
+    assert.notEqual(afterB.revision, readA.revision, 'a write moves the revision');
+
+    // A now saves an unrelated field, carrying its page-load-old scenes array.
+    // Unguarded this succeeds and silently undoes B's reorder.
+    await assert.rejects(
+      store.updateFilm(film.id, { name: 'Renamed', scenes: readA.scenes }, { expectedRevision: readA.revision }),
+      (e) => {
+        assert.equal(e.code, 'film_conflict');
+        assert.equal(e.detail.expectedRevision, readA.revision);
+        assert.equal(e.detail.revision, afterB.revision);
+        return true;
+      },
+    );
+    assert.deepEqual((await store.getFilm(film.id)).scenes.map((s) => s.slug), ['c', 'b', 'a'],
+      'B\'s order survived');
+
+    // Re-read, re-apply: the same edit lands once it is based on current truth.
+    const readC = await store.getFilm(film.id);
+    const ok = await store.updateFilm(film.id, { name: 'Renamed' }, { expectedRevision: readC.revision });
+    assert.equal(ok.name, 'Renamed');
+    assert.deepEqual(ok.scenes.map((s) => s.slug), ['c', 'b', 'a']);
+    assert.equal(ok.revision, (await store.getFilm(film.id)).revision,
+      'the revision returned by a write is the one a later read sees');
+  });
+});
+
+test('omitting expectedRevision keeps the old last-write-wins behaviour', async () => {
+  await withTmp(async (home) => {
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, { name: 'Unguarded' });
+    const stale = await store.getFilm(film.id);
+    await store.updateFilm(film.id, { name: 'Moved' });
+    // Internal read-modify-write callers (createScene, removeScene, renameAsset)
+    // rely on this: they patch one field within a tick and must not be made to
+    // carry a revision they never read.
+    const after = await store.updateFilm(film.id, { burnCaptions: true });
+    assert.equal(after.burnCaptions, true);
+    assert.equal(after.name, 'Moved');
+    assert.ok(stale.revision !== after.revision);
+    // Explicit null is "I am not claiming a base revision", not a mismatch.
+    await store.updateFilm(film.id, { burnCaptions: false }, { expectedRevision: null });
+  });
+});
+
 /* -------------------------------- planFilm ------------------------------ */
 
 test('planFilm reports problems instead of throwing', async () => {
@@ -273,7 +331,10 @@ test('validateFilm accepts footage segments beside scenes', () => {
     scenes: [{ slug: 'title' }, { footage: 'assets/f1.mp4', durationInFrames: 231 }, { slug: 'lamb' }],
   });
   validateFilm(ok);
-  assert.deepEqual(ok.scenes[1], { footage: 'assets/f1.mp4', durationInFrames: 231 });
+  // The stamped `id` is the clip's stable handle (v0.23.1) — see sequences.test.js.
+  const { id, ...clip } = ok.scenes[1];
+  assert.ok(id, 'footage segments carry a stable id');
+  assert.deepEqual(clip, { footage: 'assets/f1.mp4', durationInFrames: 231 });
 
   // Ambiguous or incomplete segments are refused, not guessed at.
   assert.throws(() => validateFilm(normalizeFilm({
@@ -299,11 +360,14 @@ test('normalizeFilm round-trips footage instead of destroying it', () => {
     name: 'F',
     scenes: [{ footage: 'assets\\win\\path.mp4', durationInFrames: 40, label: 'B-roll' }, { slug: 'outro' }],
   });
-  assert.deepEqual(film.scenes, [
+  const { id, ...clip } = film.scenes[0];
+  assert.ok(id, 'footage segments carry a stable id');
+  assert.deepEqual([clip, film.scenes[1]], [
     { footage: 'assets/win/path.mp4', durationInFrames: 40, label: 'B-roll' },
     { slug: 'outro' },
   ]);
-  // Idempotent: a second pass (i.e. the next save) preserves it exactly.
+  // Idempotent: a second pass (i.e. the next save) preserves it exactly —
+  // including the id, which is the whole point of stamping one.
   assert.deepEqual(normalizeFilm(film).scenes, film.scenes);
 });
 
@@ -628,6 +692,48 @@ test('films API: PATCH edits tracks, rejects junk', async () => {
   });
   assert.equal(patched.status, 200);
   assert.ok(patched.data.film.captions[0].id);
+});
+
+test('films API: a PATCH carrying a stale revision is a 409, not a silent revert', async () => {
+  const slugOf = (s) => s.id.split('/').pop();
+  const opened = (await j(`/api/films/${enc(filmId)}`)).data.film;   // the tab loads
+  assert.ok(opened.revision, 'GET hands the page a revision to send back');
+
+  // The AI reorders the film while that tab is open.
+  const moved = await j(`/api/films/${enc(filmId)}`, {
+    method: 'PATCH', body: { patch: { scenes: [{ slug: slugOf(sceneB) }, { slug: slugOf(sceneA) }] } },
+  });
+  assert.equal(moved.status, 200);
+
+  // The tab autosaves; its snapshot still has the old order.
+  const stale = await j(`/api/films/${enc(filmId)}`, {
+    method: 'PATCH',
+    body: { patch: { name: 'Typed in the tab', scenes: opened.scenes }, revision: opened.revision },
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.data.code, 'film_conflict');
+  assert.equal(stale.data.detail.revision, moved.data.film.revision);
+
+  const now = (await j(`/api/films/${enc(filmId)}`)).data.film;
+  assert.deepEqual(now.scenes.map((s) => s.slug), [slugOf(sceneB), slugOf(sceneA)], 'the reorder survived');
+  assert.notEqual(now.name, 'Typed in the tab');
+
+  // Re-read and retry — what the page does after reloading — goes through.
+  const retried = await j(`/api/films/${enc(filmId)}`, {
+    method: 'PATCH', body: { patch: { name: 'Typed in the tab' }, revision: now.revision },
+  });
+  assert.equal(retried.status, 200);
+  assert.equal(retried.data.film.name, 'Typed in the tab');
+
+  // Restore the state the rest of this file's tests build on.
+  const restored = await j(`/api/films/${enc(filmId)}`, {
+    method: 'PATCH',
+    body: {
+      patch: { name: opened.name, scenes: [{ slug: slugOf(sceneA) }, { slug: slugOf(sceneB) }] },
+      revision: retried.data.film.revision,
+    },
+  });
+  assert.equal(restored.status, 200);
 });
 
 test('films API: build refuses while scenes are unrendered', async () => {
@@ -1012,7 +1118,9 @@ test('films API: a film alternating footage and scenes builds, and every frame i
   assert.equal(patched.status, 200, JSON.stringify(patched.data));
   // The document really holds the footage entry — the round-trip that used to
   // silently delete it on the very next save.
-  assert.deepEqual(patched.data.film.scenes[1], { footage: 'assets/shot.mp4', durationInFrames: 24, label: 'B-roll' });
+  const { id: clipId, ...clip } = patched.data.film.scenes[1];
+  assert.ok(clipId, 'the clip keeps a stable id across saves so advice can name it');
+  assert.deepEqual(clip, { footage: 'assets/shot.mp4', durationInFrames: 24, label: 'B-roll' });
 
   const detail = patched.data.plan ?? (await j(`/api/films/${enc(fid)}`)).data.detail;
   assert.deepEqual(detail.scenes.map((s) => s.kind), ['scene', 'footage', 'scene']);

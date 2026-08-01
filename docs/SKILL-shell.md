@@ -34,6 +34,19 @@ not one shell's spelling.
 ffmpeg command to the human" — here that is wrong. You can read the file, cut it,
 and assemble it, so do.
 
+## The adviser loop applies here too
+
+The MCP production protocol (v0.23 — see the MCP skill and
+[mcp-setup.md](mcp-setup.md)) is unchanged by shell access: call
+`check_human_advice` at your checkpoints (task start, after planning, before
+expensive generation, after each scene revision, before `build_film`, before
+reporting done), acknowledge/lease/resolve every item with an outcome the
+human reads, keep `report_agent_activity` fresh during long ffmpeg or
+generation runs, and answer prefer-revision advice with `use_scene_revision`
+rather than re-rendering. Media you produce in the shell still enters
+production through the MCP registration paths, so revisions and delivery
+manifests keep their provenance.
+
 ## The workflow inverts
 
 This is the single most important difference from pure motion-graphics work, and

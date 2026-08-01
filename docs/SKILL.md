@@ -1,6 +1,6 @@
 ---
 name: motion-studio-video
-description: Use this skill whenever the user wants to create, edit, preview, render, or assemble a code-driven video with Motion Studio MCP, including motion graphics, GIFs, transparent overlays, generated audio, and supplied-media workflows that use probe_asset, transcribe_asset, transcode_asset, seekVideo, or signature-matched footage on a film timeline. Use the separate shell skill only for media operations the MCP schema cannot express.
+description: Use this skill whenever the user wants to create, edit, preview, render, or assemble a code-driven video with Motion Studio MCP, including motion graphics, GIFs, transparent overlays, generated audio, and supplied-media workflows that use probe_asset, transcribe_asset, transcode_asset, seekVideo, or signature-matched footage on a film timeline. Also use it when acting as the AI director in Motion Studio's production loop — checking or resolving human advice (check_human_advice, resolve_human_advice), working with scene revisions or archived deliveries (list_scene_revisions, use_scene_revision, list_deliveries), reporting production status, or responding to "the human left advice / prefers an older version" requests. Use the separate shell skill only for media operations the MCP schema cannot express.
 ---
 
 # Motion Studio MCP production guide
@@ -9,6 +9,11 @@ Motion Studio authors deterministic HTML/CSS/JS compositions and renders them
 through a workspace → film → scene model. The MCP tools are the production
 interface: use them to create documents, ingest media, author compositions,
 preview, render, inspect, and assemble the final film.
+
+You are the **director** (v0.23): production runs unattended, every promoted
+scene render is kept as an immutable revision, every build as an immutable
+delivery, and the human watches in the Studio and leaves durable advice you
+reconcile at checkpoints — see "The adviser loop" below.
 
 This guide is procedural. The live MCP tool schema is the argument-level source
 of truth. Before a call, use the tool name and fields actually exposed by the
@@ -39,6 +44,9 @@ filesystem operation.
    video.
 7. **Never claim completion from submission.** Wait for every asynchronous job
    to reach a terminal state and confirm the output and review evidence.
+8. **Honour the adviser loop.** Check human advice at your checkpoints, resolve
+   every item with a recorded outcome, and never wait or poll for a human
+   response — there is no approval gate anywhere in Motion Studio.
 
 If Motion Studio tools such as `get_workspace`, `create_film`,
 `write_composition_file`, and `render` are absent, say that Motion Studio is not
@@ -51,9 +59,9 @@ MCP surface.
 
 Use this map to choose the right tool. Read the live schema before calling it.
 
-- Workspace and documents: `get_workspace`, `list_films`, `create_film`,
-  `get_film`, `update_film`, `remove_film`, `create_scene`, `get_scene`,
-  `update_scene_config`, `remove_scene`
+- Workspace and documents: `get_workspace`, `get_capabilities`, `list_films`,
+  `create_film`, `get_film`, `update_film`, `remove_film`, `create_scene`,
+  `get_scene`, `update_scene_config`, `remove_scene`
 - Composition authoring: `read_composition_file`, `write_composition_file`,
   `sync_shared_files`, `add_library`
 - Assets and supplied media: `write_asset_file`, `list_assets`, `probe_asset`,
@@ -65,22 +73,94 @@ Use this map to choose the right tool. Read the live schema before calling it.
   `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`
 - Jobs and diagnostics: `get_render_status`, `wait_for_render`,
   `list_render_jobs`, `get_logs`, `cancel_render`
+- Human advice (the adviser loop — see the protocol below):
+  `check_human_advice`, `acknowledge_human_advice`, `begin_advice_work`,
+  `resolve_human_advice`, `list_human_advice`
+- Revisions and deliveries: `list_scene_revisions`, `use_scene_revision`,
+  `list_deliveries`
+- Progress: `report_agent_activity`, `get_production_status`
 - Reference resource: `motion-studio://reference/frame-api`
 
 Deletion through `remove_film`, `remove_scene`, or `delete_asset` is destructive.
 Get explicit user confirmation before deleting material.
 
+## The adviser loop: you direct, the human advises
+
+Motion Studio's production model (v0.23) makes **you the director**. The
+human watches the evolving film on its one Studio page and leaves
+plain-language advice on whatever they can see — the film, a sequence, a
+scene, a supplied footage clip, an audio item, a caption, an overlay, an
+exact moment. Advice is durable: it survives restarts and waits for you.
+There is **no approval gate**; never wait or poll for a human response.
+
+Advice arrives with the structural target already resolved (`type` +
+`scene` slug, `sequence` label, or `itemId` for a footage/audio/caption/
+overlay item), so you never have to guess what they meant by "the outro" —
+and a `footage` target names a specific clip by its stable segment id, which
+survives reordering the play order.
+
+**Checkpoints.** Call `check_human_advice` (read-only, oldest first) at:
+
+1. task start (before planning new work),
+2. after publishing your scene/sequence plan,
+3. before expensive generation,
+4. after completing each scene revision,
+5. before `build_film`,
+6. before reporting completion.
+
+No advice → continue immediately. When advice exists:
+
+- `acknowledge_human_advice` what you received (the human then sees "AI
+  received it" instead of silence).
+- `begin_advice_work` before acting — a renewable TTL lease that stops a
+  second agent duplicating the work; an expired lease is the crash recovery.
+- Compare the advice's `observation` (the exact delivery/revision the human
+  watched) with current state before acting; rebase compatible advice onto
+  the current revision, or ask with outcome `needs-clarification`.
+- `resolve_human_advice` every item with an outcome and a one-or-two-sentence
+  explanation the human will read: `applied`, `partially-applied`,
+  `not-applied` (you considered it and chose otherwise — say why),
+  `superseded`, or `needs-clarification` (not terminal; the human answers
+  with linked follow-up advice). Link the `revisionIds` you created or
+  selected and the resulting `deliveryId`. Never silently ignore advice.
+- One change may answer several compatible items — resolve each, listing the
+  others in `combinedAdviceIds`. Conflicting advice is yours to judge as
+  director; record the judgment per item.
+- The human can **withdraw** an item from the Studio (v0.23.2). A withdrawn
+  item is already terminally resolved with `withdrawnByHuman: true`, so it
+  simply stops appearing in `check_human_advice` — do not act on it, and do
+  not treat its disappearance between checkpoints as an error.
+
+**Prefer-revision advice** (`suggestedAction: "prefer-revision"`) means the
+human previewed an older take and asked for it back. Normally answer with
+`use_scene_revision` (repoints the live output; regenerates nothing; keeps
+newer history), then `build_film`, then resolve linking that revision. You
+may instead derive a better take from it, or decline with a recorded reason.
+
+**Keep the human's progress line honest.** `report_agent_activity` with a
+short present-tense phrase ("Creating scene demo-shot", "Building film")
+whenever your activity changes and every minute or two during long work.
+Pass `note` on `render` calls — it becomes the version card the human reads.
+`get_production_status` tells you whether anything is unresolved or unbuilt
+before you report completion.
+
 ## The correct end-to-end workflow
 
 ### 1. Inspect the workspace and the brief
 
-Start every task by discovering what already exists:
+Start every task by discovering what already exists — and what the human said
+while you were away:
 
 ```json
 get_workspace {}
+get_capabilities {}
+check_human_advice {}
 list_films {}
 list_shared_assets {}
 ```
+
+Unresolved advice comes first (see "The adviser loop" above). No advice means
+continue immediately — never wait for a human.
 
 Use `get_film` and `get_scene` before changing an existing project:
 
@@ -156,6 +236,35 @@ Scene dimensions and fps should normally inherit the film defaults. Diverging
 them can make lossless film assembly impossible. If `create_scene` or
 `update_scene_config` returns `structureWarnings` for a long scene, split it
 before authoring.
+
+**Label the story structure with sequences (v0.23).** Once the scene plan is
+settled, put narrative labels on the play order and record each label's
+intent — this is how the human navigates the film page's tree and timeline,
+and how their advice can target "the Demo sequence" instead of guessing at
+slugs:
+
+```json
+update_film {
+  "film": "launch-film",
+  "scenes": [
+    { "slug": "intro", "sequence": "Intro" },
+    { "slug": "feature-1", "sequence": "Demo" },
+    { "slug": "feature-2", "sequence": "Demo" },
+    { "slug": "outro", "sequence": "Close" }
+  ],
+  "sequences": {
+    "Intro": { "intent": "Hook the viewer and land the name" },
+    "Demo": { "intent": "Show the core workflow end to end" },
+    "Close": { "intent": "Call to action" }
+  }
+}
+```
+
+Sequences are presentation only — they render nothing and own no files, so
+relabeling is always safe. Consecutive segments sharing a label form one
+band; footage segments take labels too. On the human's film page these
+become the tree they navigate by and the band above the timeline, so a film
+with sensible sequence names is a film they can give you precise advice on.
 
 Choose scene output through validated config:
 
@@ -459,10 +568,16 @@ render {
 A proxy is serial, silent, skips preflight, preserves pacing, and writes a
 separate `.proxy` output. It is not the deliverable.
 
-For the full scene:
+For the full scene, pass a one-line `note` — it becomes the version card the
+human reads in the film page's version list — and link any advice this
+render answers:
 
 ```json
-render { "scene": "launch-film/intro" }
+render {
+  "scene": "launch-film/intro",
+  "note": "slower title fade per advice",
+  "adviceIds": ["adv-…"]
+}
 ```
 
 Normally omit `workers` so the user's setting applies. Use `frameRange` for a
@@ -487,12 +602,16 @@ output and document plan rather than trusting an old id.
 On `error`, call `get_logs` and read the structured error. On `done`, inspect:
 
 - `outputPath`;
+- `revisionId` — the immutable archive of this take (v0.23); keep it for
+  advice resolutions and note it when reporting;
 - `encodingWarnings`;
 - final `audio.clipping` and `audio.balanceWarnings`;
 - `review.reviewPath`, `review.contactPath`, and review warnings;
 - `reviewArtifactWarning`, if present.
 
 Do not call a render complete while any of those indicates unresolved work.
+A full-scene render automatically archives a revision and makes it current;
+partial `frameRange` renders and proxies deliberately do not.
 
 ### 8. Inspect the encoded scene
 
@@ -539,6 +658,9 @@ particular:
 - provenance-linked footage must show `sourceVerified: true`;
 - master audio, overlays, and captions must reference existing film assets.
 
+This is also a checkpoint: run `check_human_advice` before building, so a
+note the human left mid-production is folded in rather than shipped around.
+
 Render every scene, then assemble:
 
 ```json
@@ -549,7 +671,9 @@ build_film {
 ```
 
 `build_film` is asynchronous. Wait for its `jobId`, inspect the terminal status,
-and review the returned audio and delivery evidence.
+and review the returned audio and delivery evidence. The finished status also
+carries `deliveryId` — the immutable archived build the human's review player
+pins to; link it when resolving the advice this build answers.
 
 For a saved platform version:
 
@@ -586,11 +710,27 @@ speech-led cut when practical to confirm that intended words survived the edit.
 - `update_film` is a patch, but array fields such as `scenes`, `audio`,
   `overlays`, `captions`, and `deliverables` replace the whole saved array.
   Read the film, preserve wanted entries, and submit the complete new array.
+- **Because arrays replace, pass `expectedRevision`.** The human edits the same
+  document in the Studio while you work. A `scenes` array written against a
+  read they have since edited past does not just lose your field — it reverts
+  their change, silently. Take `revision` from `get_film` and pass it as
+  `expectedRevision`; a stale one fails with `film_conflict` carrying the
+  current revision, and the fix is always re-read → re-apply → retry. Omit it
+  only for a scalar field nobody else touches.
 - `update_scene_config.patch` changes only provided fields.
 - A film can save with plan `problems`; it cannot build successfully until
   those problems are resolved.
 - `create_scene` appends the scene to the film order. Use `update_film.scenes`
   to reorder or mix scene and footage segments.
+- Sequence labels ride on the `scenes` array (`{ slug, sequence }`), so a
+  whole-array rewrite that drops them silently unlabels the film — preserve
+  them like every other segment field. The `sequences` metadata map is
+  patched as one object.
+- Footage segments carry a stable `id`. A whole-array rewrite that drops it
+  gets a fresh one, which orphans any human advice aimed at that clip —
+  echo it back, exactly like `sequence`.
+- `use_scene_revision` changes only which archived take is live; the film
+  still plays the old bytes until you `build_film` again.
 - Scene source changes do not refresh old rendered output. Re-render the
   affected scene.
 - Asset paths are target-relative and must remain under `assets/`; inspection
@@ -625,6 +765,14 @@ Read the structured `code`, `message`, and `detail`; do not blind-retry.
   timeline entry with the new returned `timelineSegment`.
 - `promotion_blocked`: inspect its staged review/contact evidence, fix the
   finding, and render/build again. The prior promoted delivery is preserved.
+- `revision_mismatch`: the archived take no longer matches the scene's current
+  settings (duration/resolution/fps/format changed since). Either restore the
+  settings or render a new revision; do not force the old bytes in.
+- `advice_lease_held`: another agent is working that advice — leave it to them
+  and move on; the lease names the holder and expiry, and expiry recovers it.
+- `advice_already_resolved`: resolutions are immutable. Read the existing
+  resolution; a genuinely new thought becomes new advice or a new revision,
+  not a rewrite.
 - `tts_unavailable`, `music_unavailable`, `transcription_unavailable`: call
   `list_vendors`, report the missing configuration, and never ask the user to
   paste a credential into chat.
@@ -649,5 +797,10 @@ Before saying the work is complete, verify all of the following:
 - no `promotion_blocked`, `reviewArtifactWarning`, or encoding warning remains
   unresolved;
 - supplied-footage provenance is verified;
+- `check_human_advice` returns nothing unresolved (every item acknowledged
+  and resolved with an outcome, or explicitly awaiting the human's answer to
+  your `needs-clarification` question);
+- `get_production_status` shows the current delivery includes your latest
+  promoted work (`newerWorkThanDelivery: false`, or you built again);
 - the user receives the exact final output path and a clear statement of what
   was rendered.

@@ -53,6 +53,8 @@ import {
   captionSafeCapacity,
 } from './deliverables.js';
 import { readTranscodeMetaFile, transcodeIdentity } from './transcode.js';
+import { archiveDelivery } from './deliveries.js';
+import { currentAgentId } from './revisions.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits — generous for real work, bounded against runaway callers.   */
@@ -121,6 +123,24 @@ function checkFootage(s, i, problems) {
   }
   if (s.label !== undefined && typeof s.label !== 'string') problems.push(`${at}.label must be a string`);
   if (s.derivedFrom !== undefined) checkFootageDerivedFrom(s.derivedFrom, at, problems);
+  checkSegmentSequence(s, at, problems);
+  if (s.id !== undefined && !(typeof s.id === 'string' && s.id.trim())) {
+    problems.push(`${at}.id must be a non-empty string`);
+  }
+}
+
+/**
+ * A segment may carry a narrative `sequence` label (v0.23) — the story
+ * grouping a human navigates by ("Intro", "Demo", "Close"). Consecutive
+ * segments sharing a label form one sequence band in the plan and the Studio.
+ * It is presentation metadata: renaming or regrouping never moves a file,
+ * changes an id, or invalidates a render.
+ */
+function checkSegmentSequence(s, at, problems) {
+  if (!s || s.sequence === undefined) return;
+  if (typeof s.sequence !== 'string' || !s.sequence.trim() || s.sequence.length > 80) {
+    problems.push(`${at}.sequence must be a non-empty string of at most 80 characters`);
+  }
 }
 
 /**
@@ -195,6 +215,7 @@ export function validateFilm(film) {
   else {
     if (film.scenes.length > MAX_FILM_SCENES) problems.push(`scenes exceeds ${MAX_FILM_SCENES}`);
     const seen = new Set();
+    const seenSegmentIds = new Set();
     film.scenes.forEach((s, i) => {
       // A segment is a scene OR a piece of footage (v0.22). One key decides
       // which, so an old film — every entry a bare { slug } — stays valid with
@@ -207,8 +228,19 @@ export function validateFilm(film) {
       }
       if (hasFootage) {
         checkFootage(s, i, problems);
+        // Footage ids address a CLIP, not a file: the same plate may appear
+        // twice, so the id — not the path — is what advice and the tree bind
+        // to. Two clips sharing one id would silently merge those bindings.
+        if (typeof s.id === 'string' && s.id.trim()) {
+          if (seenSegmentIds.has(s.id)) {
+            problems.push(`scenes[${i}].id "${s.id}" appears more than once — each footage segment needs its own id`);
+          } else {
+            seenSegmentIds.add(s.id);
+          }
+        }
         return;
       }
+      checkSegmentSequence(s, `scenes[${i}]`, problems);
       if (!s || typeof s.slug !== 'string' || !SCENE_SLUG_RE.test(s.slug)) {
         problems.push(`scenes[${i}] must be a scene ({ slug }) or footage ({ footage, durationInFrames })`);
       } else if (seen.has(s.slug)) {
@@ -315,6 +347,29 @@ export function validateFilm(film) {
     }
   }
 
+  // Sequence metadata (v0.23): optional intent/notes per narrative label.
+  // Keyed by the same string the segments carry, so regrouping is one edit.
+  const seqs = film.sequences;
+  if (seqs !== undefined && seqs !== null) {
+    if (typeof seqs !== 'object' || Array.isArray(seqs)) {
+      problems.push('sequences must be an object keyed by sequence label');
+    } else {
+      for (const [key, value] of Object.entries(seqs)) {
+        if (!key.trim() || key.length > 80) problems.push(`sequences key "${key.slice(0, 20)}…" must be 1..80 characters`);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          problems.push(`sequences["${key}"] must be an object`);
+          continue;
+        }
+        if (value.intent !== undefined && (typeof value.intent !== 'string' || value.intent.length > 500)) {
+          problems.push(`sequences["${key}"].intent must be a string of at most 500 characters`);
+        }
+        for (const k of Object.keys(value)) {
+          if (!['intent'].includes(k)) problems.push(`sequences["${key}"].${k} is not a sequence field`);
+        }
+      }
+    }
+  }
+
   const cs = film.captionStyle;
   if (cs !== undefined && cs !== null) {
     if (typeof cs !== 'object') problems.push('captionStyle must be an object');
@@ -348,6 +403,12 @@ function normalizeSegment(s) {
   if (s && s.footage !== undefined) {
     const derivedFrom = s.derivedFrom;
     return {
+      // A footage clip's stable handle (v0.23). Scenes already have one — the
+      // slug — so only footage needed stamping, and it is what advice, tree
+      // rows and delivery manifests bind to. Without it the only address is
+      // the array index, which every reorder invalidates: yesterday's note on
+      // "the outro clip" would silently re-aim at whatever is 4th today.
+      id: typeof s.id === 'string' && s.id.trim() ? s.id : `seg-${randomUUID().slice(0, 8)}`,
       footage: typeof s.footage === 'string' ? s.footage.replace(/\\/g, '/') : s.footage,
       durationInFrames: s.durationInFrames,
       ...(s.label !== undefined ? { label: s.label } : {}),
@@ -367,6 +428,7 @@ function normalizeSegment(s) {
             : derivedFrom,
         }
         : {}),
+      ...(s.sequence !== undefined ? { sequence: s.sequence } : {}),
       // A segment carrying BOTH keys is a confused caller, not a footage entry
       // with a stray field. Keeping the slug here is what lets validateFilm
       // refuse it: dropping it would silently pick footage and persist a
@@ -374,7 +436,10 @@ function normalizeSegment(s) {
       ...(s.slug !== undefined ? { slug: s.slug } : {}),
     };
   }
-  return { slug: s?.slug };
+  return {
+    slug: s?.slug,
+    ...(s?.sequence !== undefined ? { sequence: s.sequence } : {}),
+  };
 }
 
 /** Fill defaults and stamp ids on timeline items so editors can address them. */
@@ -394,6 +459,7 @@ export function normalizeFilm(input = {}) {
     overlays: stampIds(input.overlays ?? []),
     captions: stampIds(input.captions ?? []),
     captionStyle: { sizePct: 4.5, position: 'bottom', ...(input.captionStyle ?? {}) },
+    sequences: input.sequences ?? {},
     audioTargetPeakDb: input.audioTargetPeakDb ?? null,
     burnCaptions: input.burnCaptions ?? false,
     // A saved film stores full preset snapshots.  No build path reads global
@@ -690,8 +756,10 @@ async function planFootage({ film, ref, index, problems, ffprobePath }) {
   const base = {
     kind: 'footage',
     index,
+    ...(ref.id ? { id: ref.id } : {}),
     footage: rel,
     ...(ref.label ? { label: ref.label } : {}),
+    ...(ref.sequence ? { sequence: ref.sequence } : {}),
     name: ref.label ?? rel.split('/').pop(),
     durationInFrames: isPosInt(declared) ? declared : 0,
   };
@@ -847,7 +915,10 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     const sceneId = `${film.id}/${ref.slug}`;
     // `kind` is on every entry (v0.22) so "where does segment 6 start" is
     // answered identically regardless of what the segment is.
-    const base = { kind: 'scene', sceneId, slug: ref.slug, index: i };
+    const base = {
+      kind: 'scene', sceneId, slug: ref.slug, index: i,
+      ...(ref.sequence ? { sequence: ref.sequence } : {}),
+    };
     let entry = null, config = null;
     try {
       entry = await store.getScene(sceneId);
@@ -997,11 +1068,51 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     durationSeconds: fps ? Number((totalFrames / fps).toFixed(3)) : 0,
     fps,
     format,
+    // Narrative bands (v0.23) — what the review UI draws above the timeline
+    // and what a "Sequence 2" advice target resolves against.
+    sequences: sequenceBands(scenes, film.sequences ?? {}),
     // The structured contract (v0.22). `signature.id` is the string this field
     // used to be, and the one every scene's own `signature` is compared against.
     signature: filmSignature(configs),
     problems,
   };
+}
+
+/**
+ * Derive narrative sequence bands from planned segments (v0.23). Pure.
+ *
+ * Consecutive segments sharing a `sequence` label form one band; unlabeled
+ * segments form anonymous bands (`sequence: null`) so the film timeline is
+ * always fully covered — a partially labeled film still navigates sensibly.
+ * A label that appears again later (out of order) is a separate band on
+ * purpose: bands describe the timeline as it plays, not a grouping ideal.
+ *
+ * @param {Array} scenes  planFilm's segments, offsets already assigned
+ * @param {object} meta   film.sequences — { [label]: { intent? } }
+ */
+export function sequenceBands(scenes, meta = {}) {
+  const bands = [];
+  for (const s of scenes ?? []) {
+    const label = s.sequence ?? null;
+    const last = bands[bands.length - 1];
+    if (last && last.sequence === label) {
+      last.toIndex = s.index;
+      last.durationInFrames += s.durationInFrames ?? 0;
+      last.segments += 1;
+      continue;
+    }
+    bands.push({
+      sequence: label,
+      ...(label && meta[label]?.intent ? { intent: meta[label].intent } : {}),
+      fromIndex: s.index,
+      toIndex: s.index,
+      segments: 1,
+      filmOffset: s.filmOffset ?? 0,
+      startSeconds: s.startSeconds ?? 0,
+      durationInFrames: s.durationInFrames ?? 0,
+    });
+  }
+  return bands;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1170,17 +1281,22 @@ async function resolveFilmForBuild({ film, store, requireRendered = true, delive
       }
       sceneData.push({
         kind: 'footage',
+        ...(s.id ? { id: s.id } : {}),
         footage: rel,
         segmentPath: abs,
         durationInFrames: s.durationInFrames,
         name: s.label ?? rel.split('/').pop(),
+        ...(s.sequence ? { sequence: s.sequence } : {}),
       });
       continue;
     }
     const sceneId = `${film.id}/${s.slug}`;
     const entry = await store.getScene(sceneId);
     const config = await store.readConfig(sceneId);
-    sceneData.push({ kind: 'scene', sceneId, slug: s.slug, path: entry.path, config });
+    sceneData.push({
+      kind: 'scene', sceneId, slug: s.slug, path: entry.path, config,
+      ...(s.sequence ? { sequence: s.sequence } : {}),
+    });
   }
   const hasMasterAudio = !!(film.audio ?? []).length;
   const info = validateScenes(sceneData, { hasMasterAudio, requireRendered });
@@ -1245,7 +1361,7 @@ async function resolveFilmForBuild({ film, store, requireRendered = true, delive
  */
 export async function buildFilmArtifact({
   film, store, ffmpegPath = 'ffmpeg', onSpawn, progress, signal, jobId = null, reviewPolicy = null,
-  deliverableId = null,
+  deliverableId = null, agent = currentAgentId(),
 }) {
   const checkCancel = () => {
     if (signal?.aborted) throw new EngineError(ErrorCodes.CANCELLED, 'film build cancelled');
@@ -1449,7 +1565,7 @@ export async function buildFilmArtifact({
       }
     }
 
-    return {
+    const built = {
       ...result,
       filmId: film.id,
       outputPath,
@@ -1480,6 +1596,19 @@ export async function buildFilmArtifact({
       ...(captionSidecarWarning ? { captionSidecarWarning } : {}),
       picture,
     };
+
+    // Freeze this build as an immutable delivery (v0.23) — the record human
+    // review pins to. Best-effort by the sidecar rule: the promoted film is
+    // already the delivery of record, and history-keeping must not fail it.
+    try {
+      progress?.phase('archiving-delivery');
+      const archived = await archiveDelivery({ store, film, result: built, agent, jobId });
+      built.deliveryId = archived.id;
+    } catch (err) {
+      built.deliveryArchiveWarning = err?.message ?? 'delivery archive failed';
+      progress?.log('warn', `delivery archive failed (the built film is unaffected): ${built.deliveryArchiveWarning}`);
+    }
+    return built;
   } catch (err) {
     const e = err instanceof EngineError ? err : new EngineError(ErrorCodes.INTERNAL, String(err?.message ?? err));
     e.detail = { ...(e.detail ?? {}), stagingPath: stagedOutputPath };
@@ -1497,7 +1626,10 @@ export async function buildFilmArtifact({
  *
  * @returns {{ jobId, state, queuePosition?, outputPath, totalFrames, filmId }}
  */
-export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg', reviewPolicy = null, deliverableId = null }) {
+export async function submitFilmBuild({
+  film, store, jobs, ffmpegPath = 'ffmpeg', reviewPolicy = null, deliverableId = null,
+  agent = currentAgentId(),
+}) {
   const r = await resolveFilmForBuild({ film, store, deliverableId });
   const settings = reviewPolicy === null
     ? await readSettings(store.dataDir).catch(() => null)
@@ -1516,6 +1648,7 @@ export async function submitFilmBuild({ film, store, jobs, ffmpegPath = 'ffmpeg'
       film, store, ffmpegPath,
       reviewPolicy: effectiveReviewPolicy,
       deliverableId,
+      agent,
       jobId: o.jobId,
       onSpawn: o.onChildPid,
       progress: o.progress,

@@ -6,6 +6,25 @@ functions of a frame number**, captured frame-by-frame in headless Chromium
 (Puppeteer), and encoded with FFmpeg — entirely locally, no cloud. It serves
 two kinds of users through one shared render engine:
 
+Since v0.23 those two users form one **production loop**: the AI is the
+director — it plans, produces, revises and assembles unattended, with **no
+approval gate anywhere** — and the human is an asynchronous adviser. Every
+promoted scene render is kept as an **immutable revision** and every film
+build as an **immutable delivery** with a frozen frame→revision manifest.
+
+Both halves live on **one page per film** — a `Film → Sequence →
+Scene/Footage` tree, the player, a sequence band above the timeline, and the
+full editor, with no modes to choose between. Click the thing that looks
+wrong — a sequence, a scene, a supplied clip, a caption, an audio item, an
+overlay — and the inspector beside it offers **advise**. Write a sentence and
+send; take it back with **withdraw** if you change your mind. Advice is durable evidence (your words
++ what you were watching + a frame grab); the AI finds it at its next
+checkpoint, acts or explains, and the history reads *what I saw → what I said
+→ what the AI changed*. "Ask AI to use this version" on any archived take is
+advice too — the Studio never edits production directly. Everything hands-on
+— add, trim, reorder, render, build — is on that same page. There is no
+separate review screen and no mode switch.
+
 - **Humans**, through the cross-platform **Studio web UI** (`npm run studio`):
   one tree of every **workspace → film → scene** on the machine, live preview
   that drives your *actual* composition, scrub/play transport, hot reload,
@@ -13,7 +32,7 @@ two kinds of users through one shared render engine:
   configure and delete scenes, manage `assets/` (upload, audition, rename,
   delete), edit the audio timeline, pick and audition the **speech, music and
   transcription vendors** (one, or an ordered fallback chain), and set global
-  preferences including an FFmpeg binary override. The **film editor** cuts a film on a
+  preferences including an FFmpeg binary override. The **film page** cuts a film on a
   visual timeline — drag-to-reorder scenes, multi-lane master audio with
   waveforms, fades and auto-ducking, captions (burn-in and/or `.srt`
   sidecar), **footage segments** on the timeline beside rendered scenes,
@@ -56,8 +75,14 @@ two kinds of users through one shared render engine:
   timeline now holds **real footage beside the rendered scenes** (v0.22), so a
   film can be "footage, then a scene, then footage". Builds preserve the prior
   delivery on failure and write a review JSON/contact sheet before promotion.
-  No shell,
-  no arbitrary file access.
+  The v0.23 production loop adds the adviser protocol: `check_human_advice`
+  at every checkpoint (never blocking, never polling), acknowledge → lease →
+  resolve with an outcome the human reads, `list_scene_revisions` /
+  `use_scene_revision` to answer "the previous version was better" without
+  regenerating anything, `list_deliveries` for the frozen manifests,
+  `report_agent_activity` for the human's live progress line, and
+  `get_production_status` + `get_capabilities` to know exactly where
+  production stands. No shell, no arbitrary file access.
 
 The MCP surface emits importer-compatible JSON Schema. In particular,
 `render.frameRange` is advertised as an integer array with exactly two entries,
@@ -217,10 +242,10 @@ motion-studio/
 │   ├── src/mcp/server.js          MCP entry — stdio server for agents, bound to one workspace
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: workspaces/films/scenes/library/settings/render/jobs/SSE
-│   │   └── public/                  vanilla-JS UI (no build step): index/app + the film editor (film.html/js/css)
+│   │   └── public/                  vanilla-JS UI (no build step): index/app + the film page (film.html/js/css)
 │   ├── src/runtime/frame-api.js   in-page helper library v1.4 (copied into every scene)
 │   ├── templates/default/         scene scaffold (HTML/JS/CSS)
-│   └── test/                      535 tests across 27 suites (see below)
+│   └── test/                      826 tests across 40 suites (see below)
 ├── examples/
 │   ├── intro-title/               1080p title sequence (mp4)
 │   └── lower-third/               transparent WebM overlay (spring/Loop/interpolateColors)
@@ -276,7 +301,7 @@ losslessly. Full contract: [docs/frame-api.md](docs/frame-api.md).
 cd engine && npm test
 ```
 
-547 tests across 28 suites: core units (incl. the workspace/film/scene store,
+826 tests across 40 suites: core units (incl. the workspace/film/scene store,
 the workspace library, and the pre-v0.20 migration), pipeline integration
 (real FFmpeg, probe-verified outputs for every format incl. transparent WebM
 alpha and the parallel GIF/PNG-sequence merge paths), CLI, MCP (official SDK
@@ -290,7 +315,10 @@ caption/overlay builders, and the Studio films API driven end to end through
 render → build → finishing pass), 3D libraries (add_library vendoring +
 scaffold), vendored-build provenance, frame-api runtime (vm-hosted), Studio
 HTTP server (ephemeral port, sandbox 403s, SSE hot reload, settings, asset
-CRUD, speech-vendor API), and a gated real-Chromium suite (capture
+CRUD, speech-vendor API), the production loop (scene revisions, immutable
+deliveries and their frozen manifests, durable advice with leases and
+evidence, production events/activity, and the film page's HTTP surface end to
+end), and a gated real-Chromium suite (capture
 determinism, genuine `omitBackground` alpha) that runs wherever a browser is
 resolvable:
 

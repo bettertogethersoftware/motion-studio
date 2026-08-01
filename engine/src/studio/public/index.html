@@ -197,14 +197,14 @@
           <dl class="env-list mono" data-facts="piper"></dl>
           <p class="v-error err-line hidden" data-error="piper"></p>
 
-          <div class="config-grid vendor-grid">
-            <label class="wide">executable
+          <div class="path-fields">
+            <label>executable
               <input id="pi-exe" placeholder="(piper on PATH)" spellcheck="false">
             </label>
-            <label>python
+            <label>python <span class="dim">— only if there is no exe</span>
               <input id="pi-python" placeholder="(only if no exe)" spellcheck="false">
             </label>
-            <label class="wide">voices folder
+            <label>voices folder
               <input id="pi-voices" placeholder="(engine/vendor/piper/voices)" spellcheck="false">
             </label>
           </div>
@@ -258,10 +258,12 @@
           <dl class="env-list mono" data-facts="node"></dl>
           <p class="v-error err-line hidden" data-error="node"></p>
 
-          <div class="config-grid vendor-grid">
-            <label class="wide">soundfont
+          <div class="path-fields">
+            <label>soundfont
               <input id="mu-soundfont" placeholder="(bundled MuseScore_General.sf3)" spellcheck="false">
             </label>
+          </div>
+          <div class="config-grid vendor-grid">
             <label>sample rate
               <select id="mu-samplerate">
                 <option value="22050">22050 Hz</option>
@@ -361,15 +363,17 @@
           <dl class="env-list mono" data-facts="whisper-cpp"></dl>
           <p class="v-error err-line hidden" data-error="whisper-cpp"></p>
 
-          <div class="config-grid vendor-grid">
-            <label class="wide">executable
+          <div class="path-fields">
+            <label>executable <span class="dim">— the whisper-cli file, or the folder holding it</span>
               <input id="wh-exe" placeholder="(whisper-cli on PATH)" spellcheck="false">
             </label>
+            <label>models folder
+              <input id="wh-models" placeholder="(a &quot;models&quot; folder beside the binary)" spellcheck="false">
+            </label>
+          </div>
+          <div class="config-grid vendor-grid">
             <label>model
               <select id="wh-model"></select>
-            </label>
-            <label class="wide">models folder
-              <input id="wh-models" placeholder="(a &quot;models&quot; folder beside the binary)" spellcheck="false">
             </label>
             <label>threads
               <input id="wh-threads" type="number" min="1" max="64" placeholder="4">
@@ -467,8 +471,8 @@
         <p class="dim note">Comma-separated delivery-review codes. A block keeps the prior video in place; a
         warning still ships with a contact sheet and review report. Film-specific policies can override these defaults.</p>
         <p class="section-label">ffmpeg</p>
-        <div class="fieldrow">
-          <label class="grow">binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
+        <div class="path-fields">
+          <label>binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
         </div>
         <div class="fieldrow">
           <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>

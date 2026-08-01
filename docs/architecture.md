@@ -38,6 +38,11 @@ Motion Studio is three thin entry points around one shared render engine.
           transcode.js — preparing media: named fields only, no shell (§9.4)
           film.js      — scene assembly primitives (lossless concat, §13)
           films.js     — film documents: validation, planning, build (§13)
+          revisions.js — immutable scene-revision archive + pointers (§14)
+          deliveries.js— immutable film deliveries + frozen manifests (§14)
+          advice.js    — durable human advice, leases, evidence (§14)
+          events.js    — production event bus + workspace watcher (§14)
+          activity.js  — agent heartbeats + production status (§14)
                        ▼
         headless Chromium ──PNG──▶ FFmpeg ──▶ mp4 / webm / gif / mov / frames
 ```
@@ -60,7 +65,12 @@ The MCP boundary deliberately uses portable JSON Schema shapes. Fixed-size
 vectors such as `render.frameRange` are emitted as homogeneous arrays with
 `minItems`/`maxItems`, rather than draft-07 tuple-style `items: [...]`. Some
 strict MCP importers reject the latter and omit the entire tool even though the
-official SDK accepts it.
+official SDK accepts it. Number-or-null fields (`audioTargetPeakDb`, overlay
+`widthPct`) publish as `anyOf [number, null]` and additionally COERCE the
+string forms at runtime (`"-2"` → −2, `"null"`/`""` → null, v0.23): a client
+that flattens `anyOf` to `{}` has no type to coerce against and delivers the
+model's argument as a string, which a plain union would reject after a
+successful discovery.
 
 v0.2 shipped a Windows-only C# WinForms app on the human path; v0.5 replaces
 it with the Studio web UI — see [CHANGELOG.md](CHANGELOG.md) for the full
@@ -292,6 +302,12 @@ that staging path; only a completed file which passes the explicit review
 policy is renamed onto the caller-visible name.
 Promotion is one native rename — there is deliberately no delete-then-rename
 fallback, because retaining the old delivery is safer than creating a gap.
+A rename refused with `EPERM`/`EACCES`/`EBUSY` is retried on a bounded
+backoff (~1.5s total, v0.23) before failing: on Windows an antivirus or
+indexer can briefly lock the destination during rename-over-existing with no
+real owner (measured — an unlink of the same path succeeded immediately),
+and failing a finished multi-minute render over a sub-second scanner lock
+helps nobody. Non-transient codes still fail on the first attempt.
 
 The terminal result exposes `promoted: true` after that rename and always states
 `framesVerified`. A missing/unusable `ffprobe` produces `framesVerified: false`,
@@ -773,11 +789,28 @@ storage model did not match what people were actually making:
 
 Concurrency is better but not free: writes are atomic (temp + rename) and the
 common case now touches disjoint files (each film document is its own file),
-so two agents in different workspaces cannot lose each other's writes. Two
-writers editing the *same* `film.json` remain last-write-wins, unchanged from
-the registry model and surfaced to the human by the Studio's refresh;
-cross-process render collisions are prevented by the render lock (§7.1), not
+so two agents in different workspaces cannot lose each other's writes.
+Cross-process render collisions are prevented by the render lock (§7.1), not
 by this store.
+
+Two writers editing the *same* `film.json` were last-write-wins, inherited
+from the registry model. For films specifically that is not survivable,
+because a film patch **replaces whole arrays**: a writer holding a stale
+`scenes` snapshot does not lose its own field, it reverts every segment change
+made in between, with no error. The production loop makes this the normal
+case rather than the exotic one — the AI edits the document continuously while
+the human sits on an open film page.
+
+So `getFilm` returns a **`revision`** (a hash of the stored document; derived
+on read, never written to disk, so hand-editing `film.json` produces a new one
+for free) and `updateFilm` takes an optional `expectedRevision`, answering a
+mismatch with `film_conflict` rather than a write. Optional is the deliberate
+choice: read-modify-write callers inside the store (`createScene`,
+`removeScene`, `renameAsset`) complete within a tick and gain nothing from it.
+The writers that hold a snapshot across *think-time* — the Studio film page's
+autosave and the `update_film` tool — pass it. Conflicts are not merged;
+whole-array replace admits no honest merge, so the page discards its unsaved
+edit (one 700 ms debounce at most), reloads, and says so.
 
 **Scene defaults are where the concat invariant now lives.** A film records
 `sceneDefaults` (fps/width/height/durationInFrames) at creation, and
@@ -1120,7 +1153,138 @@ owns what that document *means*:
   completed job. A title card may correctly be black or static, so these are facts
   for an agent to inspect, never reasons for the engine to reject a deliverable.
 
-## 14. Testability
+## 14. The production loop (v0.23): AI directs, the human advises
+
+Motion Studio's working model is unattended AI production with asynchronous
+human advice. The AI (over MCP) plans, produces, revises and assembles; the
+human (on the film page, §14.1) watches, navigates, and leaves plain-language
+advice. **There is no approval gate anywhere** — production
+never waits, and every human interaction is durable evidence rather than a
+blocking control. Four mechanisms carry the loop, all of them plain files
+under the film so they survive any process restart and are shared between
+the Studio and every MCP server without coordination:
+
+- **Scene revisions** (`core/revisions.js`). The scene is the atomic visual
+  work unit, and every promoted canonical render is archived immutably at
+  `scenes/<scene>/revisions/<id>/`: the delivered video, the render's
+  contact sheet/review report, a source snapshot, and provenance (agent,
+  note, advice ids, parent). Hardlinks make the archive nearly free, and
+  they are immutable *because* of §7.2.1: the engine only ever replaces a
+  delivery by staged rename, which swaps the inode rather than writing
+  through it. `revisions/current.json` is the pointer; `use_scene_revision`
+  repoints by staging a copy of the archived output over the live one,
+  re-stamps the render sidecar (so §7.3's staleness rule agrees with what is
+  now on disk), and refuses (`revision_mismatch`) when the scene's settings
+  have moved on. It never regenerates and never deletes newer history.
+  Retention (`pruneRevisions`) is explicit and never touches the current
+  revision or anything pinned by a delivery manifest or advice evidence.
+- **Immutable deliveries** (`core/deliveries.js`). `out/<name>.mp4` remains
+  the live delivery; every successful build is *also* archived at
+  `deliveries/<id>/` with a frozen `manifest.json` mapping each film frame
+  to the segment, scene revision, sequence, caption, overlay and audio item
+  that produced it. The film page's **built film** player pins one delivery
+  and resolves clicks through its manifest (`resolveDeliveryFrame`, pure),
+  which is what makes advice **snapshot-consistent**: the human's words bind
+  to what they actually watched, even when production has moved on. The
+  newest master build takes the `current.json` pointer; platform variants
+  archive but never steal it.
+- **Human advice** (`core/advice.js`). Per-film folders holding an immutable
+  `request.json` (wording + structural target + the observed
+  delivery/revision/frame), an append-only `events.ndjson` (appended before
+  every state write, so a crash loses a cached view, never history), a
+  replaceable `state.json` projection, a terminal immutable
+  `resolution.json`, and best-effort before/after frame evidence captured
+  *after* the request is durable (a capture failure records a warning; it
+  can never lose the human's words). Work leases are TTL wall-clock ones —
+  an agent is a remote process no pid check can see — renewable by the
+  holder, and expiry *is* the crash recovery. `needs-clarification` is
+  deliberately non-terminal: the question lands in the state, the human
+  answers with a linked follow-up request, and the original wording is
+  never rewritten. Idempotency (`requestId` on create/resolve) survives
+  restarts because it is stored in the documents themselves.
+- **Events and status** (`core/events.js`, `core/activity.js`). Truth is
+  multi-process (Studio server + N MCP servers), so the Studio's SSE stream
+  (`/api/events`) is fed by its own writes *and* a recursive `fs.watch` on
+  the workspaces root that classifies changed paths into entity events —
+  which is how an MCP server's render appears in the browser live. Events
+  carry monotonic ids with a ring-buffer replay (`Last-Event-ID`) and an
+  honest `reset` on a gap; they are notifications, never truth — clients
+  refetch canonical state. Agent heartbeats are the same durable-vs-live
+  split as jobs (§11.3): `report_agent_activity` overwrites
+  `<workspace>/activity/<agent>.json`, staleness is wall-clock (~3 min),
+  and a dead agent degrades the header to "waiting for next AI run" with
+  nothing lost.
+
+The **sequence** is the narrative layer over the play order: a `sequence`
+label per segment plus optional `film.sequences[label].intent` metadata.
+Consecutive same-label segments form bands (`sequenceBands`, pure) used by
+the plan, the film timeline, and advice targets. Sequences render nothing
+and own no files — the deliberate contrast with the scene, which is exactly
+the atomic render unit. (The upstream redesign plan called these "shots"
+inside renamed "scenes"; the shipped model keeps the engine's scene
+vocabulary and names the grouping *sequence*, killing the same ambiguity
+without churning every id, tool, and document. A later revision of that plan
+proposed `sequences[]` with opaque ids and a schema-version bump; the label
+model already satisfies its rules — bands are contiguous by construction —
+and needs no migration, so it stayed.)
+
+**Segment identity.** A scene segment is addressed by its slug, which
+`validateFilm` already keeps unique per film. A footage segment gets a
+stamped `id` in `normalizeSegment`, because neither of the alternatives is an
+identity: the path repeats when the same plate is cut in twice, and the array
+index changes on every reorder — which would silently re-aim existing advice
+at a different clip. The id survives normalization (every save runs it),
+reaches the plan and the delivery manifest, and is what a `footage` advice
+target names.
+
+Agent identity is `MOTION_STUDIO_AGENT` (default: the workspace slug),
+stamped on revisions, deliveries, advice events and heartbeats. The
+checkpoint protocol — check advice at task start / after planning / before
+expensive generation / after each scene revision / before build / before
+completion; acknowledge, lease, resolve with an outcome; never wait — lives
+in the tool descriptions themselves, `get_capabilities`, and
+[docs/SKILL.md](SKILL.md), so any MCP-capable agent learns it from the
+surface it is already reading.
+
+### 14.1 One film page
+
+The human half of the loop is **one page per film** (`film.html`), in two
+modes over the same document, timeline and player — not two screens.
+
+The first implementation shipped a second surface, `review.html`, beside the
+existing editor. Both drew a timeline of the same film, one read-only against
+a pinned delivery and one editable against the live document, and a reader
+had to know which they were on before they could trust what they saw. The
+duplication *was* the defect, so the review page was removed and its
+behaviour folded in:
+
+| Region | What it holds |
+|---|---|
+| Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` / `+ seq` |
+| Timeline | sequences band row, scenes row, track lanes, advice marker row |
+| Player | scene-stitched preview, or a pinned **built film** delivery |
+| Inspector | property panel, versions, and the advice for the selection |
+| Header | film name, production line, save state, undo/redo, build |
+
+A first cut of this shipped a *second* split — watch & advise versus advanced
+editing, toggled in the header — and it was removed for the same reason the
+review page was (v0.23.2). It only hid buttons, so it bought no safety a
+reader could rely on, while still making them establish which mode they were
+in before trusting the screen. The page is always the full editor.
+
+Advising is therefore driven from the **inspector**, not a header button: that
+panel already resolves the selection, so the advice control sits beside the
+thing it is about instead of guessing. With nothing selected it arms one
+targeting click (`A`, `Esc` to cancel), which is the only piece of modal
+behaviour left and is announced by a banner while it is live.
+
+`GET /api/films/:fid/overview` is the one call the page opens on: document,
+plan, deliveries, advice, per-scene revision counts, and production status.
+It is refetched on SSE events, and deliberately never overwrites the film
+document — an agent's activity must not clobber a sentence the human is
+mid-way through typing.
+
+## 15. Testability
 
 The renderer takes an injectable `browserFactory`; tests substitute a fake
 browser that emits real, self-encoded PNGs (RGB and RGBA), so the entire
@@ -1135,7 +1299,7 @@ SDK client over stdio), and Studio HTTP tests on an ephemeral port. A gated
 launch, screenshot determinism, and genuine `omitBackground` alpha — and
 skips honestly where no browser is resolvable.
 
-754 tests across 33 files; see `engine/test/`. A clean run has **zero
+826 tests across 40 files; see `engine/test/`. A clean run has **zero
 failures**. Tests skip rather than fail when the platform cannot host them:
 besides the gated Chromium suite, `cli: SIGTERM mid-render cancels with exit
 code 4` is POSIX-only, because Windows has no signal mechanism and

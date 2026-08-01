@@ -50,11 +50,20 @@ e.g. `ggml-small.en.bin`. Put it in a `models` folder **beside the binary** and
 you are done — that is the layout every prebuilt release already has, and the
 engine finds it without being told.
 
-**3. Point one env var at the binary:**
+**3. Point one setting at the binary** — the Studio's ⚙ **transcribe** page, or
+the env var:
 
 ```
 setx MOTION_STUDIO_WHISPER_BIN "C:\tools\whisper\Release\whisper-cli.exe"
 ```
+
+**A folder works too.** Point it at the folder holding the binary, or at the
+root you unzipped, and the engine looks inside for `whisper-cli` (or the older
+`main`), checking the folder itself and its `Release`, `bin`,
+`build/bin/Release` and `build/bin` subfolders — the layouts a prebuilt release
+and a source build actually produce. Models are then found beside whichever
+binary it resolved, so pointing at `whisper-bin-x64` alone is a complete setup.
+The Studio's **command** row shows what it resolved to and where it looked.
 
 Then restart the Studio (and your MCP client): a new environment value only
 reaches an already-running process on restart.
@@ -63,7 +72,7 @@ reaches an already-running process on restart.
 
 | variable | what it sets | default |
 |---|---|---|
-| `MOTION_STUDIO_WHISPER_BIN` | the `whisper-cli` executable | `whisper-cli` on PATH |
+| `MOTION_STUDIO_WHISPER_BIN` | the `whisper-cli` executable, **or a folder holding it** | `whisper-cli` on PATH |
 | `MOTION_STUDIO_WHISPER_MODEL` | a `ggml-*.bin` path, **or** a bare name (`small.en`) | the preference order below |
 | `MOTION_STUDIO_WHISPER_MODELS` | a folder holding several `ggml-*.bin` | `models` beside the binary, else `engine/vendor/whisper/models` |
 | `MOTION_STUDIO_WHISPER_THREADS` | `-t` | whisper.cpp's own default (4) |

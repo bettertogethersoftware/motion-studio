@@ -2,6 +2,273 @@
 
 ## Unreleased
 
+### The production loop: AI directs, the human advises (v0.23)
+
+Motion Studio's working model is now stated and implemented end to end: the
+**AI is the director and operator** — it plans, produces, revises, and
+assembles unattended — and the **human is an asynchronous adviser** who
+watches the evolving film in the Studio and leaves plain-language advice.
+There is no approval gate anywhere; production never waits.
+
+Four durable mechanisms carry that loop:
+
+- **Scene revisions.** Every promoted full-scene render is archived as an
+  immutable revision beside the live output
+  (`scenes/<scene>/revisions/<id>/`): the delivered video (hardlinked — the
+  engine's rename-only promotion makes archives immutable for free), the
+  render's contact sheet and review report, a snapshot of the composition
+  source, and provenance (agent, note, linked advice, parent). A rework never
+  destroys the previous take. `list_scene_revisions` reads the history;
+  `use_scene_revision` repoints the live output at an archived take with the
+  same staged-rename protocol a render uses, re-stamps the render sidecar so
+  staleness checks agree, and never deletes newer history. It refuses with
+  `revision_mismatch` when the scene's settings have changed since. The
+  `render` tool takes an optional `note` and `adviceIds`; its finished job
+  status reports the archived `revisionId`. Retention is explicit
+  (`pruneRevisions`), and never touches the current revision or anything
+  pinned by a delivery manifest or advice evidence.
+- **Immutable deliveries.** Every successful `build_film` is archived under
+  `deliveries/<id>/` with the delivered video and a frozen `manifest.json`
+  mapping every film frame to the exact scene revision, sequence, caption,
+  overlay, and audio item that produced it. The Studio's review player pins
+  one delivery and resolves clicks through its manifest, so advice binds to
+  what the human actually watched — even after production moves on. The
+  finished build job reports its `deliveryId`; `list_deliveries` lists and
+  returns manifests.
+- **Human advice.** A per-film durable advice store
+  (`advice/<id>/`): immutable `request.json` (wording, structural target,
+  and the exact observed delivery/revision/frame), append-only
+  `events.ndjson`, a replaceable `state.json` projection, terminal
+  `resolution.json`, and best-effort before/after frame evidence that is
+  captured *after* the request is durable and records its own failure rather
+  than losing the request. The agent protocol is five MCP tools —
+  `check_human_advice` (read-only, oldest first, never blocks),
+  `acknowledge_human_advice`, `begin_advice_work` (renewable TTL lease so two
+  agents cannot process one item; expiry is the crash recovery),
+  `resolve_human_advice` (`applied` / `partially-applied` / `not-applied` /
+  `superseded`, or non-terminal `needs-clarification` whose question the
+  human answers with linked follow-up advice), and `list_human_advice`.
+  Resolutions are immutable with idempotent retry via `requestId`, and an
+  after-frame is captured automatically for scene-target advice.
+- **Production events and status.** `report_agent_activity` writes expiring
+  heartbeat files ("Creating scene demo-shot") and `get_production_status`
+  projects readiness, unresolved advice, the current delivery, and whether
+  newer work awaits a build. The Studio serves one reconnectable SSE stream
+  (`GET /api/events`, `Last-Event-ID` replay from a ring buffer, `reset` on a
+  gap) fed by its own writes *and* a recursive watcher on the workspaces
+  root — which is how work done by an MCP server in another process appears
+  live in the browser. `get_capabilities` gives a director the whole model in
+  one call.
+
+### Narrative sequences
+
+Film segments may carry a `sequence` label, and the film document an optional
+`sequences` metadata map (`{ Intro: { intent } }`). Consecutive segments
+sharing a label form a story band in the plan (`plan.sequences`), the film
+timeline, and advice targets ("Sequence 2"). Sequences are presentation: they
+render nothing, own no files, and relabeling moves nothing.
+
+### One film page: watch & advise, with advanced editing behind a toggle
+
+The first cut of this shipped a second surface — `review.html` beside
+`film.html` — and reading a film meant knowing which of two screens with
+similar timelines and different rules you were on. That was the confusion, so
+there is now **one page per film** and no review route at all.
+
+`film.html` opens in **watch & advise**:
+
+- The left rail is a `Film → Sequence → Scene/Footage` **tree**. Selecting a
+  sequence highlights its band and moves the playhead to its start; selecting
+  a segment selects the same timeline block. Scene folders the play order
+  does not reference stay below as **unused scenes**.
+- The timeline gains a **sequences** band row above the scenes row and an
+  **advice** marker row below the tracks. Unresolved advice shows as a count
+  badge on the tree row and the block itself.
+- One prominent **Advise AI** button (`A`) opens a popup on whatever is
+  selected — sequence, scene, footage clip, audio, caption, overlay, or the
+  film at a moment. Press it with nothing selected and the next click on the
+  tree, timeline, or picture becomes the target (`Esc` cancels). The popup
+  carries the target label, the film time, one comment box, and — for a scene
+  with history — the **previous result** and **ask AI to use this previous
+  result**.
+- The inspector shows the selection's facts, its **versions** (each archived
+  take, previewable in the main player in place, with *ask AI to use this*),
+  and the **advice** scoped to it, in the human vocabulary: *advice sent → AI
+  received it → AI is working on it → updated*, or *AI reviewed it* with a
+  reason, or *AI needs more information* with a question answered inline.
+  Opening one shows the AI's explanation and the before/after frames.
+- The player keeps the editor's honest scene-stitched preview and adds a
+  **built film** source that pins one archived delivery; a newer build offers
+  itself in a banner rather than switching beneath the playhead, and a build
+  whose frame count no longer matches the cut says so.
+- The header carries the live production line from agent heartbeats,
+  degrading to "waiting for the next AI run".
+
+**Advanced editing** is a header toggle (remembered per browser) that reveals
+every production control unchanged — add/trim/reorder, render, build, undo,
+sequence create/rename/ungroup and intent — plus the same advice and version
+sections. Watch mode is genuinely read-only: block drags, the Delete key, the
+name field and the undo stack are all inert, and lane `+` buttons are gone.
+
+`GET /api/films/:fid/review` is now `GET /api/films/:fid/overview`, and
+`review.html` / `review.js` / `review.css` are no longer served.
+
+### A human watching a scene could fail the AI's re-render of it (v0.23.2)
+
+Measured, repeatedly: while the Studio streams a scene's output to a `<video>`
+— a human on the film page — Windows refuses `rename(staged → output.mp4)`
+with `EPERM` for as long as that page is open, so **8 of 8 re-renders failed
+while 6 of 6 brand-new scenes succeeded**. The bounded backoff added earlier
+cannot help; the handle is held for minutes, not milliseconds. In an
+AI-directed, human-advised product this is exactly backwards: watching must
+never be able to break directing.
+
+`promoteStagingOutput` now side-steps a held destination. Windows does allow
+renaming the open file *itself*, so the old delivery is moved aside, the new
+one takes the delivery name, and the aside copy is dropped. The reader keeps
+streaming the bytes it already opened — its handle follows the inode — and
+sees no corruption.
+
+This is **not** the delete-then-rename fallback the module has always refused.
+Nothing is deleted before the replacement is in place, and if the second
+rename fails the old delivery is renamed straight back, so a failure still
+leaves the previous delivery exactly where it was. Covered by tests that hold
+a real `fs.createReadStream` open, because the bug is a platform rename
+semantic a mocked rename cannot reproduce.
+
+### The human can take advice back
+
+Advice was one-way: a typo, a duplicate, or a note the human thought better of
+stayed unresolved forever and was re-served to every later AI run. Two new
+actions, both in the film page's advice section: **withdraw** on a single open
+item, and **withdraw all N open across the film**.
+
+Withdrawing is a resolution, not a delete — `withdrawAdvice` /
+`withdrawAllAdvice` write a terminal `not-applied` resolution flagged
+`withdrawnByHuman`, append a `withdrawn` event, and leave the original wording,
+events and evidence on disk. "I asked for this and took it back" is part of the
+record. `check_human_advice` stops offering it; the timeline marker turns
+resolved rather than disappearing; the card reads *you withdrew this* rather
+than crediting the AI with a decision it never made. Withdrawing is idempotent,
+so clearing the board cannot race an agent that just resolved something, and it
+never overwrites an existing resolution.
+
+New routes: `POST /api/films/:fid/advice/:aid/withdraw` and
+`POST /api/films/:fid/advice/withdraw-all`.
+
+### One film surface, no mode switch
+
+The watch & advise / advanced editing toggle is gone, and so is the header
+**Advise AI** button. The mode only ever hid buttons, which made a reader work
+out which mode they were in before they could trust the screen — the same
+"which surface am I on?" tax the review page charged. The page is now always
+the full editor.
+
+Advising is driven from the inspector, beside whatever is selected, because
+that panel already knows the target; with nothing selected it still arms one
+targeting click (or press `A`). `+ seq` moved from the rail header down beside
+`+ new scene`, so both "make something new in this film" actions sit together.
+
+### The whisper.cpp setting accepts a folder
+
+Pointing the transcription executable at the folder you unzipped — the obvious
+reading of a "where is whisper.cpp" box — spawned the *directory* and reported
+`whisper.cpp not found` while `whisper-cli.exe` sat inside it. It now resolves
+a directory to the binary within, searching the folder itself and its
+`Release`, `bin`, `build/bin/Release` and `build/bin` subfolders for
+`whisper-cli` or the older `main`. Models are then located beside the
+**resolved** binary, so pointing at `whisper-bin-x64` alone is a complete
+setup. The Studio's `command` row reports what it resolved to and where it
+looked; a folder holding no binary keeps the value the human typed and says
+so specifically instead of the generic "not found".
+
+### Filesystem paths are readable in the Studio
+
+Every setup surface truncated the thing it existed to show. The vendor cards'
+fact rows (`command`, `models folder`, `soundfont`) and the settings page's
+resolved-path hints ellipsised mid-path; the path *inputs* sat in a 3-column
+knob grid capped at 240px a column, cutting a Windows path off around
+`C:\Users\name\so`. Fact rows and hints now wrap, path inputs get their own
+full-width monospace stack (the shape the settings page's storage block
+already used) while `threads`/`sample rate`/`model` stay compact, the settings
+storage block opts out of the form's 720px reading measure, and every path box
+carries its current value as a hover tooltip.
+
+### Footage clips are advisable, by stable id
+
+Footage segments are stamped with a persistent `id` (scenes already had one:
+the slug). Identity cannot be the path, because the same plate may be cut in
+twice, and it cannot be the array index, because every reorder would re-aim
+yesterday's note at whatever now sits fourth. `footage` joins the advice
+target types, addressed by that id; the plan and delivery manifests carry it;
+`update_film` accepts and echoes it. Advice on a clip captures its before
+frame from the film's own asset.
+
+New error codes: `revision_not_found`, `revision_mismatch`,
+`advice_not_found`, `invalid_advice`, `advice_lease_held`,
+`advice_already_resolved`, `delivery_not_found`, `film_conflict`.
+New environment:
+`MOTION_STUDIO_AGENT` names the director identity stamped on revisions,
+deliveries, advice events, and heartbeats (defaults to the workspace name).
+
+### An open Studio tab can no longer silently revert the AI's edits
+
+Film patches replace whole arrays — that is the right contract for a timeline
+edit, and it is also a lost-update trap the moment two people hold the
+document. A writer with a stale `scenes` snapshot does not merely lose its own
+field; it reverts every segment change made in between, with no error and no
+trace. Measured in production during this release: an agent reordered a
+16-scene film, the human had the film page open in a browser from before that
+edit, one later interaction autosaved the page's page-load-old array, and the
+scene order was scrambled back. The built delivery was unaffected (its manifest
+is frozen), which is exactly what made the loss quiet.
+
+`getFilm` now returns a **`revision`** — a hash of the stored document,
+derived, never written to disk — and `updateFilm` takes an optional
+`expectedRevision`. A mismatch is `film_conflict` (HTTP 409, carrying both
+revisions) instead of a write. It is deliberately optional: the internal
+read-modify-write callers (`createScene`, `removeScene`, `renameAsset`) act
+within a tick and would only be made noisier by it. The two writers that hold
+a snapshot across human or agent think-time send it:
+
+- **The Studio film page** sends its revision with every autosave. On a
+  conflict it does not re-send and does not merge — there is no honest merge
+  for whole-array replace — it drops the unsaved edit (at most one 700 ms
+  debounce), reloads, clears undo history that now describes a document that
+  no longer exists, and says plainly that the edit was not applied.
+- **`update_film`** accepts `expectedRevision`, and `get_film` returns the
+  `revision` to pass back.
+
+The page also stopped drifting in the first place: `/overview` already carried
+the current film document, so a clean tab now notices the revision moved and
+catches up on its own instead of waiting to conflict. While the human has
+unsaved work the page says "changed elsewhere" and leaves their edit alone.
+
+Scalar-only patches (`build_film`'s `outputFilename` / `audioTargetPeakDb` /
+`burnCaptions`) stay unguarded — they cannot revert anything, and requiring a
+revision there would only make builds fail spuriously.
+
+### Promotion rides out transient Windows locks
+
+Staged-delivery promotion (`promoteStagingOutput`) now retries a rename that
+fails with `EPERM`/`EACCES`/`EBUSY` on a bounded backoff (~1.5s total) before
+surfacing `disk_error`. Measured in production: three consecutive re-renders
+failed `EPERM` renaming over an existing delivery while no process held the
+file (an immediate unlink succeeded) — the signature of an antivirus/indexer
+briefly locking the destination during rename-over-existing. The promotion
+primitive remains rename-only; there is still deliberately no
+delete-then-rename fallback, and non-transient codes still fail immediately.
+
+### Nullable numeric MCP arguments survive schema-flattening clients
+
+`update_film`/`build_film` `audioTargetPeakDb` and overlay `widthPct` publish
+as `anyOf [number, null]` — but a client that flattens `anyOf` to `{}` has no
+type to coerce against and delivers the model's argument as a string, which
+the plain union rejected (measured: `build_film { audioTargetPeakDb: -2 }`
+arrived as `"-2"` and failed input validation). Those fields now coerce
+numeric strings and `"null"`/`""` at runtime while publishing the same
+schema; a non-numeric string still fails with the normal typed error.
+
 ### MCP render-tool discovery compatibility
 
 `render.frameRange` now publishes as a homogeneous integer array constrained to

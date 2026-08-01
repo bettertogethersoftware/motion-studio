@@ -43,6 +43,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,6 +91,47 @@ export const modelNameFromFile = (file) =>
 const looksLikeModelFile = (v) => /\.bin$/i.test(v) || v.includes('/') || v.includes('\\');
 
 /**
+ * The executable names a whisper.cpp build produces. `whisper-cli` is the
+ * current one; `main` is what releases before mid-2024 called it, and old
+ * unzipped folders are still out there.
+ */
+const WHISPER_BINARY_NAMES = Object.freeze(['whisper-cli', 'main']);
+
+/**
+ * Where those binaries sit relative to a folder a human is likely to point at.
+ * The prebuilt Windows zip unpacks to `whisper-bin-x64/Release/whisper-cli.exe`
+ * and a source build lands in `build/bin/Release/`, so pointing at either the
+ * extracted root or the folder actually holding the exe has to work.
+ */
+const WHISPER_BIN_SUBDIRS = Object.freeze(['', 'Release', 'bin', 'build/bin/Release', 'build/bin']);
+
+const isDirectory = (p) => {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+};
+
+/**
+ * Find the whisper executable inside a folder, or null.
+ *
+ * Pointing a "where is whisper.cpp" setting at the folder you unzipped is the
+ * obvious reading of it, and it used to spawn the directory and fail ENOENT
+ * with "not found" while the binary sat one name away inside it. Resolving it
+ * here fixes the setting, the probe and the run in one place — and returning
+ * null (rather than guessing) keeps a genuinely empty folder an honest error.
+ */
+export function whisperBinaryIn(dir) {
+  const exts = process.platform === 'win32' ? ['.exe', ''] : ['', '.exe'];
+  for (const sub of WHISPER_BIN_SUBDIRS) {
+    for (const name of WHISPER_BINARY_NAMES) {
+      for (const ext of exts) {
+        const abs = path.join(dir, ...sub.split('/').filter(Boolean), name + ext);
+        try { if (fs.statSync(abs).isFile()) return abs; } catch { /* keep looking */ }
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Resolve how to run whisper.cpp and where its models are, recording which
  * layer won so the Studio can show "whisper-cli.exe (from
  * MOTION_STUDIO_WHISPER_BIN)" rather than leaving the user to guess.
@@ -126,16 +168,29 @@ export function resolveWhisper({
   const threadHit = pick(threads, WHISPER_ENV.threads, whisper.threads);
   const langHit = pick(language, [], whisper.language);
 
-  const command = exeHit.value ?? 'whisper-cli';
+  let command = exeHit.value ?? 'whisper-cli';
   const commandSource = exeHit.source ?? 'PATH';
+
+  // Pointed at a FOLDER? Look inside it for the binary. A "where is
+  // whisper.cpp" box invites the install folder, and the previous behaviour
+  // spawned the directory itself and reported "not found" while whisper-cli
+  // sat inside it. A folder with no binary keeps its own value, so the error
+  // still names what the human actually typed.
+  let commandFolder = null;
+  if (exeHit.value && isDirectory(exeHit.value)) {
+    const found = whisperBinaryIn(exeHit.value);
+    if (found) { commandFolder = exeHit.value; command = found; }
+  }
 
   // A model given as a file path also tells us where the models live.
   const modelDir = modelHit.value && looksLikeModelFile(modelHit.value)
     ? path.dirname(path.resolve(modelHit.value))
     : null;
-  // …and so does the binary, when it was given as a path.
-  const besideBinary = exeHit.value && (exeHit.value.includes('/') || exeHit.value.includes('\\'))
-    ? path.join(path.dirname(path.resolve(exeHit.value)), 'models')
+  // …and so does the binary, when it was given as a path. Resolved from the
+  // final command, so a folder that resolved into `Release/whisper-cli.exe`
+  // finds `Release/models` — the layout every prebuilt release ships.
+  const besideBinary = command.includes('/') || command.includes('\\')
+    ? path.join(path.dirname(path.resolve(command)), 'models')
     : null;
 
   let resolvedDir = dirHit.value;
@@ -147,6 +202,9 @@ export function resolveWhisper({
   return {
     command,
     commandSource,
+    // Set when the configured value was a folder we looked inside — the UI
+    // shows it so "I typed a folder and it works" is visible, not magic.
+    commandFolder,
     modelsDir: resolvedDir ?? DEFAULT_MODELS_DIR,
     modelsDirSource: resolvedDirSource ?? 'bundled',
     model: modelHit.value,
@@ -192,7 +250,8 @@ export async function listWhisperModels(dir) {
 /** The install sentence, in one place — a missing model is the common failure. */
 export function whisperSetupHint(resolved) {
   return 'Install whisper.cpp (a prebuilt release, or `cmake --build`), point ' +
-    `${WHISPER_ENV.bin[0]} at its whisper-cli executable, and put at least one ggml model ` +
+    `${WHISPER_ENV.bin[0]} at its whisper-cli executable (or at the folder holding it), ` +
+    'and put at least one ggml model ' +
     `(e.g. ggml-small.en.bin from huggingface.co/ggerganov/whisper.cpp) in ${resolved?.modelsDir ?? 'the models folder'} ` +
     `— or name the file directly with ${WHISPER_ENV.model[0]}. Models sitting beside the binary in a "models" ` +
     'folder are found automatically.';
@@ -280,13 +339,22 @@ function execWhisper(command, args, { timeoutMs, signal }) {
     proc.on('error', (e) => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      const missing = e.code === 'ENOENT';
+      const missing = e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'EISDIR';
+      // A folder that exists but holds no whisper binary is a different
+      // mistake from a path that is not there at all, and saying "not found"
+      // for the folder you are looking straight at reads as a bug.
+      const dir = isDirectory(command);
       reject(new EngineError(
         missing ? ErrorCodes.TRANSCRIPTION_UNAVAILABLE : ErrorCodes.TRANSCRIPTION_FAILED,
         missing
-          ? `whisper.cpp not found (tried "${command}"). Set ${WHISPER_ENV.bin[0]} to the whisper-cli executable.`
+          ? (dir
+            ? `"${command}" is a folder, and no whisper binary (${WHISPER_BINARY_NAMES.join(' / ')}) `
+              + `was found in it or in its ${WHISPER_BIN_SUBDIRS.filter(Boolean).join(' / ')} subfolders. `
+              + 'Point the executable setting at the folder that holds whisper-cli, or at the file itself.'
+            : `whisper.cpp not found (tried "${command}"). Set ${WHISPER_ENV.bin[0]} to the whisper-cli `
+              + 'executable, or to the folder holding it.')
           : `whisper.cpp failed to start: ${e.message}`,
-        { vendor: 'whisper-cpp', command, enoent: missing },
+        { vendor: 'whisper-cpp', command, enoent: missing, isDirectory: dir },
       ));
     });
     proc.on('close', (code) => {
@@ -323,6 +391,7 @@ export async function checkWhisperTranscription({ timeoutMs = 20_000, ...opts } 
   const config = {
     command: resolved.command,
     commandSource: resolved.commandSource,
+    commandFolder: resolved.commandFolder,
     modelsDir: resolved.modelsDir,
     modelsDirSource: resolved.modelsDirSource,
     model: resolved.model,

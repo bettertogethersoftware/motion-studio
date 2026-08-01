@@ -126,6 +126,33 @@ export const ErrorCodes = Object.freeze({
   // locations are fine, the timing is not, and the caller's fix is to wait or
   // cancel rather than to supply a different path.
   STORAGE_BUSY: 'storage_busy',
+  // added in v0.23 (scene revisions) — see docs/CHANGELOG.md.
+  // The named revision folder does not exist for that scene.
+  REVISION_NOT_FOUND: 'revision_not_found',
+  // The revision exists but was made at settings the scene no longer has
+  // (resolution/fps/format/duration). use_scene_revision refuses rather than
+  // repointing the film at output its own plan would immediately call stale.
+  REVISION_MISMATCH: 'revision_mismatch',
+  // added in v0.23 (human advice) — see docs/CHANGELOG.md.
+  ADVICE_NOT_FOUND: 'advice_not_found',
+  // A structurally bad advice request (no message, unknown target type) —
+  // the human-facing 400, kept apart from INVALID_CONFIG so the advice
+  // surface has its own vocabulary.
+  INVALID_ADVICE: 'invalid_advice',
+  // Another agent holds a live work lease on this advice. Carries the holder
+  // and expiry so the caller can decide to wait rather than duplicate work.
+  ADVICE_LEASE_HELD: 'advice_lease_held',
+  // Terminal resolutions are immutable; a second resolve is refused (and an
+  // idempotent retry with the same requestId returns the original instead).
+  ADVICE_ALREADY_RESOLVED: 'advice_already_resolved',
+  // added in v0.23 (immutable deliveries) — see docs/CHANGELOG.md.
+  DELIVERY_NOT_FOUND: 'delivery_not_found',
+  // The film document changed since the caller last read it. Film patches
+  // replace whole arrays, so a writer holding a stale `scenes` snapshot would
+  // otherwise silently revert every edit made in between — which is exactly
+  // what an open Studio tab did to an agent's scene reorder. Carries the
+  // current revision so the caller can re-read and re-apply.
+  FILM_CONFLICT: 'film_conflict',
 });
 
 export class EngineError extends Error {

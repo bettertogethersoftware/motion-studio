@@ -3,12 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Motion Studio — Film Editor</title>
+<title>Motion Studio — Film</title>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/film.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
 </head>
 <body>
+<!--
+  ONE page per film (v0.23.1). Motion Studio is AI-directed and human-advised,
+  and both halves live here: play the film, click the sequence, scene, clip,
+  audio, caption or overlay that looks wrong, and leave plain-language advice —
+  alongside the full production controls. Nothing waits for approval.
+
+  There is no review page, no review route, and (since v0.23.2) no mode switch:
+  a "watch" mode that only hid buttons was a decision the reader had to make
+  before they could trust what they were looking at, for no gain. Advising is
+  driven from the inspector, which already knows what is selected.
+-->
 <div class="fe-frame">
   <header class="fe-top">
     <a href="/" class="ghost back-btn" id="btn-back" title="back to the Studio">←</a>
@@ -16,6 +27,8 @@
     <input id="film-name" class="fe-name" spellcheck="false" title="film name">
     <span id="film-facts" class="dim mono"></span>
     <button id="btn-problems" class="ghost warn hidden"></button>
+    <span id="production-line" class="fe-production mono"
+      title="what the AI is doing — from its own heartbeat and from durable state"></span>
     <span class="spacer"></span>
     <span id="save-state" class="mono dim">saved</span>
     <button id="btn-undo" class="ghost" title="undo (Ctrl+Z)" disabled>↶</button>
@@ -25,16 +38,34 @@
 
   <div id="problems-panel" class="problems hidden"><ul id="problems-list"></ul></div>
 
+  <div id="aim-banner" class="fe-banner hidden">
+    <span>Click the sequence, scene, clip, audio, caption or overlay you want to advise on.</span>
+    <button id="btn-aim-cancel" class="ghost">cancel (Esc)</button>
+  </div>
+
+  <div id="film-updated" class="fe-banner ok hidden">
+    <span>The AI built a newer version of this film.</span>
+    <button id="btn-watch-latest" class="ghost">watch it</button>
+    <button id="btn-dismiss-updated" class="ghost">keep watching this one</button>
+  </div>
+
   <main class="fe-main">
     <aside class="fe-scenes" id="fe-scenes">
       <div class="fe-rail-head">
-        <span class="rail-head-label">scenes</span>
-        <span class="dim drag-hint">drag onto the timeline →</span>
+        <span class="rail-head-label">film</span>
         <button id="btn-scenes-collapse" class="ghost tiny-btn" title="collapse">«</button>
       </div>
+      <div id="fe-tree" class="fe-tree" role="tree" aria-label="film structure"></div>
+      <div class="fe-rail-split">
+        <span class="rail-head-label">unused scenes</span>
+        <span class="dim drag-hint">drag onto the timeline →</span>
+      </div>
       <ul id="fe-scene-list" class="scene-rail-list"></ul>
+      <!-- Both "make something new in this film" actions sit together at the
+           foot of the tree; + seq used to be marooned in the header. -->
       <div class="rail-foot">
         <button id="btn-new-scene" class="ghost" title="scaffold a new scene folder into this film">+ new scene</button>
+        <button id="btn-new-sequence" class="ghost" title="group the selected segment onward into a new sequence">+ seq</button>
       </div>
     </aside>
 
@@ -43,11 +74,14 @@
         <div id="player-box">
           <video class="scene" id="video-a" playsinline preload="auto"></video>
           <video class="scene" id="video-b" playsinline preload="auto"></video>
+          <video class="scene" id="video-film" playsinline preload="auto"></video>
           <div id="overlay-layer"></div>
           <div id="caption-layer"></div>
           <div id="scene-placeholder" class="hidden">
             <span class="ph-name"></span><span class="ph-note"></span>
           </div>
+          <div id="delivery-tag" class="fe-delivery-tag mono hidden"
+            title="the archived build this player is pinned to — it never switches beneath you"></div>
         </div>
       </div>
       <div class="transport">
@@ -56,6 +90,10 @@
         <button id="btn-step-fwd" class="transport-btn" title="step forward (→)">›</button>
         <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
         <span class="mono dim" id="timecode">00:00.00</span>
+        <div class="source-switch" role="group" aria-label="what the player shows">
+          <button id="btn-src-preview" class="mode-btn on" title="the scenes as they are right now, stitched">preview</button>
+          <button id="btn-src-delivery" class="mode-btn" title="the last film the AI actually built">built film</button>
+        </div>
         <span class="spacer"></span>
         <span id="mix-state" class="mono dim" title="master-audio preview: the build's exact ffmpeg mix"></span>
       </div>
@@ -90,6 +128,33 @@
     </div>
   </section>
 </div>
+
+<!--
+  The advice popup. It opens on whatever is selected — the human never types an
+  id, picks a job type, or decides what has to be re-rendered. Sending it is a
+  durable write and nothing else: production is not paused and no approval is
+  requested.
+-->
+<dialog id="advice-dialog" class="fe-dialog advice-dialog">
+  <h2>advise the AI</h2>
+  <div class="adv-target-card">
+    <span id="adv-target-title" class="adv-target-title"></span>
+    <span id="adv-target-detail" class="mono dim"></span>
+  </div>
+  <div id="adv-prev-result" class="adv-prev hidden">
+    <span class="adv-prev-head dim">previous result</span>
+    <div id="adv-prev-body" class="adv-prev-body"></div>
+  </div>
+  <textarea id="advice-text" rows="4" maxlength="4000"
+    placeholder="Tell the AI what you see, in plain language. It reads this at its next checkpoint and answers with evidence."></textarea>
+  <div class="fieldrow right">
+    <span id="advice-state" class="mono dim" style="margin-right:auto"></span>
+    <button type="button" class="ghost" data-close="advice-dialog">cancel</button>
+    <button type="button" id="btn-send-advice" class="primary">send advice</button>
+  </div>
+  <p class="dim note">Advice never pauses the AI and needs no approval. Close this page whenever you like —
+  it is on disk and the next AI run finds it.</p>
+</dialog>
 
 <dialog id="audio-dialog" class="fe-dialog">
   <h2>add audio</h2>

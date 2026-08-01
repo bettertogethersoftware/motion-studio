@@ -42,6 +42,22 @@ applies it at the **scene** level, across a film.
   720p and final-render at 1080p/4K with zero code change** — resolution and fps
   live in each scene's config (inherited from the film's `sceneDefaults` unless a
   scene overrides them), not in the composition.
+- **Sequences are the story layer (v0.23).** A scene is the atomic render
+  unit; a **sequence** is the narrative grouping a human navigates by. Label
+  segments in the play order (`scenes: [{ slug: "hook", sequence: "Intro" },
+  { slug: "demo-1", sequence: "Demo" }]`) and optionally describe each label
+  (`sequences: { Intro: { intent: "Hook the viewer in 5 seconds" } }`).
+  Consecutive segments sharing a label form one band in the plan
+  (`plan.sequences`), in the film page's tree and timeline, and as advice
+  targets ("Sequence 2 drags"). Sequences are presentation only: they render
+  nothing, own no files, and relabeling or regrouping never invalidates a
+  render or moves a folder. Footage segments take labels too.
+- **Footage clips carry a stable `id` (v0.23).** `normalizeSegment` stamps one
+  on every footage segment and preserves it across saves. Keep it when you
+  rewrite the play order: it is what human advice on that clip is bound to,
+  and neither the path (the same plate can be cut in twice) nor the array
+  index (every reorder changes it) can serve as identity. Scenes already have
+  one — the slug.
 
 ## Stale renders: the sidecar (v0.21)
 

@@ -31,7 +31,7 @@ import {
   WHISPER_SAMPLE_RATE,
 } from '../src/core/transcribe.js';
 import {
-  resolveWhisper, listWhisperModels, pickWhisperModel, modelNameFromFile,
+  resolveWhisper, whisperBinaryIn, listWhisperModels, pickWhisperModel, modelNameFromFile,
   normalizeWhisperJson, checkWhisperTranscription, transcribeWithWhisper,
   MODEL_PREFERENCE, WHISPER_ENV,
 } from '../src/core/transcribe-whisper.js';
@@ -372,6 +372,44 @@ test('resolveWhisper finds models BESIDE the binary — the shipped release layo
   const r = resolveWhisper({ exe: 'C:/tools/whisper/Release/whisper-cli.exe' });
   assert.equal(r.modelsDir, path.resolve('C:/tools/whisper/Release/models'));
   assert.equal(r.modelsDirSource, 'beside the binary');
+});
+
+test('resolveWhisper accepts a FOLDER for the executable and looks inside it', async () => {
+  // The mistake this fixes, exactly: the prebuilt Windows zip unpacks to
+  // whisper-bin-x64/Release/whisper-cli.exe, a human points the setting at a
+  // folder, and the old code spawned the directory and reported "not found"
+  // while the binary sat inside it.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-whisper-dir-'));
+  const release = path.join(root, 'Release');
+  await fsp.mkdir(path.join(release, 'models'), { recursive: true });
+  const exeName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
+  const exe = path.join(release, exeName);
+  await fsp.writeFile(exe, '');
+
+  // …pointed at the folder that holds it,
+  const inner = resolveWhisper({ exe: release });
+  assert.equal(inner.command, exe);
+  assert.equal(inner.commandFolder, release, 'the UI can say where it looked');
+  assert.equal(inner.modelsDir, path.join(release, 'models'), 'models are found beside the RESOLVED binary');
+
+  // …and pointed at the extracted root one level up.
+  const outer = resolveWhisper({ exe: root });
+  assert.equal(outer.command, exe);
+  assert.equal(outer.modelsDir, path.join(release, 'models'));
+
+  // A file path still wins verbatim, and reports no folder lookup.
+  const direct = resolveWhisper({ exe });
+  assert.equal(direct.command, exe);
+  assert.equal(direct.commandFolder, null);
+
+  // A folder with no whisper binary is NOT silently rewritten — the error has
+  // to be able to name what the human actually typed.
+  const empty = path.join(root, 'empty');
+  await fsp.mkdir(empty, { recursive: true });
+  assert.equal(resolveWhisper({ exe: empty }).command, empty);
+  assert.equal(whisperBinaryIn(empty), null);
+
+  await fsp.rm(root, { recursive: true, force: true });
 });
 
 test('resolveWhisper takes the models folder from a model given as a file path', () => {
