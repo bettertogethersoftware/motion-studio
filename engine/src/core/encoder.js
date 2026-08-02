@@ -251,12 +251,28 @@ export async function concatSegments({ segmentPaths, outputPath, ffmpegPath = 'f
  * sidechain used to silence the bed from the last narration clip onward.
  */
 /**
- * Brick-wall limiter appended to the mix (v0.10). limit=0.891 is -1 dBFS;
- * level=0 disables alimiter's auto-levelling, which would otherwise make the
- * filter *boost* quiet audio instead of only catching peaks. Below -1 dBFS this
- * is a no-op, so it costs nothing on a mix that was already safe.
+ * Brick-wall limiter appended to the mix (v0.10). level=0 disables alimiter's
+ * auto-levelling, which would otherwise make the filter *boost* quiet audio
+ * instead of only catching peaks. Below the ceiling this is a no-op, so it
+ * costs nothing on a mix that was already safe.
+ *
+ * limit=0.841 is -1.5 dBFS, not -1 (v0.24). The extra 0.5 dB is codec
+ * headroom, and it is there because the -1 dB ceiling did not survive the mux:
+ * alimiter bounds the SAMPLE peak of the mix, but the deliverable is AAC, and a
+ * lossy encoder reconstructs intersample peaks ABOVE the samples it was given.
+ * Measured on a 21-track music-video mix: preview_audio reported the WAV at
+ * -1.0 dBFS while build_film measured the encoded result at 0.0 dBFS and
+ * flagged audio_clipping — a full 1 dB of overshoot, on a mix the limiter had
+ * already done its job on. That made `clipping: true` reachable on any
+ * limited film, which trains callers to ignore the one audio warning they
+ * cannot hear for themselves.
+ *
+ * -1.5 dBFS keeps the encoded peak under 0 with margin to spare while costing
+ * half a decibel of loudness. Callers who want the old behaviour can still
+ * disable the limiter per scene with output.audioLimiter=false and set their
+ * own levels.
  */
-export const LIMITER_FILTER = 'alimiter=limit=0.891:level=0';
+export const LIMITER_FILTER = 'alimiter=limit=0.841:level=0';
 
 /**
  * @param {object} [options]
@@ -455,6 +471,76 @@ export async function measureAudioLevels({ filePath, ffmpegPath = 'ffmpeg', onSp
   };
 }
 
+/** Analysis window for peak-position measurement: 20 ms at the resampled rate. */
+const PEAK_WINDOW_SEC = 0.02;
+const PEAK_PROBE_RATE = 8000;
+
+/**
+ * Find WHERE a clip is loudest, not just how loud it is (v0.24).
+ *
+ * measureAudioLevels answers "does this clip clip?"; this answers "when does it
+ * hit?", which is the question you must answer before placing a one-shot on a
+ * beat. A cue's transient is very often not at 0 s — measured across five
+ * generated cues: impact 0.00 s, glitch 0.09 s, sub-drop 0.87 s, downlifter
+ * 3.22 s, riser 4.31 s. Place those by their start and four of the five land
+ * late, the riser by more than four seconds; place them by `peakAtSeconds` and
+ * the hit lands on the beat. Without this the only way to get the number was to
+ * decode the PCM outside the tool surface entirely.
+ *
+ * Deliberately opt-in at the call sites: this decodes the whole file, so it is
+ * not something probe_asset should do on every metadata read.
+ *
+ * Returns null (never throws) when the file has no audio or ffmpeg cannot be
+ * parsed — same contract as measureAudioLevels.
+ */
+export async function measureAudioPeakPosition({ filePath, ffmpegPath = 'ffmpeg', onSpawn, signal }) {
+  if (signal?.aborted) return null;
+
+  // Resample first so the window is a known sample count regardless of source
+  // rate; reset=1 makes astats report one measurement per window, and
+  // ametadata prints it with the window's own pts_time.
+  const filter = [
+    `aresample=${PEAK_PROBE_RATE}`,
+    `asetnsamples=n=${Math.round(PEAK_PROBE_RATE * PEAK_WINDOW_SEC)}:p=0`,
+    'astats=metadata=1:reset=1',
+    'ametadata=print:key=lavfi.astats.Overall.Peak_level:file=-',
+  ].join(',');
+
+  const args = ['-hide_banner', '-nostats', '-i', filePath, '-af', filter, '-f', 'null', '-'];
+  const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+  if (onSpawn && proc.pid) onSpawn(proc.pid);
+  const onAbort = () => { try { proc.kill('SIGKILL'); } catch { /* already gone */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  let stdout = '';
+  proc.stdout.on('data', (d) => { stdout += d.toString(); });
+  const code = await new Promise((resolve) => {
+    proc.on('error', () => resolve(-1));
+    proc.on('close', (c) => resolve(c));
+  }).finally(() => signal?.removeEventListener('abort', onAbort));
+
+  if (code !== 0) return null;
+
+  let windowTime = null;
+  let peakDb = null;
+  let peakAtSeconds = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = /pts_time:([\d.]+)/.exec(line);
+    if (t) { windowTime = Number(t[1]); continue; }
+    const v = /Peak_level=(-?[\d.]+|-?inf)/.exec(line);
+    // "-inf" is a digitally silent window: real, but never the peak.
+    if (!v || v[1].endsWith('inf') || windowTime === null) continue;
+    const db = Number(v[1]);
+    if (peakDb === null || db > peakDb) { peakDb = db; peakAtSeconds = windowTime; }
+  }
+  if (peakDb === null) return null;
+  return {
+    peakDb: Number(peakDb.toFixed(2)),
+    peakAtSeconds: Number(peakAtSeconds.toFixed(3)),
+    windowSeconds: PEAK_WINDOW_SEC,
+  };
+}
+
 /**
  * Count the video frames actually present in an encoded file (v0.11).
  *
@@ -547,6 +633,31 @@ const BROWSER_UNDECODABLE = new Set(['h264', 'hevc', 'h265', 'mpeg4', 'aac', 'mp
 const BROWSER_OK_VIDEO = 'vp8, vp9 or av1 in .webm';
 
 /**
+ * Choose the frame rate to report for a video stream (v0.24).
+ *
+ * `avg_frame_rate` is frames ÷ duration, so a perfectly constant-rate file
+ * lands just off its nominal rate once the last frame's presentation time is
+ * accounted for: every film this engine builds probed as **30.001 fps** while
+ * its `r_frame_rate` was exactly 30/1. Reporting the average therefore made
+ * `probe_asset` describe the engine's own conformant output as fractional AND
+ * attach a warning that seeking would not land on source frames — advice that
+ * is wrong, and aimed at a future agent deciding whether to trust the file.
+ *
+ * `r_frame_rate` is the stream's base rate: exact for CFR, and meaningless for
+ * genuinely variable material (containers often declare 1000/1). So prefer it
+ * only when the two agree to within 1%, which is true for CFR and false for
+ * VFR. Real fractional rates (29.97 = 30000/1001, 23.976) are preserved by
+ * both paths and still earn the note.
+ */
+export function pickFrameRate(v) {
+  const avg = parseRational(v?.avg_frame_rate);
+  const base = parseRational(v?.r_frame_rate);
+  if (base == null) return avg;
+  if (avg == null || avg === 0) return base;
+  return Math.abs(avg - base) / base <= 0.01 ? base : avg;
+}
+
+/**
  * Turn raw `ffprobe -show_format -show_streams -of json` output into the tidy
  * shape the tool surface returns. Pure, so it is unit-testable without ffprobe.
  */
@@ -564,7 +675,7 @@ export function summarizeMedia(raw) {
     codec: v.codec_name ?? null,
     width: numOrNull(v.width),
     height: numOrNull(v.height),
-    fps: parseRational(v.avg_frame_rate) ?? parseRational(v.r_frame_rate),
+    fps: pickFrameRate(v),
     frames: numOrNull(v.nb_frames),
     pixFmt: v.pix_fmt ?? null,
     // Colour tags (v0.22). NOT part of the concat signature — a mismatch never

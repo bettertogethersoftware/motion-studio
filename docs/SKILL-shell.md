@@ -272,7 +272,17 @@ in ffmpeg, and reaching for `drawtext` or `overlay` for them is a mistake:
 - **True alpha overlays**, and compositing that needs layout.
 - **Audio measurement with intent** — `preview_audio` reports `balanceWarnings`,
   `clipMeanDb`, `mix.envelopeDb` and `mix.silentTailSeconds` against the actual
-  render graph. Use it when the audio is on a film's timeline.
+  render graph. Use it when the audio is on a film's timeline. Correct levels
+  afterwards with `update_film { audioGainOffsetDb }` (shifts the whole mix,
+  preserving a balance you already verified) or `audioPatch` for named tracks,
+  rather than rewriting the timeline.
+- **Cue placement** — `probe_asset { audioPeak: true }` returns `peakAtSeconds`,
+  so a one-shot is placed by its transient rather than by where its file starts.
+  Do this instead of decoding PCM yourself: measured across five generated cues
+  the transient sat anywhere from 0.00 s to 4.31 s in, so placing by file start
+  puts a riser seconds late. Independently generated audio never phase-locks to
+  an existing song either — layer sustained beds and placed one-shots, never a
+  second groove.
 - **Delivered-picture review** — `inspect_render` returns frames from the encoded
   file at known cuts or holds; `measure_render` scans its motion, static/black
   runs and expected cuts. Use these after a render/build, not as a substitute for

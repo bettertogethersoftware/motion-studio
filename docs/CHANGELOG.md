@@ -2,6 +2,81 @@
 
 ## Unreleased
 
+### Audio mastering and delivery fixes (v0.24)
+
+Five changes, each from a defect measured while producing a three-minute music
+video end to end. Nothing here is speculative: every number below was observed.
+
+- **The limiter now leaves codec headroom.** `alimiter`'s ceiling moves from
+  −1 dBFS to **−1.5 dBFS** (`limit=0.891` → `0.841`). The limiter bounds *sample*
+  peaks while the deliverable is AAC, and a lossy encoder reconstructs
+  intersample peaks above the samples it was given — so a 21-track mix previewed
+  at −1.0 dBFS as a WAV and encoded to **0.0 dBFS**, raising `audio_clipping` on
+  a mix the limiter had already handled. That made `preview_audio` and
+  `build_film` disagree about the one audio metric an agent cannot check by ear,
+  which trains callers to ignore it. Costs half a decibel of loudness.
+- **A held output file now fails before the render, not after it.**
+  `assertDeliveryWritable()` write-opens an existing destination at the *start*
+  of every staged delivery — before the render lock, before Chromium, before a
+  build's assemble — and raises `disk_error` with `phase: "preflight"` if a
+  reader holds it. Measured: two consecutive 600-frame renders each ran to 100%
+  over ~3.5 minutes and then died at the promotion rename, roughly seven minutes
+  spent to learn what one file handle reports instantly. The message names both
+  ways out (close the holder, or change `output.filename`). Advisory by design —
+  a holder can still appear before promotion, so this reduces wasted work rather
+  than guaranteeing success; the existing backoff and rename-aside side-step are
+  unchanged.
+- **`probe_asset { audioPeak: true }` reports where a clip is loudest**, adding
+  `peakDb`, `peakAtSeconds` and `windowSeconds`. This is the number you need
+  before placing a one-shot on a beat, and it previously had no representation
+  in the tool surface at all: a cue's transient is usually not at 0 s — measured
+  across five generated cues, 0.00 / 0.09 / 0.87 / 3.22 / 4.31 s — so a riser
+  started *on* the downbeat peaks four seconds late. Off by default because it
+  decodes the whole file. Exact for a transient; for a broad swell the peak is a
+  plateau, so it reads as the middle of the climax.
+- **`update_film` can edit a saved audio timeline without restating it.**
+  `audioGainOffsetDb: -2` shifts every track by one offset, preserving the
+  balance — the documented fix when a build reports clipping — and
+  `audioPatch: [{ id, gainDb }]` changes named tracks only. Array fields still
+  replace wholesale otherwise; these two are the exception, because *mastering*
+  a timeline is a different operation from *authoring* one. Previously a 2 dB
+  master move meant re-transcribing all 21 tracks, twice, where one slip
+  silently reverts a track. Neither can add or remove tracks, an unknown id is
+  an error naming the real ids rather than a silent no-op, both are mutually
+  exclusive with `audio`, and both resolve inside the read-modify-write that
+  `expectedRevision` guards.
+- **`probe_asset` no longer misreports the engine's own output.** `fps` came
+  from `avg_frame_rate` (frames ÷ duration), so every film this engine builds
+  probed as **30.001 fps** and collected a warning that seeking would not land
+  on source frames — while its `r_frame_rate` was exactly 30/1. `pickFrameRate()`
+  now prefers the base rate when the two agree to within 1%, which is true for
+  CFR and false for the variable material the average exists to describe. Real
+  fractional rates (29.97, 23.976) are untouched and still earn the note.
+- **`transcribe_asset` no longer returns a whole song as one sentence.**
+  Sentences closed only on punctuation, and sung lyrics have none: measured
+  twice, an entire lyric came back as a single "sentence" (145 s in one film,
+  174 s in another), leaving `rawSegments` — which the docs correctly say are
+  not edit points — as the only usable structure. Sentences now also close on a
+  **pause** (>= 700 ms, a real silence, so the boundary is cuttable by
+  construction), on a **cap** (20 s), and, for material measurably lacking
+  punctuation, on the vendor's own **phrase boundaries**. Each sentence reports
+  which rule closed it in `boundary`. On the same song: 2 sentences → 48, longest
+  174 s → 6.0 s, landing on lyric lines. Prose is unaffected (the phrase-boundary
+  fallback only engages below ~1 full stop per 40 words), and `DERIVATION_VERSION`
+  is bumped so cached transcripts are re-derived.
+- **`MotionStudio.beatGrid()` (frame API v1.5)** — `pulse`/`barPulse`/
+  `frameOfBeat`/`nearestDownbeat` from a measured grid. Two music videos
+  hand-rolled these, and both had the same trap available: a beat is not an
+  integer number of frames (140 BPM at 30 fps is 12.857), so anything stepped by
+  a constant slides a whole beat every few seconds.
+- Documented the ceiling change, the preflight, both new timeline operations,
+  the frame-rate fix, the sentence boundaries and `beatGrid` in
+  `architecture.md`, `mcp-setup.md`, `film-setup.md`, `frame-api.md`,
+  `transcribe-setup.md` and `SKILL.md`.
+
+`audioTargetPeakDb` needed no change: the string-flattening fix shipped in v0.23
+(`nullableNumber`) already handles it.
+
 ### The production loop: AI directs, the human advises (v0.23)
 
 Motion Studio's working model is now stated and implemented end to end: the

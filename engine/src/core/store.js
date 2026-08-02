@@ -388,10 +388,69 @@ export class WorkspaceStore {
   }
 
   /**
+   * Resolve the two addressed audio operations into a plain `audio` array
+   * (v0.24).
+   *
+   * `audio` replacing wholesale is right for authoring a timeline and wrong for
+   * MASTERING one. The documented fix for a clipping film is "shift every track
+   * by one offset so the balance you already verified survives" — with replace-
+   * only semantics that means re-sending every track in full to change one
+   * number each. Measured: a 21-track music-video timeline had to be re-sent
+   * twice, ~3 KB of JSON per attempt, purely to apply -2 dB.
+   *
+   *   audioGainOffsetDb: -2          shift the whole mix, balance preserved
+   *   audioPatch: [{id, gainDb}]     change named tracks, leave the rest alone
+   *
+   * Both are resolved HERE, inside the same read-modify-write that
+   * expectedRevision guards, so they cannot race a concurrent Studio edit.
+   * Neither can create or delete tracks — that is what `audio` is for — and an
+   * id that does not exist is an error rather than a silent no-op, because the
+   * failure it would otherwise produce is "the gain change did nothing".
+   */
+  _resolveAudioOps(cur, patch) {
+    const { audioPatch, audioGainOffsetDb, ...rest } = patch ?? {};
+    if (audioPatch === undefined && audioGainOffsetDb === undefined) return patch;
+    if (rest.audio !== undefined) {
+      throw new EngineError(
+        ErrorCodes.INVALID_FILM,
+        'Pass either `audio` (the whole timeline) or audioPatch/audioGainOffsetDb (edits to the saved one), not both.',
+        { field: 'audio' },
+      );
+    }
+    const tracks = (cur.audio ?? []).map((t) => ({ ...t }));
+    if (!tracks.length) {
+      throw new EngineError(
+        ErrorCodes.INVALID_FILM,
+        'This film has no master audio timeline to patch — set one with `audio` first.',
+        { field: 'audioPatch' },
+      );
+    }
+    for (const edit of audioPatch ?? []) {
+      const { id, ...fields } = edit;
+      const track = tracks.find((t) => t.id === id);
+      if (!track) {
+        throw new EngineError(
+          ErrorCodes.INVALID_FILM,
+          `No audio track with id "${id}" — ids on this film are: ${tracks.map((t) => t.id).join(', ')}`,
+          { field: 'audioPatch', id },
+        );
+      }
+      Object.assign(track, fields);
+    }
+    if (audioGainOffsetDb !== undefined && audioGainOffsetDb !== null) {
+      for (const t of tracks) {
+        t.gainDb = Number(((t.gainDb ?? 0) + audioGainOffsetDb).toFixed(2));
+      }
+    }
+    return { ...rest, audio: tracks };
+  }
+
+  /**
    * Merge a patch into a film document. Only document fields are accepted,
    * and array fields REPLACE (a timeline edit is a statement of the whole
    * track — merging item-by-item would need addressing semantics no caller
-   * wants).
+   * wants) — except for the two addressed audio operations resolved by
+   * _resolveAudioOps above.
    *
    * Because arrays replace, a caller that read the film and then thought for a
    * while is proposing to undo everything written in between. Pass the
@@ -401,11 +460,14 @@ export class WorkspaceStore {
    */
   async updateFilm(filmId, patch, { expectedRevision = undefined } = {}) {
     const ALLOWED = new Set(['name', 'scenes', 'outputFilename', 'audio', 'overlays', 'captions',
-      'captionStyle', 'sequences', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables']);
+      'captionStyle', 'sequences', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables',
+      // Resolved against the CURRENT timeline below, then merged as `audio`.
+      'audioPatch', 'audioGainOffsetDb']);
     for (const k of Object.keys(patch ?? {})) {
       if (!ALLOWED.has(k)) throw new EngineError(ErrorCodes.INVALID_FILM, `Film field "${k}" cannot be updated`, { field: k });
     }
     const cur = await this.getFilm(filmId);
+    patch = this._resolveAudioOps(cur, patch);
     if (expectedRevision !== undefined && expectedRevision !== null && expectedRevision !== cur.revision) {
       throw new EngineError(
         ErrorCodes.FILM_CONFLICT,

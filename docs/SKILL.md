@@ -548,11 +548,46 @@ If it returns `stillRunning`, wait on its `jobId`. Fix:
 - digital-silence entries (`null`) in `mix.envelopeDb`;
 - speech/music coverage that does not match the picture.
 
+`balanceWarnings` compares clip MEANS, which is the wrong statistic for a
+one-shot: a transient's mean is dragged down by its own decay. Measured on a
+real film, it flagged a cue that was clearly audible and stayed silent about one
+that was not. Before acting on it for a short cue, measure the cue's actual
+contribution — peak the song alone and the mix in the same window at the cue and
+subtract the song's gain (>= 2 dB = audible). Fix what that condemns, not what
+the warning lists.
+
 Track gains add; they are not averaged. Measure source levels and balance with
 `gainDb`, fades, trims, and `duck`. Do not reuse a gain template from another
 film. If the MCP client cannot play the returned WAV, use the measurements as
 the minimum check and give the user the returned `outputPath` for a listening
 review before a long render.
+
+To correct levels after auditioning, edit the saved timeline in place instead of
+restating it:
+
+```json
+update_film { "film": "launch-film", "audioGainOffsetDb": -2 }
+update_film { "film": "launch-film", "audioPatch": [{ "id": "hit-c1", "gainDb": -4.5 }] }
+```
+
+`audioGainOffsetDb` shifts every track at once, so a balance you already
+verified survives — that is the fix when a build reports clipping. `audioPatch`
+changes named tracks only. Both beat re-sending `audio` wholesale, which on a
+long timeline is where a silent transcription slip reverts a track.
+
+**Syncing picture to music:** build `MotionStudio.beatGrid({bpm, phase, fps,
+startSeconds})` from a MEASURED grid and read `pulse`/`barPulse`/`frameOfBeat`
+off it. Never step by a constant number of frames — a beat is only an integer
+by coincidence (140 BPM at 30fps is 12.857), and never trust a requested tempo
+(a loop asked for 140 BPM measured 105).
+
+**Placing a one-shot (an impact, riser, downlifter, stab) on a beat:** probe it
+first with `probe_asset { path, audioPeak: true }` and place it by
+`peakAtSeconds`, not by its start. A cue's transient is usually not at 0 s —
+measured across five generated cues it ranged from 0.00 s to 4.31 s — so start
+the track `peakAtSeconds * fps` frames **early** and the hit lands on the beat.
+Independently generated material also never phase-locks to an existing song, so
+layer sustained beds and placed one-shots; a second rhythmic groove will flam.
 
 ### 7. Render scenes and wait correctly
 
@@ -765,6 +800,11 @@ Read the structured `code`, `message`, and `detail`; do not blind-retry.
   timeline entry with the new returned `timelineSegment`.
 - `promotion_blocked`: inspect its staged review/contact evidence, fix the
   finding, and render/build again. The prior promoted delivery is preserved.
+- `disk_error` with `detail.phase: "preflight"`: another process holds the
+  output file open, so this render could never be delivered — raised before any
+  frames are captured. Retrying unchanged fails the same way. Either the holder
+  closes it (the Studio scene page is the usual one) or you give the target a
+  different name with `update_scene_config { patch: { output: { filename } } }`.
 - `revision_mismatch`: the archived take no longer matches the scene's current
   settings (duration/resolution/fps/format changed since). Either restore the
   settings or render a new revision; do not force the old bytes in.

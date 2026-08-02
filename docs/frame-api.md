@@ -208,7 +208,48 @@ MotionStudio.registerComposition(async (frame) => {
 
 Footage costs real render time — each frame is a seek plus a decode. If you only need a plain rectangular overlay with no masking or 3D, a film-level **overlay track** composites it with ffmpeg at build time instead, and never touches the browser.
 
-## 12. Checklist before rendering
+## 12. `beatGrid({bpm, phase, fps, startSeconds?})` — lock visuals to music
+
+Everything that should hit *with* the track — a pulse, a shake, a cut, a placed
+audio cell — comes from here. Build it once from a **measured** grid and read it
+per frame:
+
+```js
+const beat = MotionStudio.beatGrid({ bpm: 140.004, phase: 0.404, fps: 30,
+                                     startSeconds: 49.567 });  // this scene's film offset
+
+MotionStudio.registerComposition((frame) => {
+  const punch = 1 + 0.05 * beat.pulse(frame);      // every beat
+  const flash = beat.barPulse(frame);              // downbeats only
+  logo.style.transform = `scale(${punch})`;
+});
+```
+
+Returns `pulse(frame, sharpness?)`, `barPulse(frame, sharpness?)`,
+`position(frame)` (fractional beat index), `timeAt(frame)`, `frameOfBeat(n)`,
+`frameOfBar(n)`, `nearestDownbeat(seconds)`, plus `beatSeconds`, `barSeconds`
+and `beatFrames`.
+
+**Two mistakes this exists to remove**, both of which shipped in hand-written
+compositions before it:
+
+- **A beat is not an integer number of frames.** At 150 BPM/30fps it happens to
+  be exactly 12, which is what makes the trap so easy: at 140 BPM it is
+  **12.857**, so `frame % 12` slides a full beat every ~7 seconds and the video
+  visibly drifts off the music by the second chorus. Everything here derives
+  from seconds and stays fractional.
+- **The tempo you asked for is not the tempo you got.** Measured: a loop
+  requested at 140 BPM came back at **105**. `bpm`/`phase` must come from
+  measuring the finished audio, not from the prompt or the sidecar that
+  generated it — `videoforge/audiogrid.py grid` reports both, plus a `holds`
+  flag for whether the tempo survives the whole file.
+
+`startSeconds` is the scene's own offset on the film timeline (`filmOffset / fps`
+from `get_film`'s plan), so every scene reads the same absolute grid and cuts
+land in the same place whether you address them from the film or from inside a
+scene.
+
+## 13. Checklist before rendering
 
 - [ ] No `Date.now()`, `setTimeout`, `setInterval`, `Math.random()`, or real-time CSS transitions/animations anywhere
 - [ ] Composition registered via `MotionStudio.registerComposition` (or a correct manual `setFrame`)

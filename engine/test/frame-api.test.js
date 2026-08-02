@@ -15,7 +15,7 @@ const win = {};
 win.window = win; // self-referential, browser-style
 vm.createContext(win);
 vm.runInContext(runtimeSrc, win, { filename: 'frame-api.js' });
-const { interpolate, Sequence, random, easings, registerComposition, spring, interpolateColors, Loop, particles } = win.MotionStudio;
+const { interpolate, Sequence, random, easings, registerComposition, spring, interpolateColors, Loop, particles, beatGrid } = win.MotionStudio;
 
 test('interpolate: linear two-point mapping', () => {
   assert.equal(interpolate(0, [0, 10], [0, 100]), 0);
@@ -329,8 +329,40 @@ test('videoReady: resolves true on loadeddata', async () => {
 
 test('the primitives compositions actually type are exposed as bare globals', () => {
   // Composition code says `seekVideo(...)`, not `MotionStudio.seekVideo(...)`.
-  for (const name of ['interpolate', 'Sequence', 'Loop', 'spring', 'interpolateColors', 'particles', 'seekVideo', 'videoReady']) {
+  for (const name of ['interpolate', 'Sequence', 'Loop', 'spring', 'interpolateColors', 'particles', 'seekVideo', 'videoReady', 'beatGrid']) {
     assert.equal(typeof win[name], 'function', `${name} must be a bare global`);
   }
-  assert.equal(win.MotionStudio.version, 1.4);
+  assert.equal(win.MotionStudio.version, 1.5);
+});
+
+/* ------------------------------ beatGrid --------------------------------- */
+
+test('frame-api: beatGrid derives from seconds, so a fractional beat never drifts', () => {
+  // 140 BPM at 30 fps = 12.857 frames per beat. Stepping by a constant integer
+  // loses a whole beat every ~7s, which is the mistake this exists to remove.
+  const g = beatGrid({ bpm: 140.004, phase: 0.404, fps: 30 });
+  assert.ok(Math.abs(g.beatFrames - 12.857) < 0.001);
+  // Beat 100 lands where the arithmetic says, not on a rounded multiple.
+  const expected = (0.404 + 100 * (60 / 140.004)) * 30;
+  assert.ok(Math.abs(g.frameOfBeat(100) - expected) < 1e-6);
+  // The pulse still fires ON beat 100 three minutes in — an integer step would
+  // be most of a beat late by here.
+  assert.ok(g.pulse(g.frameOfBeat(100)) > 0.999, 'peaks exactly on the beat');
+});
+
+test('frame-api: beatGrid offsets by the scene start so the grid stays absolute', () => {
+  const film = beatGrid({ bpm: 140.004, phase: 0.404, fps: 30 });
+  const scene = beatGrid({ bpm: 140.004, phase: 0.404, fps: 30, startSeconds: 49.567 });
+  // The same musical instant, addressed from the film and from inside a scene.
+  const filmFrame = film.frameOfBeat(200);
+  assert.ok(Math.abs(scene.position(filmFrame - 49.567 * 30) - film.position(filmFrame)) < 1e-6);
+});
+
+test('frame-api: nearestDownbeat snaps a wanted time onto the bar', () => {
+  const g = beatGrid({ bpm: 140.004, phase: 0.404, fps: 30 });
+  const t = g.nearestDownbeat(130.46);           // the bridge, from the envelope
+  const barsFromPhase = (t - 0.404) / g.barSeconds;
+  assert.ok(Math.abs(barsFromPhase - Math.round(barsFromPhase)) < 1e-9, 'lands on a whole bar');
+  assert.ok(Math.abs(t - 130.46) <= g.barSeconds / 2 + 1e-9, 'and on the NEAREST one');
+  assert.ok(g.barPulse(g.frameOfBeat(0)) > 0.999, 'bar pulse peaks on the downbeat');
 });

@@ -308,6 +308,23 @@ indexer can briefly lock the destination during rename-over-existing with no
 real owner (measured — an unlink of the same path succeeded immediately),
 and failing a finished multi-minute render over a sub-second scanner lock
 helps nobody. Non-transient codes still fail on the first attempt.
+When the backoff is exhausted and a destination exists, the old delivery is
+renamed *aside* and the new one put in its place, which Windows permits for
+many held files; if that second rename fails the aside copy goes straight
+back, so the failure mode stays "old delivery intact".
+
+Because all of that happens at the *end*, `assertDeliveryWritable()` runs at
+the **start** of every staged delivery (v0.24) — before the render lock, before
+Chromium, before a build's assemble. It write-opens an existing destination
+(`r+`, never truncating; a missing one is fine) and fails immediately with
+`disk_error` and `phase: "preflight"` if a reader holds it. A held file is not
+always recoverable: measured, two consecutive 600-frame renders each ran to
+100% over ~3.5 minutes and *then* died at the rename, roughly seven minutes
+spent to learn what one file handle reports instantly. The check is advisory
+about its own limits — a holder can still appear in the window before
+promotion, so it reduces wasted work rather than guaranteeing success — and its
+message names both ways out: close the holder (the Studio scene page is the
+usual one), or give the target a different `output.filename`.
 
 The terminal result exposes `promoted: true` after that rename and always states
 `framesVerified`. A missing/unusable `ffprobe` produces `framesVerified: false`,
@@ -432,10 +449,20 @@ construction.
 **Clipping protection (v0.10).** `normalize=0` is deliberate — it keeps the
 music bed at the level the author set — but it also means gains sum straight
 through, so three tracks near 0 dB produce a distorted master with nothing to
-catch it. The graph therefore ends `[amix] → alimiter(limit=0.891, level=0) →
-[aout]`: a brick wall at −1 dBFS that is a no-op below the threshold, with
+catch it. The graph therefore ends `[amix] → alimiter(limit=0.841, level=0) →
+[aout]`: a brick wall at −1.5 dBFS that is a no-op below the threshold, with
 alimiter's auto-levelling pinned off so it can never *boost* a quiet mix. Set
-`output.audioLimiter: false` to pass the sum through untouched. After muxing,
+`output.audioLimiter: false` to pass the sum through untouched.
+
+The ceiling is −1.5 dBFS rather than −1 because **the limiter bounds sample
+peaks and the deliverable is AAC** (v0.24). A lossy encoder reconstructs
+intersample peaks above the samples it was given, so a −1 dBFS ceiling did not
+survive the mux: a measured 21-track music-video mix previewed at −1.0 dBFS as
+a WAV and then encoded to 0.0 dBFS, raising `audio_clipping` on a mix the
+limiter had already done its job on. Since `preview_audio` measures the WAV and
+`build_film` measures the encoded result, that gap made the two disagree on the
+one audio metric an agent cannot check by ear — and taught callers to ignore
+it. Half a decibel of loudness buys the headroom back. After muxing,
 the result is decoded once with `volumedetect` and reported as
 `audio: { tracks, limiter, peakDb, meanDb, clipping, balanceWarnings }` on the
 render result and in `get_render_status` — an agent cannot listen to the

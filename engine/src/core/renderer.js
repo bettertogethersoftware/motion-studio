@@ -63,7 +63,7 @@ import { measureWavLevels, wavDurationSeconds } from './tts.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
 import { sceneOutputPath, writeRenderMeta } from './film.js';
-import { prepareStagingOutput, promoteStagingOutput } from './delivery.js';
+import { prepareStagingOutput, promoteStagingOutput, assertDeliveryWritable } from './delivery.js';
 import { archiveRevision } from './revisions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -502,6 +502,10 @@ export async function renderComposition(opts) {
   const encodingWarnings = skipAudio ? [] : encodingCompatibilityWarnings(output);
   for (const w of encodingWarnings) progress.log('warn', w);
   await fsp.mkdir(isPngSequence ? deliveryPath : path.dirname(deliveryPath), { recursive: true });
+  // Same rule as the lock below: a destination we will never be able to replace
+  // should cost nothing to discover. Without this the sharing violation only
+  // surfaces at promotion, i.e. after every frame has been captured.
+  if (stagedDelivery) await assertDeliveryWritable({ outputPath: deliveryPath });
 
   // Before Chromium: a lock failure should cost nothing.
   let held = null;
@@ -916,6 +920,11 @@ export async function renderParallel(opts) {
   });
   let stagingPath = null;
   let workOutputPath = deliveryPath;
+
+  // Cheapest possible failure, before the lock and long before N browsers: a
+  // destination held open by a reader can never be promoted, and finding that
+  // out at the end costs the entire fan-out.
+  if (stagedDelivery) await assertDeliveryWritable({ outputPath: deliveryPath });
 
   // Held for the whole fan-out. Workers run with --segment (lock:false): they
   // write this same scene deliberately, and this lock covers them.

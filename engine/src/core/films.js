@@ -46,7 +46,9 @@ import {
 } from './render-review.js';
 import { resolveInTarget } from './sandbox.js';
 import { readSettings, resolveFfprobePath } from './settings.js';
-import { stagingOutputPath, prepareStagingOutput, promoteStagingOutput } from './delivery.js';
+import {
+  stagingOutputPath, prepareStagingOutput, promoteStagingOutput, assertDeliveryWritable,
+} from './delivery.js';
 import {
   MAX_FILM_DELIVERABLES, normalizeDeliverable, validateDeliverable,
   sanitizeDeliverableBase, resolveFilmDeliverable, compileReframeFilter,
@@ -1405,6 +1407,9 @@ export async function buildFilmArtifact({
   let result;
   let reframe = null;
   try {
+    // A held deliverable cannot be promoted however long the assemble takes,
+    // and on a captions/overlays build that assemble is a full re-encode.
+    await assertDeliveryWritable({ outputPath });
     await prepareStagingOutput(outputPath, { jobId: stageId });
     const assembleTarget = finishing ? path.join(tmp, `master${ext}`) : stagedOutputPath;
     result = await assembleFilm({

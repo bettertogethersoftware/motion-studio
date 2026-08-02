@@ -486,9 +486,21 @@ The reliable procedure:
 Re-assembly is cheap — the concat is a stream copy, so a level correction on a
 ten-minute film costs seconds. Measure and fix; never ship a guess.
 
+**To move the whole mix by hand, use `audioGainOffsetDb`** (v0.24) rather than
+rewriting the timeline: `update_film { film, audioGainOffsetDb: -2 }` shifts
+every saved track by the same amount, so the balance you verified survives — the
+same arithmetic `audioTargetPeakDb` performs automatically, for when you want to
+state the offset yourself. Before it existed, "lower everything 2 dB" meant
+re-sending every track in full because array fields replace wholesale; on a
+21-track timeline that is a few kilobytes of JSON re-transcribed to change one
+number each, and a transcription slip silently reverts a track. Use
+`audioPatch: [{ id, gainDb }]` for individual tracks the same way.
+
 `output.audioLimiter` (default true, set per scene via `update_scene_config`; the
 build reads it from the **first scene's** output config when mixing the master
-audio) still brick-walls the result at −1 dBFS, but treat it as a seatbelt, not a
+audio) still brick-walls the result — at **−1.5 dBFS** since v0.24, half a
+decibel below full-scale-minus-one so that AAC's intersample overshoot cannot
+push the encoded deliverable back to 0 dBFS. Treat it as a seatbelt, not a
 mixing tool: if the limiter is doing work, the mix is already wrong.
 
 **The SFX bed is calibrated the same way.** `synthesize_sfx` (v0.12) renders a

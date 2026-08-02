@@ -113,7 +113,9 @@ import { compileTheorySpec, THEORY_STYLE_NAMES } from '../core/music-theory.js';
 import { chainFallbackNote } from '../core/vendors.js';
 import { synthesizeSfx, SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES } from '../core/sfx.js';
 import { planFilm, submitFilmBuild } from '../core/films.js';
-import { mixAudioOnly, measureAudioLevels, computeBalanceWarnings, probeMedia } from '../core/encoder.js';
+import {
+  mixAudioOnly, measureAudioLevels, computeBalanceWarnings, probeMedia, measureAudioPeakPosition,
+} from '../core/encoder.js';
 import { getFormat } from '../core/formats.js';
 import {
   MAX_RENDER_INSPECTION_FRAMES, reviewFrameList, extractRenderedFrame, measureRenderedPicture,
@@ -720,7 +722,9 @@ server.registerTool(
       'Patch the film document: name, scene ORDER (scenes: [{slug}] — this is how you reorder or drop scenes ' +
       'from the cut; the scene folders themselves are untouched), master audio timeline, overlay track, caption ' +
       'track, captionStyle, audioTargetPeakDb, burnCaptions, outputFilename, deliverables, sceneDefaults, and review policy. Omitted fields keep ' +
-      'their saved values; ARRAY FIELDS REPLACE WHOLESALE (a timeline edit is a statement of the whole track). ' +
+      'their saved values; ARRAY FIELDS REPLACE WHOLESALE (a timeline edit is a statement of the whole track) — ' +
+      'except that audio has two ADDRESSED alternatives for editing a saved timeline without restating it: ' +
+      'audioPatch (change named tracks by id) and audioGainOffsetDb (shift the whole mix, preserving balance). ' +
       'Audio/overlay src paths are relative to the FILM\'s assets/ — put master audio there by targeting the ' +
       'film id in synthesize_* / write_asset_file. Times are frames on the film timeline; get scene offsets ' +
       'from get_film\'s plan. The response echoes the plan with its `problems` — a film with problems saves ' +
@@ -764,6 +768,16 @@ server.registerTool(
         durationInFrames: z.number().int().min(1).optional(),
       }).optional().describe('Defaults inherited by newly created scenes'),
       audio: z.array(FILM_AUDIO_TRACK).optional().describe('Master audio timeline (replaces per-scene audio at build)'),
+      audioPatch: z.array(FILM_AUDIO_TRACK.partial().extend({ id: z.string() })).optional().describe(
+        'Edit NAMED tracks on the saved timeline instead of re-sending it whole: [{id, gainDb: -6}]. Fields you omit '
+        + 'keep their values, tracks you do not name are untouched. Cannot add or remove tracks (use `audio`), and an '
+        + 'unknown id is an error rather than a silent no-op. Mutually exclusive with `audio`.',
+      ),
+      audioGainOffsetDb: z.number().min(-60).max(60).optional().describe(
+        'Shift EVERY track on the saved timeline by this many dB, preserving the balance between them. This is the '
+        + 'documented fix when a build reports clipping: the mix comes down as one, so a balance you already verified '
+        + 'with preview_audio still holds. Applied after audioPatch. Mutually exclusive with `audio`.',
+      ),
       overlays: z.array(FILM_OVERLAY).optional(),
       captions: z.array(FILM_CAPTION).optional(),
       captionStyle: z.object({
@@ -1741,20 +1755,39 @@ server.registerTool(
       'Also returns `notes` for properties that will bite at render time — most importantly that H.264/HEVC ' +
       'cannot be decoded by the render browser, so a <video> using such a file fails even though the page\'s own ' +
       'canPlayType() says otherwise. Returns probed:false (never an error) when ffprobe is unavailable or the ' +
-      'file is not media; ffprobe is not a declared prerequisite.',
+      'file is not media; ffprobe is not a declared prerequisite. ' +
+      'Pass audioPeak:true to also measure WHERE the clip is loudest — `audio.peakDb` and `audio.peakAtSeconds`. ' +
+      'THAT is the number you need before placing a one-shot (an impact, riser, downlifter, glitch) on a beat: a ' +
+      'cue\'s transient is usually NOT at 0 s — measured across five generated cues it ranged from 0.00 s to ' +
+      '4.31 s — so a riser started ON the downbeat peaks four seconds late. Start the track ' +
+      '`peakAtSeconds * fps` frames EARLY and the hit lands on the beat. Off by default because it decodes the ' +
+      'whole file, unlike the metadata-only default read. Exact for a TRANSIENT (an impact, a stab); for a broad ' +
+      'swell the loudest part is a plateau, so treat the number as the middle of the climax rather than an edge.',
     inputSchema: {
       path: z.string()
         .describe('assets/ or out/-relative path when `target` is given (out/ reads what the engine rendered), else a library-relative path from list_shared_assets'),
       target: z.string().optional()
         .describe('Scene id "<film>/<scene>" or film id "<film>". Omit to probe a workspace-library file.'),
+      audioPeak: z.boolean().optional()
+        .describe('Also measure peak level and its position in seconds (decodes the file). Use before placing a one-shot cue on a beat.'),
     },
   },
-  wrap(async ({ path: relPath, target }) => {
+  wrap(async ({ path: relPath, target, audioPeak = false }) => {
     const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
     const located = await locateMedia(relPath, target);
     const { abs, ...rest } = located;
     const media = await probeMedia({ filePath: abs, ffprobePath });
-    return ok({ ...rest, probed: media !== null, ...(media ?? {}) });
+    let peak = null;
+    if (audioPeak && media?.hasAudio) {
+      const { path: ffmpegPath } = await resolveFfmpegPath({ dataDir: store.dataDir });
+      peak = await measureAudioPeakPosition({ filePath: abs, ffmpegPath }).catch(() => null);
+    }
+    return ok({
+      ...rest,
+      probed: media !== null,
+      ...(media ?? {}),
+      ...(peak ? { audio: { ...(media?.audio ?? {}), ...peak } } : {}),
+    });
   }),
 );
 

@@ -78,7 +78,7 @@ export const WHISPER_CHANNELS = 1;
  * cache key, so a build with better sentence splitting does not serve the old
  * split from a sidecar written by the previous one.
  */
-export const DERIVATION_VERSION = 1;
+export const DERIVATION_VERSION = 2;   // v0.24: pause/cap sentence boundaries
 
 /* ------------------------------- derivations ------------------------------- */
 
@@ -148,6 +148,13 @@ function isAbbreviation(text) {
   return ABBREVIATIONS.has(stem.toLowerCase());
 }
 
+/** A silence long enough that cutting in it is safe by construction. */
+const SENTENCE_PAUSE_MS = 700;
+/** Backstop for material with neither punctuation nor pauses. */
+const SENTENCE_MAX_MS = 20000;
+/** Shortest run that may close on a vendor phrase boundary (unpunctuated only). */
+const SENTENCE_PHRASE_MS = 2500;
+
 /**
  * Rebuild sentences from a word list.
  *
@@ -156,11 +163,43 @@ function isAbbreviation(text) {
  * a word whose text ends in sentence-final punctuation, and its span is its
  * first word's start to its last word's end — so a splice on a sentence boundary
  * lands in the pause, not in a clause.
+ *
+ * Punctuation alone is not enough, because SUNG material has none (v0.24).
+ * Measured twice on generated songs: the whole lyric came back as ONE
+ * "sentence" — 145 s in one film, 174 s in another — which left `rawSegments`
+ * as the only usable structure even though those are decode windows the docs
+ * correctly warn against cutting on. Since songs are a primary input for this
+ * engine, two more boundaries close a sentence:
+ *
+ *   - a gap of >= SENTENCE_PAUSE_MS to the next word. This is a real silence —
+ *     the same thing `deriveSpeechRanges` already treats as a break — so the
+ *     boundary is safe to cut on by construction, which is the property that
+ *     matters. Prose rarely pauses that long mid-sentence, so ordinary speech
+ *     segmentation is essentially unchanged.
+ *   - a span reaching SENTENCE_MAX_MS, for material with neither.
+ *
+ * Each sentence reports which rule closed it in `boundary`, so a caller can
+ * tell a real full stop from a musical rest instead of guessing.
  */
-export function segmentSentences(words) {
+export function segmentSentences(words, {
+  pauseMs = SENTENCE_PAUSE_MS, maxMs = SENTENCE_MAX_MS,
+  segmentStartsMs = [], phraseMs = SENTENCE_PHRASE_MS,
+} = {}) {
+  // Is this punctuated prose, or unpunctuated material (lyrics, chant, some
+  // ASR output)? Prose closes roughly every 15-20 words; a sung lyric closed
+  // twice in 363 words. Below the threshold the vendor's own segment
+  // boundaries are the best phrase guess available, and using them is what
+  // turns 20-second slabs into singable lines. Above it we must NOT: for prose
+  // those windows genuinely start mid-clause, which is what rawSegments warns
+  // about, so the fallback stays off exactly where it would do harm.
+  const stops = words.filter((x) => SENTENCE_END.test(x.text) && !isAbbreviation(x.text)).length;
+  const unpunctuated = words.length >= 40 && stops / words.length < 0.025;
+  const bounds = unpunctuated ? [...segmentStartsMs].sort((a, b) => a - b) : [];
+  let bi = 0;
+
   const sentences = [];
   let current = [];
-  const close = () => {
+  const close = (boundary) => {
     if (!current.length) return;
     const raw = current.map((w) => w.raw).join('');
     const ps = current.map((w) => w.p).filter((p) => typeof p === 'number');
@@ -171,14 +210,30 @@ export function segmentSentences(words) {
       minTokenP: ps.length ? Number(Math.min(...ps).toFixed(6)) : null,
       meanTokenP: ps.length ? Number((ps.reduce((a, b) => a + b, 0) / ps.length).toFixed(6)) : null,
       words: current.length,
+      boundary,
     });
     current = [];
   };
-  for (const w of words) {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
     current.push(w);
-    if (SENTENCE_END.test(w.text) && !isAbbreviation(w.text)) close();
+    if (SENTENCE_END.test(w.text) && !isAbbreviation(w.text)) { close('punctuation'); continue; }
+    const next = words[i + 1];
+    if (next && typeof next.startMs === 'number' && typeof w.endMs === 'number'
+        && next.startMs - w.endMs >= pauseMs) { close('pause'); continue; }
+
+    const runMs = current[0] ? w.endMs - current[0].startMs : 0;
+    // A vendor segment boundary at/just before the next word, on unpunctuated
+    // material that has already run long enough to be a phrase.
+    if (next && bounds.length) {
+      while (bi < bounds.length && bounds[bi] <= current[0].startMs) bi++;
+      if (bi < bounds.length && bounds[bi] <= next.startMs + 1 && runMs >= phraseMs) {
+        bi++; close('segment'); continue;
+      }
+    }
+    if (runMs >= maxMs) close('cap');
   }
-  close(); // a recording that stops mid-sentence still reports what it said
+  close('end'); // a recording that stops mid-sentence still reports what it said
   return sentences;
 }
 
@@ -214,7 +269,7 @@ const atFrame = (ms, fps) => Math.round((ms / 1000) * fps);
  */
 export function deriveTranscript({ tokens, segments = [], durationSeconds, silenceGapSeconds = 1 }) {
   const words = flattenWords(tokens);
-  const sentences = segmentSentences(words);
+  const sentences = segmentSentences(words, { segmentStartsMs: segments.map((x) => x.startMs) });
   const ranges = deriveSpeechRanges(sentences, { silenceGapSeconds });
   const text = words.map((w) => w.raw).join('').replace(/\s+/g, ' ').trim();
   const speechEnd = ranges.length ? ranges[ranges.length - 1].endMs / 1000 : null;
@@ -229,6 +284,7 @@ export function deriveTranscript({ tokens, segments = [], durationSeconds, silen
       minTokenP: s.minTokenP,
       meanTokenP: s.meanTokenP,
       words: s.words,
+      boundary: s.boundary,
     })),
     words: words.map((w) => ({
       text: w.text,
@@ -268,6 +324,7 @@ export function withFrames(derived, fps) {
       minTokenP: s.minTokenP,
       meanTokenP: s.meanTokenP,
       words: s.words,
+      boundary: s.boundary,
     })),
     words: derived.words.map((w) => ({
       text: w.text,

@@ -59,7 +59,9 @@ separate review screen and no mode switch.
    **encoded deliverable** (`inspect_render` / `measure_render` — frames at known
    cuts plus static/black/cut checks), pull in the human's
   library files (`use_shared_asset`), read a media file's duration /
-  dimensions / codecs (`probe_asset`) **and the speech inside it**
+  dimensions / codecs — and, with `audioPeak`, **where it is loudest**, so a
+  one-shot cue lands on the beat instead of wherever its file happens to start
+  (`probe_asset`) **and the speech inside it**
   (`transcribe_asset` — local whisper.cpp, sentence *and* word timing in
   frames, and a guard against using an English-only model for named non-English
   speech), **prepare it** (`transcode_asset` — conform footage to a film's
@@ -74,7 +76,11 @@ separate review screen and no mode switch.
   (`build_film`, async, with master audio, captions and overlays) — whose
   timeline now holds **real footage beside the rendered scenes** (v0.22), so a
   film can be "footage, then a scene, then footage". Builds preserve the prior
-  delivery on failure and write a review JSON/contact sheet before promotion.
+  delivery on failure and write a review JSON/contact sheet before promotion,
+  and a delivery held open by another process is now reported *before* the
+  render rather than after every frame has been captured. Master levels can be
+  corrected in place with `audioGainOffsetDb` (shift the whole mix, balance
+  preserved) or `audioPatch` (named tracks), instead of restating the timeline.
   The v0.23 production loop adds the adviser protocol: `check_human_advice`
   at every checkpoint (never blocking, never polling), acknowledge → lease →
   resolve with an outcome the human reads, `list_scene_revisions` /

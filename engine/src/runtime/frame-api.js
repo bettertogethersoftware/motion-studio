@@ -1,5 +1,5 @@
 /*!
- * Motion Studio Frame API runtime — v1.4
+ * Motion Studio Frame API runtime — v1.5
  *
  * Loaded as a classic <script> before composition code. Provides the four
  * primitives of the frame-driven contract (docs/frame-api.md):
@@ -31,6 +31,12 @@
  * seek per frame; every one of them was hand-rolling the same guards, and
  * the one that matters most — never awaiting `seeked` on an element that
  * failed to load — hangs the whole render when omitted.
+ *
+ * v1.5: MotionStudio.beatGrid({bpm, phase, fps, startSeconds?}) — lock visuals
+ * to a MEASURED beat grid. Two music videos hand-rolled the same helpers, and
+ * both had the same trap available: a beat is not an integer number of frames
+ * (140 BPM at 30fps is 12.857), so anything stepped by a constant slides a
+ * whole beat every few seconds.
  *
  * Also exported as bare globals (interpolate, Sequence, ...) for terse
  * composition code. Runs in both the render Chromium (Puppeteer) and the
@@ -436,11 +442,80 @@
     });
   }
 
+  /* ------------------------- music sync (v1.5) ------------------------- */
+
+  /**
+   * Lock visuals to a MEASURED beat grid.
+   *
+   * Written by hand in two music videos before it was worth extracting, and
+   * both times the same two mistakes were available:
+   *
+   * 1. **Stepping by a constant number of frames.** A beat is only an integer
+   *    number of frames by coincidence. At 150 BPM/30fps it is exactly 12; at
+   *    140 BPM it is 12.857, so `frame % 12` drifts a whole beat every ~7
+   *    seconds. Everything here derives from seconds and stays fractional.
+   * 2. **Trusting the requested tempo.** What a generator was ASKED for is not
+   *    what it produced (measured: a loop requested at 140 BPM came back at
+   *    105). `bpm`/`phase` must come from measuring the actual file — the
+   *    `audiogrid grid` numbers — not from the prompt that made it.
+   *
+   * `phase` is the time of the first beat, so a scene inside a longer film
+   * passes `startSeconds` (its own offset) and the grid stays absolute.
+   *
+   *   const beat = MotionStudio.beatGrid({ bpm: 140.004, phase: 0.404,
+   *                                        fps: 30, startSeconds: 49.567 });
+   *   const punch = 1 + 0.05 * beat.pulse(frame);      // hits on every beat
+   *   const flash = beat.barPulse(frame);              // hits on downbeats
+   */
+  function beatGrid(options) {
+    const o = options || {};
+    const bpm = o.bpm > 0 ? o.bpm : 120;
+    const fps = o.fps > 0 ? o.fps : 30;
+    const phase = typeof o.phase === 'number' ? o.phase : 0;
+    const startSeconds = typeof o.startSeconds === 'number' ? o.startSeconds : 0;
+    const beatsPerBar = o.beatsPerBar > 0 ? o.beatsPerBar : 4;
+    const beatSeconds = 60 / bpm;
+
+    /** Absolute time of a composition frame, on the song's own clock. */
+    function timeAt(frame) { return startSeconds + frame / fps; }
+    /** Fractional beat position; the integer part is the beat index. */
+    function position(frame) { return (timeAt(frame) - phase) / beatSeconds; }
+    /** Decaying 1→0 attack on each beat. Higher `sharpness` = tighter hit. */
+    function pulse(frame, sharpness) {
+      const p = position(frame);
+      return Math.pow(1 - (p - Math.floor(p)), sharpness > 0 ? sharpness : 4);
+    }
+    /** The same, but only on bar downbeats. */
+    function barPulse(frame, sharpness) {
+      const p = position(frame) / beatsPerBar;
+      return Math.pow(1 - (p - Math.floor(p)), sharpness > 0 ? sharpness : 6);
+    }
+    /** Frame of beat n — fractional-safe, for placing cues and cuts. */
+    function frameOfBeat(n) { return (phase + n * beatSeconds - startSeconds) * fps; }
+    /** Frame of bar n. */
+    function frameOfBar(n) { return frameOfBeat(n * beatsPerBar); }
+    /**
+     * The downbeat nearest a wanted time, in SONG seconds — what you anchor a
+     * placed audio cell to, so a repeat never lands between beats.
+     */
+    function nearestDownbeat(seconds) {
+      const bar = beatsPerBar * beatSeconds;
+      return phase + Math.round((seconds - phase) / bar) * bar;
+    }
+
+    return {
+      bpm, phase, fps, beatSeconds, beatsPerBar,
+      barSeconds: beatSeconds * beatsPerBar,
+      beatFrames: beatSeconds * fps,
+      timeAt, position, pulse, barPulse, frameOfBeat, frameOfBar, nearestDownbeat,
+    };
+  }
+
   /* ------------------------------- export ------------------------------ */
 
   const api = {
     interpolate, Sequence, Loop, spring, interpolateColors, random, particles, easings,
-    registerComposition, videoReady, seekVideo, version: 1.4,
+    registerComposition, videoReady, seekVideo, beatGrid, version: 1.5,
   };
   global.MotionStudio = api;
   // Bare-name conveniences for terse composition code.
@@ -452,6 +527,7 @@
   global.particles = particles;
   global.seekVideo = seekVideo;
   global.videoReady = videoReady;
+  global.beatGrid = beatGrid;
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api; // for engine unit tests
 })(typeof window !== 'undefined' ? window : globalThis);

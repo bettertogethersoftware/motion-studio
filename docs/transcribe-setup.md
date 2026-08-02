@@ -206,6 +206,25 @@ prevent, so the engine re-segments from token offsets and hands back sentences
 whose spans end where the full stop is. `rawSegments` is kept for when a derived
 sentence looks wrong — never as a timeline.
 
+**Punctuation alone is not enough, because sung material has none** (v0.24).
+Measured twice on generated songs: the entire lyric came back as ONE sentence —
+145 s in one film, 174 s in another — which left `rawSegments` as the only
+usable structure, exactly the thing the paragraph above tells you not to cut on.
+So a sentence now also closes on:
+
+| `boundary` | rule | why it is safe to cut there |
+|---|---|---|
+| `punctuation` | a full stop, as before | grammar |
+| `pause` | >= 700 ms to the next word | it *is* silence — the same break `speechRanges` reports |
+| `segment` | the vendor's phrase boundary | only on material measurably lacking punctuation (below ~1 full stop per 40 words), where those windows are the best phrase guess available |
+| `cap` | the run reached 20 s | a backstop for material with neither |
+
+The `segment` rule is deliberately gated: for punctuated prose those windows
+genuinely start mid-clause, so enabling it there would cause the defect this
+section warns about. On the song above the result was 2 sentences → **48**,
+longest 174 s → **6.0 s**, each one a lyric line. Read `boundary` when you care
+whether a break is a full stop or a musical rest.
+
 **3. `words[]` is what makes graphics land on speech.** Four on-screen labels cued
 to four spoken names, at frames 1451 / 1478 / 1497 / 1520, all inside *one*
 sentence: no sentence-level timing could have placed them. Words are on by

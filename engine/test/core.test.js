@@ -547,7 +547,18 @@ test('encoder: limiter disables alimiter auto-levelling', () => {
   // level defaults to true in ffmpeg and would BOOST quiet mixes; we only want
   // peaks caught, so the filter must pin level=0.
   assert.match(LIMITER_FILTER, /level=0/);
-  assert.match(LIMITER_FILTER, /limit=0\.891/);
+  assert.match(LIMITER_FILTER, /limit=0\.841/);
+});
+
+test('encoder: limiter ceiling leaves headroom for lossy intersample peaks', () => {
+  // -1 dBFS did not survive the AAC mux: a measured 21-track mix previewed at
+  // -1.0 dBFS in the WAV and encoded to 0.0 dBFS, so every limited film could
+  // report audio_clipping. The ceiling must stay far enough below full scale
+  // to absorb ~1 dB of encoder overshoot.
+  const limit = Number(/limit=([\d.]+)/.exec(LIMITER_FILTER)[1]);
+  const ceilingDb = 20 * Math.log10(limit);
+  assert.ok(ceilingDb <= -1.4, `limiter ceiling ${ceilingDb.toFixed(2)} dBFS leaves no codec headroom`);
+  assert.ok(ceilingDb >= -3, `limiter ceiling ${ceilingDb.toFixed(2)} dBFS throws away too much loudness`);
 });
 
 test('encoder: single track still gets the limiter, ending in [aout]', () => {

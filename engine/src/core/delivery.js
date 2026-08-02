@@ -61,6 +61,50 @@ export async function prepareStagingOutput(outputPath, opts = {}) {
 }
 
 /**
+ * Fail a held delivery BEFORE the work, not after it (v0.24).
+ *
+ * Promotion is the last step of a render, so a destination nobody can replace
+ * is discovered only once every frame has already been captured and encoded.
+ * Measured incident: two consecutive 600-frame renders each ran to 100%, took
+ * ~3.5 minutes apiece, and then died with EPERM at the rename because a reader
+ * held out/output.mp4 open — roughly seven minutes spent to learn something a
+ * single file handle could have reported at submission time.
+ *
+ * The probe is a WRITE open of the existing destination, which is the access
+ * that a Windows sharing violation actually denies: a reader that granted only
+ * FILE_SHARE_READ blocks both this open and the later rename, while a reader
+ * that granted delete/write sharing permits both. It never truncates (mode
+ * 'r+'), never creates, and treats a missing destination as fine — the first
+ * render of a scene has nothing to replace.
+ *
+ * Deliberately advisory about its own limits: a holder can appear in the window
+ * between this check and the promotion, so this reduces wasted work rather than
+ * guaranteeing success. promoteStagingOutput keeps its full backoff and
+ * side-step path unchanged.
+ */
+export async function assertDeliveryWritable({ outputPath, openImpl = fsp.open }) {
+  const finalPath = path.resolve(outputPath);
+  let handle;
+  try {
+    handle = await openImpl(finalPath, 'r+');
+  } catch (err) {
+    // Nothing there yet, or a path we cannot even stat — both are the
+    // renderer's problem later, not a held-file problem now.
+    if (err?.code === 'ENOENT') return;
+    if (!RETRYABLE_RENAME_CODES.has(err?.code)) return;
+    throw new EngineError(
+      ErrorCodes.DISK_ERROR,
+      `Another process is holding the output file open, so this render could not be delivered: ${finalPath}. `
+      + 'Close whatever is playing it (the Studio scene page is the usual holder), or give this target a different '
+      + 'output filename with update_scene_config { patch: { output: { filename } } }, then render again.',
+      { outputPath: finalPath, code: err.code, phase: 'preflight' },
+    );
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
  * Transient Windows lock codes worth waiting out (v0.23). Measured incident:
  * three consecutive re-renders failed EPERM renaming over an existing
  * delivery while no process held the file open — an unlink of the same path
