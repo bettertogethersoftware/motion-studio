@@ -209,6 +209,15 @@ as `references/frame-api.md` when installed:
 Why the split, and which design questions turn on it:
 [docs/agent-environments.md](docs/agent-environments.md).
 
+### Deploying onto a new machine
+
+For a full installation — Motion Studio plus the sibling media/generation
+tools, fronted by generated `AGENTS.md`/`CLAUDE.md` entry guides and a
+machine-specific `MACHINE.md` manifest — hand
+[deploy/PROVISION.md](deploy/PROVISION.md) to an agent on the target machine.
+`node deploy/provision.mjs` (re-)emits the entry files after any update. The
+layout and its rationale: [docs/architecture.md](docs/architecture.md) §16.
+
 ## Repository layout
 
 ```

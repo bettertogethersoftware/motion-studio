@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### Deployment restructure: generated entry files, MACHINE.md, and the generative boundary (v0.26)
+
+Deploying Motion Studio onto a new machine (a customer install, a new dev box)
+used to mean hand-copying a 900-line agent guide from
+`SETUPME codex name this AGENTS claude name this CLAUDE put it above this dir.md`
+to the tools root, renaming it per agent brand, and editing machine-specific
+paths into it. On the reference machine that process had already produced all
+three of its failure modes: an empty `CLAUDE.md`, a deployed guide that gained
+a section never backported to the template, and a search/replace accident that
+pointed eight helper examples at the wrong script. The monolith is gone,
+replaced by layers picked by *what changes them*
+(architecture.md §16):
+
+- **`deploy/ENTRY.md`** — the generic agent guide. `deploy/provision.mjs`
+  emits it to the tools root as **both** `AGENTS.md` and `CLAUDE.md` (no
+  rename step to forget) and always overwrites them, so deployed guides can
+  no longer drift from the repo. The guide contains zero machine-specific
+  paths; it teaches agents to *discover* helper tools (does the directory
+  exist? read its `README.md`) instead of enumerating them, so a customer
+  machine with a different tool set runs the identical guide.
+- **`MACHINE.md`** (from `deploy/MACHINE-template.md`) — the machine-owned
+  manifest: hardware/GPU sizing, exact binary paths, Python/ComfyUI installs,
+  model inventory, paid-service status (configured/not — never values), and
+  the installed-helper table. Created once by `provision.mjs`, never
+  overwritten by it.
+- **`deploy/PROVISION.md`** — the agent-driven provisioning playbook
+  (profiles `minimal`/`standard`/`gpu`): the human clones the repo and says
+  "provision this machine"; the agent installs, runs every tool's own check
+  command, emits the entry files, fills `MACHINE.md` with measured facts, and
+  verifies with an end-to-end render.
+- **[docs/production-lessons.md](production-lessons.md)** — the cross-machine
+  production lessons that lived only in the deployed guide (the music-video
+  order of operations, the measured traps, the track-layering rules, the
+  MCP-restart-after-engine-edit rule) now live in the repo, so a lesson
+  learned at one deployment reaches every other via `git pull`. Per-tool
+  content moved to the tool READMEs it belongs to.
+- **The generative boundary is now stated policy** (architecture.md §9.5, and
+  in the entry guide): the engine owns deterministic, timing-coupled
+  synthesis and measurement (`synthesize_speech`/`_music`/`_sfx`,
+  `transcribe_asset`, `probe_asset`); generative models (ComfyUI image,
+  music, video) stay agent-side tools whose outputs enter films as measured
+  assets — they will not be added as engine vendors or MCP tools. The same
+  rule triages customer-supplied APIs at install time (PROVISION.md):
+  speech APIs become engine TTS vendors (keeping frame-accurate `timings`);
+  music/image/video generation APIs become agent-side helpers.
+- **PROVISION.md covers three deployment variations**: no-shell (Env A)
+  customers — `minimal` profile without the agent-side shell tools,
+  `SKILL.md` as the production agent's entire contract; remote-GPU
+  deployments — ComfyUI served over HTTP from a separate GPU box, recorded
+  in `MACHINE.md`; and the capability triage above. It also states Linux
+  status honestly (not yet playbook-grade) and points at
+  [docs/todo_task/linux-ready-plan.md](todo_task/linux-ready-plan.md), the
+  staged plan (CI truth → engine parity → helpers → provisioning → one real
+  end-to-end install) for making Linux a supported deployment.
+
+No engine code changed; `deploy/provision.mjs` is new, standalone, and
+side-effect-free beyond writing the three files (`--dry-run` to preview).
+
 ### The vendor dir is configurable, and the settings page grew up (v0.25)
 
 **Configurable vendor dir.** The root the engine resolves bundled runtime

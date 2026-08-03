@@ -721,6 +721,41 @@ hard butt-join between two spans of speech clicks audibly; `acrossfade` overlaps
 its inputs, so the joined length is `sum(spans) − (N−1) × crossfade` — the fade
 consumes time, which is what makes it a crossfade rather than a gap.
 
+### 9.5 The generative boundary (v0.26)
+
+The audio (and image) capabilities split into two families, and the split is
+policy, not accident:
+
+- **The engine owns deterministic, timing-coupled work.** `synthesize_speech`,
+  `synthesize_music` (note-spec), and `synthesize_sfx` return frame-accurate
+  timing and mix through the one FFmpeg pass; `transcribe_asset` and
+  `probe_asset` measure what a supplied file actually contains. Same spec in,
+  same kind of result out, `*_unavailable` when a vendor is missing — an
+  MCP-only (Env A) agent can build a narrated, scored film from these alone.
+- **Generative models are agent-side tools.** ComfyUI image/music/video
+  helpers are non-deterministic, machine-specific (GPU sizing, model
+  inventories, paid partner nodes), and their outputs need an agent's
+  measure-audition-regenerate loop before they are usable — a requested tempo
+  is not a delivered one, and generated hands need eyes. Their outputs enter
+  films as ordinary assets via `write_asset_file` / `use_shared_asset`.
+
+Generative helpers will **not** be added as engine vendors or wrapped in MCP
+tools. The vendor contract that makes the speech/music vendors interchangeable
+— same spec, same kind of WAV, nothing downstream knows which ran — is exactly
+what a prompt-driven model cannot satisfy, and wrapping one in a tool call
+would hide the iteration loop that makes its output usable. A future
+capability that *is* deterministic and timing-coupled belongs inside; one that
+generates content from a prompt belongs outside, documented beside its tool
+(see [production-lessons.md](production-lessons.md) and §16).
+
+The same rule triages customer-supplied APIs at install time (the
+[deploy/PROVISION.md](../deploy/PROVISION.md) "capability triage" section):
+a speech API becomes an engine TTS **vendor** — that keeps
+`synthesize_speech`'s frame-accurate `timings`, which agent-side generation
+loses — while music/image/video generation APIs become agent-side helper
+directories. The boundary runs between capabilities, not between local and
+cloud.
+
 ## 10. Security and sandboxing
 
 The agent-facing write surface is exactly composition source files and
@@ -1350,3 +1385,50 @@ code 4. Cancellation on Windows is unaffected: it goes through
 `JobManager.cancel`'s in-process abort, covered on every platform. A
 permanently-red case teaches readers to skim past failures, which is how a
 real regression hides.
+
+## 16. Deployment: the tools root and the entry files (v0.26)
+
+A deployed Motion Studio machine is a **tools root** directory containing this
+repository plus the sibling media/generation tools, fronted by three files the
+agent reads first. `deploy/` holds the machinery:
+
+```text
+<toolsRoot>\
+  motion-studio\          the repo (this file lives inside it)
+  AGENTS.md, CLAUDE.md    generated from deploy\ENTRY.md — identical, generic
+  MACHINE.md              machine-owned manifest, created from deploy\MACHINE-template.md
+  ffmpeg-*, whisper-*, …  core tools (every machine)
+  comfyui*, *forge, …     optional helpers, each with its own README.md
+```
+
+The design rule is that **every fact lives in exactly one layer**, picked by
+what changes it:
+
+| layer | file | changes when |
+|---|---|---|
+| stable contract | `AGENTS.md`/`CLAUDE.md` (generated, never hand-edited) | the product changes |
+| this machine | `MACHINE.md` | hardware, paths, models, paid services change |
+| each helper | that helper's `README.md` | the helper changes |
+| production knowledge | `docs/` (this repo) | a lesson is learned anywhere |
+
+The generated guide teaches agents to *discover* helpers (check the directory,
+read its README, resolve machine values from `MACHINE.md`) rather than
+enumerate them — so installing, removing, or adding a customer-specific tool
+never edits the guide, and machines with different tool sets run identical
+guides. Cross-machine lessons go in repo docs
+([production-lessons.md](production-lessons.md),
+[knowledge-base.md](knowledge-base.md)) so they reach every deployment via
+`git pull`; `deploy/provision.mjs` re-emits the entry files after a pull, and
+overwrites them unconditionally *because* they are generated — drift between
+deployed guides and the repo was the failure mode that motivated this layout
+(a hand-copied guide going stale, an entry file left empty by a missed rename,
+a bad search/replace corrupting deployed examples).
+
+Provisioning a new machine is agent-driven: [deploy/PROVISION.md](../deploy/PROVISION.md)
+is a playbook (profiles `minimal`/`standard`/`gpu`) that an agent on the
+target machine executes end to end — install, verify every tool's own check
+command, emit the entry files, fill `MACHINE.md` with *measured* facts, and
+finish with an end-to-end render. §9.5's generative boundary is what keeps
+this layout stable: the engine stays portable (`npm install` + core binaries),
+while GPU-heavy generative tooling varies per machine without touching the
+engine.
