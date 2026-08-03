@@ -51,33 +51,42 @@ Verified starting points (2026-08-04):
 
 ## L1 — Engine capability parity on Linux (2–4 days standalone; mostly free if vendor-boundary Slice 0 lands first)
 
-- [ ] FFmpeg: verify `encoder.js` honors the same resolution as `prereqs.js`
-      (explicit setting → `MOTION_STUDIO_FFMPEG` → PATH) and that a distro
-      FFmpeg (apt) passes the version floor. The fetched-pack chain is the
-      vendor-boundary plan's item — do not build it here.
-- [ ] Speech: decide the Linux default. Recommended: the vendor-boundary
-      plan's zero-byte per-platform `system` backend (`espeak-ng`/`spd-say`);
-      fallback decision: document `piper` as the Linux default and verify a
-      Linux Piper install end to end (`MOTION_STUDIO_PIPER_*` paths, voice
-      download, probe, synthesis, timings).
-- [ ] Music: the `node` vendor is cross-platform but needs a SoundFont on a
-      clean clone — ship or auto-fetch a small permissively-licensed GM
-      SoundFont (vendor-boundary Phase 0.5 item). Verify the `fluidsynth`
-      vendor can point at a distro `fluidsynth` binary through the existing
-      per-vendor path settings instead of the vendored Windows exes.
+- [x] FFmpeg resolution audited (2026-08-04): `settings.js` already
+      implements the chain (explicit `--ffmpeg` → `MOTION_STUDIO_FFMPEG` →
+      `ffmpeg.path` setting → PATH) and the MCP server threads
+      `resolveFfmpegPath` through every call site; `encoder.js` only ever
+      receives the resolved path. FFmpeg 7.0.2 static passed the doctor
+      version floor on Linux. The fetched-pack chain remains the
+      vendor-boundary plan's item.
+- [x] Speech verified on Linux (2026-08-04): `piper` end to end through
+      `synthesizePiperSpeech` — pip `piper-tts` (piper1-gpl) via
+      `MOTION_STUDIO_PIPER_PYTHON=python3`, voices dir env, probe, synthesis,
+      valid WAV (5.12 s, 22050 Hz mono). **Trap recorded in tts-setup.md:**
+      the old rhasspy C++ release binary ignores the engine's flags and exits
+      0 with no audio — Linux installs must use pip. Still open: the
+      *default*-vendor decision (zero-byte `system` espeak backend is the
+      vendor-boundary plan's recommendation).
+- [x] Music `node` vendor verified on Linux (2026-08-04):
+      `synthesizeNodeMusic` with the real MuseScore_General.sf3 → correct
+      PCM WAV, measured peak −16.87 dBFS. Still open: SoundFont on a clean
+      clone (fetch/ship — vendor-boundary Phase 0.5), and pointing the
+      `fluidsynth` vendor at a distro binary via settings.
 - [ ] Transcription: document getting whisper.cpp on Linux (distro package
       or build), verify resolver and model paths, run `transcribe_asset`
-      against a known fixture.
+      against a known fixture. *Blocked in the local WSL environment (no
+      compiler, no sudo) — verify via CI or a full Linux box.*
 - [ ] Rendering: verify Puppeteer headless Chromium on Linux for every output
       format (H.264, VP9/alpha, GIF, ProRes, PNG-seq), parallel workers, and
       cancellation. **Fonts are the determinism risk** — a Linux distro's
       font set differs from Windows, so the same composition renders
       different glyphs. Decide: bundle/pin a font pack, or record the font
-      environment in render metadata and document the caveat.
-- [ ] Sweep engine + Studio for remaining win32 assumptions (hardcoded
-      `.exe`, backslash joins, `%VAR%` in spawned commands). Only one
-      `process.platform` gate exists today, which is suspicious in the good
-      direction — confirm it, don't trust it.
+      environment in render metadata and document the caveat. *Blocked in
+      the local WSL environment (Chromium system libs need sudo) — a CI job
+      with the Puppeteer download enabled is the natural vehicle.*
+- [x] win32-assumption sweep (2026-08-04): clean. Every `.exe` grep hit
+      outside the documented Windows-only vendor modules is a regex
+      `.exec(` false positive; the one `process.platform` gate
+      (whisper exe-extension ordering) is correct.
 
 ## L2 — Helper tools on Linux (1–2 days)
 

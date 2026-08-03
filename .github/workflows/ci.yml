@@ -6,18 +6,18 @@ on:
   pull_request:
     branches: [master]
 
-# The suite fakes the browser (injectable browserFactory); the one gated
-# real-Chromium file skips honestly when no browser resolves. Skipping the
-# ~700 MB Puppeteer download keeps CI fast until the vendor-boundary plan
-# makes the pinned browser a proper fetched pack.
-env:
-  PUPPETEER_SKIP_DOWNLOAD: '1'
+# The main jobs skip the ~700 MB Puppeteer download: the suite fakes the
+# browser (injectable browserFactory) and the one gated real-Chromium file
+# skips honestly when no browser resolves. The dedicated linux-render job
+# downloads the browser and runs that gated file for real.
 
 jobs:
   linux:
     name: Linux (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
     defaults:
       run:
         working-directory: engine
@@ -47,10 +47,49 @@ jobs:
       - name: Test
         run: npm test
 
+  # The real-rendering seam fakes cannot cover: Puppeteer launch, screenshot
+  # determinism, genuine omitBackground alpha (linux-ready-plan L1). Runner
+  # images ship Chromium's system libraries; the browser itself is cached.
+  linux-render:
+    name: Linux real-Chromium render
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Cache Puppeteer browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('engine/package-lock.json') }}
+
+      - name: Install FFmpeg (static build)
+        working-directory: .
+        run: |
+          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
+
+      - name: Install dependencies (with browser download)
+        run: npm ci --no-audit --no-fund
+
+      - name: Real-Chromium suite
+        run: node --test test/real-chromium.test.js
+
   windows:
     name: Windows (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
     defaults:
       run:
         working-directory: engine

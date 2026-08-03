@@ -77,10 +77,23 @@ with **two failures that were one real bug**:
   treatment. After the fix both platforms are clean: Windows 855/858 pass
   (3 platform skips), Linux 854/858 (4 platform skips), zero failures.
 - **`.github/workflows/ci.yml`** (new): `ubuntu-latest` and `windows-latest`
-  jobs — Node 22, FFmpeg from apt/choco, `npm ci`, `npm run doctor`,
+  jobs — Node 22, static/choco FFmpeg, `npm ci`, `npm run doctor`,
   `npm test` — with `PUPPETEER_SKIP_DOWNLOAD` set, since the suite fakes the
-  browser and the gated real-Chromium file skips honestly. The
-  cross-platform claim is now tested on every push instead of asserted.
+  browser and the gated real-Chromium file skips honestly. A third
+  `linux-render` job downloads the pinned browser (cached) and runs
+  `real-chromium.test.js` for real — the launch/screenshot/alpha seam fakes
+  cannot cover. The cross-platform claim is now tested on every push instead
+  of asserted. (Run #1's lesson is in the workflow comments: `apt-get` hung
+  28+ minutes on the runner's apt lock; FFmpeg comes from a static build.)
+- **Linux L1 vendor verifications** (2026-08-04, real Linux): the `node`
+  music vendor synthesized correctly against the production SoundFont, and
+  `piper` speech ran end to end via pip `piper-tts` — with a trap now
+  recorded in [tts-setup.md](tts-setup.md): the archived pre-2024 C++ piper
+  release binaries ignore this engine's flags and exit 0 having written no
+  audio; Linux installs must use pip (piper1-gpl). The FFmpeg resolution
+  chain and a clean win32-assumption sweep were audited in the same pass;
+  whisper and real-Chromium rendering verification move to CI
+  (see [linux-ready-plan.md](todo_task/linux-ready-plan.md)).
 
 ### The vendor dir is configurable, and the settings page grew up (v0.25)
 

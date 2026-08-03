@@ -215,6 +215,15 @@ pip install piper-tts
 That installs a `piper` executable next to your Python (on Windows,
 `…\Scripts\piper.exe`) as well as the `python -m piper` module form.
 
+**Install via pip, not the old GitHub release binaries.** The pre-2024 C++
+`piper` binaries from the archived `rhasspy/piper` releases page (still the top
+search result) have a different CLI: they ignore this engine's `-i`/`-f`/
+`--no-normalize` flags, read empty stdin, and **exit 0 having written no
+audio** — measured on Linux 2026-08-04, surfacing as `tts_failed: "Piper
+reported success but wrote no audio"`. The pip package is the maintained
+[piper1-gpl](https://github.com/OHF-Voice/piper1-gpl) with the CLI this engine
+drives.
+
 On Windows, pip usually prints a warning that `piper.exe` landed in a `Scripts`
 folder **which is not on PATH**. That is the normal outcome, not a broken
 install — and you can ignore it: when nothing is configured and `piper` cannot
