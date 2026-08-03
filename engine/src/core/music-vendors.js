@@ -1,5 +1,6 @@
 /**
- * Music vendors — dispatch for the note-spec → audio pipeline (v0.17).
+ * Music vendors — dispatch for the note-spec → audio pipeline (v0.17;
+ * catalog-driven since Slice A — see createMusicDispatch below).
  *
  *   node        core/music-node.js   spessasynth_core, in-process, any OS
  *   fluidsynth  core/music.js        the v0.8 chain: C# MIDI exe + fluidsynth.exe
@@ -101,141 +102,211 @@ export function demoSpec({ program = 0, drums = false, bpm = 100 } = {}) {
   return { bpm, tracks };
 }
 
-/** settings.music, tolerating a missing/older settings file. */
-async function musicSettings(dataDir, settings) {
-  if (settings) return settings.music ?? {};
-  const s = await readSettings(dataDir ?? defaultDataDir()).catch(() => null);
-  return s?.music ?? {};
-}
-
 /**
- * Which vendor renders music, and why.
- *
- * `probe: true` walks a multi-entry preference chain to the first available
- * vendor (see core/vendors.js); a single-vendor configuration probes nothing.
- *
- * @returns {Promise<{vendor: string, source: 'argument'|'env'|'settings'|'default',
- *                    chain: string[], status?: object|null, skipped?: object[], exhausted?: true}>}
+ * The default music catalog: one entry per vendor. Same contract as the
+ * speech catalog (core/tts-vendors.js): info card, probe, fix sentence,
+ * synthesize — vendor knowledge lives only here, dispatch is generic, and
+ * Phase 2 moves this to vendors/default/.
  */
-export async function resolveMusicVendor({ vendor, dataDir, settings, probe = false } = {}) {
-  const stored = settings
-    ? settings.music
-    : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.music;
-  const resolved = resolveVendorFrom('music', {
-    vendor,
-    storedVendor: stored?.vendor,
-    storedVendors: stored?.vendors,
-    allowed: MUSIC_VENDORS,
-    fallback: DEFAULT_MUSIC_VENDOR,
-  });
-  if (!probe) return resolved;
-  return walkVendorChain(resolved, (id) => checkMusicVendor(id, { dataDir, settings }));
-}
-
-/**
- * Probe one vendor. Never throws for an unusable vendor (that is data) — only
- * for an unknown vendor id.
- */
-export async function checkMusicVendor(vendor, { dataDir, settings } = {}) {
-  if (!MUSIC_VENDORS.includes(vendor)) {
-    throw new EngineError(
-      ErrorCodes.INVALID_CONFIG,
-      `Unknown music vendor "${vendor}" — expected one of: ${MUSIC_VENDORS.join(', ')}`,
-      { vendor, allowed: MUSIC_VENDORS },
-    );
-  }
-  const music = await musicSettings(dataDir, settings);
-
-  if (vendor === 'node') {
-    const probe = await checkNodeMusic({ soundfont: music.node?.soundfont ?? undefined });
-    return {
-      vendor,
-      available: probe.available,
-      error: probe.error,
-      config: {
-        ...probe.config,
-        sampleRate: music.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
-        gain: music.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
+export function defaultMusicCatalog() {
+  return Object.freeze({
+    node: {
+      id: 'node',
+      info: MUSIC_VENDOR_INFO.node,
+      async probe({ section = {} } = {}) {
+        const probe = await checkNodeMusic({ soundfont: section.node?.soundfont ?? undefined });
+        return {
+          available: probe.available,
+          error: probe.error,
+          config: {
+            ...probe.config,
+            sampleRate: section.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
+            gain: section.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
+          },
+        };
       },
-    };
+      fix: () => 'Run "npm run fetch-soundfont" in engine/ (or point MOTION_STUDIO_SOUNDFONT at a General MIDI ' +
+        ".sf2/.sf3 file, or set it on the Studio's music page), and make sure `npm install` has run in engine/.",
+      async synthesize({ spec, outPath, sampleRate, gain }, { section, target }) {
+        const result = await synthesizeNodeMusic({
+          spec,
+          outPath,
+          soundfont: section.node?.soundfont ?? undefined,
+          sampleRate: sampleRate ?? section.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
+          gain: gain ?? section.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
+          targetPeakDb: target,
+        });
+        return { ...result, vendor: 'node' };
+      },
+    },
+    fluidsynth: {
+      id: 'fluidsynth',
+      info: MUSIC_VENDOR_INFO.fluidsynth,
+      async probe({ section = {} } = {}) {
+        const probe = await checkMusic({ soundfont: section.node?.soundfont ?? undefined });
+        return {
+          available: probe.available,
+          error: probe.error,
+          config: {
+            midiExe: resolveMidiExe(),
+            fluidsynth: resolveFluidSynth(),
+            soundfont: resolveSoundFont(section.node?.soundfont ?? undefined),
+          },
+        };
+      },
+      fix: () => 'Build MotionStudioMidi.exe and install fluidsynth.exe + a SoundFont (see docs/music-setup.md), ' +
+        'or switch the music vendor to "node".',
+      async synthesize({ spec, outPath, sampleRate, timeoutMs }, { section, target }) {
+        // The exe chain validates the spec itself, but running the shared
+        // validator first means both vendors reject the same bad spec with
+        // the same message instead of one failing at a process boundary.
+        validateMusicSpec(spec);
+        const result = await synthesizeMusic({
+          spec,
+          outPath,
+          soundfont: section.node?.soundfont ?? undefined,
+          ...(sampleRate ? { sampleRate } : {}),
+          ...(timeoutMs ? { timeoutMs } : {}),
+        });
+        const level = await conformWavLevel(outPath, target);
+        return {
+          ...result,
+          ...level,
+          channels: 2,
+          soundfont: resolveSoundFont(section.node?.soundfont ?? undefined),
+          vendor: 'fluidsynth',
+        };
+      },
+    },
+  });
+}
+
+/** Build the music dispatch surface over a catalog (Slice A; the §10.6 seam). */
+export function createMusicDispatch(catalog) {
+  const ids = Object.freeze(Object.keys(catalog));
+  const entry = (v) => catalog[v];
+
+  /** settings.music, tolerating a missing/older settings file. */
+  async function musicSettings(dataDir, settings) {
+    if (settings) return settings.music ?? {};
+    const s = await readSettings(dataDir ?? defaultDataDir()).catch(() => null);
+    return s?.music ?? {};
   }
 
-  const probe = await checkMusic({ soundfont: music.node?.soundfont ?? undefined });
+  async function resolveMusicVendor({ vendor, dataDir, settings, probe = false } = {}) {
+    const stored = settings
+      ? settings.music
+      : (await readStoredSettings(dataDir ?? defaultDataDir()).catch(() => null))?.music;
+    const resolved = resolveVendorFrom('music', {
+      vendor,
+      storedVendor: stored?.vendor,
+      storedVendors: stored?.vendors,
+      allowed: ids,
+      fallback: DEFAULT_MUSIC_VENDOR,
+    });
+    if (!probe) return resolved;
+    return walkVendorChain(resolved, (id) => checkMusicVendor(id, { dataDir, settings }));
+  }
+
+  async function checkMusicVendor(vendor, { dataDir, settings } = {}) {
+    if (!ids.includes(vendor)) {
+      throw new EngineError(
+        ErrorCodes.INVALID_CONFIG,
+        `Unknown music vendor "${vendor}" — expected one of: ${ids.join(', ')}`,
+        { vendor, allowed: ids },
+      );
+    }
+    const section = await musicSettings(dataDir, settings);
+    const status = await entry(vendor).probe({ section });
+    return { vendor, ...status };
+  }
+
+  /** The vendors that *are* usable, so a failure can point somewhere useful. */
+  async function availableAlternatives(failing, opts) {
+    const others = [];
+    for (const id of ids) {
+      if (id === failing) continue;
+      const probe = await checkMusicVendor(id, opts).catch(() => null);
+      if (probe?.available) others.push(id);
+    }
+    return others;
+  }
+
+  function musicUnavailable(vendor, status, alternatives = []) {
+    return unavailableError('music', vendor, status, { fix: entry(vendor).fix(status), alternatives });
+  }
+
+  async function musicUnavailableWithAlternatives(vendor, status, opts = {}) {
+    return musicUnavailable(vendor, status, await availableAlternatives(vendor, opts));
+  }
+
+  /** Full status of every music vendor — backs the Studio page and list_vendors. */
+  async function musicVendorReport({ dataDir, settings, probe = true } = {}) {
+    const music = await musicSettings(dataDir, settings);
+    // No probe on resolution: every vendor is probed below for its card, and
+    // the chain walk is done from those results rather than paying twice.
+    const resolved = await resolveMusicVendor({ dataDir, settings });
+    const chain = resolved.chain;
+    const vendors = [];
+    for (const id of ids) {
+      const info = entry(id).info;
+      const priority = chain.includes(id) ? chain.indexOf(id) + 1 : null;
+      if (!probe) {
+        vendors.push({ ...info, active: id === resolved.vendor, priority, available: null });
+        continue;
+      }
+      const status = await checkMusicVendor(id, { dataDir, settings });
+      vendors.push({
+        ...info,
+        priority,
+        available: status.available,
+        error: status.error ?? null,
+        config: status.config,
+      });
+    }
+    const usable = probe ? chain.find((id) => vendors.find((v) => v.id === id)?.available) : null;
+    const active = usable ?? resolved.vendor;
+    for (const v of vendors) v.active = v.id === active;
+    return buildReport({ capability: 'music', active, activeSource: resolved.source, chain, settings: music, vendors });
+  }
+
+  async function synthesizeMusicWithVendor({
+    vendor, spec, outPath, dataDir, settings, sampleRate, gain, targetPeakDb, timeoutMs,
+    resolved: preResolved,
+  }) {
+    const resolved = preResolved ?? await resolveMusicVendor({ vendor, dataDir, settings, probe: true });
+    const section = await musicSettings(dataDir, settings);
+    const target = targetPeakDb === undefined ? (section.targetPeakDb ?? null) : targetPeakDb;
+
+    const status = resolved.status ?? await checkMusicVendor(resolved.vendor, { dataDir, settings });
+    if (!status.available) throw await musicUnavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
+
+    const result = await entry(resolved.vendor).synthesize(
+      { spec, outPath, sampleRate, gain, timeoutMs },
+      { section, target },
+    );
+    return { ...result, vendorSource: resolved.source, targetPeakDb: target };
+  }
+
   return {
-    vendor,
-    available: probe.available,
-    error: probe.error,
-    config: {
-      midiExe: resolveMidiExe(),
-      fluidsynth: resolveFluidSynth(),
-      soundfont: resolveSoundFont(music.node?.soundfont ?? undefined),
-    },
+    ids, catalog,
+    resolveMusicVendor, checkMusicVendor, musicVendorReport,
+    musicUnavailable, musicUnavailableWithAlternatives, synthesizeMusicWithVendor,
   };
 }
 
-/** The vendors that *are* usable, so a failure can point somewhere useful. */
-async function availableAlternatives(failing, opts) {
-  const others = [];
-  for (const id of MUSIC_VENDORS) {
-    if (id === failing) continue;
-    const probe = await checkMusicVendor(id, opts).catch(() => null);
-    if (probe?.available) others.push(id);
-  }
-  return others;
-}
+/* ------------------------------------------------------------------ */
+/* Default-bound surface — the public API, unchanged for callers.      */
+/* Phase 4 constructs dispatches from the injected registry instead.   */
+/* ------------------------------------------------------------------ */
 
-function fixFor(vendor) {
-  return vendor === 'node'
-    ? 'Point MOTION_STUDIO_SOUNDFONT at a General MIDI .sf2/.sf3 file (or set it on the Studio\'s music page), and make sure `npm install` has run in engine/.'
-    : 'Build MotionStudioMidi.exe and install fluidsynth.exe + a SoundFont (see docs/music-setup.md), or switch the music vendor to "node".';
-}
-
-/** "This music vendor cannot be used right now" — phrased once, in core/vendors.js. */
-export function musicUnavailable(vendor, status, alternatives = []) {
-  return unavailableError('music', vendor, status, { fix: fixFor(vendor), alternatives });
-}
-
-/** Same, plus a probe of the other vendors so the message can name a ready one. */
-export async function musicUnavailableWithAlternatives(vendor, status, opts = {}) {
-  return musicUnavailable(vendor, status, await availableAlternatives(vendor, opts));
-}
-
-/** Full status of every music vendor — backs the Studio page and list_vendors. */
-export async function musicVendorReport({ dataDir, settings, probe = true } = {}) {
-  const music = await musicSettings(dataDir, settings);
-  // No probe here: every vendor is probed below for its card, and the chain walk
-  // is done from those results rather than paying for a second round.
-  const resolved = await resolveMusicVendor({ dataDir, settings });
-  const chain = resolved.chain;
-  const vendors = [];
-  for (const id of MUSIC_VENDORS) {
-    const info = MUSIC_VENDOR_INFO[id];
-    const priority = chain.includes(id) ? chain.indexOf(id) + 1 : null;
-    if (!probe) {
-      vendors.push({ ...info, active: id === resolved.vendor, priority, available: null });
-      continue;
-    }
-    const status = await checkMusicVendor(id, { dataDir, settings });
-    vendors.push({
-      ...info,
-      priority,
-      available: status.available,
-      error: status.error ?? null,
-      config: status.config,
-    });
-  }
-  const usable = probe ? chain.find((id) => vendors.find((v) => v.id === id)?.available) : null;
-  const active = usable ?? resolved.vendor;
-  for (const v of vendors) v.active = v.id === active;
-  return buildReport({
-    capability: 'music',
-    active,
-    activeSource: resolved.source,
-    chain,
-    settings: music,
-    vendors,
-  });
-}
+const defaultDispatch = createMusicDispatch(defaultMusicCatalog());
+export const resolveMusicVendor = defaultDispatch.resolveMusicVendor;
+export const checkMusicVendor = defaultDispatch.checkMusicVendor;
+export const musicVendorReport = defaultDispatch.musicVendorReport;
+export const musicUnavailable = defaultDispatch.musicUnavailable;
+export const musicUnavailableWithAlternatives = defaultDispatch.musicUnavailableWithAlternatives;
+export const synthesizeMusicWithVendor = defaultDispatch.synthesizeMusicWithVendor;
 
 /* ------------------------------ level control ----------------------------- */
 
@@ -286,60 +357,3 @@ export async function conformWavLevel(file, targetPeakDb) {
   };
 }
 
-/* -------------------------------- synthesis ------------------------------- */
-
-/**
- * Render `spec` through whichever vendor is active (or the one named).
- * Returns the provider's metadata plus `vendor`/`vendorSource` and the measured
- * level, so a caller can see what it actually got rather than what it asked for.
- *
- * `resolved` lets a caller hand in a decision it already made (and probed).
- * With preference chains that is a correctness point, not just a saved probe:
- * resolving twice consults live availability twice and could reach two different
- * vendors. See core/tts-vendors.js synthesizeWithVendor for the same argument.
- */
-export async function synthesizeMusicWithVendor({
-  vendor, spec, outPath, dataDir, settings, sampleRate, gain, targetPeakDb, timeoutMs,
-  resolved: preResolved,
-}) {
-  const resolved = preResolved ?? await resolveMusicVendor({ vendor, dataDir, settings, probe: true });
-  const music = await musicSettings(dataDir, settings);
-  const target = targetPeakDb === undefined ? (music.targetPeakDb ?? null) : targetPeakDb;
-
-  const status = resolved.status ?? await checkMusicVendor(resolved.vendor, { dataDir, settings });
-  if (!status.available) throw await musicUnavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
-
-  if (resolved.vendor === 'node') {
-    const result = await synthesizeNodeMusic({
-      spec,
-      outPath,
-      soundfont: music.node?.soundfont ?? undefined,
-      sampleRate: sampleRate ?? music.node?.sampleRate ?? MUSIC_NODE_DEFAULTS.sampleRate,
-      gain: gain ?? music.node?.gain ?? MUSIC_NODE_DEFAULTS.gain,
-      targetPeakDb: target,
-    });
-    return { ...result, vendor: 'node', vendorSource: resolved.source, targetPeakDb: target };
-  }
-
-  // The exe chain validates the spec itself, but running the shared validator
-  // first means both vendors reject the same bad spec with the same message
-  // instead of one failing at a process boundary.
-  validateMusicSpec(spec);
-  const result = await synthesizeMusic({
-    spec,
-    outPath,
-    soundfont: music.node?.soundfont ?? undefined,
-    ...(sampleRate ? { sampleRate } : {}),
-    ...(timeoutMs ? { timeoutMs } : {}),
-  });
-  const level = await conformWavLevel(outPath, target);
-  return {
-    ...result,
-    ...level,
-    channels: 2,
-    soundfont: resolveSoundFont(music.node?.soundfont ?? undefined),
-    vendor: 'fluidsynth',
-    vendorSource: resolved.source,
-    targetPeakDb: target,
-  };
-}
