@@ -45,15 +45,17 @@ packaging (vendor packs, a lightweight npm-first core) is planned — see
 `docs\plans\ai-only-desktop-vendor-boundary-plan.md` (draft); as that
 lands, the core-tool steps below shrink into fetched packs.
 
-**Linux status: not yet playbook-grade, but most seams are verified.** The
-full engine suite, the real-Chromium render seam, the `piper`/`node`-music
-vendors, and a real speech→transcribe round-trip all run green on Linux (in
-CI and a WSL environment — see `docs\plans\linux-ready-plan.md`), and
-`provision.mjs` emits bash-flavored entry files on Linux automatically. What
-has **not** happened is one complete end-to-end Linux install driven by this
-playbook (the plan's L4 acceptance test). Until that passes once, treat a
-Linux customer as a scoped pilot, not a playbook run. The "Provisioning on
-Linux" section below records the per-step deltas verified so far.
+**Linux status: supported.** The L4 acceptance test passed on 2026-08-04 on
+a fresh Ubuntu 24.04.4 LTS (WSL2) install — agent-driven provisioning from
+this playbook, then a complete film over MCP stdio: piper narration with
+sentence timings, `node`-vendor music, SFX, two Chromium renders, a promoted
+H.264+AAC build, and a whisper transcribe-back of the deliverable with every
+expected word intact; plus the `standard`-profile forge smokes against
+distro FluidSynth. Versions tested: Node 18.19.1 (the engine floor), distro
+FFmpeg 6.1.1 and static 7.0.2, ImageMagick 6, pip piper-tts, whisper.cpp
+master. Bare-metal/VM confirmation beyond WSL2 is an optional follow-up, and
+macOS remains untested. The "Provisioning on Linux" section below records
+the verified per-step deltas.
 
 ## Deployment variations
 
@@ -253,7 +255,10 @@ end to end yet.
 - **ImageMagick (step 3):** install from the distro. **No
   `magick-portable.ps1` wrapper on Linux** — packaged installs locate their
   own coders, and the cmd caret-eating failure the wrapper exists for is a
-  Windows-only phenomenon. Record the plain `magick` path in `MACHINE.md`.
+  Windows-only phenomenon. Note: **Ubuntu 24.04's `imagemagick` package is
+  ImageMagick 6** — the binaries are `convert` and `identify`; there is no
+  `magick` unified CLI (that arrives with IM7). Record whichever binaries
+  exist in `MACHINE.md`.
 - **Auto-Editor (step 3):** `pipx install auto-editor` (pipx keeps its own
   venv; no sudo).
 - **Whisper.cpp (step 3):** no prebuilt Linux binaries — build it statically
@@ -266,6 +271,14 @@ end to end yet.
   ```
 
   Then fetch a `ggml-*.bin` model from huggingface.co/ggerganov/whisper.cpp.
+- **SoundFont:** no fresh clone can synthesize music until one exists. Fetch
+  MuseScore_General.sf3 (~40 MB) from the MuseScore mirror
+  (`https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3`),
+  and **export `MOTION_STUDIO_SOUNDFONT` in `~/.profile`** — the engine's
+  `node` music vendor and `musicforge` both honor it.
+- **FluidSynth (standard profile):** `apt install fluidsynth` — `musicforge`
+  falls back to the distro binary on PATH when the vendored Windows exe is
+  absent (verified end to end on 24.04).
 - **Speech vendor:** the Windows `system` TTS exe and the vendored FluidSynth
   chain do not exist on Linux. Install Piper via **pip only** —
   `pipx install piper-tts` — never the archived pre-2024 C++ release

@@ -60,6 +60,30 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Linux is supported: the L4 acceptance passed (v0.26)
+
+On 2026-08-04 a **fresh Ubuntu 24.04.4 LTS install** (new WSL2 distro,
+customer-like `motion` user with sudo — none of the earlier experiments'
+environment reused) was provisioned agent-driven from
+[deploy/PROVISION.md](../deploy/PROVISION.md) and passed the
+[linux-ready plan](plans/linux-ready-plan.md)'s full §L4 acceptance: MCP
+over stdio built a complete film — piper narration with sentence timings,
+`node`-vendor SoundFont music, SFX, two Chromium renders, a promoted
+H.264+AAC build (ffprobe-verified at exactly 30/1 fps) — and whisper.cpp
+transcribed the *delivered MP4* back with every expected word intact. The
+`standard`-profile smokes ran too: `shotfinder` scanned the built film and
+`musicforge` rendered through **distro FluidSynth via its new PATH
+fallback**. PROVISION.md's Linux status is now **supported** (bare-metal
+confirmation beyond WSL2 optional; macOS untested). Provisioning findings
+folded into the playbook: Ubuntu 24.04 packages ImageMagick 6
+(`convert`/`identify`, no `magick`), the SoundFont must be fetched and
+exported (`MOTION_STUDIO_SOUNDFONT`), and Puppeteer's ~700 MB double
+browser download reproduces on every clean install (the vendor-boundary
+plan's Phase 0.5 target). The acceptance script is kept as
+`engine/test/smoke-mcp-film.mjs` — a rerunnable real-vendor smoke for any
+machine with the `MOTION_STUDIO_*` hooks set. Node 18.19.1 — exactly the
+engine's floor — ran everything, so the floor is real, not aspirational.
+
 ### Linux L0: CI on two platforms, and the first Linux bug (v0.26)
 
 The linux-ready plan's L0 phase ran: the full suite executed on real Linux

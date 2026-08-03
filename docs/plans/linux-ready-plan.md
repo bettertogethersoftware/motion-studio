@@ -143,23 +143,42 @@ Verified starting points (2026-08-04):
       defaults once the L1 *default-vendor* decisions are made
       (tts-setup.md already carries the pip-only Piper warning).
 
-## L4 — Acceptance: one real Linux install, end to end (1 day)
+## L4 — Acceptance: one real Linux install, end to end — **PASSED 2026-08-04**
 
-The plan is complete only when all of these pass on a clean Linux machine
-(container acceptable for CI, but run once on a real box):
+Executed on a **fresh Ubuntu 24.04.4 LTS WSL2 distro** (created for this
+test; the tainted L1 environment was not reused), as user `motion` with
+passwordless sudo — customer-like, not root:
 
-1. Provision the `minimal` profile per the updated playbook, driven by an
-   agent, with no undocumented manual step.
-2. MCP over stdio: `initialize`, `get_capabilities`, `list_vendors` report
-   the expected Linux vendors and availability.
-3. End-to-end film: create film → scene → composition → `synthesize_speech`
-   (Linux default vendor) → `synthesize_music` (`node` vendor) →
-   `synthesize_sfx` → render → `build_film` → `transcribe_asset` on the
-   result → measurements verified with ffprobe.
-4. `standard` profile: `videoforge` and `musicforge` smoke runs succeed
-   against distro FFmpeg/FluidSynth.
-5. Flip the Linux status note in `deploy/PROVISION.md` from "not yet
-   playbook-grade" to supported, recording the distro and versions tested.
+1. [x] `minimal`-profile provisioning, agent-driven per the playbook: apt
+       prereqs, GitHub clone, engine `npm install` + doctor (Node 18.19.1 —
+       exactly the floor — and distro FFmpeg 6.1.1 both pass), whisper.cpp
+       static build, pipx piper + voice, SoundFont fetch, `provision.mjs`
+       (auto-emitted bash-flavored guides), measured `MACHINE.md`.
+       Findings folded back into PROVISION.md: Ubuntu 24.04 packages
+       ImageMagick **6** (`convert`/`identify`, no `magick`); the SoundFont
+       must be fetched and exported as `MOTION_STUDIO_SOUNDFONT`; Puppeteer's
+       ~700 MB double browser download reproduced on a clean install.
+2. [x] MCP over stdio: initialize, `get_capabilities`, `list_vendors` —
+       piper/node/whisper-cpp all available.
+3. [x] End-to-end film (`engine/test/smoke-mcp-film.mjs`): piper speech with
+       sentence timings (5.4 s, 2 sentences), `node`-vendor music
+       (peak −16.1 dB), `tone` SFX, both scenes rendered through the freshly
+       downloaded Chromium, `build_film` promoted, and the delivered MP4
+       (H.264 640×360 at exactly 30/1 + AAC, 10.02 s, ffprobe-verified)
+       transcribed back by whisper.cpp with every expected word intact.
+4. [x] `standard` profile: `shotfinder` scanned the built film;
+       `compose.py` rendered through **distro FluidSynth via the PATH
+       fallback** (fresh raw WAV measured −18.6 dB mean / −0.8 dB max, full
+       accent map) — which also proved the 2026-08-04 resolution fixes on
+       the platform they were written for. First attempt was caught reading
+       *stale copied artifacts* as success; the honest re-run rendered
+       fresh.
+5. [x] PROVISION.md's Linux status flipped to **supported**, recording the
+       distro and versions tested.
+
+Remaining honest caveats: the machine was WSL2, not bare metal (optional
+follow-up); the render-format matrix beyond H.264 and the three Slice-0
+design decisions live on in [TODO.md](TODO.md).
 
 ## Explicitly out of scope
 

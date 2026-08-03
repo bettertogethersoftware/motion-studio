@@ -10,7 +10,7 @@ Active plan documents:
 
 | document | what it is |
 |---|---|
-| [linux-ready-plan.md](linux-ready-plan.md) | make Linux a supported deployment — L0–L3 done, **L4 open** |
+| [linux-ready-plan.md](linux-ready-plan.md) | **complete 2026-08-04 — Linux is supported** (L4 passed on fresh Ubuntu 24.04); kept for the record and the remaining caveats |
 | [ai-only-desktop-vendor-boundary-plan.md](ai-only-desktop-vendor-boundary-plan.md) | AI-only desktop runtime + vendor packs (proposed, 12–19 d) |
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets — **first of the three queued** |
@@ -19,25 +19,19 @@ Active plan documents:
 
 ## Next up (ordered)
 
-1. [ ] **Linux L4 — the acceptance install** (flips PROVISION.md's "not yet
-       playbook-grade" warning): one complete agent-driven `minimal`-profile
-       install on a clean Linux machine **with sudo** (the no-sudo WSL used
-       for L1 does not qualify), ending in the film→render→transcribe
-       verification and the `standard`-profile forge smokes.
-       [linux-ready-plan.md](linux-ready-plan.md) §L4.
-2. [ ] **Full render-format matrix on Linux CI**: extend the `linux-render`
+1. [ ] **Full render-format matrix on Linux CI**: extend the `linux-render`
        job beyond `real-chromium.test.js` to every output format (H.264,
        VP9/alpha, GIF, ProRes, PNG-seq), parallel workers, cancellation.
-3. [ ] **Three Slice-0 design decisions** — make once, inside the
+2. [ ] **Three Slice-0 design decisions** — make once, inside the
        [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md), not
        ad-hoc: Linux default speech vendor (zero-byte per-platform `system`
        backend vs. documented-Piper); SoundFont on a clean clone (no fresh
        clone can synthesize music on any OS today); font determinism for
        Linux rendering (pin a pack vs. record the environment in metadata).
-4. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
+3. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
        its §10 decisions are unmade; the Linux work added extra motivation
        (the pack mechanism replaces several hand-rolled provisioning steps).
-5. [ ] **Product backlog P0 items** from
+4. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect
        deliverable variants. Then the three queued plans, audio-cue first
@@ -68,14 +62,20 @@ Active plan documents:
       second JSON parser beside whisper.cpp's `-ojf` shape, CPU-only on
       Apple Silicon. Adoption trigger: a customer needing GPU-speed
       transcription of hours-long footage.
-- [ ] **macOS, then ARM64** (Windows-on-ARM Spark boxes, Linux ARM) — after
-      x64 Linux passes L4; most work transfers.
+- [ ] **macOS, then ARM64** (Windows-on-ARM Spark boxes, Linux ARM) — x64
+      Linux passed L4 on 2026-08-04, so these are unblocked; schedule when a
+      macOS/ARM customer appears. Most Linux work transfers.
 - [ ] **GitHub Actions Node-20 deprecation** — bump `actions/checkout` and
       `actions/setup-node` majors in `ci.yml`. Cosmetic until it breaks.
 - [ ] **CI badge in README.md.**
 
 ## Recently completed (context — details in [completed.md](completed.md))
 
+- 2026-08-04 — **Linux L4 acceptance PASSED** on a fresh Ubuntu 24.04 WSL2
+  distro: agent-driven provisioning, full film over MCP (speech + music +
+  SFX + Chromium renders + promoted build), whisper transcribe-back, forge
+  smokes via distro FluidSynth. PROVISION.md now says **supported**; the
+  acceptance script lives on as `engine/test/smoke-mcp-film.mjs`.
 - 2026-08-04 — CI green end to end on both platforms (run #6): suite ×2,
   real-Chromium render with skips-are-failures, piper→whisper round-trip.
   Linux L0–L3 done; per-OS entry emit shipped; docs/plans consolidation.
