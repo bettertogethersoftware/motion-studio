@@ -60,6 +60,19 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Doctor and get_capabilities report capability tiers (v0.26)
+
+Phase 0.5's goal 10, implemented as `core/tiers.js`: every capability
+reports its tier — **core** (render, sfx), **free-local** (system speech,
+node music), **pack** (whisper transcription), **byok** (cloud vendors) —
+with `ready` computed from existence-level checks only (no process spawned;
+the deep probes stay behind `list_vendors`) and, when not ready, the exact
+per-OS fix command: `npm run fetch-soundfont` for a missing SoundFont, the
+whisper.cpp build-or-download recipe per platform, the browser install
+hint. `npm run doctor` and `get_capabilities` both carry the block; cloud
+keys are reported as presence booleans only, with a test pinning that a key
+*value* can never appear in the report.
+
 ### The `system` speech vendor works on every OS, at zero bytes (v0.26)
 
 The decided §10 design, implemented: the vendor id stays `system` and the

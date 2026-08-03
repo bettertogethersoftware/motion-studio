@@ -87,6 +87,7 @@ import {
   preflightFrameList, MAX_PREVIEW_FRAMES, normalizeProxy, proxyOutputPath,
 } from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
+import { capabilityTiers } from '../core/tiers.js';
 import {
   readSettings, resolveFfmpegPath, resolveFfprobePath, withNewSceneDefaults, outputSeedFromSettings,
   DEFAULT_SETTINGS,
@@ -3039,6 +3040,10 @@ server.registerTool(
         music: { configured: settings?.music?.vendor ?? 'node', available: MUSIC_VENDORS },
         transcription: { configured: settings?.transcription?.vendor ?? 'whisper-cpp', available: TRANSCRIPTION_VENDORS },
       },
+      // Capability tiers (Slice 0): core / free-local / pack / byok, with the
+      // per-OS fix command when a capability is not ready. Existence-level
+      // checks only — the deep probes stay behind list_vendors.
+      tiers: await capabilityTiers().catch((e) => ({ error: e.message })),
       productionLoop: {
         advice: 'check_human_advice / acknowledge_human_advice / begin_advice_work / resolve_human_advice / list_human_advice',
         revisions: 'every promoted full-scene render is archived immutably; list_scene_revisions / use_scene_revision',

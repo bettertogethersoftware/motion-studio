@@ -30,10 +30,14 @@ Active plan documents:
        pack contents, workspace split, Studio's future, injection seam,
        distribution shape) still gate Slice A.
 2. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
-       the three decisions above unblock it; the injection-seam and
-       distribution-shape decisions (§10.6–7) are needed before Slice A,
-       not Slice 0. The Linux work added extra motivation (the pack
-       mechanism replaces several hand-rolled provisioning steps).
+       **mostly done 2026-08-04**: headless-shell-only browser (−420 MB per
+       install) with `MOTION_STUDIO_CHROME` and sidecar recording;
+       `npm run fetch-soundfont` (the pack-mechanism pilot); the zero-byte
+       per-platform `system` speech backend; capability-tier reporting in
+       doctor + `get_capabilities`. Remaining from Phase 0.5: the
+       FFmpeg *fetched-pack* chain (resolution chain already exists) and
+       treating the pinned browser itself as a pack. The injection-seam and
+       distribution-shape decisions (§10.6–7) gate Slice A, not this.
 3. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect

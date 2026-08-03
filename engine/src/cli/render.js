@@ -101,9 +101,13 @@ async function main() {
   const { path: ffmpegPath, source: ffmpegSource } = await resolveFfmpegPath({ override: args.ffmpeg });
   if (args.doctor) {
     const prereqs = await checkPrerequisites({ ffmpegPath });
+    // Capability tiers (Slice 0): which capability sits in which tier and,
+    // when it is not ready, the exact command that fixes it on this OS.
+    const { capabilityTiers } = await import('../core/tiers.js');
+    const tiers = await capabilityTiers({ ffmpegReady: !!prereqs.ffmpeg?.meetsMinimum }).catch((e) => ({ error: e.message }));
     process.stdout.write(
       JSON.stringify(
-        { ...prereqs, ffmpeg: { ...prereqs.ffmpeg, effectivePath: ffmpegPath, source: ffmpegSource } },
+        { ...prereqs, ffmpeg: { ...prereqs.ffmpeg, effectivePath: ffmpegPath, source: ffmpegSource }, tiers },
         null,
         2,
       ) + '\n',
