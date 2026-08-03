@@ -60,6 +60,25 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Both entrypoints build their vendor runtime from the registry (v0.26)
+
+Slice A-5/A-6: `engine/src/vendors/default/registry.js` is the composition
+point — all three capability dispatches over their default catalogs, with
+per-capability overrides (the §10.6 seam, tested by injecting a fake vendor
+through the real dispatch). The MCP server and the Studio both construct
+that runtime at startup, **dynamically and failure-tolerantly** (Phase 4's
+hard rule): a core-only install with no vendors/default tree still
+initializes MCP, renders video, serves every non-audio page and tool — the
+audio surfaces return structured `*_unavailable` errors naming the cause
+instead of the process dying with ERR_MODULE_NOT_FOUND. Both entrypoints
+consume the SAME runtime shape so they cannot drift; the dispatch functions
+keep their historical local names, so every tool handler and route is
+unchanged. Vendor id lists import from settings.js; the Studio's display
+constants (env hooks, format enums, GM programs) import from the provider
+modules where they live until Phase 2 moves them. The real core-only
+integration test lands with Phase 2's packaging split, where a genuine
+core-only artifact exists to test.
+
 ### All three vendor dispatchers are catalog-driven (v0.26)
 
 Slice A-4 complete: music (`createMusicDispatch`) and transcription

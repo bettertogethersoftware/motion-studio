@@ -63,8 +63,13 @@ Active plan documents:
       per-capability catalog overrides (the §10.6 seam, tested with a fake
       vendor injected through the real dispatch). Phase 2 moves the
       catalogs into its tree.
-- [ ] A-6: thread the runtime through the MCP and Studio entrypoints
-      (~15 vendor symbols each); Phase 2 file moves follow.
+- [x] A-6: both entrypoints build the runtime from the registry
+      (2026-08-04), dynamically and failure-tolerantly per Phase 4; local
+      names preserved so no handler changed. **Phase 1 of Slice A is
+      complete.** Next: Phase 2 file moves (catalogs + providers into
+      vendors/default/, spessasynth to the vendor package), the core-only
+      integration test, and the settings-schema injection that finishes
+      the catalog story.
 
 ## Engineering backlog (carried from the retired prioritized todo)
 

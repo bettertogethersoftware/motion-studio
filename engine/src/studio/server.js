@@ -111,17 +111,60 @@ import {
 import {
   resolvePaths, updateLocations, ensureStableDataDir, PATH_KEYS, PATH_ENV, APP_DATA_DIR,
 } from '../core/paths.js';
-import {
-  speechVendorReport, listSpeechVoices, synthesizeWithVendor, TTS_VENDORS, AZURE_ENV, AZURE_WAV_FORMATS,
-  ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS, OPENAI_ENV, DEEPGRAM_ENV,
+import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
+import { AZURE_ENV, AZURE_WAV_FORMATS } from '../core/tts-azure.js';
+import { ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS } from '../core/tts-elevenlabs.js';
+import { OPENAI_ENV } from '../core/tts-openai.js';
+import { DEEPGRAM_ENV } from '../core/tts-deepgram.js';
+import { WHISPER_ENV, MODEL_PREFERENCE } from '../core/transcribe-whisper.js';
+import { demoSpec, GM_PROGRAMS } from '../core/music-vendors.js';
+
+/* ------------------------------------------------------------------ */
+/* The vendor runtime (Slice A-6b) — the Studio is a compatibility     */
+/* consumer of the SAME injected runtime the MCP entrypoint builds     */
+/* (vendor-boundary plan Phase 4), so the two can never drift apart.   */
+/* Same dynamic, failure-tolerant construction: a core-only install    */
+/* still serves every non-audio page; the vendor pages report the      */
+/* structured unavailable error instead of the server failing to load. */
+/* Historical local names keep every route handler unchanged.          */
+/* ------------------------------------------------------------------ */
+
+let vendorRuntime = null;
+let vendorRuntimeError = null;
+try {
+  const { createDefaultRuntime } = await import('../vendors/default/registry.js');
+  vendorRuntime = createDefaultRuntime();
+} catch (e) {
+  vendorRuntimeError = e;
+}
+
+const missingRuntime = (capability, code) => async () => {
+  throw new EngineError(
+    code,
+    `The ${capability} vendor runtime is not installed (the default vendor package could not be loaded: ` +
+    `${vendorRuntimeError?.message ?? 'vendors/default/registry.js not found'}).`,
+    { capability, cause: vendorRuntimeError?.message },
+  );
+};
+
+const {
+  speechVendorReport, listSpeechVoices, synthesizeWithVendor,
   resolveSpeechVendor, checkSpeechVendor, unavailableWithAlternatives,
-} from '../core/tts-vendors.js';
-import {
-  musicVendorReport, synthesizeMusicWithVendor, demoSpec, MUSIC_VENDORS, GM_PROGRAMS,
-} from '../core/music-vendors.js';
-import {
-  transcriptionVendorReport, TRANSCRIPTION_VENDORS, WHISPER_ENV, MODEL_PREFERENCE,
-} from '../core/transcribe-vendors.js';
+} = vendorRuntime?.speech ?? {
+  speechVendorReport: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  listSpeechVoices: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  synthesizeWithVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  resolveSpeechVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  checkSpeechVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  unavailableWithAlternatives: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+};
+const { musicVendorReport, synthesizeMusicWithVendor } = vendorRuntime?.music ?? {
+  musicVendorReport: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+  synthesizeMusicWithVendor: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+};
+const { transcriptionVendorReport } = vendorRuntime?.transcription ?? {
+  transcriptionVendorReport: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
+};
 import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
 import { maskKey } from '../core/tts-azure.js';
 import { PIPER_ENV } from '../core/tts-piper.js';
