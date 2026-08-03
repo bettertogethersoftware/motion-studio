@@ -33,11 +33,26 @@ jobs:
       # apt-get on ubuntu-latest is unreliable: run #1 crawled through mirror
       # downloads for 30 minutes until the job timeout cancelled it. The
       # static build is one fast fetch and needs no sudo.
+      - name: Cache static FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-static
+          key: ffmpeg-static-amd64-release
+
+      # Retries + cache because the static-build mirror flaked on one of
+      # three concurrent fetches in run #4; after one warm run nothing
+      # downloads at all.
       - name: Install FFmpeg (static build)
         working-directory: .
         run: |
-          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
+          set -euo pipefail
+          if [ ! -x "$HOME/ffmpeg-static/ffmpeg" ]; then
+            mkdir -p "$HOME/ffmpeg-static"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+              | tar -xJ -C "$HOME/ffmpeg-static" --strip-components=1
+          fi
+          echo "$HOME/ffmpeg-static" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
@@ -73,11 +88,26 @@ jobs:
           path: ~/.cache/puppeteer
           key: puppeteer-${{ runner.os }}-${{ hashFiles('engine/package-lock.json') }}
 
+      - name: Cache static FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-static
+          key: ffmpeg-static-amd64-release
+
+      # Retries + cache because the static-build mirror flaked on one of
+      # three concurrent fetches in run #4; after one warm run nothing
+      # downloads at all.
       - name: Install FFmpeg (static build)
         working-directory: .
         run: |
-          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
+          set -euo pipefail
+          if [ ! -x "$HOME/ffmpeg-static/ffmpeg" ]; then
+            mkdir -p "$HOME/ffmpeg-static"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+              | tar -xJ -C "$HOME/ffmpeg-static" --strip-components=1
+          fi
+          echo "$HOME/ffmpeg-static" >> "$GITHUB_PATH"
 
       - name: Install dependencies (with browser download)
         run: npm ci --no-audit --no-fund
@@ -113,11 +143,26 @@ jobs:
           cache: npm
           cache-dependency-path: engine/package-lock.json
 
+      - name: Cache static FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-static
+          key: ffmpeg-static-amd64-release
+
+      # Retries + cache because the static-build mirror flaked on one of
+      # three concurrent fetches in run #4; after one warm run nothing
+      # downloads at all.
       - name: Install FFmpeg (static build)
         working-directory: .
         run: |
-          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
+          set -euo pipefail
+          if [ ! -x "$HOME/ffmpeg-static/ffmpeg" ]; then
+            mkdir -p "$HOME/ffmpeg-static"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+              | tar -xJ -C "$HOME/ffmpeg-static" --strip-components=1
+          fi
+          echo "$HOME/ffmpeg-static" >> "$GITHUB_PATH"
 
       - name: Cache whisper build and piper voice
         uses: actions/cache@v4
