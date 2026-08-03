@@ -60,6 +60,29 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Slice 0 begins: the vanilla install loses 420 MB of browser (v0.26)
+
+- **Only `chrome-headless-shell` is downloaded** (`engine/.puppeteerrc.cjs`):
+  `core/browser.js` only ever runs headless, so full Chrome was ~420 MB of
+  dead weight per install — the vanilla footprint issue reproduced on every
+  clean machine this week. The launch default is now the shell binary;
+  `MOTION_STUDIO_CHROME` points at an installed Chrome/Edge instead (custom
+  binaries run in the new headless mode, since current full builds no longer
+  ship the old one). Verified: full suite + real-Chromium (3/3, zero skips)
+  on Windows, real-Chromium + the whole render-format matrix on Linux — the
+  determinism and alpha tests pass identically under the shell binary.
+- **The render sidecar records the browser** (architecture §7.3): an
+  `environment` block with resolution source, headless mode, and build
+  string (e.g. `HeadlessChrome/131.0.6778.204`) — the font/browser
+  provenance decision's first half, deliberately outside the staleness
+  allowlist.
+- **Found while validating on the engine's Node floor:** the test suite
+  cannot run on Node 18 at all — `node --test` there rejects the glob and,
+  given explicit file lists, spawns all 41 test files as concurrent
+  children (no concurrency cap before Node 21) and dies. Policy recorded:
+  **runtime floor stays Node ≥18** (the L4 install proved it end to end);
+  **developing/testing needs Node ≥21**. CI runs 22.
+
 ### Three Slice-0 design decisions taken (v0.26)
 
 Recorded in the vendor-boundary plan §10 with rationale, so they are not

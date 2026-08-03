@@ -25,6 +25,7 @@ import { EngineError, ErrorCodes } from './errors.js';
 import { getFormat, outputColorProfile } from './formats.js';
 import { concatSegments, muxAudio, measureAudioLevels } from './encoder.js';
 import { outputIdentity, outputIdentityMatches } from './delivery.js';
+import { describeBrowserResolution, lastBrowserBuild } from './browser.js';
 
 /** Peak (dBFS) at or above which the mix is reported as clipping. */
 const CLIPPING_DBFS = -0.1;
@@ -150,9 +151,21 @@ function metaFromConfig(cfg, frames) {
  */
 export async function writeRenderMeta({ scenePath, config, frames, outputPath = sceneOutputPath(scenePath, config) }) {
   const identity = outputIdentity(outputPath);
+  // Which browser rendered these pixels (Slice 0). Same-machine determinism
+  // is the contract; this field is what makes a cross-machine or
+  // post-browser-upgrade difference diagnosable instead of mysterious. The
+  // build string is best-effort (null under the fake test browser and in the
+  // parallel parent, which never launches one); the resolution facts are
+  // recorded unconditionally. Not part of renderStaleness's allowlist on
+  // purpose — a browser upgrade must not mark every existing render stale.
+  const environment = {
+    ...describeBrowserResolution(),
+    build: lastBrowserBuild(),
+  };
   const body = {
     ...metaFromConfig(config, frames),
     renderedAt: new Date().toISOString(),
+    environment,
     // This is deliberately captured only after the output is promoted.  The
     // config alone cannot distinguish a new partial file from the prior render
     // at identical settings; bytes + mtime catches the common crash window

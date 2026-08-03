@@ -83,8 +83,35 @@ export function formatPageDiagnostics({ pageErrors = [], failedRequests = [] } =
   return parts.length ? '\n' + parts.join('\n') : '';
 }
 
+/**
+ * How the browser binary is chosen (Slice 0): explicit argument →
+ * MOTION_STUDIO_CHROME → the bundled chrome-headless-shell, which is the only
+ * browser a vanilla install downloads (.puppeteerrc.cjs skips full Chrome).
+ * A custom binary is a full Chrome/Edge and runs in the new headless mode —
+ * current full builds no longer ship the old headless the shell implements.
+ * Pure and synchronous so the parallel-render parent can record the same
+ * facts in the sidecar without launching anything.
+ */
+export function describeBrowserResolution({ executablePath = undefined, env = process.env } = {}) {
+  const custom = executablePath ?? env.MOTION_STUDIO_CHROME ?? undefined;
+  return {
+    executablePath: custom ?? null, // null = puppeteer's bundled headless shell
+    source: executablePath ? 'argument' : (env.MOTION_STUDIO_CHROME ? 'MOTION_STUDIO_CHROME' : 'bundled'),
+    headlessMode: custom ? 'new' : 'shell',
+  };
+}
+
+/**
+ * The build string of the most recently launched browser in THIS process
+ * ("HeadlessChrome/131.0.6778.204"). Best-effort sidecar enrichment: the
+ * parallel-render parent never launches a browser, so it stays null there
+ * and the sidecar records the resolution facts without a build string.
+ */
+let lastLaunchedBuild = null;
+export const lastBrowserBuild = () => lastLaunchedBuild;
+
 export async function createPuppeteerBrowser({
-  headless = true,
+  headless = undefined,
   executablePath = undefined,
   frameTimeoutMs = DEFAULT_FRAME_TIMEOUT_MS,
 } = {}) {
@@ -95,11 +122,12 @@ export async function createPuppeteerBrowser({
     throw new EngineError(ErrorCodes.BROWSER_LAUNCH_FAILED, `puppeteer is not installed: ${e.message}`);
   }
 
+  const resolution = describeBrowserResolution({ executablePath });
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless,
-      executablePath,
+      headless: headless ?? (resolution.headlessMode === 'shell' ? 'shell' : true),
+      executablePath: resolution.executablePath ?? undefined,
       args: [
         '--no-sandbox',                    // required in many locked-down/user-profile installs
         '--disable-dev-shm-usage',
@@ -118,12 +146,16 @@ export async function createPuppeteerBrowser({
     throw new EngineError(
       ErrorCodes.BROWSER_LAUNCH_FAILED,
       `Failed to launch Chromium via Puppeteer: ${e.message}. ` +
-        `If this is a fresh install, run "npm install" in the engine folder so Puppeteer downloads its browser.`,
+        'If this is a fresh install, run "npm install" in the engine folder so Puppeteer downloads ' +
+        'chrome-headless-shell — or point MOTION_STUDIO_CHROME at an installed Chrome/Edge binary.',
     );
   }
 
+  lastLaunchedBuild = await browser.version().catch(() => null);
+
   return {
     pid: browser.process()?.pid ?? null,
+    buildInfo: { ...resolution, build: lastLaunchedBuild },
 
     async openPage({ url, width, height, transparent = false, contentScale = null }) {
       const page = await browser.newPage();

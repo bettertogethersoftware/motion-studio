@@ -27,14 +27,19 @@ let tmp, haveBrowser = false, haveFfmpeg = true;
 before(async () => {
   tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-real-'));
   try { await execFileP('ffmpeg', ['-version']); } catch { haveFfmpeg = false; }
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH || process.env.MOTION_STUDIO_CHROME) {
     haveBrowser = true;
   } else {
     try {
       const puppeteer = (await import('puppeteer')).default;
       // executablePath() returns a path even when nothing is installed there.
-      const p = puppeteer.executablePath();
-      haveBrowser = !!p && (await fsp.access(p).then(() => true, () => false));
+      // Vanilla installs only download chrome-headless-shell (Slice 0 —
+      // .puppeteerrc.cjs), so check it first; a pre-Slice-0 cache still has
+      // full Chrome, so accept that too.
+      const exists = (p) => !!p && fsp.access(p).then(() => true, () => false);
+      const shell = await exists((() => { try { return puppeteer.executablePath({ headless: 'shell' }); } catch { return null; } })());
+      const chrome = await exists((() => { try { return puppeteer.executablePath(); } catch { return null; } })());
+      haveBrowser = shell || chrome;
     } catch { haveBrowser = false; }
   }
 });

@@ -350,7 +350,15 @@ replaces it for that build. A blocked promotion keeps the old delivery intact
 and retains all staged evidence for inspection; the Studio build panel reads
 that saved report and overlays its frame diagnostics on the contact sheet.
 
-### 7.3 The render sidecar (v0.21)
+### 7.3 The render sidecar (v0.21; `environment` since v0.26)
+
+Since v0.26 the sidecar also records which browser produced the pixels — an
+`environment` block with the binary's resolution (`bundled` headless shell vs
+`MOTION_STUDIO_CHROME`), the headless mode, and the build string when the
+writing process launched the browser itself. Deliberately outside the
+staleness allowlist: a browser upgrade must not mark every existing render
+stale; the field exists so a cross-machine or post-upgrade visual difference
+is diagnosable, not to invalidate work.
 
 §7.2 verifies a file against **what was just rendered**. It cannot verify it
 against **what the scene says now** — and a config edit after a render is the
