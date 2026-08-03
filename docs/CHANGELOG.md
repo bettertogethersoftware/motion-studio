@@ -60,6 +60,22 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Slice A begins: core/audio.js (v0.26)
+
+The vendor-boundary plan's Phase 1 opener: the generic PCM WAV and
+audio-measurement utilities — RIFF parsing, duration, frame conversion,
+sentence splitting, concatenation with placed-segment timings, PCM→WAV
+wrapping, level and envelope measurement — moved out of `core/tts.js` into
+**`core/audio.js`**, exactly the §5 target layout. They were never
+speech-specific: the renderer, SFX, music, transcription, and every speech
+vendor consume them. All ten in-tree importers (both entrypoints, five cloud
+vendors, renderer, transcribe, music-vendors) now import from `audio.js`
+directly; `tts.js` keeps compatibility re-exports so external/test importers
+are untouched, and shrinks from 450 lines to ~210 — what remains is actually
+the `system` speech vendor. Error codes deliberately unchanged
+(`TTS_FAILED` stays; renaming codes is not this extraction's job). Suite
+green at both steps: after the split, and after the repointing.
+
 ### The last §10 decisions, whisper turns optional, and the Studio can bind beyond loopback (v0.26)
 
 - **Vendor-boundary §10.2/6/7 decided** (recorded in the plan with

@@ -98,7 +98,7 @@ import { ADDON_IDS } from '../core/libraries.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
-} from '../core/tts.js';
+} from '../core/audio.js';
 import {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport,
   unavailableWithAlternatives, TTS_VENDORS,

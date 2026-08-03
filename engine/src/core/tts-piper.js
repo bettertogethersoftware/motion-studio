@@ -45,7 +45,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
-import { parseWavHeader } from './tts.js';
+import { parseWavHeader } from './audio.js';
 import { vendorDir } from './paths.js';
 
 const STDERR_TAIL_LINES = 40;

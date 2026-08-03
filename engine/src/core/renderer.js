@@ -59,7 +59,7 @@ import { FfmpegFrameSink, encodePngSequence, concatSegments, muxAudio, transcode
 import {
   measureRenderedPicture, createDeliveryReview, assertReviewAllowsPromotion, resolveReviewPolicy,
 } from './render-review.js';
-import { measureWavLevels, wavDurationSeconds } from './tts.js';
+import { measureWavLevels, wavDurationSeconds } from './audio.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
 import { sceneOutputPath, writeRenderMeta } from './film.js';

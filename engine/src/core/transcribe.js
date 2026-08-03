@@ -52,7 +52,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { EngineError, ErrorCodes } from './errors.js';
-import { framesForDuration } from './tts.js';
+import { framesForDuration } from './audio.js';
 import { runFfmpeg } from './encoder.js';
 import { defaultDataDir } from './scene.js';
 import {

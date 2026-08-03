@@ -127,7 +127,7 @@ import { maskKey } from '../core/tts-azure.js';
 import { PIPER_ENV } from '../core/tts-piper.js';
 import {
   parseWavHeader, wavDurationSeconds, framesForDuration, measureWavLevels, splitSentences, concatWavBuffers,
-} from '../core/tts.js';
+} from '../core/audio.js';
 import { JobManager, RENDER_LANE, TASK_LANE } from '../core/jobs.js';
 import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
