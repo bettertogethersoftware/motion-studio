@@ -30,8 +30,9 @@ jobs:
           cache: npm
           cache-dependency-path: engine/package-lock.json
 
-      # apt-get on ubuntu-latest can hang on the runner's apt lock (observed:
-      # 28+ minutes in run #1). The static build needs no locks and no sudo.
+      # apt-get on ubuntu-latest is unreliable: run #1 crawled through mirror
+      # downloads for 30 minutes until the job timeout cancelled it. The
+      # static build is one fast fetch and needs no sudo.
       - name: Install FFmpeg (static build)
         working-directory: .
         run: |
@@ -81,8 +82,88 @@ jobs:
       - name: Install dependencies (with browser download)
         run: npm ci --no-audit --no-fund
 
-      - name: Real-Chromium suite
-        run: node --test test/real-chromium.test.js
+      # Green must mean "ran", not "skipped": the suite skips honestly when
+      # no browser resolves, and node --test exits 0 on skips, so a broken
+      # browser install would otherwise pass silently.
+      - name: Real-Chromium suite (skips are failures here)
+        run: |
+          set -euo pipefail
+          node --test test/real-chromium.test.js 2>&1 | tee /tmp/chromium.log
+          grep -qx '# skipped 0' /tmp/chromium.log
+          grep -qx '# fail 0' /tmp/chromium.log
+
+  # Real-vendor speech→transcription round-trip (linux-ready-plan L1): piper
+  # speaks, whisper.cpp (built here, statically, cached) transcribes, the
+  # words must come back. The suite itself fakes both vendors on purpose.
+  linux-speech:
+    name: Linux speech→transcribe round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Install FFmpeg (static build)
+        working-directory: .
+        run: |
+          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
+
+      - name: Cache whisper build and piper voice
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/whisper-dist
+            ~/piper-voices
+          key: whisper-base-en-piper-lessac-v1
+
+      - name: Build whisper.cpp, fetch model and voice (cache miss only)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/whisper-dist/whisper-cli" ]; then
+            git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$RUNNER_TEMP/whisper.cpp"
+            cmake -S "$RUNNER_TEMP/whisper.cpp" -B "$RUNNER_TEMP/whisper.cpp/build" \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+            cmake --build "$RUNNER_TEMP/whisper.cpp/build" -j"$(nproc)" --target whisper-cli
+            mkdir -p "$HOME/whisper-dist"
+            cp "$RUNNER_TEMP/whisper.cpp/build/bin/whisper-cli" "$HOME/whisper-dist/"
+            curl -fsSL -o "$HOME/whisper-dist/ggml-base.en.bin" \
+              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+          fi
+          if [ ! -f "$HOME/piper-voices/en_US-lessac-medium.onnx" ]; then
+            mkdir -p "$HOME/piper-voices"
+            curl -fsSL -o "$HOME/piper-voices/en_US-lessac-medium.onnx" \
+              https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+            curl -fsSL -o "$HOME/piper-voices/en_US-lessac-medium.onnx.json" \
+              https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+          fi
+
+      - name: Install piper (pip package)
+        working-directory: .
+        run: pipx install piper-tts
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Round-trip
+        run: |
+          set -euo pipefail
+          export MOTION_STUDIO_PIPER_EXE="$HOME/.local/bin/piper"
+          export MOTION_STUDIO_PIPER_VOICES="$HOME/piper-voices"
+          export MOTION_STUDIO_WHISPER_BIN="$HOME/whisper-dist/whisper-cli"
+          export MOTION_STUDIO_WHISPER_MODEL="$HOME/whisper-dist/ggml-base.en.bin"
+          node test/smoke-speech-roundtrip.mjs
 
   windows:
     name: Windows (windows-latest)

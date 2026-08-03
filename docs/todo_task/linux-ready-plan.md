@@ -71,18 +71,25 @@ Verified starting points (2026-08-04):
       PCM WAV, measured peak −16.87 dBFS. Still open: SoundFont on a clean
       clone (fetch/ship — vendor-boundary Phase 0.5), and pointing the
       `fluidsynth` vendor at a distro binary via settings.
-- [ ] Transcription: document getting whisper.cpp on Linux (distro package
-      or build), verify resolver and model paths, run `transcribe_asset`
-      against a known fixture. *Blocked in the local WSL environment (no
-      compiler, no sudo) — verify via CI or a full Linux box.*
+- [x] Transcription: verified via CI (2026-08-04). The `linux-speech` job
+      builds whisper.cpp statically (cached), fetches `ggml-base.en.bin`, and
+      runs `engine/test/smoke-speech-roundtrip.mjs` — piper speaks a known
+      sentence, `extractSpeechWav` conforms it to 16 kHz, real whisper.cpp
+      transcribes it, and every expected word must survive. The smoke is
+      deliberately outside `npm test` (the suite fakes both vendors); it also
+      runs on any machine with the `MOTION_STUDIO_PIPER_*`/`_WHISPER_*` env
+      hooks set. Incidental extra: run #1's re-run proved distro (apt)
+      FFmpeg 6.x also passes the full suite, alongside the static 7.0.2.
 - [ ] Rendering: verify Puppeteer headless Chromium on Linux for every output
       format (H.264, VP9/alpha, GIF, ProRes, PNG-seq), parallel workers, and
       cancellation. **Fonts are the determinism risk** — a Linux distro's
       font set differs from Windows, so the same composition renders
       different glyphs. Decide: bundle/pin a font pack, or record the font
-      environment in render metadata and document the caveat. *Blocked in
-      the local WSL environment (Chromium system libs need sudo) — a CI job
-      with the Puppeteer download enabled is the natural vehicle.*
+      environment in render metadata and document the caveat. *Partially
+      covered (2026-08-04): CI's `linux-render` job runs the gated
+      `real-chromium.test.js` (launch, screenshot determinism, real alpha)
+      with a skips-are-failures guard, so green provably means "ran". The
+      full per-format render matrix and the font decision remain open.*
 - [x] win32-assumption sweep (2026-08-04): clean. Every `.exe` grep hit
       outside the documented Windows-only vendor modules is a regex
       `.exec(` false positive; the one `process.platform` gate
