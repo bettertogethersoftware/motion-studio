@@ -19,15 +19,21 @@ Active plan documents:
 
 ## Next up (ordered)
 
-1. [ ] **Three Slice-0 design decisions** — make once, inside the
-       [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md), not
-       ad-hoc: Linux default speech vendor (zero-byte per-platform `system`
-       backend vs. documented-Piper); SoundFont on a clean clone (no fresh
-       clone can synthesize music on any OS today); font determinism for
-       Linux rendering (pin a pack vs. record the environment in metadata).
+1. [x] **Three Slice-0 design decisions** — DECIDED 2026-08-04, recorded in
+       the [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md)
+       §10: zero-byte per-platform `system` speech backend as the default
+       (Piper stays the documented upgrade); SoundFont fetch-on-command
+       with SHA-256 as the pack-mechanism pilot (never in git, never
+       fetched silently); fonts recorded in the render sidecar with the
+       `@font-face`-assets policy for cross-machine consistency (optional
+       font pack later). §10's remaining decisions (2–7: shell shape,
+       pack contents, workspace split, Studio's future, injection seam,
+       distribution shape) still gate Slice A.
 2. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
-       its §10 decisions are unmade; the Linux work added extra motivation
-       (the pack mechanism replaces several hand-rolled provisioning steps).
+       the three decisions above unblock it; the injection-seam and
+       distribution-shape decisions (§10.6–7) are needed before Slice A,
+       not Slice 0. The Linux work added extra motivation (the pack
+       mechanism replaces several hand-rolled provisioning steps).
 3. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect

@@ -60,6 +60,21 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Three Slice-0 design decisions taken (v0.26)
+
+Recorded in the vendor-boundary plan §10 with rationale, so they are not
+re-litigated: the cross-platform default speech vendor is the **zero-byte
+per-platform `system` backend** (espeak-ng on Linux; Piper stays the
+documented one-command quality upgrade); the clean-clone SoundFont gap is
+closed by **fetch-on-command with SHA-256** (MuseScore_General.sf3, MIT) as
+the deliberate pilot of the pack-bootstrap mechanism — never committed to
+git, never fetched silently at synthesis time; and font determinism is
+handled by **recording the font environment in the render sidecar** plus
+the policy that cross-machine visual consistency comes from
+`@font-face` composition assets, with an optional font pack later. These
+unblock Slice 0; the injection-seam and distribution-shape decisions
+(§10.6–7) still gate Slice A.
+
 ### The render-format matrix runs in CI (v0.26)
 
 `engine/test/smoke-render-formats.mjs` (new, outside `npm test` like the

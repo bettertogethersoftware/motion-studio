@@ -557,12 +557,41 @@ Additional estimates:
 
 ## 10. Decisions to make before implementation
 
+> **Decided 2026-08-04 (items 1, plus the SoundFont and font questions the
+> linux-ready plan routed here):**
+>
+> 1. **Default speech = the zero-byte per-platform `system` backend**, as
+>    recommended below: keep the vendor id, resolve per platform (bundled
+>    exe → System.Speech → `say` → `espeak-ng`). A default must work on a
+>    clean install with nothing downloaded; Piper (proven end to end on
+>    Linux in the L4 acceptance) stays the documented one-command quality
+>    upgrade, not the default. The `system` vendor's documented
+>    modest-quality/non-deterministic expectations already cover espeak.
+> 2. **SoundFont = fetch-on-command, never fetch-on-synthesize, never in
+>    git.** `synthesize_music` without a SoundFont keeps returning
+>    structured `music_unavailable`, but the fix it names becomes one
+>    command: a `fetch-soundfont` step downloading MuseScore_General.sf3
+>    (MIT) from the canonical mirror with SHA-256 verification into the
+>    vendor dir; provisioning runs it at install. This is deliberately the
+>    **pilot of Phase 3's pack-bootstrap mechanism** — smallest possible
+>    pack, one URL, one hash — so the mechanism exists before the heavier
+>    packs need it.
+> 3. **Fonts = record now, policy over pinning, optional pack later.**
+>    (a) Write the resolved font environment into the render sidecar, the
+>    same way the browser build is recorded. (b) State the contract:
+>    same-machine determinism is guaranteed; cross-machine pixel identity
+>    never was (Chromium builds differ anyway) — cross-machine visual
+>    consistency comes from shipping fonts as composition `@font-face`
+>    assets, the only airtight mechanism. (c) An optional Noto-subset font
+>    pack can ride the pack mechanism later; it is a convenience, not a
+>    correctness requirement.
+
 1. Windows default speech provider for new installations: preserve system
    speech for compatibility, ship one cross-platform local voice pack, or —
    recommended — keep the vendor id "system" and give it zero-byte
    per-platform OS backends (bundled exe → System.Speech → say → espeak-ng),
    so existing settings stay valid and the default works on every OS with
-   nothing downloaded (Phase 0.5).
+   nothing downloaded (Phase 0.5). **Decided: yes, this option — see above.**
 2. Whether the first desktop shell is a hidden process or a tray app.
 3. Which local vendor assets belong in the first default pack, versus optional
    downloads.
