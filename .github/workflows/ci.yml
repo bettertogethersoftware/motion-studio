@@ -194,9 +194,22 @@ jobs:
               https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
           fi
 
+      # Resolve where pipx actually put the console script instead of assuming
+      # ~/.local/bin: the runner image presets PIPX_BIN_DIR (/opt/pipx_bin), so
+      # run #5 pointed MOTION_STUDIO_PIPER_EXE at a path that did not exist and
+      # the round-trip died on spawn ENOENT in under a second. Resolving here
+      # also makes a missing piper fail in *this* step, where the name says so.
       - name: Install piper (pip package)
         working-directory: .
-        run: pipx install piper-tts
+        run: |
+          set -euo pipefail
+          pipx install piper-tts
+          piper_bin="$(command -v piper || true)"
+          if [ -z "$piper_bin" ]; then
+            piper_bin="$(pipx environment --value PIPX_BIN_DIR)/piper"
+          fi
+          test -x "$piper_bin" || { echo "piper console script not found after pipx install"; exit 1; }
+          echo "MOTION_STUDIO_PIPER_EXE=$piper_bin" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
@@ -204,7 +217,7 @@ jobs:
       - name: Round-trip
         run: |
           set -euo pipefail
-          export MOTION_STUDIO_PIPER_EXE="$HOME/.local/bin/piper"
+          # MOTION_STUDIO_PIPER_EXE comes from the install step via GITHUB_ENV.
           export MOTION_STUDIO_PIPER_VOICES="$HOME/piper-voices"
           export MOTION_STUDIO_WHISPER_BIN="$HOME/whisper-dist/whisper-cli"
           export MOTION_STUDIO_WHISPER_MODEL="$HOME/whisper-dist/ggml-base.en.bin"
