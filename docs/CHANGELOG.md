@@ -60,6 +60,38 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The last §10 decisions, whisper turns optional, and the Studio can bind beyond loopback (v0.26)
+
+- **Vendor-boundary §10.2/6/7 decided** (recorded in the plan with
+  rationale): the desktop shell is a **ComfyUI-style viewer host** — an
+  Electron shell managing a local instance and displaying the Studio UI,
+  which amends the earlier "no Studio in the desktop product" stance because
+  the production loop makes the Studio page the human's advice surface;
+  runtime injection is a **constructor parameter with a lazy
+  failure-tolerant default registry** (option B — matches the browserFactory
+  idiom and the construct-with-fakes test style); distribution is
+  **npm-first via GitHub URL install** — tied to repository access, matching
+  the install-on-customer-infrastructure model, with the engine-in-subfolder
+  packaging wrinkle noted for Slice B.
+- **Transcription is now saveable as "not on this machine".** The Studio's
+  vendor page refused to save with nothing ticked — and with exactly one
+  transcription vendor that made whisper effectively mandatory. Unticking
+  now saves `vendors: null` (scalar stays `whisper-cpp` for old readers);
+  the engine keeps reporting `transcription_unavailable` with the fix and
+  picks whisper up the moment the paths point at it. Verified live against
+  a running Studio: untick→save ✓, settings show `vendors: null`,
+  re-tick→save restores exactly.
+- **`MOTION_STUDIO_STUDIO_HOST`** (default `127.0.0.1`): opt-in network bind
+  for the server-hosted deployment where the human views the Studio from
+  another machine. The Studio has no authentication — the comment and
+  PROVISION.md both say trusted network or authenticating reverse proxy
+  only.
+- **Product framing recorded** (PROVISION.md): the no-shell tier is for
+  demos/first impressions; production audio/visuals come from agent-side
+  tools; and using Motion Studio purely as a Remotion-like programmatic
+  renderer (zero vendors) is a supported shape — goal 6 and the `tiers`
+  block already carry it.
+
 ### Doctor and get_capabilities report capability tiers (v0.26)
 
 Phase 0.5's goal 10, implemented as `core/tiers.js`: every capability

@@ -2370,7 +2370,12 @@ $('#btn-vendors-save').addEventListener('click', async () => {
   // An empty chain would leave the capability with nothing to resolve to, and
   // silently substituting a default is exactly the kind of guess this page is
   // supposed to make visible. Refuse, and say which page is wrong.
-  if (!chain.length) {
+  // Transcription is the exception (v0.26): it is an optional capability with
+  // one vendor, so "nothing ticked" is a legitimate machine state — whisper is
+  // often simply not installed. Saving is allowed; the engine reports
+  // transcription_unavailable with the fix, and picks whisper up the moment
+  // the paths on this page (or the MOTION_STUDIO_WHISPER_* env) point at it.
+  if (!chain.length && cap !== 'transcription') {
     setVendorMsg(`tick at least one ${CAP_LABELS[cap].noun} vendor before saving`, true);
     return;
   }
@@ -2382,8 +2387,12 @@ $('#btn-vendors-save').addEventListener('click', async () => {
     if (cap === 'transcription') {
       patch = {
         transcription: {
-          vendor: chain[0],   // chain head, for anything reading the scalar
-          vendors: chain,
+          // The scalar stays a valid vendor name even when nothing is ticked
+          // (settings validation requires it, and old readers expect one);
+          // an unticked page saves vendors: null — "resolve the default, and
+          // report unavailable honestly when it is not installed".
+          vendor: chain[0] ?? 'whisper-cpp',
+          vendors: chain.length ? chain : null,
           whisper: {
             exe: $('#wh-exe').value.trim() || null,
             // "" = the documented preference order picks; a name pins it.

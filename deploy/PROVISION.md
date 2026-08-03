@@ -61,8 +61,12 @@ the verified per-step deltas.
 
 ### No-shell customers (MCP-only, Env A)
 
-When the production agent will have **only MCP** — no shell, often no
-filesystem — the deployment changes shape:
+This is the **demo / first-impression tier** (stated product intent,
+2026-08-04): real production customers run shell-capable agents that
+generate audio/visuals through ComfyUI helpers or AI-written API tools, and
+the built-in tts/music vendors serve scratch work and demos. Size the effort
+accordingly. When the production agent will have **only MCP** — no shell,
+often no filesystem — the deployment changes shape:
 
 - Use the `minimal` profile, and **skip Auto-Editor and ImageMagick**: they
   are agent-side shell tools, and nobody on the machine will run them. FFmpeg
@@ -78,6 +82,17 @@ filesystem — the deployment changes shape:
   SoundFont vendor for music). The customer supplies media by dropping files
   into the workspace `library\`; the agent brings them in with
   `use_shared_asset`.
+
+### Server-hosted Studio: the human views from another machine
+
+Motion Studio can sit on a server (or the customer's main box) with the
+human adviser viewing the Studio UI from elsewhere. The Studio binds
+`127.0.0.1` by default; set `MOTION_STUDIO_STUDIO_HOST` (v0.26, e.g.
+`0.0.0.0`) to opt in to a network bind. **The Studio has no authentication**
+— a non-loopback bind belongs on a trusted network or behind an
+authenticating reverse proxy, never the open internet; record which applies
+in `MACHINE.md`. The planned desktop app (vendor-boundary plan §10.2) is a
+ComfyUI-style shell around this same surface.
 
 ### Remote GPU: ComfyUI as a network server
 

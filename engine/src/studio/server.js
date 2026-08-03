@@ -1661,7 +1661,13 @@ if (isMain) {
     );
   }
   const port = Number(process.env.PORT) || 7345;
-  const host = '127.0.0.1'; // local tool: never expose on the network
+  // Local tool by default: 127.0.0.1 unless the operator opts in. The opt-in
+  // exists for the server-hosted deployment (Motion Studio on one box, the
+  // human adviser viewing the Studio from another) — but the Studio has no
+  // authentication of its own, so a non-loopback bind belongs on a trusted
+  // network or behind an authenticating reverse proxy, never the open
+  // internet. MACHINE.md should record which of those applies.
+  const host = process.env.MOTION_STUDIO_STUDIO_HOST || '127.0.0.1';
   const server = createStudioServer({ browserFactory });
   server.listen(port, host, () => {
     process.stderr.write(`[motion-studio] Studio running at http://${host}:${port}\n`);

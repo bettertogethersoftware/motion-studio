@@ -585,6 +585,37 @@ Additional estimates:
 >    assets, the only airtight mechanism. (c) An optional Noto-subset font
 >    pack can ride the pack mechanism later; it is a convenience, not a
 >    correctness requirement.
+>
+> **Decided 2026-08-04 (items 2, 6, 7):**
+>
+> 4. **§10.2 — the desktop shell is a ComfyUI-style viewer host.** Model it
+>    on ComfyUI's standalone desktop app: an Electron shell that manages a
+>    local Motion Studio instance (launch, lifecycle, cleanup) and displays
+>    the Studio web UI for the human adviser — progress, film pages, advice.
+>    This AMENDS §1/§4's "no human Studio UI in the desktop product": the
+>    product's own production loop makes the Studio page the human's advice
+>    surface, so the desktop app is that surface's window. The AI still
+>    connects over MCP regardless of the shell. The same Studio can also be
+>    served from a headless server and viewed from another machine
+>    (`MOTION_STUDIO_STUDIO_HOST` opt-in bind, v0.26 — trusted networks or an
+>    authenticating reverse proxy only).
+> 5. **§10.6 — runtime injection = constructor parameter (option B)** on the
+>    stores/servers, defaulting to a lazily-imported, failure-tolerant
+>    default registry (the music-node.js pattern, as Phase 4 already
+>    requires). Matches the engine's existing DI idiom (browserFactory,
+>    nodeExecutable), keeps the 871-test construct-with-fakes style working,
+>    and avoids module-global state that in-process Studio tests would trip
+>    over. Threading through every handler (A) was rejected for churn;
+>    setRuntime() (C) for global state.
+> 6. **§10.7 — distribution = npm-first via GitHub URL install**
+>    (`npm install github:bettertogethersoftware/motion-studio`), keeping
+>    distribution tied to repository access — matching the
+>    install-on-customer-infrastructure business model; no public npm
+>    publish, no signing, no installer channel. The Electron host follows
+>    (per §10.2), never leads. Known wrinkle to solve in Slice B: npm
+>    git-installs pack the repo ROOT, and the package lives in `engine/` — a
+>    root package.json wrapper (files/exports pointing into engine, or a
+>    `prepare` script) is required before the URL install works.
 
 1. Windows default speech provider for new installations: preserve system
    speech for compatibility, ship one cross-platform local voice pack, or —
