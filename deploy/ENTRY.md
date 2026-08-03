@@ -315,6 +315,7 @@ Helper families that may be present (non-exhaustive — the inventory in
 |---|---|
 | `comfyui/` | local ComfyUI image generation and editing (plus a paid Wan video partner helper) |
 | `comfyui_music/` | generated soundtrack audio (ACE-Step, Stable Audio 3) |
+| `comfyui_tts/` | authoring-time Kokoro and Qwen3-TTS speech generation through ComfyUI |
 | `comfyui_upscaling/` | Real-HAT GAN video upscaling |
 | `comfyui_video/` | local video generation workflows |
 | `videoforge/` | building a beat-locked cut around long recordings |
@@ -338,12 +339,16 @@ Do not integrate generative helpers as engine vendors, wrap them in MCP tools,
 or call them per-frame; their outputs are authoring-time inputs that require
 an agent's measure-and-regenerate loop before they are usable.
 
-The inverse also holds: **narration goes through the engine, not through an
-external TTS call.** Cloud speech belongs inside as a configured TTS vendor
-(Azure, ElevenLabs, OpenAI, Deepgram — see `docs/tts-setup.md`); generating
-speech agent-side discards `synthesize_speech`'s frame-accurate `timings` and
-forces a `transcribe_asset` round-trip to recover what the engine reports for
-free.
+The inverse also holds for engine-owned narration: **production narration goes
+through the engine, not through an external TTS call.** Cloud speech belongs
+inside as a configured TTS vendor (Azure, ElevenLabs, OpenAI, Deepgram — see
+`docs/tts-setup.md`). An agent-side TTS helper (such as `comfyui_tts/`, when
+installed) is authoring-time speech generation for GPU audition/export; it is
+not an engine vendor, does not run per-frame, and its output must be measured
+and reviewed before being attached as a film asset. Generating speech
+agent-side discards `synthesize_speech`'s frame-accurate `timings` and forces
+a `transcribe_asset` round-trip to recover them — use such a helper only when
+that asset workflow is intentional.
 
 ## Stock images from Pexels
 
