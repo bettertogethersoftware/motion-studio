@@ -99,19 +99,70 @@ import { resolveInTarget } from '../core/sandbox.js';
 import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
 } from '../core/audio.js';
-import {
+import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
+
+/* ------------------------------------------------------------------ */
+/* The vendor runtime (Slice A-6a; vendor-boundary plan Phase 4).      */
+/*                                                                     */
+/* Constructed from the default registry at startup — imported         */
+/* DYNAMICALLY and failure-tolerantly, because a core-only install     */
+/* (no vendors/default tree) must still initialize MCP, render video,  */
+/* and answer every non-audio tool; the audio tools then return the    */
+/* structured *_unavailable errors instead of the process dying with   */
+/* ERR_MODULE_NOT_FOUND before initialize ever runs.                   */
+/* The dispatch functions keep their historical local names so the     */
+/* tool handlers below are unchanged.                                  */
+/* ------------------------------------------------------------------ */
+
+let vendorRuntime = null;
+let vendorRuntimeError = null;
+try {
+  const { createDefaultRuntime } = await import('../vendors/default/registry.js');
+  vendorRuntime = createDefaultRuntime();
+} catch (e) {
+  vendorRuntimeError = e;
+}
+
+const missingRuntime = (capability, code) => async () => {
+  throw new EngineError(
+    code,
+    `The ${capability} vendor runtime is not installed (the default vendor package could not be loaded: ` +
+    `${vendorRuntimeError?.message ?? 'vendors/default/registry.js not found'}). Video rendering and every ` +
+    'non-audio tool are unaffected. This is a setup problem for the user to fix — do not retry blindly.',
+    { capability, cause: vendorRuntimeError?.message },
+  );
+};
+
+const {
   resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport,
-  unavailableWithAlternatives, TTS_VENDORS,
-} from '../core/tts-vendors.js';
-import {
+  unavailableWithAlternatives,
+} = vendorRuntime?.speech ?? {
+  resolveSpeechVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  checkSpeechVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  synthesizeWithVendor: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  listSpeechVoices: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  speechVendorReport: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+  unavailableWithAlternatives: missingRuntime('speech', ErrorCodes.TTS_UNAVAILABLE),
+};
+const {
   resolveMusicVendor, checkMusicVendor, synthesizeMusicWithVendor, musicVendorReport,
-  musicUnavailableWithAlternatives, MUSIC_VENDORS,
-} from '../core/music-vendors.js';
-import {
+  musicUnavailableWithAlternatives,
+} = vendorRuntime?.music ?? {
+  resolveMusicVendor: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+  checkMusicVendor: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+  synthesizeMusicWithVendor: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+  musicVendorReport: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+  musicUnavailableWithAlternatives: missingRuntime('music', ErrorCodes.MUSIC_UNAVAILABLE),
+};
+const {
   resolveTranscriptionVendor, checkTranscriptionVendor, transcriptionVendorReport,
-  unavailableWithAlternatives as transcriptionUnavailableWithAlternatives,
-  TRANSCRIPTION_VENDORS,
-} from '../core/transcribe-vendors.js';
+  unavailableWithAlternatives: transcriptionUnavailableWithAlternatives,
+} = vendorRuntime?.transcription ?? {
+  resolveTranscriptionVendor: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
+  checkTranscriptionVendor: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
+  transcriptionVendorReport: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
+  unavailableWithAlternatives: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
+};
 import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
 import {
   transcodeAsset, transcodeMetaPath, validateTranscode, formatForExtension, MAX_SPANS, MAX_CROSSFADE_MS,
