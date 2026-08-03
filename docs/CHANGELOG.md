@@ -60,6 +60,19 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### All three vendor dispatchers are catalog-driven (v0.26)
+
+Slice A-4 complete: music (`createMusicDispatch`) and transcription
+(`createTranscriptionDispatch`) received the same transform as speech —
+every vendor-specific fact is a catalog entry, every dispatch function is
+generic over the injected catalog, and the module-level exports are bound
+to the default catalogs so no caller changed. A second transcription
+vendor (the parked faster-whisper candidate, for instance) is now a
+catalog entry rather than a code branch. Each rewrite landed
+behavior-identical on the first suite run: 875 tests, 0 fail, three times
+over. Next: the default registry (`vendors/default/registry.js`) and the
+§10.6 constructor threading through the entrypoints.
+
 ### The speech dispatcher is catalog-driven (v0.26)
 
 Slice A-4b: `tts-vendors.js` is now `createSpeechDispatch(catalog)` plus a

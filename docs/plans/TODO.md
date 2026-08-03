@@ -51,11 +51,13 @@ Active plan documents:
 - [x] A-1/A-2: `core/audio.js` extracted from tts.js; all ten in-tree
       importers repointed; compat re-exports keep external imports working.
 - [x] A-3: the import-graph boundary test stands guard before the migration.
-- [ ] A-4 (next): catalog-driven vendor selection — the three `*-vendors.js`
-      dispatchers consume an injected capability catalog instead of
-      hardcoded provider imports; settings validation accepts schemas from
-      the registry and tolerates vendors whose pack is absent. This is the
-      settings-validation redesign the plan says dominates the estimate.
+- [x] A-4: catalog-driven vendor selection (2026-08-04). Settings stopped
+      importing vendor modules (A-4a: structural-only option validation, so
+      a newer build's setting survives an older build — with a drift-guard
+      test); all three dispatchers rewrote to createXDispatch(catalog) +
+      defaultXCatalog() (A-4b/c/d), each landing behavior-identical on the
+      first suite run. The catalogs still live beside the dispatchers;
+      Phase 2 moves them to vendors/default/.
 - [ ] A-5: default registry at `engine/src/vendors/default/registry.js`
       wrapping the existing modules; constructor-injected per §10.6, lazy
       and failure-tolerant.
