@@ -60,6 +60,21 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The speech dispatcher is catalog-driven (v0.26)
+
+Slice A-4b: `tts-vendors.js` is now `createSpeechDispatch(catalog)` plus a
+`defaultSpeechCatalog()`. Every vendor-specific fact — the info card, the
+probe, the one-sentence fix, the synthesis call, and which requested
+options the vendor cannot honour — is one catalog entry; the dispatch
+functions (resolve/check/report/list-voices/synthesize/unavailable) are
+generic over the catalog, and the option-warning policy is data (the
+"deterministic is only supported by piper and elevenlabs" sentence is now
+generated from the catalog rather than hardcoded). The module-level exports
+are the same functions bound to the default catalog, so no caller changed;
+Phase 4 constructs dispatches from the injected registry instead, and
+Phase 2 moves the catalog to vendors/default/. Behavior-identical by test:
+875 tests, 0 fail, first run.
+
 ### Settings validation stops importing vendors (v0.26)
 
 Slice A-4a: `core/settings.js` no longer imports `tts-azure.js` /
