@@ -45,6 +45,22 @@ Active plan documents:
        (smallest, knowledge-shaped, caught a real 1.5–2.7 s sync defect no
        existing check can see).
 
+## Slice A progress (vendor-boundary Phase 1; started 2026-08-04)
+
+- [x] A-1/A-2: `core/audio.js` extracted from tts.js; all ten in-tree
+      importers repointed; compat re-exports keep external imports working.
+- [x] A-3: the import-graph boundary test stands guard before the migration.
+- [ ] A-4 (next): catalog-driven vendor selection — the three `*-vendors.js`
+      dispatchers consume an injected capability catalog instead of
+      hardcoded provider imports; settings validation accepts schemas from
+      the registry and tolerates vendors whose pack is absent. This is the
+      settings-validation redesign the plan says dominates the estimate.
+- [ ] A-5: default registry at `engine/src/vendors/default/registry.js`
+      wrapping the existing modules; constructor-injected per §10.6, lazy
+      and failure-tolerant.
+- [ ] A-6: thread the runtime through the MCP and Studio entrypoints
+      (~15 vendor symbols each); Phase 2 file moves follow.
+
 ## Engineering backlog (carried from the retired prioritized todo)
 
 - [ ] **Release candidate discipline** — package.json still says `0.21.0`

@@ -60,6 +60,15 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The vendor boundary is now enforced, not aspired to (v0.26)
+
+`test/import-graph.test.js` (Phase 6's static check, stood up before the
+migration it guards): nothing under `core/` may import from `vendors/` —
+static, dynamic, or require — and the future `vendors/` tree may only be
+imported from entrypoints. Both assertions pass trivially today; their job
+is to make the Phase 2 file moves unable to regress the dependency
+direction silently.
+
 ### Slice A begins: core/audio.js (v0.26)
 
 The vendor-boundary plan's Phase 1 opener: the generic PCM WAV and
