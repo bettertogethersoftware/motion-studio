@@ -29,6 +29,16 @@ Studio page. Nothing downstream knows which one spoke. If the selected vendor
 isn't configured, those tools return `tts_unavailable` and the rest of the
 engine is unaffected.
 
+## Direct local ComfyUI TTS
+
+For GPU-generated authoring-time narration outside the Motion Studio speech
+vendor contract, use the sibling [comfyui_tts README](../comfyui_tts/README.md).
+It provides direct standard-library wrappers for the installed Kokoro and
+Qwen3-TTS ComfyUI nodes, with live node/model checks, WAV or FLAC output, and
+reproducible generation sidecars. These helpers are not MCP tools and do not
+run during frame rendering; review the generated narration before attaching it
+to a film.
+
 ## Picking a vendor
 
 **In the Studio:** `npm run studio` → **🗣 tts** in the sidebar footer. Vendors sit behind tabs (v0.22, one card at a

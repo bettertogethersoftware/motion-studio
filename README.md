@@ -270,6 +270,8 @@ motion-studio/
 │   └── README.md                  RTX 3080-friendly local video setup + CLI
 ├── comfyui_music/
 │   └── README.md                  local ACE-Step 1.5 instrumental + vocal generation
+├── comfyui_tts/
+│   └── README.md                  local Kokoro + Qwen3-TTS speech generation
 └── docs/
     ├── CHANGELOG.md               decision log + current release notes (read this first)
     ├── architecture.md            system design, formats, queue, sandboxing
