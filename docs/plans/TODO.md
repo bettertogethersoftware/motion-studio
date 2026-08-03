@@ -26,9 +26,10 @@ Active plan documents:
        with SHA-256 as the pack-mechanism pilot (never in git, never
        fetched silently); fonts recorded in the render sidecar with the
        `@font-face`-assets policy for cross-machine consistency (optional
-       font pack later). §10's remaining decisions (2–7: shell shape,
-       pack contents, workspace split, Studio's future, injection seam,
-       distribution shape) still gate Slice A.
+       font pack later). §10.2/6/7 followed on 2026-08-04 (ComfyUI-style
+       desktop viewer, constructor-injected runtime, GitHub-URL install);
+       all seven §10 decisions are now made and Slice A is running — see
+       the progress ledger below.
 2. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
        **mostly done 2026-08-04**: headless-shell-only browser (−420 MB per
        install) with `MOTION_STUDIO_CHROME` and sidecar recording;
@@ -36,8 +37,8 @@ Active plan documents:
        per-platform `system` speech backend; capability-tier reporting in
        doctor + `get_capabilities`. Remaining from Phase 0.5: the
        FFmpeg *fetched-pack* chain (resolution chain already exists) and
-       treating the pinned browser itself as a pack. The injection-seam and
-       distribution-shape decisions (§10.6–7) gate Slice A, not this.
+       treating the pinned browser itself as a pack — both consumers of the
+       fetchVerified pack mechanism.
 3. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect
