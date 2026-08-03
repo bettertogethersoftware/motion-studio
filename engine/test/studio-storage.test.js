@@ -69,7 +69,7 @@ test('studio: the settings report describes each storage location', async () => 
   const { status, data } = await j('/api/settings');
   assert.equal(status, 200);
   const { storage } = data.environment;
-  assert.deepEqual(Object.keys(storage.locations), ['dataDir', 'workspacesRoot', 'settingsFile']);
+  assert.deepEqual(Object.keys(storage.locations), ['dataDir', 'workspacesRoot', 'settingsFile', 'vendorDir']);
   assert.equal(storage.locations.dataDir.value, home);
   assert.equal(storage.locations.dataDir.source, 'configured');
   assert.equal(storage.locations.dataDir.editable, true);

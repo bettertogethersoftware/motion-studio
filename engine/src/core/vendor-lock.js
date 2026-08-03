@@ -1,7 +1,7 @@
 /**
  * Vendor provenance for the 3D library builds (v0.13).
  *
- * **engine/vendor/libs is committed** (the only part of engine/vendor that is —
+ * **vendor/libs is committed** (the only part of vendor that is —
  * ~9 MB of immutable third-party JS, three.js MIT and Babylon Apache-2.0). So git
  * already guarantees every clone has identical bytes, and this module is NOT the
  * integrity mechanism for them. It answers the two questions git cannot:
@@ -24,7 +24,7 @@
  * and "what did this scene copy" (libraryBuilds) are different facts once the
  * libraries are ever upgraded.
  *
- * The lockfile lives at engine/vendor.lock.json — outside engine/vendor/, whose
+ * The lockfile lives at vendor.lock.json — outside vendor/, whose
  * *contents* are ignored by default with only libs/ negated back in.
  */
 
@@ -40,7 +40,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** Origin record for the committed vendor/libs builds. */
 export function vendorLockPath() {
-  return process.env.MOTION_STUDIO_VENDOR_LOCK || path.resolve(__dirname, '../../vendor.lock.json');
+  return process.env.MOTION_STUDIO_VENDOR_LOCK || path.resolve(__dirname, '../../../vendor.lock.json');
 }
 
 export const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -78,7 +78,7 @@ export async function writeLock(files) {
   const sorted = {};
   for (const k of Object.keys(files).sort()) sorted[k] = files[k];
   const body = {
-    comment: 'Upstream origin of the committed engine/vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run "node scripts/fetch-libs.mjs --update" to change.',
+    comment: 'Upstream origin of the committed vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run "node scripts/fetch-libs.mjs --update" to change.',
     lockfileVersion: 1,
     files: sorted,
   };

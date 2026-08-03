@@ -12,12 +12,13 @@
 
 <div class="frame" id="frame">
   <aside class="rail">
+    <!-- v0.25: the version/engine status lines moved into the global-settings
+         page head — they cost sidebar height every day and were only read when
+         something was wrong. The prereq banner still surfaces failures. -->
     <header class="brand">
       <span class="brand-mark">▶</span>
       <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
-        <span class="version">v0.20 · deterministic renderer</span>
-        <span id="engine-status" class="rail-status">engine —</span>
       </div>
       <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
@@ -32,11 +33,16 @@
       </div>
     </div>
 
+    <!-- Four buttons share 264px (v0.25): words abbreviated, and icon+word
+         together still painted over the neighbouring button, so the expanded
+         rail shows the word alone and the collapsed rail shows the icon alone
+         (settings is icon-only in both — the gear reads on its own). Full
+         names live in the tooltips. -->
     <footer class="rail-foot">
-      <button id="btn-tts" class="ghost foot-btn" title="tts vendors">🗣<span class="foot-label"> tts</span></button>
-      <button id="btn-music" class="ghost foot-btn" title="music vendors">♫<span class="foot-label"> music</span></button>
-      <button id="btn-transcribe" class="ghost foot-btn" title="transcription vendors — reading speech out of a recording">✎<span class="foot-label"> transcribe</span></button>
-      <button id="btn-settings" class="ghost foot-btn" title="global settings">⚙<span class="foot-label"> settings</span></button>
+      <button id="btn-tts" class="ghost foot-btn" title="tts vendors"><span class="foot-ico">🗣</span><span class="foot-label">tts</span></button>
+      <button id="btn-music" class="ghost foot-btn" title="music vendors"><span class="foot-ico">♫</span><span class="foot-label">music</span></button>
+      <button id="btn-transcribe" class="ghost foot-btn" title="transcription vendors — reading speech out of a recording"><span class="foot-ico">✎</span><span class="foot-label">trans</span></button>
+      <button id="btn-settings" class="ghost foot-btn icon-only" title="global settings"><span class="foot-ico">⚙</span></button>
     </footer>
   </aside>
 
@@ -205,7 +211,7 @@
               <input id="pi-python" placeholder="(only if no exe)" spellcheck="false">
             </label>
             <label>voices folder
-              <input id="pi-voices" placeholder="(engine/vendor/piper/voices)" spellcheck="false">
+              <input id="pi-voices" placeholder="(vendor/piper/voices)" spellcheck="false">
             </label>
           </div>
 
@@ -425,106 +431,134 @@
     <!-- Global settings (v0.22): an inline stage page like the vendor pages,
          not a modal — same header grammar, same close/save placement. -->
     <section id="settings-page" class="vendors-page hidden">
+      <!-- v0.25: save moved up here to match the vendor pages, and the engine
+           status strip (version · engine · ffmpeg) lives in this head now
+           instead of costing permanent sidebar height. Each section below is a
+           .set-card — a bordered, accent-barred panel — so the page scans as
+           blocks instead of one long column of fields. -->
       <header class="page-head">
         <h2>global settings</h2>
         <span class="dim">defaults and paths — for the Studio and every connected agent</span>
         <span class="spacer"></span>
+        <span class="engine-strip mono dim">v0.25 · deterministic renderer · <span id="engine-status">engine —</span></span>
         <span id="settings-msg" class="dim"></span>
+        <button id="btn-settings-save" type="submit" form="settings-form" class="primary">save</button>
         <button id="btn-settings-close" class="ghost">close</button>
       </header>
       <form id="settings-form" autocomplete="off">
-        <p class="section-label">new-scene defaults</p>
-        <div class="fieldrow">
-          <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
-          <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
-          <label>fps <input name="fps" type="number" min="1" max="240"></label>
-          <label>frames <input name="durationInFrames" type="number" min="1"></label>
-        </div>
-        <p class="section-label">new-film platform defaults</p>
-        <div id="settings-deliverable-defaults" class="deliverable-options"></div>
-        <p class="dim note">Optional. These versions are preselected whenever someone creates a film in Studio.
-        Leave all unchecked for a master-only film. AI-created films use the platforms named in the request instead.</p>
-        <p class="section-label">render</p>
-        <div class="fieldrow">
-          <label>default workers
-            <select name="defaultWorkers">
-              <option value="1">1 (serial)</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="6">6</option>
-              <option value="8">8</option>
-              <option value="10">10</option>
-            </select>
-          </label>
-        </div>
-        <div class="fieldrow">
-          <label class="grow">block delivery on
-            <input name="reviewBlock" spellcheck="false" autocapitalize="off" autocorrect="off"
-              placeholder="frame_count_mismatch">
-          </label>
-          <label class="grow">record as warning
-            <input name="reviewWarn" spellcheck="false" autocapitalize="off" autocorrect="off"
-              placeholder="static_run, black_run, suspect_cut">
-          </label>
-        </div>
-        <p class="dim note">Comma-separated delivery-review codes. A block keeps the prior video in place; a
-        warning still ships with a contact sheet and review report. Film-specific policies can override these defaults.</p>
-        <p class="section-label">ffmpeg</p>
-        <div class="path-fields">
-          <label>binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
-        </div>
-        <div class="fieldrow">
-          <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>
-          <label>default preset
-            <select name="ffmpegPreset">
-              <option value="">engine default</option>
-              <option>ultrafast</option><option>superfast</option><option>veryfast</option>
-              <option>faster</option><option>fast</option><option>medium</option>
-              <option>slow</option><option>slower</option><option>veryslow</option>
-            </select>
-          </label>
-          <span id="ffmpeg-probe" class="dim mono probe"></span>
-        </div>
-        <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
-        used for every render and the prereq check; new-scene defaults and crf/preset fill in whatever a new
-        scene (or film) doesn't specify, and an agent that asks for a specific size or codec still gets it.
-        <em>Newly created</em> scenes only — existing scenes keep their own.</p>
+        <section class="set-card">
+          <p class="section-label">new-scene defaults</p>
+          <div class="fieldrow">
+            <label>width <input name="width" type="number" step="2" min="2" max="7680"></label>
+            <label>height <input name="height" type="number" step="2" min="2" max="4320"></label>
+            <label>fps <input name="fps" type="number" min="1" max="240"></label>
+            <label>frames <input name="durationInFrames" type="number" min="1"></label>
+          </div>
+        </section>
+        <section class="set-card">
+          <p class="section-label">new-film platform defaults</p>
+          <div id="settings-deliverable-defaults" class="deliverable-options"></div>
+          <p class="dim note">Optional. These versions are preselected whenever someone creates a film in Studio.
+          Leave all unchecked for a master-only film. AI-created films use the platforms named in the request instead.</p>
+        </section>
+        <section class="set-card">
+          <p class="section-label">render</p>
+          <div class="fieldrow">
+            <label>default workers
+              <select name="defaultWorkers">
+                <option value="1">1 (serial)</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="6">6</option>
+                <option value="8">8</option>
+                <option value="10">10</option>
+              </select>
+            </label>
+          </div>
+          <div class="fieldrow">
+            <label class="grow">block delivery on
+              <input name="reviewBlock" spellcheck="false" autocapitalize="off" autocorrect="off"
+                placeholder="frame_count_mismatch">
+            </label>
+            <label class="grow">record as warning
+              <input name="reviewWarn" spellcheck="false" autocapitalize="off" autocorrect="off"
+                placeholder="static_run, black_run, suspect_cut">
+            </label>
+          </div>
+          <p class="dim note">Comma-separated delivery-review codes. A block keeps the prior video in place; a
+          warning still ships with a contact sheet and review report. Film-specific policies can override these defaults.</p>
+        </section>
+        <section class="set-card">
+          <p class="section-label">ffmpeg</p>
+          <div class="path-fields">
+            <label>binary path <input name="ffmpegPath" placeholder="(use ffmpeg on PATH)" spellcheck="false"></label>
+          </div>
+          <div class="fieldrow">
+            <label>default crf <input name="ffmpegCrf" type="number" min="0" max="63" placeholder="per format"></label>
+            <label>default preset
+              <select name="ffmpegPreset">
+                <option value="">engine default</option>
+                <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+                <option>faster</option><option>fast</option><option>medium</option>
+                <option>slow</option><option>slower</option><option>veryslow</option>
+              </select>
+            </label>
+            <span id="ffmpeg-probe" class="dim mono probe"></span>
+          </div>
+          <p class="dim note">These apply everywhere — the Studio and connected agents alike. The binary path is
+          used for every render and the prereq check; new-scene defaults and crf/preset fill in whatever a new
+          scene (or film) doesn't specify, and an agent that asks for a specific size or codec still gets it.
+          <em>Newly created</em> scenes only — existing scenes keep their own.</p>
+        </section>
 
         <!-- Storage (v0.22): the three locations were read-only here until the
              engine grew somewhere to record them that isn't settings.json —
-             settings.json being one of the three. See core/paths.js. -->
-        <p class="section-label">storage <span class="dim">· where films, scenes and settings live on disk</span></p>
-        <div class="storage-fields" id="storage-fields">
-          <label class="storage-field" data-key="dataDir">
-            <span class="storage-name">data dir</span>
-            <input name="dataDir" spellcheck="false" autocapitalize="off" autocorrect="off">
-            <span class="storage-hint dim mono"></span>
-          </label>
-          <label class="storage-field" data-key="workspacesRoot">
-            <span class="storage-name">workspaces root</span>
-            <input name="workspacesRoot" spellcheck="false" autocapitalize="off" autocorrect="off">
-            <span class="storage-hint dim mono"></span>
-          </label>
-          <label class="storage-field" data-key="settingsFile">
-            <span class="storage-name">settings file</span>
-            <input name="settingsFile" spellcheck="false" autocapitalize="off" autocorrect="off">
-            <span class="storage-hint dim mono"></span>
-          </label>
-        </div>
-        <p class="dim note">Leave a box empty for its default (shown greyed in the box). Relative paths are taken
-        from the Motion Studio folder, so <code>data</code> keeps the install portable. Folders are created on
-        save, and <strong>nothing is moved</strong> — point these at an existing tree, or copy your files across
-        yourself first. The Studio switches over immediately; <em>connected agents keep using the old location
-        until their MCP server is restarted</em>. A field the environment already sets
-        (<code>MOTION_STUDIO_HOME</code>, <code>_WORKSPACES</code>, <code>_SETTINGS</code>) is shown locked —
-        change it where that variable is set.</p>
+             settings.json being one of the three. See core/paths.js.
+             The vendor dir joined them in v0.25: same bootstrap file, same
+             precedence, but it is where bundled runtime assets are RESOLVED
+             from rather than where user data is written. -->
+        <section class="set-card wide">
+          <p class="section-label">storage <span class="dim">· where films, scenes, settings and vendor assets live on disk</span></p>
+          <div class="storage-fields" id="storage-fields">
+            <label class="storage-field" data-key="dataDir">
+              <span class="storage-name">data dir</span>
+              <input name="dataDir" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <span class="storage-hint dim mono"></span>
+            </label>
+            <label class="storage-field" data-key="workspacesRoot">
+              <span class="storage-name">workspaces root</span>
+              <input name="workspacesRoot" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <span class="storage-hint dim mono"></span>
+            </label>
+            <label class="storage-field" data-key="settingsFile">
+              <span class="storage-name">settings file</span>
+              <input name="settingsFile" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <span class="storage-hint dim mono"></span>
+            </label>
+            <label class="storage-field" data-key="vendorDir">
+              <span class="storage-name">vendor dir</span>
+              <input name="vendorDir" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <span class="storage-hint dim mono"></span>
+            </label>
+          </div>
+          <p class="dim note">Leave a box empty for its default (shown greyed in the box). Relative paths are taken
+          from the Motion Studio folder, so <code>data</code> keeps the install portable. Folders are created on
+          save, and <strong>nothing is moved</strong> — point these at an existing tree, or copy your files across
+          yourself first. The Studio switches over immediately; <em>connected agents keep using the old location
+          until their MCP server is restarted</em>. A field the environment already sets
+          (<code>MOTION_STUDIO_HOME</code>, <code>_WORKSPACES</code>, <code>_SETTINGS</code>,
+          <code>_VENDOR_DIR</code>) is shown locked — change it where that variable is set.
+          <strong>vendor dir</strong> is where the bundled speech/music exes, FluidSynth, SoundFonts, Piper
+          voices, Whisper models and the 3D libs are looked up (default: the app's own <code>vendor</code>
+          folder). A per-item override — an exe path set on a vendor card, or an env var like
+          <code>MOTION_STUDIO_SOUNDFONT</code> — still beats it.</p>
+        </section>
 
-        <div class="fieldrow">
-          <button type="submit" class="primary">save</button>
-        </div>
-        <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
-        <dl id="settings-env" class="env-list mono"></dl>
+        <section class="set-card wide">
+          <p class="section-label">environment <span class="dim">(read-only · set via env vars)</span></p>
+          <dl id="settings-env" class="env-list mono"></dl>
+        </section>
       </form>
     </section>
 

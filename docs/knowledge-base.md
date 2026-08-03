@@ -502,7 +502,7 @@ never saw it. Addon notes are now appended to `notes`, attributed as
 that produced it.
 
 **Root cause.** `libraries.js` declared Babylon as `version: 'stable'` fetching
-`https://cdn.babylonjs.com/babylon.js`, and all of `engine/vendor/` was
+`https://cdn.babylonjs.com/babylon.js`, and all of `vendor/` was
 git-ignored. Two independent failures hid in that: **acquisition** (two machines
 fetching at different times get different builds) and **provenance** (a scene
 cannot say what it rendered against, even on one machine).
@@ -515,7 +515,7 @@ the version would have reported "9.18.0" and still handed over a different
 artifact than the one that rendered the space-jump video.
 
 **Fix.** Content addressing, in `core/vendor-lock.js` + a committed
-`engine/vendor.lock.json` — the npm/cargo split of ignored artifacts and a tracked
+`vendor.lock.json` — the npm/cargo split of ignored artifacts and a tracked
 lock. `fetch-libs.mjs` hashes every download, **refuses to overwrite on mismatch**
 (so a failed run cannot half-upgrade the vendor dir), and `--update` is the only
 way to change the lock. `--verify` checks disk against the lock and exits 1 on
@@ -528,7 +528,7 @@ confirmed by re-rendering a frame of the ship — identical. **Verify the
 substitution, don't assume a same-version build is the same build.**
 
 **Then the cheaper fix, chosen afterwards: commit the libraries.** Of the 215 MB
-in `engine/vendor/`, only `libs/` was a sane candidate — ~9 MB of immutable
+in `vendor/`, only `libs/` was a sane candidate — ~9 MB of immutable
 third-party JS (three.js MIT, Babylon Apache-2.0) with no build step. The rest
 stays out: the two 94 MB / 65 MB exes are build artifacts of tracked C# source,
 git keeps every version of a binary forever, and there is no LFS configured. With
@@ -536,10 +536,10 @@ git keeps every version of a binary forever, and there is no LFS configured. Wit
 the jobs git cannot do: recording *where* the bytes came from, and refusing to let
 a `fetch-libs` run silently rewrite committed files.
 
-A `.gitignore` trap worth knowing, verified in a scratch repo: `engine/vendor/`
+A `.gitignore` trap worth knowing, verified in a scratch repo: `vendor/`
 (trailing slash) excludes the directory so git never descends into it, and a
-following `!engine/vendor/libs/` does **nothing**. You must ignore the *contents* —
-`engine/vendor/*` — for the negation to bite.
+following `!vendor/libs/` does **nothing**. You must ignore the *contents* —
+`vendor/*` — for the negation to bite.
 
 **Lesson.** *A version string is a claim; a hash is a fact.* For anything
 git-ignored, record the checkable one — and reconsider whether it needs to be

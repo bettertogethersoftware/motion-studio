@@ -47,10 +47,9 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
+import { vendorDir } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STDERR_TAIL_LINES = 40;
 
 /** Env hooks, in precedence order. Exported so the UI and docs list one truth. */
@@ -62,7 +61,7 @@ export const WHISPER_ENV = Object.freeze({
 });
 
 /** Where models live when nothing says otherwise (git-ignored, like piper's voices). */
-const DEFAULT_MODELS_DIR = path.resolve(__dirname, '../../vendor/whisper/models');
+const defaultModelsDir = () => path.join(vendorDir(), 'whisper', 'models');
 
 /**
  * Which model to use when the machine has several and nobody named one.
@@ -205,7 +204,7 @@ export function resolveWhisper({
     // Set when the configured value was a folder we looked inside — the UI
     // shows it so "I typed a folder and it works" is visible, not magic.
     commandFolder,
-    modelsDir: resolvedDir ?? DEFAULT_MODELS_DIR,
+    modelsDir: resolvedDir ?? defaultModelsDir(),
     modelsDirSource: resolvedDirSource ?? 'bundled',
     model: modelHit.value,
     modelSource: modelHit.source,

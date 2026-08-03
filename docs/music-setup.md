@@ -82,7 +82,7 @@ so `npm install` is the entire setup.
 
 | piece | env var | default |
 |---|---|---|
-| instruments | `MOTION_STUDIO_SOUNDFONT` | `engine/vendor/soundfonts/MuseScore_General.sf3` |
+| instruments | `MOTION_STUDIO_SOUNDFONT` | `vendor/soundfonts/MuseScore_General.sf3` |
 
 Settings (`music.node`) can also carry a `soundfont` path, `sampleRate`
 (default 44100) and `gain`; the environment variable wins over settings, as
@@ -142,13 +142,18 @@ call only; the default is changed on the vendors page.
 ## What the `fluidsynth` vendor needs
 
 Three external pieces, each resolvable by an environment variable, each with a
-git-ignored **vendored default** under `engine/vendor/`:
+git-ignored **vendored default** under `vendor/`:
 
 | piece | env var | vendored default | what it is |
 |---|---|---|---|
-| MIDI author | `MOTION_STUDIO_MIDI_EXE` | `engine/vendor/music/MotionStudioMidi.exe` | the C# exe in `music/MotionStudioMidi` (DryWetMIDI) |
-| synthesizer | `MOTION_STUDIO_FLUIDSYNTH` | `engine/vendor/fluidsynth/bin/fluidsynth.exe` | the [FluidSynth](https://www.fluidsynth.org/) binary |
-| instruments | `MOTION_STUDIO_SOUNDFONT` | `engine/vendor/soundfonts/MuseScore_General.sf3` | any General MIDI `.sf2`/`.sf3` SoundFont |
+| MIDI author | `MOTION_STUDIO_MIDI_EXE` | `vendor/music/MotionStudioMidi.exe` | the C# exe in `music/MotionStudioMidi` (DryWetMIDI) |
+| synthesizer | `MOTION_STUDIO_FLUIDSYNTH` | `vendor/fluidsynth/bin/fluidsynth.exe` | the [FluidSynth](https://www.fluidsynth.org/) binary |
+| instruments | `MOTION_STUDIO_SOUNDFONT` | `vendor/soundfonts/MuseScore_General.sf3` | any General MIDI `.sf2`/`.sf3` SoundFont |
+
+`vendor/` here means the configured **vendor dir** — the `vendor` folder beside
+the app unless changed in the Studio's ⚙ storage settings or by
+`MOTION_STUDIO_VENDOR_DIR` (v0.25). The per-piece env vars above always win
+over it.
 
 All three must exist before the tool runs; whichever is missing is named in the
 `music_unavailable` error. Set the overrides in the MCP server's `env` block
@@ -312,27 +317,27 @@ single self-contained `win-x64` exe:
 
 ```
 dotnet publish music/MotionStudioMidi -c Release -r win-x64 --self-contained true \
-  -p:PublishSingleFile=true -o engine/vendor/music
+  -p:PublishSingleFile=true -o vendor/music
 ```
 
-→ `engine/vendor/music/MotionStudioMidi.exe` (git-ignored; ~68 MB). The engine
+→ `vendor/music/MotionStudioMidi.exe` (git-ignored; ~68 MB). The engine
 looks there by default, so once published it's picked up automatically;
 otherwise set `MOTION_STUDIO_MIDI_EXE`. Smoke-test with a spec file:
 
 ```
 echo {"bpm":120,"tracks":[{"program":0,"notes":[{"pitch":60,"start":0,"duration":1}]}]} > spec.json
-engine/vendor/music/MotionStudioMidi.exe --spec-file spec.json --out song.mid
+vendor/music/MotionStudioMidi.exe --spec-file spec.json --out song.mid
 ```
 
 ## Setting up FluidSynth + a SoundFont
 
 1. **FluidSynth** — unzip the Windows build (e.g. `fluidsynth-v2.5.6-win10-x64`)
-   into `engine/vendor/fluidsynth/` so the exe is at
-   `engine/vendor/fluidsynth/bin/fluidsynth.exe`. Keep the **whole `bin/`
+   into `vendor/fluidsynth/` so the exe is at
+   `vendor/fluidsynth/bin/fluidsynth.exe`. Keep the **whole `bin/`
    folder** — the exe needs its sibling `.dll`s (glib, etc.). Verify with
-   `engine/vendor/fluidsynth/bin/fluidsynth.exe --version`.
+   `vendor/fluidsynth/bin/fluidsynth.exe --version`.
 2. **SoundFont** — drop a General MIDI SoundFont at
-   `engine/vendor/soundfonts/MuseScore_General.sf3`
+   `vendor/soundfonts/MuseScore_General.sf3`
    ([MuseScore_General](https://musescore.org/en/handbook/3/soundfonts-and-sfz-files#soundfonts)
    is a good free default, ~38 MB). **Use a real `.sf2`/`.sf3`** — Windows'
    bundled `gm.dls` is a DLS file, which FluidSynth rejects ("Not a SoundFont

@@ -783,7 +783,7 @@ export class WorkspaceStore {
         throw new EngineError(
           ErrorCodes.LIBRARY_UNAVAILABLE,
           `Library build not found: ${f.vendor}. This file is committed to the repo, so a clean checkout should have it — `
-            + `restore it with "git checkout -- engine/vendor/libs", or re-download with `
+            + `restore it with "git checkout -- vendor/libs", or re-download with `
             + `"node scripts/fetch-libs.mjs ${spec.id}" in the engine folder (~${spec.approxKB} KB).`,
           { library: spec.id, file: f.vendor },
         );
@@ -792,7 +792,7 @@ export class WorkspaceStore {
       await fsp.mkdir(path.dirname(abs), { recursive: true });
       await fsp.copyFile(srcAbs, abs);
       // Hash what we actually copied, so the scene records the exact build it
-      // holds. Not redundant with git tracking engine/vendor/libs: git says what
+      // holds. Not redundant with git tracking vendor/libs: git says what
       // the repo holds *now*, this says what the scene copied *then* — they
       // diverge the moment the libraries are upgraded, and it is the second one a
       // finished render was made from. (A version string would not do: see

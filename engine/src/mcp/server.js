@@ -32,6 +32,12 @@
  *                               "default"; created on first use). Give each
  *                               agent its own so their films don't mingle.
  *   MOTION_STUDIO_HOME          override data dir (default ~/.motion-studio)
+ *   MOTION_STUDIO_VENDOR_DIR    override the vendor-asset root the bundled
+ *                               defaults resolve from — exes, FluidSynth,
+ *                               SoundFonts, Piper voices, Whisper models, 3D
+ *                               libs (default <app>/vendor; configurable in
+ *                               the Studio's storage settings too — v0.25).
+ *                               Per-item hooks below still win over it.
  *   MOTION_STUDIO_FFMPEG        ffmpeg binary to use (default: the Studio's
  *                               settings.json ffmpeg.path, else "ffmpeg" on PATH).
  *                               MCP servers are spawned by a GUI client and often

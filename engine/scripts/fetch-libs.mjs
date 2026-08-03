@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Maintain the 3D library builds in engine/vendor/libs.
+ * Maintain the 3D library builds in vendor/libs.
  *
- * **You do not need this after cloning** — engine/vendor/libs is committed, so
+ * **You do not need this after cloning** — vendor/libs is committed, so
  * `add_library` works out of the box. This is an upgrade/repair tool:
  *
  *   node scripts/fetch-libs.mjs --verify     # check what's on disk, download nothing
@@ -15,7 +15,7 @@
  *
  * Because the targets are committed, a plain re-fetch that silently pulled a newer
  * build would land an unreviewed dependency bump in someone's next commit. So every
- * download is hashed against engine/vendor.lock.json and a mismatch is a refusal,
+ * download is hashed against vendor.lock.json and a mismatch is a refusal,
  * not an overwrite — `--update` is the only way to change what is locked.
  *
  * Content-addressed, not version-pinned, because a version string does not identify

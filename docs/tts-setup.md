@@ -228,7 +228,7 @@ To pin it explicitly instead:
 |---|---|
 | executable | `MOTION_STUDIO_PIPER_EXE` (falls back to `piper`, then `python -m piper` / `py -m piper` on PATH) |
 | Python (module form) | `MOTION_STUDIO_PIPER_PYTHON` — used as `<python> -m piper` when no exe is set |
-| voices folder | `MOTION_STUDIO_PIPER_VOICES` (default `engine/vendor/piper/voices`) |
+| voices folder | `MOTION_STUDIO_PIPER_VOICES` (default `vendor/piper/voices` under the configured vendor dir — ⚙ storage settings or `MOTION_STUDIO_VENDOR_DIR`, v0.25) |
 
 An explicitly configured command never falls back — a user who named a binary
 meant it.
@@ -251,7 +251,7 @@ The easiest way to fetch one is Piper's own downloader, aimed straight at the
 voices folder:
 
 ```
-python -m piper.download_voices en_US-lessac-medium --download-dir engine/vendor/piper/voices
+python -m piper.download_voices en_US-lessac-medium --download-dir vendor/piper/voices
 ```
 
 Or download both files by hand and put them in the voices folder. Every `.onnx` there with its `.onnx.json`
@@ -602,7 +602,8 @@ the `system` vendor succeeds and returns
 `warnings: ["\"style\" is an Azure-only option and was ignored…"]`.
 
 The exe path resolves as: explicit argument → `MOTION_STUDIO_TTS_EXE` → a
-bundled default at `engine/vendor/tts/MotionStudioTts.exe`. A `.js`/`.mjs`
+bundled default at `vendor/tts/MotionStudioTts.exe` under the configured
+vendor dir (⚙ storage settings or `MOTION_STUDIO_VENDOR_DIR`, v0.25). A `.js`/`.mjs`
 target is run through Node (used by the test stub
 `engine/test/helpers/fake-tts.mjs`); each cloud vendor is stubbed the same way
 by a local HTTP server (`engine/test/helpers/fake-azure-speech.mjs`,
@@ -647,15 +648,15 @@ To build/rebuild it:
 1. **Publish** the self-contained single-file exe to the engine's default path:
    ```
    dotnet publish tts/MotionStudioTts -c Release -r win-x64 --self-contained true \
-     -p:PublishSingleFile=true -o engine/vendor/tts
+     -p:PublishSingleFile=true -o vendor/tts
    ```
-   → `engine/vendor/tts/MotionStudioTts.exe` (the built exe is git-ignored; it's ~70 MB).
-2. **Wire it up:** the engine looks at `engine/vendor/tts/MotionStudioTts.exe` by
+   → `vendor/tts/MotionStudioTts.exe` (the built exe is git-ignored; it's ~70 MB).
+2. **Wire it up:** the engine looks at `vendor/tts/MotionStudioTts.exe` by
    default, so once published it's picked up automatically; otherwise set
    `MOTION_STUDIO_TTS_EXE` to wherever the exe lives.
 3. **Smoke-test:**
    ```
-   engine/vendor/tts/MotionStudioTts.exe --list-voices
+   vendor/tts/MotionStudioTts.exe --list-voices
    ```
    then a `--text-file <utf8> --out <path.wav>` run, and confirm the WAV plays.
 

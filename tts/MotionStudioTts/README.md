@@ -21,10 +21,10 @@ synthesis backends, both from the Windows runtime:
 ## Build
 
 ```
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ../../engine/vendor/tts
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ../../vendor/tts
 ```
 
-That drops `MotionStudioTts.exe` at `engine/vendor/tts/`, which is the path the
+That drops `MotionStudioTts.exe` at `vendor/tts/`, which is the path the
 engine checks by default (`resolveTtsExe` in `engine/src/core/tts.js`). The exe
 is ~70 MB and git-ignored — build it locally. Alternatively point
 `MOTION_STUDIO_TTS_EXE` at it wherever it lives.

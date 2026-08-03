@@ -856,14 +856,28 @@ it will not hold — see §9.2.
 
 ### 11.1 Where the data dir is (v0.22)
 
-Three locations decide where everything lives, and `core/paths.js` owns all
-three:
+Four locations decide where everything lives, and `core/paths.js` owns all
+of them:
 
 | location | default | env override |
 |---|---|---|
 | `dataDir` | `<app>/data` | `MOTION_STUDIO_HOME` |
 | `workspacesRoot` | `<dataDir>/workspaces` | `MOTION_STUDIO_WORKSPACES` |
 | `settingsFile` | `<dataDir>/settings.json` | `MOTION_STUDIO_SETTINGS` |
+| `vendorDir` | `<app>/vendor` | `MOTION_STUDIO_VENDOR_DIR` (v0.25) |
+
+`vendorDir` is the odd one out: it is not user *data* but the root the engine
+resolves bundled runtime assets from — the TTS/MIDI exes, FluidSynth,
+SoundFonts, Piper voices, Whisper models and the committed 3D libs. It lives in
+`core/paths.js` all the same because it shares every property that put the
+other three there: machine-level, needed synchronously by module-level
+resolvers, and per-process overridable. Its default is anchored to the app, not
+the data dir — relocating your film library must not drag the vendor binaries
+with it. The per-item hooks (`MOTION_STUDIO_TTS_EXE`, `_SOUNDFONT`,
+`_WHISPER_MODELS`, `_LIBS_DIR`, …) and per-vendor paths in `settings.json` all
+still win over it; the vendor dir only moves the *default* root they fall back
+to. Changing it never triggers the storage-relocation machinery below — the
+next probe or synthesis simply resolves against the new root.
 
 Through v0.22 all three were derived from `MOTION_STUDIO_HOME` (or
 `~/.motion-studio`) and changing one meant restarting every front end with a
@@ -873,7 +887,7 @@ that is *not* `settings.json`, since `settings.json` is one of the things being
 located. Hence a bootstrap file of their own:
 
 ```
-<app>/paths.json   { dataDir, workspacesRoot, settingsFile }   any may be null
+<app>/paths.json   { dataDir, workspacesRoot, settingsFile, vendorDir }   any may be null
 ```
 
 Resolution per key, highest first: **env → `paths.json` → the default**. Env

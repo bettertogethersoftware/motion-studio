@@ -170,7 +170,7 @@ from a checkout without a workspace.
 If Puppeteer's Chromium download is blocked, install any Chrome/Chromium and
 set `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome`. If FFmpeg is not on PATH,
 point at it with `--ffmpeg /path/to/ffmpeg` (CLI) or the **ffmpeg → binary
-path** field in the Studio's ⚙ settings dialog, which applies to every
+path** field in the Studio's ⚙ global-settings page, which applies to every
 Studio render and the prerequisite check.
 
 ### Connect an AI agent (MCP)

@@ -207,7 +207,7 @@ test('config: libraryBuilds is validated, and rejects a malformed entry', async 
 test('the committed vendor.lock.json is present and internally consistent', async () => {
   // Reads the real repo lock (not a sandbox), so a hand-edit that breaks its
   // shape fails here rather than at someone else's clone.
-  const real = path.resolve(import.meta.dirname, '../vendor.lock.json');
+  const real = path.resolve(import.meta.dirname, '../../vendor.lock.json');
   if (!fs.existsSync(real)) return;                     // fresh clone before --update
   const body = JSON.parse(await fsp.readFile(real, 'utf8'));
   assert.equal(body.lockfileVersion, 1);

@@ -4,24 +4,22 @@
  * Motion Studio compositions are self-contained HTML/CSS/JS. A scene can opt
  * in to a heavier rendering library (Three.js / Babylon.js) that gets vendored
  * *locally* into the scene — never a CDN at render time, so renders stay
- * hermetic and reproducible. The builds live in engine/vendor/libs, which IS
+ * hermetic and reproducible. The builds live in vendor/libs, which IS
  * committed (~9 MB, MIT / Apache-2.0), so add_library works on a fresh clone with
- * no setup step; engine/vendor.lock.json records which upstream build each file
+ * no setup step; vendor.lock.json records which upstream build each file
  * came from, and scripts/fetch-libs.mjs is an upgrade/repair tool rather than a
- * prerequisite. The rest of engine/vendor (the two exes, FluidSynth, SoundFonts)
+ * prerequisite. The rest of vendor (the two exes, FluidSynth, SoundFonts)
  * stays out of git — see .gitignore for why each one.
  *
  * This registry is the single source of truth for both `add_library` (the MCP
  * tool / WorkspaceStore.addLibrary) and scripts/fetch-libs.mjs.
  */
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { vendorDir } from './paths.js';
 
 /** Where the vendored library builds live. Overridable for tests. */
 export function libsVendorDir() {
-  return process.env.MOTION_STUDIO_LIBS_DIR || path.resolve(__dirname, '../../vendor/libs');
+  return process.env.MOTION_STUDIO_LIBS_DIR || path.join(vendorDir(), 'libs');
 }
 
 // Determinism rules the starter templates already follow — surfaced to the agent.
@@ -101,7 +99,7 @@ export const LIBRARIES = {
     // with nothing recording which. Versioned paths need the `v` prefix
     // (/v9.18.0/… works, /9.18.0/… 404s). Core and addons must match versions.
     // NB the pinned build is NOT byte-identical to the floating one even at the
-    // same version — hence the content hashes in engine/vendor.lock.json.
+    // same version — hence the content hashes in vendor.lock.json.
     version: '9.18.0',
     global: 'BABYLON',
     approxKB: 7990,

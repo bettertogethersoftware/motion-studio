@@ -15,9 +15,11 @@ import path from 'node:path';
 
 import {
   resolvePaths, updateLocations, invalidatePaths, ensureStableDataDir,
-  defaultDataDir, workspacesRootFor, settingsFileFor,
-  locationsFile, APP_DATA_DIR, PATH_ENV, PATHS_FILE_ENV,
+  defaultDataDir, workspacesRootFor, settingsFileFor, vendorDir,
+  locationsFile, APP_DATA_DIR, APP_VENDOR_DIR, PATH_ENV, PATHS_FILE_ENV,
 } from '../src/core/paths.js';
+import { resolveMidiExe, resolveSoundFont } from '../src/core/music.js';
+import { libsVendorDir } from '../src/core/libraries.js';
 import { WorkspaceStore } from '../src/core/store.js';
 import { readSettings, updateSettings } from '../src/core/settings.js';
 import { ErrorCodes } from '../src/core/errors.js';
@@ -92,12 +94,43 @@ test('paths: each location has its own env override', () => {
   process.env[PATH_ENV.dataDir] = path.join(tmp, 'd');
   process.env[PATH_ENV.workspacesRoot] = path.join(tmp, 'ws');
   process.env[PATH_ENV.settingsFile] = path.join(tmp, 'cfg', 'settings.json');
+  process.env[PATH_ENV.vendorDir] = path.join(tmp, 'packs');
   invalidatePaths();
 
   const p = resolvePaths();
   assert.equal(p.workspacesRoot, path.join(tmp, 'ws'));
   assert.equal(p.settingsFile, path.join(tmp, 'cfg', 'settings.json'));
-  assert.deepEqual(Object.values(p.sources), ['env', 'env', 'env']);
+  assert.equal(p.vendorDir, path.join(tmp, 'packs'));
+  assert.deepEqual(Object.values(p.sources), ['env', 'env', 'env', 'env']);
+});
+
+/* ------------------------------ vendor dir ------------------------------- */
+
+test('paths: the vendor dir defaults to the app vendor tree, not the data dir', async () => {
+  // Relocating the DATA dir must not drag the vendor assets with it — they
+  // ship with the app.
+  await updateLocations({ dataDir: path.join(tmp, 'store') });
+  const p = resolvePaths();
+  assert.equal(p.vendorDir, APP_VENDOR_DIR);
+  assert.equal(p.sources.vendorDir, 'default');
+});
+
+test('paths: a configured vendor dir reaches every bundled-asset resolver', async () => {
+  const packs = path.join(tmp, 'packs');
+  await updateLocations({ vendorDir: packs });
+  assert.equal(vendorDir(), packs);
+  assert.ok(fs.existsSync(packs), 'an explicitly configured vendor dir is created on save');
+  // The resolvers join their relative defaults onto it…
+  assert.equal(resolveMidiExe(), path.join(packs, 'music', 'MotionStudioMidi.exe'));
+  assert.equal(resolveSoundFont(), path.join(packs, 'soundfonts', 'MuseScore_General.sf3'));
+  assert.equal(libsVendorDir(), path.join(packs, 'libs'));
+  // …and the per-item env hook still wins over the configured root.
+  process.env.MOTION_STUDIO_SOUNDFONT = path.join(tmp, 'own.sf3');
+  try {
+    assert.equal(resolveSoundFont(), path.join(tmp, 'own.sf3'));
+  } finally {
+    delete process.env.MOTION_STUDIO_SOUNDFONT;
+  }
 });
 
 test('paths: a relative stored value is resolved against the bootstrap file', async () => {

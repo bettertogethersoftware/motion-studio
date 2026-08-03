@@ -450,8 +450,9 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
   };
 
   /**
-   * Where everything lives, plus — for each of the three storage locations —
-   * which layer decided it and what the settings page may do about it (v0.22).
+   * Where everything lives, plus — for each configurable location (the three
+   * storage paths of v0.22, and the vendor dir since v0.25) — which layer
+   * decided it and what the settings page may do about it.
    *
    * `editable: false` is the honest report for a location the environment has
    * fixed: MOTION_STUDIO_HOME is set by whoever launched this process, writing

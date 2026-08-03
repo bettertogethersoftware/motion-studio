@@ -7,7 +7,7 @@
  *     → a config.audio track, mixed by the same muxAudio pass as narration.
  *
  * Windows-only, optional. Three external pieces, each resolvable by env var with
- * a vendored default under engine/vendor/ (git-ignored):
+ * a vendored default under vendor/ (git-ignored):
  *   MOTION_STUDIO_MIDI_EXE     MotionStudioMidi.exe   (music/MotionStudioMidi)
  *   MOTION_STUDIO_FLUIDSYNTH   fluidsynth.exe         (provided binary)
  *   MOTION_STUDIO_SOUNDFONT    a .sf2/.sf3 SoundFont  (MuseScore_General.sf3)
@@ -18,21 +18,19 @@ import fsp from 'node:fs/promises';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
+import { vendorDir } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const VENDOR = path.resolve(__dirname, '../../vendor');
 const STDERR_TAIL = 40;
 
 export function resolveMidiExe(explicit) {
-  return explicit || process.env.MOTION_STUDIO_MIDI_EXE || path.join(VENDOR, 'music', 'MotionStudioMidi.exe');
+  return explicit || process.env.MOTION_STUDIO_MIDI_EXE || path.join(vendorDir(), 'music', 'MotionStudioMidi.exe');
 }
 export function resolveFluidSynth(explicit) {
-  return explicit || process.env.MOTION_STUDIO_FLUIDSYNTH || path.join(VENDOR, 'fluidsynth', 'bin', 'fluidsynth.exe');
+  return explicit || process.env.MOTION_STUDIO_FLUIDSYNTH || path.join(vendorDir(), 'fluidsynth', 'bin', 'fluidsynth.exe');
 }
 export function resolveSoundFont(explicit) {
-  return explicit || process.env.MOTION_STUDIO_SOUNDFONT || path.join(VENDOR, 'soundfonts', 'MuseScore_General.sf3');
+  return explicit || process.env.MOTION_STUDIO_SOUNDFONT || path.join(vendorDir(), 'soundfonts', 'MuseScore_General.sf3');
 }
 
 // A `.js`/`.mjs` target is treated as a Node script (spawned via node) so tests

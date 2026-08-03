@@ -42,7 +42,7 @@ test('resolvers prefer an explicit path over env and default', () => {
   assert.equal(resolveMidiExe('/x/midi.exe'), '/x/midi.exe');
   assert.equal(resolveFluidSynth('/x/fs.exe'), '/x/fs.exe');
   assert.equal(resolveSoundFont('/x/font.sf2'), '/x/font.sf2');
-  // With no explicit arg and no env override, defaults land under engine/vendor/.
+  // With no explicit arg and no env override, defaults land under vendor/.
   assert.match(resolveMidiExe(), /vendor[\\/]music[\\/]MotionStudioMidi\.exe$/);
   assert.match(resolveFluidSynth(), /vendor[\\/]fluidsynth[\\/]bin[\\/]fluidsynth\.exe$/);
   assert.match(resolveSoundFont(), /vendor[\\/]soundfonts[\\/]/);

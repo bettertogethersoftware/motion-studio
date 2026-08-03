@@ -31,7 +31,7 @@ add_library { scene, library: "three" | "babylon", scaffold?: true }
   starter; the library id is recorded in the new optional `config.libraries`.
 
 Registry: [`engine/src/core/libraries.js`](../engine/src/core/libraries.js).
-Builds are **committed** under `engine/vendor/libs/` (~9 MB, MIT / Apache-2.0), so
+Builds are **committed** under `vendor/libs/` (~9 MB, MIT / Apache-2.0), so
 `add_library` works on a fresh clone with no setup. `node scripts/fetch-libs.mjs`
 is an upgrade/repair tool, not a prerequisite. Starters live in
 `engine/templates/lib-*`.
@@ -250,7 +250,7 @@ cinematic frame-driven video.
 ### 3.5 Build/CDN notes — pinned and hash-locked (v0.13)
 
 Both libraries are now **version-pinned and content-locked**. The registry points
-at versioned URLs and `engine/vendor.lock.json` (committed, unlike the artifacts
+at versioned URLs and `vendor.lock.json` (committed, unlike the artifacts
 it describes) records the sha256 of every vendored build:
 
 - Core: `https://cdn.babylonjs.com/v9.18.0/babylon.js`

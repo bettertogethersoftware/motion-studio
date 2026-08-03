@@ -63,7 +63,7 @@ export const VENDOR_INFO = Object.freeze({
     id: 'system',
     label: 'System speech (Windows)',
     summary: 'The local MotionStudioTts.exe driving the OS voices. Offline, free, Windows-only.',
-    requires: 'MOTION_STUDIO_TTS_EXE (or the bundled engine/vendor/tts/MotionStudioTts.exe)',
+    requires: 'MOTION_STUDIO_TTS_EXE (or the bundled vendor/tts/MotionStudioTts.exe)',
     offline: true,
   }),
   azure: Object.freeze({

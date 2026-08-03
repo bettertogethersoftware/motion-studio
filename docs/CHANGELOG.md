@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### The vendor dir is configurable, and the settings page grew up (v0.25)
+
+**Configurable vendor dir.** The root the engine resolves bundled runtime
+assets from — the TTS/MIDI exes, FluidSynth, SoundFonts, Piper voices, Whisper
+models and the committed 3D libs — is now a fourth configurable location in
+`core/paths.js`, beside the v0.22 storage trio: `vendorDir` in `paths.json`,
+`MOTION_STUDIO_VENDOR_DIR` in the environment, and a **vendor dir** field in
+the Studio's ⚙ storage settings. Default: the `vendor` folder beside the app
+(unchanged behavior). Precedence is the same as every other location — env →
+`paths.json` → default — and every per-item hook (`MOTION_STUDIO_TTS_EXE`,
+`_SOUNDFONT`, `_WHISPER_MODELS`, `_LIBS_DIR`, per-vendor paths in
+`settings.json`) still wins over it: the vendor dir only moves the *default
+root* those fall back to. The resolvers in `core/tts.js`, `core/tts-piper.js`,
+`core/transcribe-whisper.js`, `core/music.js` and `core/libraries.js` now ask
+`vendorDir()` instead of hardcoding a path relative to their own source file.
+Changing it needs no reload and no relocation machinery — the next probe or
+synthesis resolves against the new root (a connected MCP server picks up the
+saved value too, since it reads the same `paths.json`; only the env var is
+per-process).
+
+**Settings page layout** (all Studio-only):
+
+- **Save moved to the page header**, matching the tts/music/transcription
+  vendor pages — it was at the bottom of a long form, below the fold.
+- **Every section is a card** — bordered, amber accent bar on the left, wide
+  variants for the path-heavy storage and environment blocks — so the page
+  scans as blocks instead of one undifferentiated column.
+- **The engine status strip moved into the settings page header** (version ·
+  engine ready/missing · ffmpeg version). It cost permanent sidebar height and
+  was only read when something was wrong; the red prereq banner still appears
+  globally on failures.
+- **The sidebar footer buttons fit the rail now** (`tts · music · trans · ⚙`):
+  words abbreviated, and since icon+word together still overpainted the
+  neighbouring button at 264px, the expanded rail shows the word alone and the
+  collapsed rail the icon alone — settings is the gear in both. Full names
+  remain in the tooltips.
+- **The per-vendor facts and environment boxes span their card** on the tts,
+  music and transcription pages (previously capped at 620px). Those rows are
+  mostly absolute Windows paths, and the cap wrapped exactly the interesting
+  tail on every one of them.
+
+### `engine/vendor` moved to the repo root (v0.25)
+
+The vendor tree (committed 3D libs plus the git-ignored exes, FluidSynth,
+SoundFonts, Piper voices, Whisper models and the download cache) now lives at
+`/vendor`, beside `engine/`, and `engine/vendor.lock.json` moved with it to
+`/vendor.lock.json`. Rationale: the tree is runtime *assets*, not engine code,
+and at ~2.5 GB it dominated `engine/` — the root is where the other local
+toolchains (FFmpeg, ImageMagick) already sit.
+
+Nothing observable changes for a fresh clone: `vendor/libs` is still committed
+(git recorded the move as renames), every default path is resolved relative to
+the engine's own source location (`core/*.js` now reach `../../../vendor`
+instead of `../../vendor`), and all `MOTION_STUDIO_*` overrides
+(`…_TTS_EXE`, `…_SOUNDFONT`, `…_PIPER_VOICES`, `…_WHISPER_MODELS`,
+`…_LIBS_DIR`, `…_VENDOR_LOCK`, …) are untouched. Existing local checkouts move
+their ignored binaries once (or re-follow docs/tts-setup.md and
+docs/music-setup.md); the `.gitignore` contents-not-directory pattern
+(`/vendor/*` + `!/vendor/libs/`) and the `-text` attribute on `vendor/libs/**`
+moved with it. Setup docs, the Studio placeholder text, and the publish paths
+in the exe READMEs were updated in the same pass.
+
 ### Audio mastering and delivery fixes (v0.24)
 
 Five changes, each from a defect measured while producing a three-minute music

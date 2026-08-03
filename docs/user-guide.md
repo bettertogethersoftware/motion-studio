@@ -65,7 +65,7 @@ same tree, because it's the same thing on disk — presence of `film.json` or
 separate registry to fall out of sync. Data lives under
 `<dataDir>/workspaces/<workspace>/films/<film>/scenes/<scene>/`, where
 `<dataDir>` is the `data` folder beside the app by default — change it in
-⚙ settings, or override it for one process with `MOTION_STUDIO_HOME`. If you
+the ⚙ global-settings page, or override it for one process with `MOTION_STUDIO_HOME`. If you
 used Motion Studio before v0.22 your existing `~/.motion-studio` keeps being
 used, and the settings page shows it.
 
@@ -137,9 +137,15 @@ a library file doesn't touch copies a scene or film already pulled in.
 
 ## Global settings (v0.15)
 
-**⚙ settings** in the sidebar footer opens the global configuration — since
-v0.22 an inline stage page like the tts/music vendor pages (it replaces the
-workbench while open; close restores it), no longer a popup dialog:
+The **⚙** button in the sidebar footer opens the global configuration (since
+v0.25 the footer shows compact labels — `tts · music · trans · ⚙` — so all
+four buttons fit the rail; full names live in the tooltips) — since v0.22 an
+inline stage page like the
+tts/music vendor pages (it replaces the workbench while open; close restores
+it), no longer a popup dialog. Since v0.25 the **save** button sits in the
+page header like the vendor pages, each section is drawn as its own
+accent-barred card, and the header carries the engine status strip
+(version · engine · ffmpeg) that used to occupy the sidebar:
 
 - **new-scene defaults** — the fps/dimensions/duration the **new film** and
   **new scene** dialogs are pre-filled with, and what any new film or scene
@@ -161,7 +167,8 @@ workbench while open; close restores it), no longer a popup dialog:
   document (for example an agent can use `update_film { review: … }`).
 - **ffmpeg** — a binary path override (leave empty to use `ffmpeg` on PATH;
   the dialog live-probes the effective binary and shows its version or a
-  ✗ if it can't be run — the footer status updates too) and default
+  ✗ if it can't be run — the engine status strip in the page header updates
+  too) and default
   crf/preset values that seed *newly created* scenes' output config.
   The path override applies to every render — the Studio's, the CLI's, and an
   agent's. `MOTION_STUDIO_FFMPEG` overrides it for a single process, and the
@@ -176,9 +183,15 @@ workbench while open; close restores it), no longer a popup dialog:
   your files across yourself first. The Studio switches over immediately (it
   reloads); connected agents keep using the old location until their MCP server
   is restarted. A field that `MOTION_STUDIO_HOME` / `_WORKSPACES` / `_SETTINGS`
-  already sets is shown locked, because editing it here would change nothing.
-  Moving is refused while a render or build is running (`storage_busy`) — let
-  it finish first.
+  / `_VENDOR_DIR` already sets is shown locked, because editing it here would
+  change nothing. Moving is refused while a render or build is running
+  (`storage_busy`) — let it finish first.
+  The fourth box, **vendor dir** (v0.25), is where the bundled speech/music
+  exes, FluidSynth, SoundFonts, Piper voices, Whisper models and the 3D libs
+  are looked up — default: the app's own `vendor` folder. A per-item override
+  (an exe path on a vendor card, or an env var such as
+  `MOTION_STUDIO_SOUNDFONT`) still beats it; changing it needs no reload —
+  the next probe simply resolves against the new root.
 - a read-only **environment** report: the bootstrap file that records the
   locations above, plus the current values of the `MOTION_STUDIO_*` env hooks
   (including which **workspace** each connected agent is bound to),
@@ -186,7 +199,7 @@ workbench while open; close restores it), no longer a popup dialog:
   masked, never in full).
 
 Narration and music vendors each live on their own page — **🗣 tts** and
-**♫ music** in the sidebar footer, next to ⚙ settings; see
+**♫ music** in the sidebar footer, next to ✎ trans and the ⚙ settings button; see
 [Generated narration](#generated-narration-text-to-speech) below.
 
 Settings persist in `<dataDir>/settings.json` and are genuinely global:
@@ -465,7 +478,7 @@ still wins.
 
 ### Reading a recording you supplied (transcription, v0.22)
 
-The two pages above make audio. The **✎ transcribe** page in the sidebar footer
+The two pages above make audio. The **✎ trans** (transcription) page in the sidebar footer
 configures the one thing that *reads* it: `transcribe_asset` turns a recording you
 supplied — audio or video — into text with per-sentence and per-word timing, which
 is what lets an agent cut your talk on sentence boundaries and land a caption on

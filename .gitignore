@@ -362,10 +362,10 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Motion Studio — engine/vendor holds five unrelated things, and only one is
-# committed. Note the pattern ignores the *contents* (`vendor/*`), not the
-# directory: with `vendor/` git never descends into it and the !negation below
-# would silently do nothing.
+# Motion Studio — /vendor (repo root, moved from engine/vendor in v0.25) holds
+# five unrelated things, and only one is committed. Note the pattern ignores the
+# *contents* (`/vendor/*`), not the directory: with `/vendor/` git never descends
+# into it and the !negation below would silently do nothing.
 #
 #   vendor/tts/          MotionStudioTts.exe   ~94 MB  build artifact — source is in tts/
 #   vendor/music/        MotionStudioMidi.exe  ~65 MB  build artifact — source is in music/
@@ -378,12 +378,12 @@ FodyWeavers.xsd
 # (docs/tts-setup.md, docs/music-setup.md), git keeps every version of a binary
 # forever, and at 94 MB the TTS exe is close to GitHub's 100 MB hard limit with
 # no LFS configured here.
-engine/vendor/*
+/vendor/*
 # vendor/libs IS committed: ~9 MB of immutable third-party JS (three.js MIT,
 # Babylon.js Apache-2.0) with no build step, so a fresh clone can render 3D with
-# no setup and no network. engine/vendor.lock.json records which upstream build
+# no setup and no network. /vendor.lock.json records which upstream build
 # each file came from — git guarantees the bytes, the lock explains their origin.
-!engine/vendor/libs/
+!/vendor/libs/
 # FluidSynth binary distribution (runtime dependency; build/place locally, see docs/music-setup.md).
 fluidsynth-v2.5.6-win10-x64-glib/
 download/

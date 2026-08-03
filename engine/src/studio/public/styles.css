@@ -57,12 +57,11 @@ body {
   font: 700 15px/1.05 var(--mono);
   letter-spacing: 0.22em;
 }
-.version { font: 10px/1.6 var(--mono); color: var(--dim); letter-spacing: 0.04em; }
-
-/* Engine status lives up here (v0.18) — the footer belongs to the page buttons. */
-.rail-status { display: block; margin-top: 4px; font: 10px/1.5 var(--mono); color: var(--dim); letter-spacing: 0.04em; }
-.rail-status .ok { color: var(--ok); }
-.rail-status .err { color: var(--err); }
+/* Engine status moved into the settings page head (v0.25) — it cost sidebar
+   height every day and was only read when something was wrong. */
+.engine-strip { font-size: 11px; letter-spacing: 0.04em; white-space: nowrap; }
+#engine-status .ok { color: var(--ok); }
+#engine-status .err { color: var(--err); }
 
 .rail-section { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 0; }
 .rail-head {
@@ -486,10 +485,17 @@ dialog .fieldrow { margin-bottom: 10px; }
 
 /* ------------------------------ settings ------------------------------- */
 
-/* Three page buttons share the footer width; the open page's button glows. */
-.foot-btn { flex: 1; padding: 3px 6px; font-size: 10px; }
+/* Four page buttons share the footer width; the open page's button glows.
+   Expanded rail: word only (icon+word together overpainted the neighbour at
+   264px); collapsed rail: icon only. Settings is icon-only in both (v0.25).
+   min-width: max-content, NOT 0: flex's equal split can be narrower than a
+   label, and nowrap text wider than its box paints over the next button. */
+.foot-btn { flex: 1; padding: 3px 4px; font-size: 10px; white-space: nowrap; min-width: max-content; }
+.foot-btn .foot-ico { display: none; }
+.foot-btn.icon-only .foot-ico { display: inline; }
+.rail-collapsed .foot-ico { display: inline; }
 .foot-btn.active { color: var(--accent); border-color: var(--accent); }
-.rail-foot { display: flex; align-items: center; gap: 6px; }
+.rail-foot { display: flex; align-items: center; gap: 4px; }
 .section-label {
   margin: 12px 0 8px;
   font: 11px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
@@ -604,12 +610,23 @@ button.ghost.tiny {
 .vendor-cards.tabbed .vendor-card { display: none; }
 .vendor-cards.tabbed .vendor-card.tab-active { display: block; }
 /* The settings page reuses the vendors-page shell; keep the form readable. */
-/* 720px is a comfortable reading measure for the prose and the small knobs,
-   but the storage block holds absolute paths — it opts out rather than making
-   every paragraph on the page span the window. */
-#settings-page form { max-width: 720px; }
+/* Each section is a card (v0.25) — same border-plus-accent-bar grammar as the
+   vendor cards, so a human scanning the page sees blocks, not one long column.
+   760px is a comfortable reading measure; the storage and environment cards
+   hold absolute paths and opt out via .wide instead of stretching everything. */
+#settings-page form { max-width: min(1240px, 100%); }
+.set-card {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--ink-2);
+  padding: 12px 16px 16px;
+  margin: 14px 0 0;
+  max-width: 760px;
+}
+.set-card.wide { max-width: 1240px; }
+.set-card > .section-label:first-child { margin-top: 0; }
 #settings-page form .storage-fields,
-#settings-page form .path-fields { width: min(1200px, calc(100vw - 320px)); }
+#settings-page form .path-fields { width: 100%; }
 button.ghost.tiny:disabled { opacity: 0.25; cursor: default; }
 .chain-note { font-size: 11px; color: var(--dim); margin: 0 0 14px; }
 .chain-note.warn { color: var(--warn, var(--err)); }
@@ -621,7 +638,9 @@ label.radio {
 label.radio input { accent-color: var(--accent); }
 .v-title { font: 600 13px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text); }
 .v-summary { font-size: 12px; margin: 0 0 10px; max-width: 760px; }
-.vendor-card .env-list { max-width: 620px; max-height: none; margin-bottom: 10px; }
+/* Full card width (v0.25): these rows are mostly absolute paths, and a 620px
+   cap forced exactly the interesting tail to wrap on every real Windows path. */
+.vendor-card .env-list { max-width: none; max-height: none; margin-bottom: 10px; }
 .err-line { color: var(--err); font: 11px/1.5 var(--mono); margin: 0 0 10px; max-width: 760px; }
 
 .vendor-grid { margin: 12px 0 4px; grid-template-columns: repeat(3, minmax(140px, 240px)); }
@@ -644,7 +663,8 @@ label.radio input { accent-color: var(--accent); }
 .test-btn.playing { color: var(--accent); border-color: var(--accent); }
 .vendor-test [data-test-msg] { font-size: 11px; padding-bottom: 7px; }
 .vendor-test [data-test-msg].err { color: var(--err); }
-#vendors-env { max-width: 760px; }
+/* The page-bottom environment lists span the page — paths again (v0.25). */
+#vendors-env { max-width: none; }
 
 /* Transcription result (v0.22). The speech page auditions a voice by playing
    it; there is nothing to play here, so the read-back IS the audition — the

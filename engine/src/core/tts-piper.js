@@ -44,11 +44,10 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
 import { parseWavHeader } from './tts.js';
+import { vendorDir } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STDERR_TAIL_LINES = 40;
 
 /** Env hooks, in precedence order. Exported so the UI and docs list one truth. */
@@ -59,7 +58,7 @@ export const PIPER_ENV = Object.freeze({
 });
 
 /** Where voices live when nothing says otherwise (git-ignored, like the other vendored assets). */
-const DEFAULT_VOICES_DIR = path.resolve(__dirname, '../../vendor/piper/voices');
+const defaultVoicesDir = () => path.join(vendorDir(), 'piper', 'voices');
 
 /**
  * Map the engine's −10..10 rate onto Piper's `--length-scale`, which is a
@@ -121,7 +120,7 @@ export function resolvePiper({ exe, python, voicesDir, piper = {}, env = process
     command,
     argv,
     source,
-    voicesDir: voiceHit.value ?? DEFAULT_VOICES_DIR,
+    voicesDir: voiceHit.value ?? defaultVoicesDir(),
     voicesSource: voiceHit.source ?? 'bundled',
   };
 }

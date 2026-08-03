@@ -74,7 +74,7 @@ reaches an already-running process on restart.
 |---|---|---|
 | `MOTION_STUDIO_WHISPER_BIN` | the `whisper-cli` executable, **or a folder holding it** | `whisper-cli` on PATH |
 | `MOTION_STUDIO_WHISPER_MODEL` | a `ggml-*.bin` path, **or** a bare name (`small.en`) | the preference order below |
-| `MOTION_STUDIO_WHISPER_MODELS` | a folder holding several `ggml-*.bin` | `models` beside the binary, else `engine/vendor/whisper/models` |
+| `MOTION_STUDIO_WHISPER_MODELS` | a folder holding several `ggml-*.bin` | `models` beside the binary, else `vendor/whisper/models` under the configured vendor dir (⚙ storage settings or `MOTION_STUDIO_VENDOR_DIR`, v0.25) |
 | `MOTION_STUDIO_WHISPER_THREADS` | `-t` | whisper.cpp's own default (4) |
 | `MOTION_STUDIO_TRANSCRIPTION_VENDOR` | which vendor transcribes | `whisper-cpp` |
 

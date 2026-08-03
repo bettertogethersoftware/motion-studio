@@ -28,14 +28,14 @@ import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
+import { vendorDir } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STDERR_TAIL_LINES = 40;
 
-/** Path to the bundled default exe (may not exist — checkTts reports that). */
-const DEFAULT_TTS_EXE = path.resolve(__dirname, '../../vendor/tts/MotionStudioTts.exe');
+/** Path to the bundled default exe (may not exist — checkTts reports that).
+ *  A function, not a constant: the vendor dir is configurable (v0.25). */
+const defaultTtsExe = () => path.join(vendorDir(), 'tts', 'MotionStudioTts.exe');
 
 /**
  * Resolve the TTS executable path. Mirrors the ffmpegPath / browser-module DI
@@ -45,7 +45,7 @@ const DEFAULT_TTS_EXE = path.resolve(__dirname, '../../vendor/tts/MotionStudioTt
  * without a compiled binary.
  */
 export function resolveTtsExe(explicit) {
-  return explicit || process.env.MOTION_STUDIO_TTS_EXE || DEFAULT_TTS_EXE;
+  return explicit || process.env.MOTION_STUDIO_TTS_EXE || defaultTtsExe();
 }
 
 /**
@@ -59,7 +59,7 @@ export function resolveTtsExeInfo(explicit) {
   if (explicit) return { path: explicit, source: 'argument' };
   const env = process.env.MOTION_STUDIO_TTS_EXE?.trim();
   if (env) return { path: env, source: 'env' };
-  return { path: DEFAULT_TTS_EXE, source: 'bundled' };
+  return { path: defaultTtsExe(), source: 'bundled' };
 }
 
 function spawnArgs(exe, ttsArgs) {

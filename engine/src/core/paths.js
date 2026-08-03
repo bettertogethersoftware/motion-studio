@@ -1,11 +1,21 @@
 /**
  * Where Motion Studio keeps its data — v0.22.
  *
- * Three locations decide where everything lives:
+ * Four locations decide where everything lives:
  *
  *   dataDir         the root.             default: <app>/data
  *   workspacesRoot  the workspace tree.   default: <dataDir>/workspaces
  *   settingsFile    global settings.json. default: <dataDir>/settings.json
+ *   vendorDir       vendor binaries/models/voices (v0.25). default: <app>/vendor
+ *
+ * vendorDir is the odd one out: it is not user *data* but the root the engine
+ * resolves bundled runtime assets from — the TTS/MIDI exes, FluidSynth,
+ * SoundFonts, Piper voices, Whisper models and the committed 3D libs. It lives
+ * here all the same because it shares every property that put the other three
+ * here: machine-level, needed synchronously by module-level resolvers, and
+ * overridable per process by an env var (MOTION_STUDIO_VENDOR_DIR). The
+ * per-item hooks (MOTION_STUDIO_TTS_EXE, _SOUNDFONT, _WHISPER_MODELS, …) all
+ * still win over it — this only moves the *default* root those fall back to.
  *
  * Until v0.22 all three were derived from MOTION_STUDIO_HOME (or ~/.motion-studio)
  * and could only be changed by restarting every front end with a different
@@ -80,14 +90,19 @@ export const CONFIG_ROOT = PORTABLE ? APP_ROOT : LEGACY_DATA_DIR;
 /** The default data dir — the one a fresh install gets. */
 export const APP_DATA_DIR = PORTABLE ? path.join(APP_ROOT, 'data') : LEGACY_DATA_DIR;
 
+/** The default vendor dir — the checkout's own vendor/ tree (moved to the repo
+ *  root in v0.25; see docs/CHANGELOG.md). */
+export const APP_VENDOR_DIR = path.join(APP_ROOT, 'vendor');
+
 /** The configurable keys, in display order. */
-export const PATH_KEYS = Object.freeze(['dataDir', 'workspacesRoot', 'settingsFile']);
+export const PATH_KEYS = Object.freeze(['dataDir', 'workspacesRoot', 'settingsFile', 'vendorDir']);
 
 /** The environment variable that overrides each key. */
 export const PATH_ENV = Object.freeze({
   dataDir: 'MOTION_STUDIO_HOME',
   workspacesRoot: 'MOTION_STUDIO_WORKSPACES',
   settingsFile: 'MOTION_STUDIO_SETTINGS',
+  vendorDir: 'MOTION_STUDIO_VENDOR_DIR',
 });
 
 /** Redirects the bootstrap file itself. See locationsFile(). */
@@ -189,6 +204,9 @@ export function resolvePaths() {
     dataDir: APP_DATA_DIR,
     workspacesRoot: path.join(dataDir, 'workspaces'),
     settingsFile: path.join(dataDir, 'settings.json'),
+    // Vendor assets ship with the app, not the data — the default does NOT
+    // follow a relocated data dir.
+    vendorDir: APP_VENDOR_DIR,
   };
   const derive = (k) => {
     const env = envValue(k);
@@ -202,6 +220,7 @@ export function resolvePaths() {
     dataDir,
     workspacesRoot: derive('workspacesRoot'),
     settingsFile: derive('settingsFile'),
+    vendorDir: derive('vendorDir'),
     sources: Object.freeze(sources),
     stored: Object.freeze({ ...stored }),
     defaults: Object.freeze(defaults),
@@ -214,6 +233,16 @@ export function resolvePaths() {
 /** The effective data dir. The default for every `dataDir` parameter in the engine. */
 export function defaultDataDir() {
   return resolvePaths().dataDir;
+}
+
+/**
+ * The effective vendor dir (v0.25) — what every vendor-asset resolver joins its
+ * relative default onto: tts/, music/, fluidsynth/, soundfonts/, piper/voices/,
+ * whisper/models/, libs/. Synchronous and memoized like everything else here,
+ * because the resolvers that need it are synchronous default-parameter code.
+ */
+export function vendorDir() {
+  return resolvePaths().vendorDir;
 }
 
 /**
@@ -321,6 +350,9 @@ export async function updateLocations(patch) {
     await fsp.mkdir(dataDir, { recursive: true });
     await fsp.mkdir(workspacesRoot, { recursive: true });
     await fsp.mkdir(path.dirname(settingsFile), { recursive: true });
+    // Only an explicitly configured vendor dir is created — the default is the
+    // checkout's own vendor/ tree, which exists (or intentionally doesn't).
+    if (next.vendorDir) await fsp.mkdir(next.vendorDir, { recursive: true });
   } catch (e) {
     throw new EngineError(ErrorCodes.DISK_ERROR,
       `Could not create the storage location: ${e.message}`, { dataDir, workspacesRoot, settingsFile });

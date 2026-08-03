@@ -1,5 +1,5 @@
 {
-  "comment": "Upstream origin of the committed engine/vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run \"node scripts/fetch-libs.mjs --update\" to change.",
+  "comment": "Upstream origin of the committed vendor/libs builds. Git guarantees the bytes; this records where they came from and stops a re-fetch changing them silently. Run \"node scripts/fetch-libs.mjs --update\" to change.",
   "lockfileVersion": 1,
   "files": {
     "babylon/babylon.js": {
