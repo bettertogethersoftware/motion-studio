@@ -58,9 +58,11 @@ Active plan documents:
       defaultXCatalog() (A-4b/c/d), each landing behavior-identical on the
       first suite run. The catalogs still live beside the dispatchers;
       Phase 2 moves them to vendors/default/.
-- [ ] A-5: default registry at `engine/src/vendors/default/registry.js`
-      wrapping the existing modules; constructor-injected per §10.6, lazy
-      and failure-tolerant.
+- [x] A-5: default registry at `engine/src/vendors/default/registry.js`
+      (2026-08-04) — thin composition point over the three catalogs, with
+      per-capability catalog overrides (the §10.6 seam, tested with a fake
+      vendor injected through the real dispatch). Phase 2 moves the
+      catalogs into its tree.
 - [ ] A-6: thread the runtime through the MCP and Studio entrypoints
       (~15 vendor symbols each); Phase 2 file moves follow.
 
