@@ -387,11 +387,15 @@ test('settings: an Azure key is refused rather than stored', async () => {
   );
 });
 
-test('settings: a non-WAV output format is refused', async () => {
-  await assert.rejects(
-    updateSettings({ tts: { azure: { outputFormat: 'audio-24khz-96kbitrate-mono-mp3' } } }, home),
-    (e) => e.code === 'invalid_config',
-  );
+test('settings: an outputFormat unknown to this build is preserved, not destroyed', async () => {
+  // Since Slice A, settings validation is structural only for vendor option
+  // enums: the vendor refuses an unusable format at use time with a precise
+  // error, and a format written by a NEWER build must survive an older
+  // build's validateSettings — enum-refusing here destroyed that setting.
+  await updateSettings({ tts: { azure: { outputFormat: 'audio-24khz-96kbitrate-mono-mp3' } } }, home);
+  const s = await readSettings(home);
+  assert.equal(s.tts.azure.outputFormat, 'audio-24khz-96kbitrate-mono-mp3');
+  await updateSettings({ tts: { azure: { outputFormat: null } } }, home); // restore default for later tests
 });
 
 test('settings: patching one azure field keeps the others', async () => {

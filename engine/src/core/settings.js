@@ -42,8 +42,6 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir, settingsFileFor } from './paths.js';
-import { AZURE_WAV_FORMATS, AZURE_DEFAULT_FORMAT } from './tts-azure.js';
-import { ELEVENLABS_WAV_FORMATS, ELEVENLABS_DEFAULT_FORMAT } from './tts-elevenlabs.js';
 import { DEFAULT_REVIEW_POLICY, REVIEW_WARNING_CODES } from './render-review.js';
 import {
   DEFAULT_DELIVERABLE_PRESETS, DELIVERABLE_ID_RE, MAX_FILM_DELIVERABLES,
@@ -105,14 +103,18 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // Surfaced through list_vendors so narrating agents can prefer voices the
     // user actually auditioned and chose. Mirrors music.favoritePrograms.
     favoriteVoices: null,
-    azure: Object.freeze({ region: null, voice: null, outputFormat: AZURE_DEFAULT_FORMAT, style: null }),
+    // Vendor default values are literals here rather than imports (Slice A):
+    // settings must not load vendor modules, and each vendor remains the
+    // authority at use time. test/settings.test drift-guards the literals
+    // against the vendor constants.
+    azure: Object.freeze({ region: null, voice: null, outputFormat: 'riff-24khz-16bit-mono-pcm', style: null }),
     // Piper (v0.18): where the CLI and the downloaded .onnx voices live, and
     // which voice to use when a call doesn't name one. All paths, no secrets.
     piper: Object.freeze({ exe: null, python: null, voicesDir: null, voice: null }),
     // The v0.20 cloud vendors, each following azure's rule: the non-secret
     // half only — every API key is environment-only. See the vendor modules
     // (core/tts-elevenlabs.js, core/tts-openai.js, core/tts-deepgram.js).
-    elevenlabs: Object.freeze({ voice: null, model: null, outputFormat: ELEVENLABS_DEFAULT_FORMAT }),
+    elevenlabs: Object.freeze({ voice: null, model: null, outputFormat: 'wav_24000' }),
     openai: Object.freeze({ voice: null, model: null, instructions: null }),
     deepgram: Object.freeze({ voice: null }),
   }),
@@ -265,11 +267,13 @@ export function validateSettings(s) {
         nullableString('region');
         nullableString('voice');
         nullableString('style');
-        // A non-WAV format would break the duration contract every consumer
-        // relies on, so it is refused here rather than at synthesis time.
-        if (!AZURE_WAV_FORMATS.includes(a.outputFormat)) {
-          problems.push(`tts.azure.outputFormat: one of ${AZURE_WAV_FORMATS.join(', ')}`);
-        }
+        // outputFormat is validated structurally only (Slice A): the Azure
+        // vendor refuses a non-WAV format with a structured error at use
+        // time, which is the authoritative check — and enum-validating here
+        // would destroy a setting written by a newer build that knows a
+        // format this build does not (the forward-compatibility rule from
+        // core/vendors.js).
+        nullableString('outputFormat');
         // The key is environment-only. Accepting it here — even to "help" —
         // would write a live credential into a file users share freely.
         if ('key' in a || 'apiKey' in a) {
@@ -305,11 +309,9 @@ export function validateSettings(s) {
         }
         return c;
       };
-      const el = cloudVendor('elevenlabs', ['voice', 'model'], 'ElevenLabs');
-      // Same duration contract as tts.azure.outputFormat: only headered WAV.
-      if (el && !ELEVENLABS_WAV_FORMATS.includes(el.outputFormat)) {
-        problems.push(`tts.elevenlabs.outputFormat: one of ${ELEVENLABS_WAV_FORMATS.join(', ')}`);
-      }
+      // outputFormat rides the same structural rule as azure's above: the
+      // vendor validates the enum at use time.
+      cloudVendor('elevenlabs', ['voice', 'model', 'outputFormat'], 'ElevenLabs');
       cloudVendor('openai', ['voice', 'model', 'instructions'], 'OpenAI');
       cloudVendor('deepgram', ['voice'], 'Deepgram');
       // Starred voices (v0.22): a map of vendor → distinct voice names.

@@ -106,8 +106,10 @@ test('settings refuse a stored ElevenLabs key, same rule as azure', () => {
   });
   assert.throws(() => validateSettings(withEleven({ key: 'secret' })),
     (e) => e.code === 'invalid_config' && /environment only/.test(e.message));
-  assert.throws(() => validateSettings(withEleven({ outputFormat: 'mp3_44100_128' })),
-    (e) => e.code === 'invalid_config' && /outputFormat/.test(e.message));
+  // Since Slice A the format enum is validated at use time by the vendor
+  // ("refused before the request" below); settings accepts any non-empty
+  // string so a newer build's format survives this build's validation.
+  assert.ok(validateSettings(withEleven({ outputFormat: 'mp3_44100_128' })));
   assert.ok(validateSettings(withEleven({ voice: 'Rachel', model: 'eleven_flash_v2_5' })));
 });
 

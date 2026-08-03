@@ -60,6 +60,19 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Settings validation stops importing vendors (v0.26)
+
+Slice A-4a: `core/settings.js` no longer imports `tts-azure.js` /
+`tts-elevenlabs.js` for their format enums. Vendor default values are
+literals (drift-guarded by a test that tethers them to the vendor
+constants), and `outputFormat` is validated structurally only — the vendor
+refuses an unusable format at use time with a precise structured error,
+which was already true, and a format written by a NEWER build now survives
+an older build's `validateSettings` instead of being destroyed (the
+forward-compatibility rule the vendor-boundary plan calls out). Two tests
+that pinned the old settings-time enum refusal were updated to pin the new
+contract instead.
+
 ### The vendor boundary is now enforced, not aspired to (v0.26)
 
 `test/import-graph.test.js` (Phase 6's static check, stood up before the
