@@ -60,6 +60,20 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The render-format matrix runs in CI (v0.26)
+
+`engine/test/smoke-render-formats.mjs` (new, outside `npm test` like the
+other real-vendor smokes) renders one tiny scene through **every deliverable
+format** with a real browser and real FFmpeg — mp4/H.264, webm with genuine
+VP9 alpha, gif, ProRes 4444, png-sequence — plus a 2-worker parallel render
+and a cancellation that ends in state `cancelled`, each output
+ffprobe-verified. CI's `linux-render` job runs it after the gated Chromium
+suite. Verified first on the L4 Linux install; three probe subtleties are
+recorded in the script: ffprobe's native VP9 decoder hides the alpha plane
+(`alpha_mode=1` container tag is the marker), ProRes 4444 decodes as
+12-bit alpha (`yuva444p12le`) regardless of 10-bit encode input, and the
+opaque scaffold composition legitimately yields `rgb24` PNG frames.
+
 ### Linux is supported: the L4 acceptance passed (v0.26)
 
 On 2026-08-04 a **fresh Ubuntu 24.04.4 LTS install** (new WSL2 distro,

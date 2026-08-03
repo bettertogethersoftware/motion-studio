@@ -89,11 +89,15 @@ Verified starting points (2026-08-04):
       cancellation. **Fonts are the determinism risk** — a Linux distro's
       font set differs from Windows, so the same composition renders
       different glyphs. Decide: bundle/pin a font pack, or record the font
-      environment in render metadata and document the caveat. *Partially
-      covered (2026-08-04): CI's `linux-render` job runs the gated
-      `real-chromium.test.js` (launch, screenshot determinism, real alpha)
-      with a skips-are-failures guard, so green provably means "ran". The
-      full per-format render matrix and the font decision remain open.*
+      environment in render metadata and document the caveat. *Covered
+      except the font decision (2026-08-04): CI's `linux-render` job runs
+      the gated `real-chromium.test.js` (launch, screenshot determinism,
+      real alpha) with a skips-are-failures guard, then
+      `smoke-render-formats.mjs` — every deliverable format (mp4, webm with
+      VP9 alpha via the alpha_mode tag, gif, prores 4444 12-bit alpha,
+      png-sequence), a 2-worker parallel render, and a cancellation, each
+      ffprobe-verified. The font-determinism decision moves to the Slice-0
+      set in [TODO.md](TODO.md).*
 - [x] win32-assumption sweep (2026-08-04): clean. Every `.exe` grep hit
       outside the documented Windows-only vendor modules is a regex
       `.exec(` false positive; the one `process.platform` gate

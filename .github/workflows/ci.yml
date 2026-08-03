@@ -122,6 +122,12 @@ jobs:
           grep -qx '# skipped 0' /tmp/chromium.log
           grep -qx '# fail 0' /tmp/chromium.log
 
+      # Every deliverable format through the real browser + real FFmpeg:
+      # mp4, webm (VP9 alpha), gif, prores 4444, png-sequence, plus a
+      # 2-worker parallel render and a cancellation, each ffprobe-verified.
+      - name: Render format matrix
+        run: node test/smoke-render-formats.mjs
+
   # Real-vendor speech→transcription round-trip (linux-ready-plan L1): piper
   # speaks, whisper.cpp (built here, statically, cached) transcribes, the
   # words must come back. The suite itself fakes both vendors on purpose.

@@ -19,19 +19,16 @@ Active plan documents:
 
 ## Next up (ordered)
 
-1. [ ] **Full render-format matrix on Linux CI**: extend the `linux-render`
-       job beyond `real-chromium.test.js` to every output format (H.264,
-       VP9/alpha, GIF, ProRes, PNG-seq), parallel workers, cancellation.
-2. [ ] **Three Slice-0 design decisions** — make once, inside the
+1. [ ] **Three Slice-0 design decisions** — make once, inside the
        [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md), not
        ad-hoc: Linux default speech vendor (zero-byte per-platform `system`
        backend vs. documented-Piper); SoundFont on a clean clone (no fresh
        clone can synthesize music on any OS today); font determinism for
        Linux rendering (pin a pack vs. record the environment in metadata).
-3. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
+2. [ ] **Vendor-boundary plan Slice 0** (footprint + vanilla preflight) —
        its §10 decisions are unmade; the Linux work added extra motivation
        (the pack mechanism replaces several hand-rolled provisioning steps).
-4. [ ] **Product backlog P0 items** from
+3. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect
        deliverable variants. Then the three queued plans, audio-cue first
@@ -71,6 +68,10 @@ Active plan documents:
 
 ## Recently completed (context — details in [completed.md](completed.md))
 
+- 2026-08-04 — **Render-format matrix on CI**: `smoke-render-formats.mjs`
+  proves mp4 / webm-alpha / gif / prores-4444 / png-sequence plus parallel
+  workers and cancellation through the real browser, ffprobe-verified;
+  runs in the `linux-render` job after the gated Chromium suite.
 - 2026-08-04 — **Linux L4 acceptance PASSED** on a fresh Ubuntu 24.04 WSL2
   distro: agent-driven provisioning, full film over MCP (speech + music +
   SFX + Chromium renders + promoted build), whisper transcribe-back, forge
