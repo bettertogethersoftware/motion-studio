@@ -60,6 +60,29 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The `system` speech vendor works on every OS, at zero bytes (v0.26)
+
+The decided §10 design, implemented: the vendor id stays `system` and the
+"exe" it spawns is now chosen per platform — the bundled
+`MotionStudioTts.exe` keeps priority on Windows when present (existing
+installs keep their exact voices), otherwise a small Node backend drives the
+OS's own synthesis through the **same CLI contract**: System.Speech via
+PowerShell (values crossing via environment variables, never string
+interpolation), `say` on macOS (written to Apple's documented flags, not yet
+run on a real Mac — the file says so), `espeak-ng` on Linux. Nothing
+downloads, every existing `settings.json` stays valid, and everything
+downstream of the contract — timings, level measurement, the Studio's
+audition button — is untouched because the backends are just more "exes" to
+the resolver (`resolveTtsExeInfo` now reports source `os` for them).
+Verified live: Windows System.Speech spoke 3.4 s through the backend
+(9 voices listed), and Linux `synthesizeSpeech` with zero configuration
+produced a 3.95 s WAV through espeak-ng. Quality is scratch-narration by
+design; piper and the cloud vendors remain the documented upgrades
+(tts-setup.md). Amusing test finding: "the foreign platform's tool is
+reliably absent" is false — this dev machine has eSpeak NG *for Windows*
+installed, so the contract tests skip-not-fail when a foreign tool turns out
+to exist.
+
 ### `npm run fetch-soundfont` — the pack mechanism's pilot (v0.26)
 
 The decided fetch-on-command policy, implemented: one command downloads the

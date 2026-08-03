@@ -5,7 +5,7 @@ vendors**:
 
 | vendor | what it is | needs | platform |
 |---|---|---|---|
-| `system` *(default)* | the local `MotionStudioTts.exe` driving the OS voices | `MOTION_STUDIO_TTS_EXE` | Windows only |
+| `system` *(default)* | the OS's own voices — bundled exe / System.Speech on Windows, `say` on macOS, `espeak-ng` on Linux (v0.26) | nothing (zero-byte) | any |
 | `azure` | Azure AI Speech neural voices over REST, in plain Node | `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | any |
 | `piper` *(v0.18)* | [Piper](https://github.com/OHF-Voice/piper1-gpl) neural voices, running locally | Piper installed + downloaded `.onnx` voices | any |
 | `elevenlabs` *(v0.20)* | ElevenLabs cloud voices over REST | `ELEVENLABS_API_KEY` | any |
@@ -13,8 +13,8 @@ vendors**:
 | `deepgram` *(v0.20)* | Deepgram Aura-2 voices over REST | `DEEPGRAM_API_KEY` | any |
 
 The short version of choosing: the local vendors are still the recommended
-starting point — `system` is free and offline but Windows-only and stuck with
-whatever voices Windows has; `piper` is neural *and* offline *and* free, at
+starting point — `system` is free, offline, and since v0.26 works on every
+OS with zero setup (scratch-narration quality by design); `piper` is neural *and* offline *and* free, at
 the cost of installing it and downloading voices yourself. Among the cloud
 vendors: `azure` has the widest catalogue (~140 locales, expressive styles)
 but needs an account and bills per character; **`elevenlabs` has the best
@@ -473,11 +473,27 @@ Aura's API takes text and a voice — nothing else. `rate`, `volume`, `style`,
 
 ---
 
-## Vendor: `system` (Windows speech exe) — v0.6
+## Vendor: `system` (the OS's own voices) — v0.6, cross-platform since v0.26
 
-Offline, free, no account, and the reason narration existed before v0.17. Motion
-Studio does not synthesize speech itself here either: narration is produced by a
-small, self-contained Windows console executable that the engine spawns the same
+Offline, free, no account, and the reason narration existed before v0.17.
+Since v0.26 the vendor is **zero-byte on every OS**: the engine picks a
+per-platform backend automatically, and nothing is downloaded for any of
+them —
+
+| platform | what actually speaks |
+|---|---|
+| Windows | the bundled `MotionStudioTts.exe` when present (existing installs keep their exact voices), otherwise System.Speech driven through PowerShell |
+| macOS | the built-in `say` command *(written to Apple's documented flags; not yet exercised on a real Mac)* |
+| Linux | `espeak-ng` from the distro (`sudo apt install espeak-ng`) |
+
+All three speak the same CLI contract as the Windows exe, so everything
+downstream — timings, levels, the Studio's audition button — is identical.
+Quality is deliberately scratch-narration grade: `system` is the vendor that
+always works; `piper` (neural, still local and free) and the cloud vendors
+are the documented upgrades.
+
+Motion Studio does not synthesize speech itself here either: narration is
+produced by a small, self-contained program that the engine spawns the same
 way it spawns FFmpeg.
 
 Once the exe exists, point the engine at it:

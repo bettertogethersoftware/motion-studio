@@ -560,14 +560,14 @@ Additional estimates:
 > **Decided 2026-08-04 (items 1, plus the SoundFont and font questions the
 > linux-ready plan routed here):**
 >
-> 1. **Default speech = the zero-byte per-platform `system` backend**, as
+> 1. **[IMPLEMENTED 2026-08-04]** **Default speech = the zero-byte per-platform `system` backend**, as
 >    recommended below: keep the vendor id, resolve per platform (bundled
 >    exe → System.Speech → `say` → `espeak-ng`). A default must work on a
 >    clean install with nothing downloaded; Piper (proven end to end on
 >    Linux in the L4 acceptance) stays the documented one-command quality
 >    upgrade, not the default. The `system` vendor's documented
 >    modest-quality/non-deterministic expectations already cover espeak.
-> 2. **SoundFont = fetch-on-command, never fetch-on-synthesize, never in
+> 2. **[IMPLEMENTED 2026-08-04** — `npm run fetch-soundfont`] **SoundFont = fetch-on-command, never fetch-on-synthesize, never in
 >    git.** `synthesize_music` without a SoundFont keeps returning
 >    structured `music_unavailable`, but the fix it names becomes one
 >    command: a `fetch-soundfont` step downloading MuseScore_General.sf3

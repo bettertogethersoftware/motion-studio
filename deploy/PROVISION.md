@@ -280,8 +280,9 @@ end to end yet.
 - **FluidSynth (standard profile):** `apt install fluidsynth` — `musicforge`
   falls back to the distro binary on PATH when the vendored Windows exe is
   absent (verified end to end on 24.04).
-- **Speech vendor:** the Windows `system` TTS exe and the vendored FluidSynth
-  chain do not exist on Linux. Install Piper via **pip only** —
+- **Speech vendor:** the default `system` vendor works on Linux since v0.26
+  through `espeak-ng` (`sudo apt install espeak-ng`; zero-config scratch
+  narration). For production narration install Piper via **pip only** —
   `pipx install piper-tts` — never the archived pre-2024 C++ release
   binaries, which ignore the engine's flags and exit 0 having written no
   audio (see `docs\tts-setup.md`). Note that pipx's bin directory varies

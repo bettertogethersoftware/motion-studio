@@ -25,17 +25,38 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { EngineError, ErrorCodes } from './errors.js';
 import { vendorDir } from './paths.js';
 
 const STDERR_TAIL_LINES = 40;
 
-/** Path to the bundled default exe (may not exist — checkTts reports that).
- *  A function, not a constant: the vendor dir is configurable (v0.25). */
-const defaultTtsExe = () => path.join(vendorDir(), 'tts', 'MotionStudioTts.exe');
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The zero-byte per-platform default (Slice 0, decided in the vendor-boundary
+ * plan §10): the vendor id stays `system`, and the "exe" it spawns is chosen
+ * per platform. On Windows the bundled MotionStudioTts.exe keeps priority
+ * when present (back-compat: existing installs keep their exact voices);
+ * otherwise a small Node backend drives the OS's own synthesis through the
+ * same CLI contract — System.Speech via PowerShell, `say`, or espeak-ng.
+ * Nothing is downloaded for any of them; quality is scratch-narration by
+ * design and the documented upgrades are piper or a cloud vendor.
+ * A function, not a constant: the vendor dir is configurable (v0.25).
+ */
+const defaultTtsExe = () => {
+  if (process.platform === 'win32') {
+    const bundled = path.join(vendorDir(), 'tts', 'MotionStudioTts.exe');
+    if (fs.existsSync(bundled)) return bundled;
+    return path.join(MODULE_DIR, 'system-tts', 'windows-sapi.mjs');
+  }
+  if (process.platform === 'darwin') return path.join(MODULE_DIR, 'system-tts', 'macos-say.mjs');
+  return path.join(MODULE_DIR, 'system-tts', 'linux-espeak.mjs');
+};
 
 /**
  * Resolve the TTS executable path. Mirrors the ffmpegPath / browser-module DI
@@ -53,13 +74,16 @@ export function resolveTtsExe(explicit) {
  * resolveFfmpegPath()'s {path, source} so the Studio's vendors page can say
  * "not found at <path> (from env)" instead of an anonymous failure.
  *
- * @returns {{path: string, source: 'argument'|'env'|'bundled'}}
+ * @returns {{path: string, source: 'argument'|'env'|'bundled'|'os'}}
  */
 export function resolveTtsExeInfo(explicit) {
   if (explicit) return { path: explicit, source: 'argument' };
   const env = process.env.MOTION_STUDIO_TTS_EXE?.trim();
   if (env) return { path: env, source: 'env' };
-  return { path: defaultTtsExe(), source: 'bundled' };
+  const p = defaultTtsExe();
+  // 'bundled' = the shipped Windows exe; 'os' = the per-platform zero-byte
+  // backend (Slice 0) driving the operating system's own synthesis.
+  return { path: p, source: p.endsWith('.mjs') ? 'os' : 'bundled' };
 }
 
 function spawnArgs(exe, ttsArgs) {
