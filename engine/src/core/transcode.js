@@ -280,11 +280,22 @@ export function readTranscodeMeta(outPath) {
   return readTranscodeMetaFile(transcodeMetaPath(outPath));
 }
 
+/**
+ * Case normalization is Windows-only: the recorded path is stat()ed again at
+ * plan time, and POSIX filesystems are case-sensitive — lowercasing there
+ * turns a real source into ENOENT. Windows keeps lowercasing so sidecars
+ * written before this distinction still match their recomputed identity.
+ */
+const normalizePathForIdentity = (p) => {
+  const resolved = path.resolve(p).replace(/\\/g, '/');
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
+
 /** Identity of a transcode: the source as it was, plus every parameter. */
 export function transcodeIdentity({ sourceAbs, bytes, mtimeMs, request }) {
   return {
     version: TRANSCODE_VERSION,
-    source: path.resolve(sourceAbs).replace(/\\/g, '/').toLowerCase(),
+    source: normalizePathForIdentity(sourceAbs),
     bytes,
     mtimeMs: Math.round(mtimeMs),
     request,
@@ -331,7 +342,7 @@ export async function transcodeAsset({
   }
   // Never overwrite the source — a destructive in-place transcode is not a thing
   // this surface should be able to express by accident.
-  if (path.resolve(sourceAbs).toLowerCase() === path.resolve(outPath).toLowerCase()) {
+  if (normalizePathForIdentity(sourceAbs) === normalizePathForIdentity(outPath)) {
     throw bad('to must differ from the source — this tool never overwrites its input', { path: outPath });
   }
 

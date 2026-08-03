@@ -32,17 +32,22 @@ Verified starting points (2026-08-04):
   (env var → any sibling `ffmpeg-*` build → PATH); `verticalforge` and
   `comfyui_music` already resolved acceptably.
 
-## L0 — Make the cross-platform claim testable (0.5–1 day)
+## L0 — Make the cross-platform claim testable (0.5–1 day) — DONE 2026-08-04
 
-- [ ] Stand up Linux CI (ubuntu-latest) running the full engine suite from
-      `engine/` (`npm install`, `npm run doctor` tolerated to fail on missing
-      binaries, `npm test`). Record the pass/fail/skip baseline — the current
-      claim is asserted, not tested.
-- [ ] Triage failures into: real bugs, tests needing a platform gate, and
-      tests needing a Linux fixture (e.g. the POSIX SIGTERM case should now
-      *run* rather than skip).
-- [ ] Add the baseline to CI so regressions are visible from the first
-      Linux-targeting commit. macOS CI is optional here; add it only if free.
+- [x] Baseline measured on real Linux (WSL Ubuntu 26.04, Node 22.16, static
+      FFmpeg 7.0.2, `PUPPETEER_SKIP_DOWNLOAD=1`): **858 tests, 852 pass,
+      2 fail, 4 skipped** on the first-ever Linux run. `npm run doctor`
+      passed unmodified.
+- [x] Triaged both failures to one real bug, not test gaps:
+      `transcodeIdentity` lowercased the recorded absolute source path
+      (`transcode.js`), which is harmless on case-insensitive Windows but
+      turns a mixed-case `mkdtemp` path into ENOENT on POSIX →
+      `footage_source_changed`/`source_missing` at plan time. Fixed by making
+      case normalization win32-only (Windows sidecars written before the fix
+      still match); the source==dest overwrite guard had the same bug and got
+      the same fix. After the fix: 858 tests, 854 pass, 0 fail, 4 skipped.
+- [x] `.github/workflows/ci.yml`: `ubuntu-latest` + `windows-latest` jobs
+      (Node 22, distro/choco FFmpeg, `npm ci`, doctor, test). macOS deferred.
 
 ## L1 — Engine capability parity on Linux (2–4 days standalone; mostly free if vendor-boundary Slice 0 lands first)
 

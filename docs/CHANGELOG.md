@@ -60,6 +60,28 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Linux L0: CI on two platforms, and the first Linux bug (v0.26)
+
+The linux-ready plan's L0 phase ran: the full suite executed on real Linux
+for the first time (Ubuntu 26.04, Node 22, FFmpeg 7.0.2) and scored 852/858
+with **two failures that were one real bug**:
+
+- **`transcodeIdentity` no longer lowercases paths on POSIX**
+  (`core/transcode.js`). The recorded absolute source path was lowercased for
+  identity stability — correct on case-insensitive Windows, but on
+  case-sensitive filesystems it turns any mixed-case source path into ENOENT
+  at plan time, so every prepared-footage film failed `planFilm` with
+  `footage_source_changed`/`source_missing`. Case normalization is now
+  win32-only; sidecars written on Windows before the fix still match their
+  recomputed identity, and the source==dest overwrite guard got the same
+  treatment. After the fix both platforms are clean: Windows 855/858 pass
+  (3 platform skips), Linux 854/858 (4 platform skips), zero failures.
+- **`.github/workflows/ci.yml`** (new): `ubuntu-latest` and `windows-latest`
+  jobs — Node 22, FFmpeg from apt/choco, `npm ci`, `npm run doctor`,
+  `npm test` — with `PUPPETEER_SKIP_DOWNLOAD` set, since the suite fakes the
+  browser and the gated real-Chromium file skips honestly. The
+  cross-platform claim is now tested on every push instead of asserted.
+
 ### The vendor dir is configurable, and the settings page grew up (v0.25)
 
 **Configurable vendor dir.** The root the engine resolves bundled runtime
