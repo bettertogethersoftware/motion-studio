@@ -80,6 +80,20 @@ Nothing to install beyond a SoundFont. The spec becomes a MIDI file in memory
 transitive dependencies, ~2.5 MB — which is already a dependency of the engine,
 so `npm install` is the entire setup.
 
+The SoundFont itself is not committed (40 MB does not belong in git history),
+so a fresh clone gets it with one command (v0.26):
+
+```
+npm run fetch-soundfont
+```
+
+That downloads the MIT-licensed `MuseScore_General.sf3` from MuseScore's
+canonical mirror with SHA-256 verification into `vendor/soundfonts/`, is
+idempotent (a verified existing file is reused, nothing re-downloads), and
+never runs implicitly — `synthesize_music` without a SoundFont returns
+`music_unavailable` naming this command rather than downloading anything on
+its own.
+
 | piece | env var | default |
 |---|---|---|
 | instruments | `MOTION_STUDIO_SOUNDFONT` | `vendor/soundfonts/MuseScore_General.sf3` |

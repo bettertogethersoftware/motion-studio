@@ -60,6 +60,22 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### `npm run fetch-soundfont` — the pack mechanism's pilot (v0.26)
+
+The decided fetch-on-command policy, implemented: one command downloads the
+MIT-licensed `MuseScore_General.sf3` (pinned URL + pinned SHA-256, verified
+from two independent copies) into the engine's vendor dir — streamed to a
+`.part` file, hash-verified **before** the destination name ever exists,
+atomic rename, idempotent re-runs, structured offline failure naming the
+manual fallback. `synthesize_music`'s `music_unavailable` hint now leads
+with the command. `fetchVerified()` is deliberately the reusable shape the
+vendor-boundary plan's Phase 3 pack mechanism needs — future packs consume
+it rather than reinventing it. Five network-free tests pin the contract
+(reuse-without-network, atomic install, mismatch-never-installs,
+offline-is-structured, HTTP-error retry); verified live on Windows
+(reuse path) and a clean Linux install (real 40 MB download, plus the
+override note when `MOTION_STUDIO_SOUNDFONT` points elsewhere).
+
 ### Slice 0 begins: the vanilla install loses 420 MB of browser (v0.26)
 
 - **Only `chrome-headless-shell` is downloaded** (`engine/.puppeteerrc.cjs`):

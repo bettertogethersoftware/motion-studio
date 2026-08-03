@@ -271,11 +271,12 @@ end to end yet.
   ```
 
   Then fetch a `ggml-*.bin` model from huggingface.co/ggerganov/whisper.cpp.
-- **SoundFont:** no fresh clone can synthesize music until one exists. Fetch
-  MuseScore_General.sf3 (~40 MB) from the MuseScore mirror
-  (`https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3`),
-  and **export `MOTION_STUDIO_SOUNDFONT` in `~/.profile`** — the engine's
-  `node` music vendor and `musicforge` both honor it.
+- **SoundFont:** no fresh clone can synthesize music until one exists. Run
+  `npm run fetch-soundfont` from `engine/` (v0.26) — a one-command
+  SHA-256-verified download of the MIT-licensed MuseScore_General.sf3 into
+  the engine's vendor dir, which is where the `node` music vendor looks by
+  default; no env var needed. (`MOTION_STUDIO_SOUNDFONT` still overrides for
+  a custom SoundFont, and `musicforge` honors it too.)
 - **FluidSynth (standard profile):** `apt install fluidsynth` — `musicforge`
   falls back to the distro binary on PATH when the vendored Windows exe is
   absent (verified end to end on 24.04).

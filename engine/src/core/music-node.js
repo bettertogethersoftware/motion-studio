@@ -215,8 +215,9 @@ export async function checkNodeMusic({ soundfont } = {}) {
   } catch {
     return {
       available: false,
-      error: `SoundFont not found: ${sf}. Set MOTION_STUDIO_SOUNDFONT (or the soundfont path on the Studio's ` +
-        'music page) to any General MIDI .sf2/.sf3 file.',
+      error: `SoundFont not found: ${sf}. Run "npm run fetch-soundfont" in the engine folder for a one-command ` +
+        'verified download of the default (MIT-licensed MuseScore_General.sf3) — or set MOTION_STUDIO_SOUNDFONT ' +
+        "(or the soundfont path on the Studio's music page) to any General MIDI .sf2/.sf3 file you already have.",
       config,
     };
   }

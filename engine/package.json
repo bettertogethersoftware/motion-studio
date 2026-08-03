@@ -4,6 +4,7 @@
   "description": "Motion Studio render engine: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with a Studio web UI, CLI, MCP server, and pluggable speech/music vendors (Windows voices or Azure AI Speech; in-process SoundFont synth or FluidSynth).",
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
+    "fetch-soundfont": "node src/cli/fetch-soundfont.js",
     "studio": "node src/studio/server.js",
     "doctor": "node src/cli/render.js --doctor",
     "mcp": "node src/mcp/server.js"
