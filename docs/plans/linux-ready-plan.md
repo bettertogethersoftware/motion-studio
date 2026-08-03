@@ -71,15 +71,19 @@ Verified starting points (2026-08-04):
       PCM WAV, measured peak −16.87 dBFS. Still open: SoundFont on a clean
       clone (fetch/ship — vendor-boundary Phase 0.5), and pointing the
       `fluidsynth` vendor at a distro binary via settings.
-- [x] Transcription: verified via CI (2026-08-04). The `linux-speech` job
-      builds whisper.cpp statically (cached), fetches `ggml-base.en.bin`, and
-      runs `engine/test/smoke-speech-roundtrip.mjs` — piper speaks a known
+- [x] Transcription: verified in CI **run #6, commit `1f3f9fe`, 2026-08-04**
+      (runs #4/#5 failed on CI plumbing first — a mirror flake, then the
+      runner's preset `PIPX_BIN_DIR` breaking a hardcoded piper path). The
+      `linux-speech` job builds whisper.cpp statically (cached), fetches
+      `ggml-base.en.bin`, and runs
+      `engine/test/smoke-speech-roundtrip.mjs` — piper speaks a known
       sentence, `extractSpeechWav` conforms it to 16 kHz, real whisper.cpp
-      transcribes it, and every expected word must survive. The smoke is
-      deliberately outside `npm test` (the suite fakes both vendors); it also
-      runs on any machine with the `MOTION_STUDIO_PIPER_*`/`_WHISPER_*` env
-      hooks set. Incidental extra: run #1's re-run proved distro (apt)
-      FFmpeg 6.x also passes the full suite, alongside the static 7.0.2.
+      transcribes it, and every expected word must survive (measured: 3 s of
+      real work in the green run). The smoke is deliberately outside
+      `npm test` (the suite fakes both vendors); it also runs on any machine
+      with the `MOTION_STUDIO_PIPER_*`/`_WHISPER_*` env hooks set.
+      Incidental extra: run #1's re-run proved distro (apt) FFmpeg 6.x also
+      passes the full suite, alongside the static 7.0.2.
 - [ ] Rendering: verify Puppeteer headless Chromium on Linux for every output
       format (H.264, VP9/alpha, GIF, ProRes, PNG-seq), parallel workers, and
       cancellation. **Fonts are the determinism risk** — a Linux distro's
@@ -117,24 +121,27 @@ Verified starting points (2026-08-04):
       Linux — packaged installs find their own coders), auto-editor via pip,
       whisper.cpp built or packaged; each records its path in `MACHINE.md`.
 
-## L3 — Provisioning and entry files (1–2 days)
+## L3 — Provisioning and entry files (1–2 days) — DONE 2026-08-04 (except the doc item below)
 
-- [ ] `deploy/ENTRY.md`: the root-resolution block and examples are
-      PowerShell. Decide: dual-shell examples in one file, or per-OS entry
-      templates selected by `provision.mjs` at emit time (recommended — the
-      guide stays short and each machine gets one shell, not two).
-- [ ] `deploy/PROVISION.md`: add the Linux branch to each step (prereqs via
-      distro packages, core tools per the L2 decision, env var via
-      `~/.profile` or systemd user environment rather than
-      `[Environment]::SetEnvironmentVariable`).
-- [ ] `deploy/provision.mjs`: already plain Node — run it on Linux, confirm
-      path handling, and add the per-OS template selection if L3's first
-      decision goes that way.
-- [ ] `deploy/MACHINE-template.md`: generalize Windows-flavored rows
-      (Windows version → OS/kernel; `python.exe` → interpreter path).
+- [x] `deploy/ENTRY.md` is a single source with
+      `<!-- os:windows -->`/`<!-- os:posix -->` blocks; `provision.mjs`
+      filters at emit time (platform auto-detected, `--os` to override,
+      nesting/unclosed-marker validation) and stamps the header with the
+      target OS. Verified: Windows emit (4 PowerShell blocks, 0 bash), Linux
+      emit (4 bash, 0 PowerShell, zero leftover markers), WSL auto-detect.
+- [x] `deploy/PROVISION.md` gained the "Provisioning on Linux" section:
+      per-step deltas incl. userspace no-sudo fallbacks, both FFmpeg routes,
+      the whisper.cpp static build recipe, pip-only Piper with the
+      `PIPX_BIN_DIR` and pre-2024-binary traps, no ImageMagick wrapper on
+      Linux, and the round-trip smoke as a verification step.
+- [x] `deploy/provision.mjs` verified on Linux (WSL): path handling and
+      per-OS emit both correct.
+- [x] `deploy/MACHINE-template.md` rows are OS-neutral (operating system,
+      interpreter path, per-OS MAGICK note, new PIPER row).
 - [ ] Update `docs/mcp-setup.md` and the vendor setup docs
-      (`tts-setup.md`, `music-setup.md`, `transcribe-setup.md`) with the
-      Linux paths and defaults decided in L1.
+      (`music-setup.md`, `transcribe-setup.md`) with the Linux paths and
+      defaults once the L1 *default-vendor* decisions are made
+      (tts-setup.md already carries the pip-only Piper warning).
 
 ## L4 — Acceptance: one real Linux install, end to end (1 day)
 

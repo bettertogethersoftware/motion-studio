@@ -15,7 +15,7 @@
 | Machine / customer | TODO |
 | Provisioned on | TODO (date) |
 | Provisioned profile | TODO (`minimal` / `standard` / `gpu`) |
-| Windows version | TODO |
+| Operating system | TODO (e.g. `Windows 11 Pro 10.0.26200` or `Ubuntu 24.04, kernel 6.8`) |
 | Last verified | TODO (date all check commands below last passed) |
 
 ## Hardware
@@ -39,13 +39,14 @@ The four binaries every install has. These are the values the agent guide's
 
 | variable | path |
 |---|---|
-| `FFMPEG_EXE` | TODO `<toolsRoot>\ffmpeg-<version>\bin\ffmpeg.exe` |
+| `FFMPEG_EXE` | TODO (Windows: `<toolsRoot>\ffmpeg-<version>\bin\ffmpeg.exe`; Linux: static build or distro path) |
 | `FFPROBE_EXE` | TODO |
 | `FFPLAY_EXE` | TODO |
-| `AUTO_EDITOR_EXE` | TODO |
-| `MAGICK_WRAPPER` | TODO `<toolsRoot>\ImageMagick-<version>\magick-portable.ps1` |
-| `WHISPER_CLI` | TODO |
+| `AUTO_EDITOR_EXE` | TODO (Linux: the pipx-installed path) |
+| `MAGICK` | TODO (Windows: the `magick-portable.ps1` wrapper — never bare `magick.exe`; Linux: the distro `magick`) |
+| `WHISPER_CLI` | TODO (Linux: the statically built `whisper-cli`) |
 | `WHISPER_MODEL` | TODO (default model for MCP config) |
+| `PIPER` | TODO (the pip-installed piper — resolve with `command -v piper`, or `none`) |
 | `SOUNDFONT` | TODO (`.sf2`/`.sf3` path, or `none`) |
 
 Installed Whisper models:
@@ -58,7 +59,7 @@ Installed Whisper models:
 
 | fact | value |
 |---|---|
-| System Python | TODO (`python` on PATH → version) |
+| System Python | TODO (interpreter on PATH → version) |
 | ComfyUI installs | TODO (checkout path + version + which helpers use it; note if ComfyUI runs on a remote GPU box instead) |
 | ComfyUI API URL(s) | TODO (`http://127.0.0.1:8188`, or the remote GPU box's URL) |
 | ComfyUI Python venv(s) | TODO (exact `python.exe` paths) |

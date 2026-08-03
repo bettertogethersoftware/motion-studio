@@ -363,7 +363,7 @@ engine's, and the concat succeeded *despite* it.
   `colorPrimaries`, `colorTransfer`, `colorMatrix`, and `colorRange`; a changed
   value is a `stale_render` problem. Older sidecars that predate these fields are
   unverified rather than falsely declared compatible. See
-  [task_completed/film-colour-plan.md](task_completed/film-colour-plan.md) for the design
+  [plans/completed.md](plans/completed.md) (design record in git history) for the design
   record and historical measurements that led to this choice.
 
 **Do not confuse this with the render-browser codec rule.** Video played *inside a

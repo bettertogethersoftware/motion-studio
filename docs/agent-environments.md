@@ -92,10 +92,10 @@ either skill refers to the other.)
 
 ## What is planned to narrow the gap
 
-The [plans in `todo_task/`](todo_task/README.md) are scoped against exactly this
+The [plans in `plans/`](plans/TODO.md) are scoped against exactly this
 distinction — most of them exist to bring Env A closer to what Env B can already
 do by hand, with the acceptance test *"Env A can reproduce the prototype film."*
 
 Related: [SKILL.md](SKILL.md), [SKILL-shell.md](SKILL-shell.md),
 [frame-api.md](frame-api.md) (the authoring contract, identical in both),
-[todo_task/README.md](todo_task/README.md).
+[plans/TODO.md](plans/TODO.md).

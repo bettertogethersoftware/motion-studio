@@ -1,11 +1,12 @@
 # Motion Studio Agent Guide
 
-> **Generated file — do not edit.** `motion-studio\deploy\provision.mjs` writes
-> this guide to the tools root as both `AGENTS.md` and `CLAUDE.md`. It is
+> **Generated file — do not edit.** `motion-studio/deploy/provision.mjs` writes
+> this guide to the tools root as both `AGENTS.md` and `CLAUDE.md`, filtered
+> for the machine's OS (this copy: **__MOTION_STUDIO_OS__**). It is otherwise
 > identical on every Motion Studio machine. Everything specific to *this*
-> machine lives in `MACHINE.md` beside it; everything specific to a helper tool
-> lives in that tool's own `README.md`. If this file disagrees with either of
-> those, the more specific file wins.
+> machine lives in `MACHINE.md` beside it; everything specific to a helper
+> tool lives in that tool's own `README.md`. If this file disagrees with
+> either of those, the more specific file wins.
 
 Use this guide when driving this Motion Studio installation as an AI agent with
 MCP, filesystem, and shell access. The agent may use Motion Studio MCP tools
@@ -17,38 +18,41 @@ and directly run the locally installed media tools.
 |---|---|---|
 | stable contract | this file | Motion Studio itself changes (regenerate, never hand-edit) |
 | this machine | `MACHINE.md` (beside this file) | hardware, paths, models, or paid services change |
-| each helper tool | `<tool>\README.md` | that tool changes |
-| production knowledge | `<MOTION_STUDIO_ROOT>\docs\` | lessons are learned anywhere |
+| each helper tool | `<tool>/README.md` | that tool changes |
+| production knowledge | `<MOTION_STUDIO_ROOT>/docs/` | lessons are learned anywhere |
 
 ## Required Motion Studio orientation
 
 Before performing any Motion Studio task, read
-`<MOTION_STUDIO_ROOT>\docs\SKILL.md` completely and follow its workflow,
+`<MOTION_STUDIO_ROOT>/docs/SKILL.md` completely and follow its workflow,
 authoring contract, verification requirements, and error-handling guidance.
 
-Read `<MOTION_STUDIO_ROOT>\docs\mcp-setup.md` before configuring,
+Read `<MOTION_STUDIO_ROOT>/docs/mcp-setup.md` before configuring,
 troubleshooting, or directly using the Motion Studio MCP server. It is the
 complete connection and MCP tool reference.
 
 Before writing composition HTML, CSS, or JavaScript, also read
-`<MOTION_STUDIO_ROOT>\docs\frame-api.md`.
+`<MOTION_STUDIO_ROOT>/docs/frame-api.md`.
 
 Before producing a music video, beat-synced film, or anything that layers
-generated audio, read `<MOTION_STUDIO_ROOT>\docs\production-lessons.md` — it
+generated audio, read `<MOTION_STUDIO_ROOT>/docs/production-lessons.md` — it
 records the measured traps from previous productions so they are paid for once.
 
 If Motion Studio concepts or capabilities are unfamiliar, consult the relevant
-documents under `<MOTION_STUDIO_ROOT>\docs\` before acting. Start with
+documents under `<MOTION_STUDIO_ROOT>/docs/` before acting. Start with
 `user-guide.md`, `film-setup.md`, and `architecture.md`, then use the
 capability-specific guides such as `tts-setup.md`, `music-setup.md`,
 `transcribe-setup.md`, `sfx-setup.md`, or `3d-libraries.md`.
 
 ## Read the root path from the environment
 
-Before following any PowerShell example in this guide, retrieve the repository
-root from the `MotionStudioRoot` environment variable. Do not hard-code or
-guess the repository path. Use the process value first, then the user- and
-system-level Windows environment values, and validate the result:
+Before following any shell example in this guide, retrieve the repository root
+from the `MotionStudioRoot` environment variable. Do not hard-code or guess
+the repository path.
+
+<!-- os:windows -->
+Use the process value first, then the user- and system-level Windows
+environment values, and validate the result:
 
 ```powershell
 $MotionStudioRoot = $env:MotionStudioRoot
@@ -71,9 +75,32 @@ if (-not (Test-Path (Join-Path $MotionStudioToolsRoot 'MACHINE.md'))) {
   throw "MACHINE.md was not found beside the repository. Run motion-studio\deploy\provision.mjs first: $MotionStudioToolsRoot"
 }
 ```
+<!-- /os:windows -->
+<!-- os:posix -->
+It is normally exported from the user's shell profile (`~/.profile` or
+similar). Validate it before use:
 
-The examples below use `$MotionStudioRoot` for the app, documents, workspaces,
-and temporary assets, and `$MotionStudioToolsRoot` for the sibling tools.
+```bash
+if [ -z "${MotionStudioRoot:-}" ]; then
+  echo 'MotionStudioRoot is not configured. Ask the user to set it before continuing.' >&2
+  exit 1
+fi
+if [ ! -f "$MotionStudioRoot/engine/src/mcp/server.js" ]; then
+  echo "MotionStudioRoot does not point to a Motion Studio repository: $MotionStudioRoot" >&2
+  exit 1
+fi
+
+# Helper tools and machine facts live beside the app repository.
+MotionStudioToolsRoot="$(dirname "$MotionStudioRoot")"
+if [ ! -f "$MotionStudioToolsRoot/MACHINE.md" ]; then
+  echo "MACHINE.md was not found beside the repository. Run motion-studio/deploy/provision.mjs first: $MotionStudioToolsRoot" >&2
+  exit 1
+fi
+```
+<!-- /os:posix -->
+
+The examples below use `MotionStudioRoot` for the app, documents, workspaces,
+and temporary assets, and `MotionStudioToolsRoot` for the sibling tools.
 
 ## This machine: MACHINE.md
 
@@ -85,7 +112,7 @@ are installed, which paid services are signed in, and an inventory of the
 helper tools present on this machine.
 
 Any path in this guide or in a helper README that is written as an example —
-a versioned folder name, a `C:\Users\...` path, a model file — must be
+a versioned folder name, a home-directory path, a model file — must be
 confirmed against `MACHINE.md` before use. If `MACHINE.md` and an example
 disagree, `MACHINE.md` is right.
 
@@ -94,46 +121,51 @@ disagree, `MACHINE.md` is right.
 Skill location:
 
 ```text
-<MOTION_STUDIO_ROOT>\docs\SKILL.md
-<MOTION_STUDIO_ROOT>\docs\SKILL-shell.md
+<MOTION_STUDIO_ROOT>/docs/SKILL.md
+<MOTION_STUDIO_ROOT>/docs/SKILL-shell.md
 ```
 
 Motion Studio stores work as `workspace → film → scene`:
 
 ```text
-data\workspaces\<workspace>\
-  library\                         shared user-provided assets
-  films\<film>\
+data/workspaces/<workspace>/
+  library/                         shared user-provided assets
+  films/<film>/
     film.json
-    assets\
-    out\
-    scenes\<scene>\                one renderable composition
+    assets/
+    out/
+    scenes/<scene>/                one renderable composition
 ```
 
-Use the workspace library for large user-provided assets. Scene `out\` folders
-hold render results; film `out\` folders hold assembled multi-scene films.
+Use the workspace library for large user-provided assets. Scene `out/` folders
+hold render results; film `out/` folders hold assembled multi-scene films.
 
 ## Preferred: install the Motion Studio MCP server
 
 The local MCP server is:
 
-`engine\src\mcp\server.js`
+`engine/src/mcp/server.js`
 
 It exposes workspace, film, scene, asset, music, preview, and render tools.
 It is the preferred interface for new Motion Studio work because it enforces
 the film/scene model and returns structured paths and render status.
 
-Before configuring it, run this once from `engine\` if dependencies are not
+Before configuring it, run this once from `engine/` if dependencies are not
 already present:
 
-```powershell
+```
 npm install
 npm run doctor
 ```
 
-### Codex on Windows
+### Codex configuration
 
+<!-- os:windows -->
 Add this to `%USERPROFILE%\.codex\config.toml`, replacing
+<!-- /os:windows -->
+<!-- os:posix -->
+Add this to `~/.codex/config.toml`, replacing
+<!-- /os:posix -->
 `<UNIQUE_AGENT_WORKSPACE>` with a unique name for this agent and every path
 placeholder with the literal absolute value recorded in `MACHINE.md` (MCP
 client configuration formats require literal paths). Restart Codex or start a
@@ -142,7 +174,7 @@ new task after editing the config.
 ```toml
 [mcp_servers.motion_studio]
 command = "node"
-args = ["<MOTION_STUDIO_ROOT>\\engine\\src\\mcp\\server.js"]
+args = ["<MOTION_STUDIO_ROOT>/engine/src/mcp/server.js"]
 startup_timeout_sec = 120
 
 [mcp_servers.motion_studio.env]
@@ -154,46 +186,55 @@ MOTION_STUDIO_SOUNDFONT = "<SOUNDFONT from MACHINE.md>"
 ```
 
 If the MCP client cannot find `node`, replace `command = "node"` with the
-result of `(Get-Command node).Source`. The SoundFont setting is optional; keep
-it only when the referenced `.sf2`/`.sf3` file exists.
+absolute node path (`(Get-Command node).Source` in PowerShell, `command -v
+node` in bash). The SoundFont setting is optional; keep it only when the
+referenced `.sf2`/`.sf3` file exists.
 
 For another MCP client, launch this exact stdio command and set the same
 environment variables in that client's MCP configuration:
 
 ```text
-node <repository-root>\engine\src\mcp\server.js
+node <repository-root>/engine/src/mcp/server.js
 ```
 
-See `docs\mcp-setup.md` for the complete MCP tool reference.
+See `docs/mcp-setup.md` for the complete MCP tool reference.
 
 ## Core media tools
 
-Every Motion Studio machine has these four installed at the tools root. Their
-folder names vary by version — resolve the exact paths from `MACHINE.md`
-(shown here as `$ffmpeg`, `$ffprobe`, `$autoEditor`, `$magick`, `$whisper`,
-`$whisperModel`).
+Every Motion Studio machine has these four available. Their exact paths vary
+per machine — resolve them from `MACHINE.md` (shown here as `$ffmpeg`,
+`$ffprobe`, `$autoEditor`, `$magick`, `$whisper`, `$whisperModel`).
 
 ### FFmpeg
 
+<!-- os:windows -->
 ```powershell
 & $ffprobe -v error -show_format -show_streams input.mp4
 & $ffmpeg -i input.mp4 -c:v libvpx-vp9 -c:a libopus prepared.webm
 ```
 
-The bundled FFmpeg build can crash when using the `drawtext` filter because it
-has no fontconfig support. Use HTML/CSS canvas text in Motion Studio instead.
+The bundled Windows FFmpeg build has no fontconfig support — the `drawtext`
+filter can crash it. Use HTML/CSS canvas text in Motion Studio instead.
+<!-- /os:windows -->
+<!-- os:posix -->
+```bash
+"$ffprobe" -v error -show_format -show_streams input.mp4
+"$ffmpeg" -i input.mp4 -c:v libvpx-vp9 -c:a libopus prepared.webm
+```
+
+Do typography in Motion Studio compositions rather than with the `drawtext`
+filter — some FFmpeg builds lack fontconfig and crash on it, and composition
+text is what the engine's determinism contract covers.
+<!-- /os:posix -->
 
 ### Auto-Editor
 
 Use Auto-Editor to prepare supplied video footage by removing or speeding up
 silent sections before it is added to a Motion Studio film:
 
-```powershell
-# Review the proposed cuts first.
-& $autoEditor input.mp4 --preview
-
-# Create an edited copy; keep short pauses around spoken content.
-& $autoEditor input.mp4 --margin 0.2s --output prepared.mp4
+```
+$autoEditor input.mp4 --preview                                # review the proposed cuts first
+$autoEditor input.mp4 --margin 0.2s --output prepared.mp4      # keep short pauses around speech
 ```
 
 Inspect the output before using it. Silence can be intentional, so do not
@@ -204,6 +245,7 @@ blindly apply automatic cuts to interviews, narration, or timed footage.
 Use ImageMagick to inspect and prepare still-image assets — resizing,
 cropping, or converting an image before it is placed in a scene.
 
+<!-- os:windows -->
 **Always call `magick-portable.ps1`, never `magick.exe` directly, and never
 re-wrap the wrapper in `cmd`, a `.bat`, or a `.cmd`.** The copy is a portable
 "Modules" build that needs the wrapper's environment variables, and `cmd`
@@ -218,8 +260,22 @@ in the `README.md` beside the wrapper. Read it before any ImageMagick work.
 # Verification: must print 1920x1440. If it prints 1440x1080, the caret is being eaten.
 & $magick input.jpg -resize '1920x1080^' -format '%wx%h' info:
 ```
+<!-- /os:windows -->
+<!-- os:posix -->
+The distro package installs a normal `magick` (or `convert`) that finds its
+own coders — no wrapper is needed. Quote geometry arguments so the shell
+leaves the caret alone:
 
-Write derived files to `data\temp` while preparing them, then add the final
+```bash
+"$magick" identify input.jpg
+"$magick" input.jpg -resize '1920x1080^' -gravity center -extent 1920x1080 prepared.jpg
+
+# Verification: must print 1920x1440. If it prints 1440x1080, the caret was eaten.
+"$magick" input.jpg -resize '1920x1080^' -format '%wx%h' info:
+```
+<!-- /os:posix -->
+
+Write derived files to `data/temp` while preparing them, then add the final
 image to the active scene or film's `assets/` folder (or workspace library)
 before rendering.
 
@@ -227,9 +283,9 @@ before rendering.
 
 Convert an input to Whisper-friendly mono WAV, then transcribe it:
 
-```powershell
-& $ffmpeg -i input.mp4 -ar 16000 -ac 1 speech.wav
-& $whisper -m $whisperModel -f speech.wav -l en -otxt -oj
+```
+$ffmpeg -i input.mp4 -ar 16000 -ac 1 speech.wav
+$whisper -m $whisperModel -f speech.wav -l en -otxt -oj
 ```
 
 This writes text and JSON transcript files beside `speech.wav`. `MACHINE.md`
@@ -257,14 +313,14 @@ Helper families that may be present (non-exhaustive — the inventory in
 
 | helper | what it is for |
 |---|---|
-| `comfyui\` | local ComfyUI image generation and editing (plus a paid Wan video partner helper) |
-| `comfyui_music\` | generated soundtrack audio (ACE-Step, Stable Audio 3) |
-| `comfyui_upscaling\` | Real-HAT GAN video upscaling |
-| `comfyui_video\` | local video generation workflows |
-| `videoforge\` | building a beat-locked cut around long recordings |
-| `musicforge\` | composing an instrumental score with an exported accent map |
-| `verticalforge\` | converting a finished landscape master to a portrait deliverable |
-| `youtube\` | uploading finished deliverables to the configured YouTube account |
+| `comfyui/` | local ComfyUI image generation and editing (plus a paid Wan video partner helper) |
+| `comfyui_music/` | generated soundtrack audio (ACE-Step, Stable Audio 3) |
+| `comfyui_upscaling/` | Real-HAT GAN video upscaling |
+| `comfyui_video/` | local video generation workflows |
+| `videoforge/` | building a beat-locked cut around long recordings |
+| `musicforge/` | composing an instrumental score with an exported accent map |
+| `verticalforge/` | converting a finished landscape master to a portrait deliverable |
+| `youtube/` | uploading finished deliverables to the configured YouTube account |
 
 A customer- or machine-specific helper not in this table follows the same
 rule: its directory has a `README.md`, and that README is the guide.
@@ -284,7 +340,7 @@ an agent's measure-and-regenerate loop before they are usable.
 
 The inverse also holds: **narration goes through the engine, not through an
 external TTS call.** Cloud speech belongs inside as a configured TTS vendor
-(Azure, ElevenLabs, OpenAI, Deepgram — see `docs\tts-setup.md`); generating
+(Azure, ElevenLabs, OpenAI, Deepgram — see `docs/tts-setup.md`); generating
 speech agent-side discards `synthesize_speech`'s frame-accurate `timings` and
 forces a `transcribe_asset` round-trip to recover what the engine reports for
 free.
@@ -309,7 +365,7 @@ putting Pexels/CDN URLs in a composition — remote images can work in a preview
 but make parallel renders unreliable. For every Pexels image used in a film:
 
 1. Save it under the active workspace library, for example
-   `<workspace>\library\pexels\`, using a descriptive filename that includes
+   `<workspace>/library/pexels/`, using a descriptive filename that includes
    the Pexels photo ID.
 2. Keep the Pexels page URL and photographer alongside the asset (for example,
    in a small `sources.md` file) so the source can be revisited and credited
@@ -326,26 +382,25 @@ Follow the current Pexels licence and API terms for every download.
 
 ### Temporary asset staging
 
-Agents with filesystem access may use the path below as a local staging area
-for **any** asset, including Pexels downloads, user media, generated images,
-and intermediate conversions:
-
-```powershell
-$MotionStudioTemp = Join-Path $MotionStudioRoot 'data\temp'
-```
+Agents with filesystem access may use `<MOTION_STUDIO_ROOT>/data/temp` as a
+local staging area for **any** asset, including Pexels downloads, user media,
+generated images, and intermediate conversions.
 
 Before a render, copy or link every asset the composition needs into the active
 scene or film's `assets/` folder (or its workspace library); never reference
-files in `data\temp` directly from a composition.
+files in `data/temp` directly from a composition.
 
 However if you have access to Motion Studio, you may directly copy data to
-`<MOTION_STUDIO_ROOT>\data\workspaces\{workspace}\library` (the default
+`<MOTION_STUDIO_ROOT>/data/workspaces/{workspace}/library` (the default
 `{workspace}` is `default`).
 
 ## Install the Motion Studio shell skill
 
 Install the shell skill plus the Frame API reference in the target agent's
-skill directory. On Codex for Windows, the skill directory is normally
+skill directory.
+
+<!-- os:windows -->
+On Codex for Windows, the skill directory is normally
 `%USERPROFILE%\.codex\skills`.
 
 ```powershell
@@ -354,9 +409,20 @@ New-Item -ItemType Directory -Force -Path (Join-Path $skill 'references')
 Copy-Item (Join-Path $MotionStudioRoot 'docs\SKILL-shell.md') (Join-Path $skill 'SKILL.md') -Force
 Copy-Item (Join-Path $MotionStudioRoot 'docs\frame-api.md') (Join-Path $skill 'references\frame-api.md') -Force
 ```
+<!-- /os:windows -->
+<!-- os:posix -->
+On Codex, the skill directory is normally `~/.codex/skills`.
+
+```bash
+skill="$HOME/.codex/skills/motion-studio-video-shell"
+mkdir -p "$skill/references"
+cp "$MotionStudioRoot/docs/SKILL-shell.md" "$skill/SKILL.md"
+cp "$MotionStudioRoot/docs/frame-api.md" "$skill/references/frame-api.md"
+```
+<!-- /os:posix -->
 
 Other AI products use different skill locations. Keep the same structure:
-`SKILL.md` at the skill root and `references\frame-api.md` beside it.
+`SKILL.md` at the skill root and `references/frame-api.md` beside it.
 
 Skills are copies: after `docs/SKILL.md` or `docs/SKILL-shell.md` changes in
 the repository, re-copy them to every client skill directory.

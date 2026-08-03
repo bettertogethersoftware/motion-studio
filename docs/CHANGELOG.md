@@ -53,7 +53,7 @@ replaced by layers picked by *what changes them*
   deployments — ComfyUI served over HTTP from a separate GPU box, recorded
   in `MACHINE.md`; and the capability triage above. It also states Linux
   status honestly (not yet playbook-grade) and points at
-  [docs/todo_task/linux-ready-plan.md](todo_task/linux-ready-plan.md), the
+  [docs/plans/linux-ready-plan.md](plans/linux-ready-plan.md), the
   staged plan (CI truth → engine parity → helpers → provisioning → one real
   end-to-end install) for making Linux a supported deployment.
 
@@ -85,6 +85,27 @@ with **two failures that were one real bug**:
   cannot cover. The cross-platform claim is now tested on every push instead
   of asserted. (Run #1's lesson is in the workflow comments: `apt-get` hung
   28+ minutes on the runner's apt lock; FFmpeg comes from a static build.)
+- **Plan papers consolidated into `docs/plans/`.** The parallel
+  `docs/todo_task/` and `docs/task_completed/` trees (21 files, ~6,200
+  lines) collapsed into one folder: [TODO.md](plans/TODO.md) — the single
+  live index; [completed.md](plans/completed.md) — a ledger summarizing
+  every shipped plan (full design records remain in git history at
+  `1f3f9fe`); [retired.md](plans/retired.md) — dropped plans, each with the
+  reason so they are not re-proposed; plus the six still-active plan
+  documents kept whole (linux-ready, vendor-boundary, the
+  production-workflow backlog — renamed from its source-of-truth filename —
+  and the three queued capability plans). Cross-references repo-wide were
+  repointed.
+- **Per-OS entry files (Linux L3).** `deploy/ENTRY.md` is now a single
+  source with `<!-- os:windows -->` / `<!-- os:posix -->` blocks;
+  `provision.mjs` filters them at emit time (auto-detected platform, `--os`
+  to override) and stamps the header with the target OS, so a Windows
+  machine gets PowerShell examples and a Linux machine gets bash — one
+  template, no drift. PROVISION.md gained a **"Provisioning on Linux"**
+  section with the verified per-step deltas (userspace fallbacks for no-sudo
+  machines, the static-FFmpeg and whisper.cpp build recipes, pip-only Piper
+  with the `PIPX_BIN_DIR` and pre-2024-binary traps, no ImageMagick wrapper
+  on Linux), and MACHINE-template's rows are OS-neutral.
 - **Linux L1 vendor verifications** (2026-08-04, real Linux): the `node`
   music vendor synthesized correctly against the production SoundFont, and
   `piper` speech ran end to end via pip `piper-tts` — with a trap now
@@ -93,7 +114,7 @@ with **two failures that were one real bug**:
   audio; Linux installs must use pip (piper1-gpl). The FFmpeg resolution
   chain and a clean win32-assumption sweep were audited in the same pass;
   whisper and real-Chromium rendering verification move to CI
-  (see [linux-ready-plan.md](todo_task/linux-ready-plan.md)).
+  (see [linux-ready-plan.md](plans/linux-ready-plan.md)).
 
 ### The vendor dir is configurable, and the settings page grew up (v0.25)
 
@@ -1171,11 +1192,11 @@ environment is wrong in the other:
   Both skills are also now free of markdown links, since an install directory
   receives only `SKILL.md` + `references/frame-api.md` and any other link breaks on
   install.
-- **[todo_task/](todo_task/README.md)** (new) — four plans scoped against the two
+- **todo_task/** (new; since consolidated into [plans/](plans/TODO.md)) — four plans scoped against the two
   environments, in ship order, with the acceptance test *"Env A can reproduce the
   prototype film."* An audit against that test found the blocker is **not** asset
   tooling but the film timeline: [footage segments on the film
-  timeline](task_completed/footage-segment-plan.md) was filed as "out of scope" in an
+  timeline](plans/completed.md) was filed as "out of scope" in an
   earlier draft and is in fact the prerequisite for everything else.
 
 ## v0.21 — Seeing the media, and catching a stale render

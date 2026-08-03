@@ -1,9 +1,10 @@
 # `measure_reframe` — aspect variants that follow the subject
 
 > **Status: PROPOSED. Nothing here has shipped.** Design record, in the shape of
-> the plans in [`task_completed/`](../task_completed/). It is the hard half of the
+> the completed plans (summarized in [completed.md](completed.md); full records
+> in git history). It is the hard half of the
 > **aspect deliverable variants** item in
-> [source-of-truth-production-workflow-todo-2026-07-29.md](source-of-truth-production-workflow-todo-2026-07-29.md).
+> [production-workflow-backlog.md](production-workflow-backlog.md).
 >
 > Prototyped end to end against `data/temp/source-interview.mp4` — a real
 > 1920×1080/60 two-shot, 956 frames — and reframed to 9:16. Findings from that run

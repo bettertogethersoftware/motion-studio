@@ -42,17 +42,18 @@ guide instructs agents to discover helpers by directory and read their READMEs.
 
 This playbook is Windows-first, matching the current product. Cross-platform
 packaging (vendor packs, a lightweight npm-first core) is planned — see
-`docs\todo_task\ai-only-desktop-vendor-boundary-plan.md` (draft); as that
+`docs\plans\ai-only-desktop-vendor-boundary-plan.md` (draft); as that
 lands, the core-tool steps below shrink into fetched packs.
 
-**Linux status: not yet playbook-grade.** The engine is close (Node core;
-FFmpeg-on-PATH default; `piper`/cloud speech, `node` music, and `whisper-cpp`
-are the cross-platform vendors — the Windows `system` TTS exe and the vendored
-FluidSynth chain are not), and the helper scripts resolve FFmpeg
-platform-aware, but no Linux install has run end to end and there is no Linux
-CI. Treat a Linux customer as a scoped pilot per
-`docs\todo_task\linux-ready-plan.md`, not a playbook run — do not promise
-playbook-grade Linux until that plan's acceptance test has passed once.
+**Linux status: not yet playbook-grade, but most seams are verified.** The
+full engine suite, the real-Chromium render seam, the `piper`/`node`-music
+vendors, and a real speech→transcribe round-trip all run green on Linux (in
+CI and a WSL environment — see `docs\plans\linux-ready-plan.md`), and
+`provision.mjs` emits bash-flavored entry files on Linux automatically. What
+has **not** happened is one complete end-to-end Linux install driven by this
+playbook (the plan's L4 acceptance test). Until that passes once, treat a
+Linux customer as a scoped pilot, not a playbook run. The "Provisioning on
+Linux" section below records the per-step deltas verified so far.
 
 ## Deployment variations
 
@@ -223,6 +224,63 @@ literal paths from `MACHINE.md`.
 If any step cannot be completed on this machine, record it under
 **Machine-specific deviations** in `MACHINE.md` with the reason, rather than
 leaving a silent gap.
+
+## Provisioning on Linux
+
+The steps above are the same; these are the per-step deltas. Everything here
+was verified on real Linux (Ubuntu WSL without sudo, and GitHub CI runners)
+on 2026-08-04 — but remember the status note: no *complete* install has run
+end to end yet.
+
+- **Prerequisites (step 1):** distro packages need sudo — list what is
+  missing and let the user run or approve the installs. Every prerequisite
+  also has a proven userspace fallback for machines where sudo is
+  unavailable: Node from the official tarball into `~/tools`, static FFmpeg
+  (below), pip via `get-pip.py --user`.
+- **Env var (step 2):** set `MotionStudioRoot` by appending an `export` line
+  to `~/.profile` (or the distro's equivalent) instead of
+  `[Environment]::SetEnvironmentVariable`.
+- **FFmpeg (step 3):** distro FFmpeg 6.x and the johnvansickle static 7.x
+  build both pass the engine's version floor and full suite. The static
+  build needs no sudo:
+
+  ```bash
+  curl -fsSL --retry 5 --retry-all-errors \
+    https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+    | tar -xJ -C ~/tools
+  ```
+
+- **ImageMagick (step 3):** install from the distro. **No
+  `magick-portable.ps1` wrapper on Linux** — packaged installs locate their
+  own coders, and the cmd caret-eating failure the wrapper exists for is a
+  Windows-only phenomenon. Record the plain `magick` path in `MACHINE.md`.
+- **Auto-Editor (step 3):** `pipx install auto-editor` (pipx keeps its own
+  venv; no sudo).
+- **Whisper.cpp (step 3):** no prebuilt Linux binaries — build it statically
+  (needs cmake + a compiler; ~1 minute):
+
+  ```bash
+  git clone --depth 1 https://github.com/ggml-org/whisper.cpp
+  cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+  cmake --build whisper.cpp/build -j --target whisper-cli
+  ```
+
+  Then fetch a `ggml-*.bin` model from huggingface.co/ggerganov/whisper.cpp.
+- **Speech vendor:** the Windows `system` TTS exe and the vendored FluidSynth
+  chain do not exist on Linux. Install Piper via **pip only** —
+  `pipx install piper-tts` — never the archived pre-2024 C++ release
+  binaries, which ignore the engine's flags and exit 0 having written no
+  audio (see `docs\tts-setup.md`). Note that pipx's bin directory varies
+  (`PIPX_BIN_DIR`); resolve the real path with `command -v piper` before
+  recording it in `MACHINE.md`. Music needs no extra install: the `node`
+  vendor works everywhere a SoundFont exists.
+- **Entry files (step 5):** `provision.mjs` detects the platform and emits
+  bash-flavored guides automatically (`--os linux|macos|windows` to
+  override).
+- **Verification (step 8):** additionally run
+  `node engine/test/smoke-speech-roundtrip.mjs` with the
+  `MOTION_STUDIO_PIPER_*`/`_WHISPER_*` env hooks set — it proves speech and
+  transcription against the real vendors in one shot.
 
 ## Updating an existing machine
 

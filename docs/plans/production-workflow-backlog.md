@@ -514,7 +514,8 @@ and nothing else shifts.
 
 ## Relationship to the other backlog
 
-[prioritized-codebase-todo-2026-07-29.md](prioritized-codebase-todo-2026-07-29.md)
+The prioritized codebase todo (retired 2026-08-04 — see
+[retired.md](retired.md))
 was written the same day and proposes four of these under different names — its
 P1-2 (vertical profile), P1-3 (word-timing captions), P1-4 (finishing templates)
 and P1-5 (policy-based release gates). They are absorbed here as P0-3, P1-2, P2-1

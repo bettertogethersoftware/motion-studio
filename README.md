@@ -287,7 +287,7 @@ motion-studio/
     ├── competitive-position.md    where this wins, what to stop trying to win, and in what order
     ├── SKILL.md                   drop-in agent skill — MCP only (Env A)
     ├── SKILL-shell.md             drop-in agent skill — MCP + ffmpeg/whisper.cpp (Env B)
-    ├── todo_task/                 planned work, scoped against the two environments
+    ├── plans/                     TODO index, active plans, completed/retired ledgers
     └── spec-changes.md            historical v0.2-era decision log
 ```
 

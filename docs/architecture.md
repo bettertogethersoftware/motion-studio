@@ -1415,7 +1415,10 @@ The generated guide teaches agents to *discover* helpers (check the directory,
 read its README, resolve machine values from `MACHINE.md`) rather than
 enumerate them — so installing, removing, or adding a customer-specific tool
 never edits the guide, and machines with different tool sets run identical
-guides. Cross-machine lessons go in repo docs
+guides. The template is also single-sourced across OSes: `ENTRY.md` carries
+`<!-- os:windows -->`/`<!-- os:posix -->` blocks and `provision.mjs` filters
+them at emit time, so each machine's guide shows exactly one shell's examples
+without maintaining two templates. Cross-machine lessons go in repo docs
 ([production-lessons.md](production-lessons.md),
 [knowledge-base.md](knowledge-base.md)) so they reach every deployment via
 `git pull`; `deploy/provision.mjs` re-emits the entry files after a pull, and

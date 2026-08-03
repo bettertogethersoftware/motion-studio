@@ -453,7 +453,7 @@ const isSpecialToken = (text) => /^\s*\[_.*_?\]\s*$/.test(text ?? '');
  * milliseconds, real tokens only, and nothing vendor-specific left in it.
  *
  * Exported for the tests, which drive it from the verbatim sample in
- * docs/task_completed/transcribe-asset-plan.md.
+ * the transcribe-asset design record (git history; see docs/plans/completed.md).
  */
 export function normalizeWhisperJson(doc) {
   const windows = Array.isArray(doc?.transcription) ? doc.transcription : [];

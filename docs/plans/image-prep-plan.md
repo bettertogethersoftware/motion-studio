@@ -1,11 +1,12 @@
 # `prepare_image` — the still-image hole in the media surface
 
 > **Status: PROPOSED. Nothing here has shipped.** This is a design record written
-> before implementation, in the shape of the four plans in
-> [`task_completed/`](../task_completed/). It is **capability-shaped**, which by the
-> rule in [README.md](README.md#the-rule-this-implies) means it ships *behind* the
-> knowledge-shaped work in
-> [source-of-truth-production-workflow-todo-2026-07-29.md](source-of-truth-production-workflow-todo-2026-07-29.md),
+> before implementation, in the shape of the completed real-footage plans
+> (summarized in [completed.md](completed.md)). It is **capability-shaped**,
+> which by the rule in
+> [agent-environments.md](../agent-environments.md#the-rule-that-falls-out-of-it)
+> means it ships *behind* the knowledge-shaped work in
+> [production-workflow-backlog.md](production-workflow-backlog.md),
 > not ahead of it.
 >
 > Prototyped by hand — a 15 s product spot built entirely **outside** the MCP

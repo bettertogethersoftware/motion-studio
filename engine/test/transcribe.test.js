@@ -4,7 +4,7 @@
  * The derivations are pure and tested directly, because they are the product —
  * everything else here is a vendor wrapper. The load-bearing case has its own
  * test: **a decode window that spans three sentences must re-segment**, driven
- * from the verbatim `-ojf` sample in docs/task_completed/transcribe-asset-plan.md
+ * from the verbatim `-ojf` sample in the transcribe-asset design record (git history)
  * (helpers/fake-whisper.mjs serves it). Splicing audio on the vendor's own
  * segments is the audible mid-clause cut the whole tool exists to prevent, so if
  * one test in this file matters, it is that one.

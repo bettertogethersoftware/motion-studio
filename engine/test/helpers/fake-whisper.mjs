@@ -26,7 +26,7 @@
  * engine deletes its temp dir on the way out.
  *
  * Fixture selection, so one stub covers every case:
- *   FAKE_WHISPER_FIXTURE=plan     the sample from docs/task_completed/transcribe-asset-plan.md
+ *   FAKE_WHISPER_FIXTURE=plan     the sample from the transcribe-asset design record (git history)
  *                                 (default) — one window, three sentences
  *   FAKE_WHISPER_FIXTURE=gap      two windows separated by 4 s of silence
  *   FAKE_WHISPER_FIXTURE=empty    a file with no speech in it
