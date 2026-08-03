@@ -82,15 +82,20 @@ Verified starting points (2026-08-04):
 ## L2 — Helper tools on Linux (1–2 days)
 
 - [x] `videoforge` FFmpeg resolution (done 2026-08-04).
-- [ ] `comfyui/generate_video_wan.py`, `comfyui_video/generate_video.py`:
-      their ffprobe globs match `ffmpeg-*/bin/ffprobe.exe` only — make them
-      platform-aware with a PATH fallback (copy `comfyui_music`'s resolver).
-- [ ] `verticalforge`: add the `MOTION_STUDIO_FFMPEG`/`FFPROBE` env override
-      for consistency (its glob is already platform-aware).
-- [ ] `musicforge/compose.py`: resolve FluidSynth as env override → vendored
-      Windows exe → `fluidsynth` on PATH, so a distro install works.
+- [x] `comfyui/generate_video_wan.py` (+ missing env override),
+      `comfyui_video/generate_video.py`, and both `comfyui_music` helpers:
+      globs are now platform-aware (done 2026-08-04; PATH fallbacks already
+      existed). Verified resolving on both Windows and Linux.
+- [x] `verticalforge`: `MOTION_STUDIO_FFMPEG`/`FFPROBE` env override added to
+      `_common.py` and `register.mjs`; version-pinned "preferred" dir dropped
+      in favor of the newest-first glob (done 2026-08-04).
+- [x] `musicforge/compose.py`: FluidSynth resolves env override → vendored
+      Windows exe → `fluidsynth` on PATH; SoundFont honors
+      `MOTION_STUDIO_SOUNDFONT` (done 2026-08-04).
 - [ ] Audit all helpers for `os.startfile`, backslash literals, `.exe`
-      assumptions, and Windows-only subprocess conventions.
+      assumptions, and Windows-only subprocess conventions — the resolution
+      fixes above touched only FFmpeg/FluidSynth discovery, not each
+      helper's full command construction.
 - [ ] Decide the Linux story for each core tool in provisioning terms:
       FFmpeg/ImageMagick via distro packages (no `magick-portable.ps1` on
       Linux — packaged installs find their own coders), auto-editor via pip,

@@ -30,9 +30,13 @@ jobs:
           cache: npm
           cache-dependency-path: engine/package-lock.json
 
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # apt-get on ubuntu-latest can hang on the runner's apt lock (observed:
+      # 28+ minutes in run #1). The static build needs no locks and no sudo.
+      - name: Install FFmpeg (static build)
         working-directory: .
+        run: |
+          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP"/ffmpeg-*-static >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
