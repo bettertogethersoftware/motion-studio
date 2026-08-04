@@ -71,6 +71,7 @@ Use this map to choose the right tool. Read the live schema before calling it.
   `synthesize_music`, `synthesize_sfx`, `preview_audio`
 - Preview and delivery: `capture_preview_frame`, `capture_preview_frames`,
   `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`
+- Render groups: `render_group`, `wait_render_group`, `cancel_render_group`
 - Jobs and diagnostics: `get_render_status`, `wait_for_render`,
   `list_render_jobs`, `get_logs`, `cancel_render`
 - Human advice (the adviser loop — see the protocol below):
@@ -644,6 +645,15 @@ wait_for_render {
 a failure; call `wait_for_render` again. Check each job independently. A server
 restart can turn an in-memory job id into `not_found`, so confirm work by the
 output and document plan rather than trusting an old id.
+
+**Rendering many scenes of one film? Use the group operation instead of a
+per-scene loop** (v0.26): `render_group { film }` submits exactly the
+missing/stale scenes in one call and returns a `groupId`;
+`wait_render_group { groupId, since }` aggregates progress (pass the previous
+`cursor` as `since` for heartbeat/delta responses), reports full detail only
+for failed scenes, and its `done` is computed from output files — it survives
+server restarts. Re-running `render_group` after a partial submission is the
+designed resume. `cancel_render_group` aborts the lot.
 
 On `error`, call `get_logs` and read the structured error. On `done`, inspect:
 

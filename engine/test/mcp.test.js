@@ -194,6 +194,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'inspect_render', 'measure_render',
     // new in v0.26 (token-efficient batch authoring, TE P0-4/P0-5)
     'use_shared_asset_batch', 'write_composition_bundle',
+    // new in v0.26 (render groups, TE P0-6/P0-7)
+    'render_group', 'wait_render_group', 'cancel_render_group',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }

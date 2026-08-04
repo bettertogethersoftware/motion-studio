@@ -92,7 +92,7 @@ import {
   DEFAULT_SETTINGS,
 } from '../core/settings.js';
 import { pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { checkJsSyntax } from '../core/scene.js';
 import { ADDON_IDS } from '../core/libraries.js';
@@ -1685,6 +1685,240 @@ server.registerTool(
     inputSchema: { jobId: z.string() },
   },
   wrap(async ({ jobId }) => ok(jobs.cancel(jobId))),
+);
+
+/* ------------------------------------------------------------------ */
+/* Render groups (v0.26, TE P0-6/P0-7): one operation instead of the   */
+/* agent-side submit-and-poll loop over N scenes.                      */
+/* ------------------------------------------------------------------ */
+
+// Group records persist under <film>/render-groups/<groupId>.json so a
+// restart can answer "what remains?" from files (job ids die with the
+// process; scene truth is recomputed from the plan's output/sidecar state).
+// The in-memory index is only a fast path — lookup falls back to scanning
+// the workspace's films.
+const groupIndex = new Map(); // groupId → { filmId, recordPath }
+const groupsDirFor = (filmPath) => path.join(filmPath, 'render-groups');
+
+async function findGroupRecord(groupId) {
+  const hit = groupIndex.get(groupId);
+  const read = async (p) => JSON.parse(await fsp.readFile(p, 'utf8'));
+  if (hit) {
+    try { return { record: await read(hit.recordPath), recordPath: hit.recordPath }; } catch { /* fall through to scan */ }
+  }
+  for (const f of await store.listFilms(WORKSPACE)) {
+    if (f.broken) continue;
+    const p = path.join(groupsDirFor(store.filmPath(f.id)), `${groupId}.json`);
+    try {
+      const record = await read(p);
+      groupIndex.set(groupId, { filmId: f.id, recordPath: p });
+      return { record, recordPath: p };
+    } catch { /* not this film */ }
+  }
+  throw new EngineError(ErrorCodes.FILE_NOT_FOUND,
+    `No render group "${groupId}" in this workspace. Groups persist per film under render-groups/; start one with render_group.`);
+}
+
+server.registerTool(
+  'render_group',
+  {
+    title: 'Render every missing/stale scene of a film as one group',
+    description:
+      'One idempotent operation instead of the per-scene submit loop (v0.26, TE P0-6): computes the film plan ' +
+      'ONCE, refuses structurally broken films (missing scene folders/footage) before submitting anything, ' +
+      'skips scenes that are already rendered and current, and submits only missing/stale scenes to the normal ' +
+      'FIFO render queue (serial policy unchanged — this removes orchestration, not the queue). Returns a ' +
+      'groupId plus per-scene job ids, skipped scenes, and counts. The group record persists with the film, so ' +
+      'a server restart recovers scene truth from output files — and re-running render_group after a partial ' +
+      'submission (e.g. queue_full rows) is the designed resume: already-rendered scenes are skipped, the rest ' +
+      'submit. Wait on it with wait_render_group; cancel with cancel_render_group.',
+    inputSchema: {
+      film: z.string(),
+      scenePolicy: z.enum(['missing-or-stale', 'all']).optional()
+        .describe('missing-or-stale (default): only scenes whose render is absent or stale. all: re-render every scene.'),
+      sceneIds: z.array(z.string()).max(64).optional()
+        .describe('Restrict to these scene slugs (still filtered by scenePolicy)'),
+      workers: z.number().int().min(1).max(16).optional()
+        .describe('Parallel capture processes per scene render (default: the global render setting)'),
+      note: z.string().max(200).optional()
+        .describe('One-line provenance note stamped on every revision this group produces'),
+    },
+  },
+  wrap(async ({ film, scenePolicy = 'missing-or-stale', sceneIds, workers, note }) => {
+    await requirePrereqs();
+    const doc = await store.getFilm(qualifyFilm(film));
+    const plan = await planFilm({ film: doc, store });
+    const rows = segmentRows(plan, localId);
+
+    const missing = rows.filter((r) => r.state === 'missing');
+    if (missing.length) {
+      throw new EngineError(ErrorCodes.INVALID_FILM,
+        `Cannot render a structurally broken film: ${missing.map((r) => r.slug ?? r.footage).join(', ')} missing. ` +
+        'Fix the plan first (get_film names every problem).',
+        { missing: missing.map((r) => r.slug ?? r.footage) });
+    }
+
+    const wanted = rows.filter((r) => r.kind === 'scene')
+      .filter((r) => !sceneIds || sceneIds.includes(r.slug))
+      .filter((r) => (scenePolicy === 'all' ? true : r.state !== 'rendered'));
+    const skipped = rows.filter((r) => r.kind === 'scene' && !wanted.includes(r))
+      .map((r) => ({ slug: r.slug, reason: sceneIds && !sceneIds.includes(r.slug) ? 'not-selected' : 'rendered' }));
+
+    // Same submission facts as the single `render` tool (no proxy, no
+    // frameRange — a group renders deliverables), read once for the group.
+    const settings = await readSettings(store.dataDir).catch(() => null);
+    const reviewPolicy = resolveReviewPolicy({ globalPolicy: settings?.render?.review, filmPolicy: doc.review });
+    const effectiveWorkers = workers ?? settings?.render?.defaultWorkers ?? 1;
+
+    const groupId = `rg-${randomUUID().slice(0, 12)}`;
+    const members = [];
+    for (const row of wanted) {
+      try {
+        const s = await store.getScene(qualifyScene(`${doc.slug}/${row.slug}`));
+        const config = await store.readConfig(s.id);
+        const outputPath = path.join(s.path, config.output.dir, config.output.filename);
+        const { jobId, state, queuePosition } = jobs.startRender({
+          targetId: s.id, scenePath: s.path, config, outputPath,
+          workers: effectiveWorkers,
+          ffmpegPath: await ffmpegPathOnly(),
+          reviewPolicy,
+          revision: { agent: AGENT, ...(note ? { note } : {}), group: groupId },
+          ...(injectedBrowserFactory
+            ? { renderFn: (o) => (o.workers > 1 ? renderParallelInjected(o) : renderCompositionInjected(o)) }
+            : {}),
+        });
+        members.push({ slug: row.slug, jobId, state, ...(queuePosition ? { queuePosition } : {}) });
+      } catch (e) {
+        // queue_full (or a broken scene) is one honest row; re-running the
+        // group after the queue drains submits exactly the remainder.
+        members.push({ slug: row.slug, jobId: null, state: 'not-submitted', error: { code: e.code ?? 'error', message: e.message } });
+      }
+    }
+
+    const record = {
+      groupId, film: doc.slug, filmRevision: doc.revision, scenePolicy,
+      ...(sceneIds ? { sceneIds } : {}), ...(note ? { note } : {}),
+      engine: enginePkg.version, createdAt: new Date().toISOString(),
+      members, skipped,
+    };
+    const recordPath = path.join(groupsDirFor(doc.path), `${groupId}.json`);
+    await fsp.mkdir(path.dirname(recordPath), { recursive: true });
+    await fsp.writeFile(recordPath, JSON.stringify(record, null, 2));
+    groupIndex.set(groupId, { filmId: doc.id, recordPath });
+
+    return ok({
+      groupId,
+      film: doc.slug,
+      counts: {
+        submitted: members.filter((m) => m.jobId).length,
+        notSubmitted: members.filter((m) => !m.jobId).length,
+        skipped: skipped.length,
+      },
+      members, skipped,
+      // Plan problems that are NOT the unrendered scenes this group exists to
+      // fix still matter for build_film — surfaced, never hidden.
+      planProblems: plan.problems,
+    });
+  }),
+);
+
+server.registerTool(
+  'wait_render_group',
+  {
+    title: 'Wait on a render group with delta reporting',
+    description:
+      'Block on a render_group (v0.26, TE P0-7) for up to timeoutMs (same 50 s ceiling as wait_for_render — a ' +
+      'timeout is a progress snapshot, never a failure; call again to keep waiting). Returns aggregate counts, ' +
+      'per-scene member states, full detail for FAILED scenes only, and `done` — true when every member scene ' +
+      'is rendered per the CURRENT film plan, which is recomputed from output files and sidecars: after a ' +
+      'server restart the job ids are gone (state "not_found") but a scene whose verified output exists still ' +
+      'counts done — files are the truth, not process memory. Pass the returned `cursor` back as `since` to get ' +
+      'a heartbeat when nothing changed, or a `delta` naming exactly the scenes that did.',
+    inputSchema: {
+      groupId: z.string(),
+      timeoutMs: z.number().int().min(1_000).max(50_000).default(30_000),
+      since: z.string().optional().describe('Cursor from a previous wait; unchanged state answers a tiny heartbeat'),
+    },
+  },
+  wrap(async ({ groupId, timeoutMs, since }) => {
+    const { record } = await findGroupRecord(groupId);
+    const liveIds = record.members.filter((m) => m.jobId).map((m) => m.jobId);
+    const waited = liveIds.length
+      ? await jobs.waitFor(liveIds, { timeoutMs })
+      : { timedOut: false, jobs: [] };
+    const byJob = new Map(waited.jobs.map((j) => [j.jobId, j]));
+
+    // Scene truth from the CURRENT plan — output files and sidecars, not
+    // process memory (the restart rule).
+    const doc = await store.getFilm(qualifyFilm(record.film));
+    const plan = await planFilm({ film: doc, store });
+    const rows = segmentRows(plan, localId);
+    const rowBySlug = new Map(rows.filter((r) => r.kind === 'scene').map((r) => [r.slug, r]));
+
+    const members = record.members.map((m) => {
+      const job = m.jobId ? byJob.get(m.jobId) : null;
+      const row = rowBySlug.get(m.slug);
+      return {
+        slug: m.slug,
+        jobId: m.jobId,
+        jobState: job?.state ?? (m.jobId ? 'not_found' : 'not-submitted'),
+        sceneState: row?.state ?? 'missing',
+        ...(job?.state === 'running' ? { percent: job.percent } : {}),
+      };
+    });
+    const counts = members.reduce((acc, m) => {
+      acc[m.jobState] = (acc[m.jobState] ?? 0) + 1;
+      return acc;
+    }, {});
+    const done = members.every((m) => m.sceneState === 'rendered');
+    // Failure detail is local (plan principle 6): only failed members carry
+    // their full job snapshot, error and all.
+    const errors = record.members
+      .map((m) => (m.jobId ? byJob.get(m.jobId) : null))
+      .filter((j) => j && j.state === 'error');
+
+    const memberRows = members.map(({ percent, ...m }) => m); // percent churns; keep it out of the cursor
+    const cursor = computeCursor({ film: record.film, rows: memberRows, marks: { groupId, done } });
+    const parsed = since !== undefined ? parseCursor(since) : undefined;
+    if (parsed && parsed.o === parseCursor(cursor).o) {
+      return ok({ groupId, unchanged: true, done, timedOut: waited.timedOut, cursor });
+    }
+    const delta = parsed ? diffRows(parsed, memberRows) : undefined;
+
+    return ok({
+      groupId,
+      film: record.film,
+      timedOut: waited.timedOut,
+      done,
+      counts,
+      members,
+      ...(errors.length ? { errors } : {}),
+      ...(delta ? { delta } : {}),
+      ...(since !== undefined && !parsed ? { cursorReset: true } : {}),
+      cursor,
+    });
+  }),
+);
+
+server.registerTool(
+  'cancel_render_group',
+  {
+    title: 'Cancel every job of a render group',
+    description:
+      'Cancels each of a render group\'s jobs with the same per-job semantics as cancel_render (running jobs ' +
+      'have their process tree killed, queued jobs dequeue, terminal/lost jobs are left as they are). ' +
+      'Idempotent; the group record stays on disk for the run history.',
+    inputSchema: { groupId: z.string() },
+  },
+  wrap(async ({ groupId }) => {
+    const { record } = await findGroupRecord(groupId);
+    const results = record.members.map((m) => {
+      if (!m.jobId) return { slug: m.slug, cancelled: false, reason: 'never-submitted' };
+      try { return { slug: m.slug, ...jobs.cancel(m.jobId) }; }
+      catch { return { slug: m.slug, cancelled: false, reason: 'not_found' }; }
+    });
+    return ok({ groupId, film: record.film, results });
+  }),
 );
 
 server.registerTool(

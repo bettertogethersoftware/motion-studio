@@ -313,6 +313,78 @@ test('loop: render → revision history → rework → use_scene_revision → bu
   assert.equal(status2.data.newerWorkThanDelivery, true);
 });
 
+test('loop: render_group renders the stale set, resumes idempotently, and waits with cursors (TE P0-6/P0-7)', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const film = await callJson('create_film', { name: 'Group Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
+  const slug = film.data.film;
+  await callJson('create_scene', { film: slug, name: 'G One', durationInFrames: 8 });
+  await callJson('create_scene', { film: slug, name: 'G Two', durationInFrames: 8 });
+
+  const group = await callJson('render_group', { film: slug, note: 'group take' });
+  assert.equal(group.isError, false, JSON.stringify(group.data));
+  assert.equal(group.data.counts.submitted, 2);
+  assert.equal(group.data.counts.skipped, 0);
+  assert.ok(group.data.groupId.startsWith('rg-'));
+
+  // The group record persists with the film (restart recovery is file-based).
+  const recordPath = path.join(filmPathOf(slug), 'render-groups', `${group.data.groupId}.json`);
+  const record = JSON.parse(await fsp.readFile(recordPath, 'utf8'));
+  assert.equal(record.members.length, 2);
+
+  let wait = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 50_000 });
+  assert.equal(wait.isError, false, JSON.stringify(wait.data));
+  for (let i = 0; i < 3 && !wait.data.done; i++) {
+    wait = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 50_000 });
+  }
+  assert.equal(wait.data.done, true, JSON.stringify(wait.data));
+  assert.equal(wait.data.counts.done, 2);
+  assert.ok(wait.data.members.every((m) => m.sceneState === 'rendered'));
+  assert.equal(wait.data.errors, undefined, 'failure detail appears only on failure');
+
+  // Unchanged since-cursor → heartbeat.
+  const beat = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 1_000, since: wait.data.cursor });
+  assert.equal(beat.data.unchanged, true, JSON.stringify(beat.data));
+
+  // Idempotent resume: everything is rendered, so nothing resubmits.
+  const again = await callJson('render_group', { film: slug });
+  assert.equal(again.data.counts.submitted, 0);
+  assert.equal(again.data.counts.skipped, 2);
+
+  // Cancelling a finished group is a per-job no-op, never an error.
+  const cancel = await callJson('cancel_render_group', { groupId: group.data.groupId });
+  assert.equal(cancel.isError, false);
+  assert.equal(cancel.data.results.length, 2);
+
+  const missing = await callJson('wait_render_group', { groupId: 'rg-nope' });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.data.code, 'file_not_found');
+
+  // Restart recovery: a FRESH server has no job memory, but the group record
+  // and the scene outputs are files — done stays true, jobs read not_found.
+  const transport2 = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER],
+    env: {
+      ...process.env,
+      MOTION_STUDIO_HOME: home,
+      MOTION_STUDIO_BROWSER_MODULE: FAKE_BROWSER,
+      MOTION_STUDIO_WORKSPACE: 'loop',
+      MOTION_STUDIO_AGENT: 'director-2',
+    },
+    stderr: 'pipe',
+  });
+  const client2 = new Client({ name: 'ms-loop-restart', version: '0.0.1' });
+  await client2.connect(transport2);
+  try {
+    const res = await client2.callTool({ name: 'wait_render_group', arguments: { groupId: group.data.groupId, timeoutMs: 5_000 } });
+    const after = JSON.parse(res.content.find((c) => c.type === 'text').text);
+    assert.equal(res.isError ?? false, false, JSON.stringify(after));
+    assert.equal(after.done, true, 'scene truth comes from output files, not process memory');
+    assert.ok(after.members.every((m) => m.jobState === 'not_found'));
+  } finally {
+    await client2.close().catch(() => {});
+  }
+});
+
 test('loop: prefer-revision advice round-trip with after-evidence', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
   const film = await callJson('create_film', { name: 'Prefer Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
   const slug = film.data.film;

@@ -77,9 +77,15 @@ Active plan documents:
       independently, content hashes). Deferred: `expectedRevisions` on the
       bundle — the single-file tool has no revision guard either; add both
       together if composition drift ever bites.
-- [ ] TE-3: P0-6/P0-7 `render_group` / `wait_render_group` /
-      `cancel_render_group`; then the P0-3 output-size test sweep across
-      remaining tools.
+- [x] TE-3 (2026-08-04): P0-6/P0-7 render groups — `render_group`
+      (plan-once, refuse-broken, skip-current, per-scene queue_full rows,
+      re-run = resume, record persisted with the film),
+      `wait_render_group` (aggregate counts, failure detail only on
+      failure, since-cursor heartbeats/deltas, `done` from output files —
+      restart-proven by a second-server test), `cancel_render_group`.
+- [ ] TE-3b: the P0-3 output-size test sweep across remaining tools
+      (assert compact responses never carry composition bodies, prompts,
+      or base64).
 - [ ] TE-4 (P1): `finish_film`, `review_render_grid`, durable run groups
       (absorbs the old "durable jobs" item), agent-economy telemetry, and
       the NEON APEX replay acceptance.

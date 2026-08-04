@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Render groups: one operation instead of the submit-and-poll loop (TE P0-6/P0-7)
+
+The dominant token bucket of the measured production — per-scene render
+orchestration — gets its server-side replacement. `render_group { film }`
+computes the plan once, refuses structurally broken films before submitting
+anything, skips scenes that are already rendered and current, and submits
+only missing/stale scenes to the unchanged serial FIFO queue; a
+`queue_full` is a per-scene `not-submitted` row and re-running the group is
+the designed resume. The group record persists at
+`<film>/render-groups/<groupId>.json`. `wait_render_group` aggregates:
+counts, compact per-scene states, full detail for failed jobs only, cursor
+heartbeats/deltas via `since` (the TE-1 mechanism reused), and a `done`
+computed from the CURRENT plan's output files and sidecars — proven by a
+test that spawns a second server against the same tree and gets `done:
+true` with every job id reading `not_found`. `cancel_render_group` aborts
+per-job, idempotently. The skill now teaches the group pattern over the
+per-scene loop.
+
 ### Batch authoring: use_shared_asset_batch and write_composition_bundle (TE P0-4/P0-5)
 
 Ten plates used to cost ten `use_shared_asset` calls and ten full responses;
