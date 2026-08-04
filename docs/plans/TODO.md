@@ -42,6 +42,16 @@ Active plan documents:
        operation exists, use it"). The plateforge/Krea2 half has no such
        dependency and could start alongside item 1 if GPU production
        resumes first.
+       **Progress 2026-08-04: plateforge P0 items 1–2 implemented** at the
+       tools root (`<toolsRoot>\plateforge\`, outside this repository, with
+       its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`,
+       `plan`, `generate`, `review`, `select`, `stage`, and `verify-assets`
+       — the shared manifest, path containment, Krea2 sidecar reuse/stale/
+       `--force`, the JSONL event log and run-directory layout, the single
+       contact sheet, explicit selection, and safe library staging. 115
+       unittests pass against a fake Krea2 helper; real GPU generation is
+       still unexercised. **motionforge (item 3 of the delivery order)
+       remains pending** and is still gated on item 1's P0.
 4. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect
