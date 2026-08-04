@@ -192,6 +192,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'transcode_asset',
     // new in v0.23 (reviewing the encoded deliverable)
     'inspect_render', 'measure_render',
+    // new in v0.26 (token-efficient batch authoring, TE P0-4/P0-5)
+    'use_shared_asset_batch', 'write_composition_bundle',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -1403,6 +1405,66 @@ test('mcp: the workspace library is listed and links into a scene', async (t) =>
   const missing = await callJson('use_shared_asset', { target: sceneId, path: 'nope.png' });
   assert.equal(missing.isError, true);
   assert.equal(missing.data.code, 'file_not_found');
+});
+
+test('mcp: use_shared_asset_batch links a list with per-item errors and honest counts (TE P0-4)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const ws = await callJson('get_workspace');
+  const libDir = path.join(ws.data.path, 'library', 'batch');
+  await fsp.mkdir(libDir, { recursive: true });
+  await fsp.writeFile(path.join(libDir, 'a.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+  await fsp.writeFile(path.join(libDir, 'b.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+
+  const batch = await callJson('use_shared_asset_batch', {
+    items: [
+      { target: sceneId, path: 'batch/a.png' },
+      { target: sceneId, path: 'batch/b.png', as: 'assets/plate.png' },
+      { target: sceneId, path: 'batch/missing.png' },
+    ],
+  });
+  assert.equal(batch.isError, false, JSON.stringify(batch.data));
+  assert.equal(batch.data.counts.items, 3);
+  assert.equal(batch.data.counts.errors, 1, 'the missing file is one error row, not a failed batch');
+  assert.equal(batch.data.counts.linked + batch.data.counts.copied, 2);
+  assert.equal(batch.data.results[1].dest, 'assets/plate.png');
+  assert.equal(batch.data.results[2].result, 'error');
+  assert.equal(batch.data.results[2].error.code, 'file_not_found');
+
+  // Idempotent: the repeat run refreshes, it never errors.
+  const again = await callJson('use_shared_asset_batch', {
+    items: [{ target: sceneId, path: 'batch/a.png' }],
+  });
+  assert.equal(again.data.counts.errors, 0);
+});
+
+test('mcp: write_composition_bundle validates once, writes independently (TE P0-5)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const filmB = await callJson('create_film', { name: 'Bundle Film', fps: 30, width: 320, height: 240, durationInFrames: 10 });
+  const slug = filmB.data.film;
+  await callJson('create_scene', { film: slug, name: 'One', durationInFrames: 10 });
+  await callJson('create_scene', { film: slug, name: 'Two', durationInFrames: 10 });
+
+  const good = 'MotionStudio.registerComposition(({frame}) => {});';
+  const bundle = await callJson('write_composition_bundle', {
+    targets: [`${slug}/one`, `${slug}/two`, `${slug}/nope`],
+    files: { 'shared.js': good, 'shared.css': '.x{color:red}' },
+  });
+  assert.equal(bundle.isError, false, JSON.stringify(bundle.data));
+  assert.equal(bundle.data.counts.written, 2);
+  assert.equal(bundle.data.counts.errors, 1, 'the missing scene is one error row');
+  assert.equal(bundle.data.results[2].error.code, 'scene_not_found');
+  assert.ok(bundle.data.files['shared.js'].match(/^[0-9a-f]{16}$/), 'content hashes returned');
+  const readBack = await callJson('read_composition_file', { scene: `${slug}/one`, path: 'shared.js' });
+  assert.equal(readBack.data.content, good);
+
+  // A syntax error fails the WHOLE call before anything is written anywhere.
+  const bad = await callJson('write_composition_bundle', {
+    targets: [`${slug}/one`], files: { 'broken.js': 'function ( { nope' },
+  });
+  assert.equal(bad.isError, true);
+  assert.equal(bad.data.code, 'syntax_error');
+  const notWritten = await callJson('read_composition_file', { scene: `${slug}/one`, path: 'broken.js' });
+  assert.equal(notWritten.isError, true, 'nothing was written');
 });
 
 /* ------------------------------------------------------------------ */

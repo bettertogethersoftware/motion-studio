@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Batch authoring: use_shared_asset_batch and write_composition_bundle (TE P0-4/P0-5)
+
+Ten plates used to cost ten `use_shared_asset` calls and ten full responses;
+a shared-engine edit cost one `write_composition_file` per scene. Two batch
+tools replace those loops. `use_shared_asset_batch` links a list of
+`{target, path, as?}` items with per-item error rows and aggregate counts —
+a missing library file is one error row, not a failed batch, and repeat runs
+refresh idempotently. `write_composition_bundle` writes the same file set to
+many scenes: the bundle is validated once (a parse error fails the whole
+call before anything is written anywhere), targets are written
+independently (one `scene_not_found` never blocks its neighbours), lint
+warnings arrive per target, and per-file content hashes come back for the
+run record. `sync_shared_files` remains the copy-from-a-source-scene
+variant. Deferred from the plan's sketch: `expectedRevisions` — composition
+files have no revision guard on the single-file tool either; add both
+together if drift ever bites.
+
 ### Production reads are compact by default, with cursors (TE P0-1/P0-2)
 
 The first slice of the token-efficient plan, motivated by a measured

@@ -71,8 +71,12 @@ Active plan documents:
       `full` — the editing read). Deferred from the row spec:
       `outputIdentity {bytes, mtimeMs}` — planFilm does not surface it yet;
       add when render groups (P0-6) need it.
-- [ ] TE-2: P0-4/P0-5 batch operations — `use_shared_asset_batch`,
-      `write_composition_bundle`.
+- [x] TE-2 (2026-08-04): P0-4/P0-5 batch operations —
+      `use_shared_asset_batch` (per-item rows + counts, idempotent) and
+      `write_composition_bundle` (validate once, write targets
+      independently, content hashes). Deferred: `expectedRevisions` on the
+      bundle — the single-file tool has no revision guard either; add both
+      together if composition drift ever bites.
 - [ ] TE-3: P0-6/P0-7 `render_group` / `wait_render_group` /
       `cancel_render_group`; then the P0-3 output-size test sweep across
       remaining tools.

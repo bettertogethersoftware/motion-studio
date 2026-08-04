@@ -92,7 +92,9 @@ import {
   DEFAULT_SETTINGS,
 } from '../core/settings.js';
 import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
+import { checkJsSyntax } from '../core/scene.js';
 import { ADDON_IDS } from '../core/libraries.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import {
@@ -1251,6 +1253,69 @@ server.registerTool(
 );
 
 server.registerTool(
+  'write_composition_bundle',
+  {
+    title: 'Write the same composition files to many scenes',
+    description:
+      'Batch authoring (v0.26, TE P0-5): write the SAME set of files to many scenes in one call — the ' +
+      'film pattern\'s "every scene ships the same composition.js" without one call per scene. The bundle is ' +
+      'validated ONCE (a .js/.json parse error fails the whole call before anything is written anywhere); ' +
+      'each target is then written independently, so one missing scene reports an error row while the rest ' +
+      'succeed — a failed target never makes the operation look successful, and a successful one is never ' +
+      'blocked by a neighbour. Per-target lint warnings arrive exactly as write_composition_file reports ' +
+      'them. Returns per-file content hashes plus per-scene results and aggregate counts. Differs from ' +
+      'sync_shared_files in taking content directly instead of copying from a source scene. After writing, ' +
+      're-render the affected scenes.',
+    inputSchema: {
+      targets: z.array(z.string()).min(1).max(100).describe('Scene ids "<film>/<scene>" to write into'),
+      files: z.record(z.string()).describe('Map of scene-relative path → file content, e.g. {"composition.js": "..."}'),
+      detail: z.enum(['summary', 'full']).optional()
+        .describe('summary (default): counts + per-scene status and warnings. full: adds per-file byte sizes per scene.'),
+    },
+  },
+  wrap(async ({ targets, files, detail = 'summary' }) => {
+    const entries = Object.entries(files);
+    if (!entries.length) {
+      throw new EngineError(ErrorCodes.INVALID_CONFIG, 'files must contain at least one path → content entry');
+    }
+    // Validate the bundle once — the same content cannot be a syntax error
+    // for one scene and fine for another (TE plan: "Validate the bundle once").
+    const fileHashes = {};
+    for (const [relPath, content] of entries) {
+      const ext = relPath.slice(relPath.lastIndexOf('.')).toLowerCase();
+      if (ext === '.js' || ext === '.mjs') checkJsSyntax(content, relPath);
+      if (ext === '.json') {
+        try { JSON.parse(content); }
+        catch (e) { throw new EngineError(ErrorCodes.SYNTAX_ERROR, `JSON parse error in ${relPath}: ${e.message}`, { path: relPath }); }
+      }
+      fileHashes[relPath] = createHash('sha256').update(content).digest('hex').slice(0, 16);
+    }
+    const results = [];
+    for (const target of targets) {
+      try {
+        const written = [];
+        for (const [relPath, content] of entries) {
+          const res = await store.writeFile(qualifyScene(target), relPath, content);
+          written.push({ path: res.path, ...(detail === 'full' ? { bytes: res.bytes } : {}), ...(res.warnings ? { warnings: res.warnings } : {}) });
+        }
+        results.push({ scene: target, written });
+      } catch (e) {
+        results.push({ scene: target, error: { code: e.code ?? 'error', message: e.message } });
+      }
+    }
+    return ok({
+      files: fileHashes,
+      counts: {
+        targets: targets.length,
+        written: results.filter((r) => !r.error).length,
+        errors: results.filter((r) => r.error).length,
+      },
+      results,
+    });
+  }),
+);
+
+server.registerTool(
   'capture_preview_frame',
   {
     title: 'Capture one frame as PNG',
@@ -2362,6 +2427,50 @@ server.registerTool(
   },
   wrap(async ({ target, path: libPath, as }) => {
     return ok(await store.useLibraryAsset(qualifyTarget(target), libPath, { as }));
+  }),
+);
+
+server.registerTool(
+  'use_shared_asset_batch',
+  {
+    title: 'Pull many library files into scenes/films in one call',
+    description:
+      'Batch asset linking (v0.26, TE P0-4): one call for a list of library → target links instead of one ' +
+      'call per plate. Each item is `{target, path, as?}` exactly as use_shared_asset takes them; items are ' +
+      'independent — a missing library file reports an error row for that item while the rest link, and the ' +
+      'aggregate counts say at a glance whether everything landed. Idempotent like the single tool: pulling ' +
+      'the same file again refreshes the link/copy, so a repeat run is cheap and never an error. Returns one ' +
+      'row per item (`linked` = hardlinked, `copied` = filesystem could not hardlink, or `error`) plus counts.',
+    inputSchema: {
+      items: z.array(z.object({
+        target: z.string().describe('Scene id "<film>/<scene>" or film id "<film>"'),
+        path: z.string().describe('Library-relative path from list_shared_assets'),
+        as: z.string().optional().describe('Destination under the target\'s assets/ (default assets/library/<path>)'),
+      })).min(1).max(200),
+    },
+  },
+  wrap(async ({ items }) => {
+    const results = [];
+    for (const { target, path: libPath, as } of items) {
+      try {
+        const res = await store.useLibraryAsset(qualifyTarget(target), libPath, { as });
+        results.push({
+          target, path: libPath, dest: res.path, bytes: res.bytes,
+          result: res.linked ? 'linked' : 'copied',
+        });
+      } catch (e) {
+        results.push({ target, path: libPath, result: 'error', error: { code: e.code ?? 'error', message: e.message } });
+      }
+    }
+    return ok({
+      counts: {
+        items: items.length,
+        linked: results.filter((r) => r.result === 'linked').length,
+        copied: results.filter((r) => r.result === 'copied').length,
+        errors: results.filter((r) => r.result === 'error').length,
+      },
+      results,
+    });
   }),
 );
 

@@ -63,10 +63,10 @@ Use this map to choose the right tool. Read the live schema before calling it.
   `create_film`, `get_film`, `update_film`, `remove_film`, `create_scene`,
   `get_scene`, `update_scene_config`, `remove_scene`
 - Composition authoring: `read_composition_file`, `write_composition_file`,
-  `sync_shared_files`, `add_library`
+  `write_composition_bundle`, `sync_shared_files`, `add_library`
 - Assets and supplied media: `write_asset_file`, `list_assets`, `probe_asset`,
   `transcribe_asset`, `transcode_asset`, `rename_asset`, `delete_asset`,
-  `list_shared_assets`, `use_shared_asset`
+  `list_shared_assets`, `use_shared_asset`, `use_shared_asset_batch`
 - Audio: `list_vendors`, `list_voices`, `synthesize_speech`,
   `synthesize_music`, `synthesize_sfx`, `preview_audio`
 - Preview and delivery: `capture_preview_frame`, `capture_preview_frames`,
@@ -306,6 +306,12 @@ use_shared_asset {
 Reference it from the scene as `assets/city.png`. Film master audio, overlays,
 and timeline footage belong in the film's own assets; target the film id rather
 than inventing a spare scene.
+
+Linking one plate per scene across a whole film? One
+`use_shared_asset_batch { items: [{target, path, as}, …] }` call replaces the
+per-scene loop — items succeed or fail independently with per-item rows.
+Likewise `write_composition_bundle { targets, files }` writes the same
+composition files to many scenes in one validated call (v0.26).
 
 `probe_asset` reads media. `transcribe_asset` hears it. `transcode_asset` changes
 it. Do not ask the user to perform a conversion that the MCP schema supports.
