@@ -11,8 +11,10 @@
  * The layering, top to bottom:
  *
  *   this file                  extract → bound → cache → DERIVE
- *   core/transcribe-vendors.js which vendor, and the chain rule
- *   core/transcribe-whisper.js one CLI contract, normalized to milliseconds
+ *   (injected dispatch)        which vendor, and the chain rule — the caller
+ *                              passes `transcription` from the vendor runtime
+ *                              (Slice A Phase 2: core no longer imports it)
+ *   transcribe-whisper         one CLI contract, normalized to milliseconds
  *
  * Four derivations live here, and they are the product — not conveniences:
  *
@@ -55,10 +57,6 @@ import { EngineError, ErrorCodes } from './errors.js';
 import { framesForDuration } from './audio.js';
 import { runFfmpeg } from './encoder.js';
 import { defaultDataDir } from './scene.js';
-import {
-  resolveTranscriptionVendor, checkTranscriptionVendor, transcribeWithVendor,
-  unavailableWithAlternatives,
-} from './transcribe-vendors.js';
 
 /**
  * Bounds. A twenty-minute silent job is the failure mode these exist to
@@ -529,6 +527,11 @@ export async function transcribeMedia({
   cacheDir, refresh = false, cache = true,
   maxSeconds = MAX_TRANSCRIBE_SECONDS, maxBytes = MAX_TRANSCRIBE_BYTES,
   timeoutMs, signal, onPhase = () => {},
+  // The transcription dispatch from the vendor runtime (Slice A Phase 2).
+  // Core cannot import it — the import-graph test enforces that — so the
+  // entrypoints hand it in; absent means "core-only install" and the error
+  // below is that install's expected, structured shape.
+  transcription = null,
 }) {
   if (!Number.isFinite(fps) || fps <= 0) {
     throw new EngineError(ErrorCodes.INVALID_CONFIG, `fps must be a positive number (got ${fps})`, { fps });
@@ -548,10 +551,20 @@ export async function transcribeMedia({
 
   // Probe before doing any work: an unconfigured vendor must fail without having
   // spent an ffmpeg extraction, and the probe also tells us which model will run
-  // — which is part of the cache key.
-  const resolved = await resolveTranscriptionVendor({ vendor, dataDir, settings, probe: true });
-  const status = resolved.status ?? await checkTranscriptionVendor(resolved.vendor, { dataDir, settings });
-  if (!status.available) throw await unavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
+  // — which is part of the cache key. Placed after the cheap input validation
+  // above so a bad call still gets its precise error on a core-only install.
+  if (!transcription) {
+    throw new EngineError(
+      ErrorCodes.TRANSCRIPTION_UNAVAILABLE,
+      'No transcription runtime was provided: the default vendor package is not installed (or the caller ' +
+        'did not pass its dispatch). Video rendering and every non-audio operation are unaffected. ' +
+        'This is a setup problem for the user to fix — do not retry blindly.',
+      { capability: 'transcription' },
+    );
+  }
+  const resolved = await transcription.resolveTranscriptionVendor({ vendor, dataDir, settings, probe: true });
+  const status = resolved.status ?? await transcription.checkTranscriptionVendor(resolved.vendor, { dataDir, settings });
+  if (!status.available) throw await transcription.unavailableWithAlternatives(resolved.vendor, status, { dataDir, settings });
 
   const effectiveModel = model ?? status.config?.activeModel ?? null;
   const effectiveLanguage = language ?? status.config?.language ?? null;
@@ -594,7 +607,7 @@ export async function transcribeMedia({
     }
 
     onPhase('transcribing');
-    const raw = await transcribeWithVendor({
+    const raw = await transcription.transcribeWithVendor({
       wavPath, model, language, dataDir, settings, resolved,
       // ffmpeg measured the audio, so the timeout can be proportional to it
       // instead of a flat guess: 4 s of wall per second of audio is ~26× the

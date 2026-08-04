@@ -26,10 +26,17 @@ import { fileURLToPath } from 'node:url';
 
 import {
   flattenWords, segmentSentences, deriveSpeechRanges, deriveTranscript, withFrames,
-  probeWavHeader, extractSpeechWav, transcribeMedia, looksTranscribable,
+  probeWavHeader, extractSpeechWav, transcribeMedia as transcribeMediaRaw, looksTranscribable,
   transcriptCacheKey, readTranscriptCache, DERIVATION_VERSION,
   WHISPER_SAMPLE_RATE,
 } from '../src/core/transcribe.js';
+import { createTranscriptionDispatch, defaultTranscriptionCatalog } from '../src/core/transcribe-vendors.js';
+
+// Slice A Phase 2: transcribeMedia receives the transcription dispatch from
+// its caller (core no longer imports the dispatcher). The tests are that
+// caller here, so they bind the default dispatch once.
+const transcription = createTranscriptionDispatch(defaultTranscriptionCatalog());
+const transcribeMedia = (opts) => transcribeMediaRaw({ transcription, ...opts });
 import {
   resolveWhisper, whisperBinaryIn, listWhisperModels, pickWhisperModel, modelNameFromFile,
   normalizeWhisperJson, checkWhisperTranscription, transcribeWithWhisper,

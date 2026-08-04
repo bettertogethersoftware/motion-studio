@@ -1942,6 +1942,7 @@ server.registerTool(
       kind: 'transcribe',
       targetId: located.path,
       run: ({ signal, onPhase }) => transcribeMedia({
+        transcription: vendorRuntime?.transcription ?? null,
         filePath: located.abs,
         fps: effectiveFps,
         vendor, model, language,

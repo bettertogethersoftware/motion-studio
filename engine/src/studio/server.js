@@ -829,6 +829,7 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             try {
               await fsp.writeFile(src, buf);
               const result = await transcribeMedia({
+        transcription: vendorRuntime?.transcription ?? null,
                 filePath: src,
                 fps: Number(url.searchParams.get('fps')) || 30,
                 model: url.searchParams.get('model') || undefined,
