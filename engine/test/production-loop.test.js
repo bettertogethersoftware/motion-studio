@@ -385,6 +385,31 @@ test('loop: render_group renders the stale set, resumes idempotently, and waits 
   }
 });
 
+test('loop: compact responses never leak composition bodies (TE P0-3 sweep)', async () => {
+  const film = await callJson('create_film', { name: 'Canary Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
+  const slug = film.data.film;
+  await callJson('create_scene', { film: slug, name: 'Canary Shot', durationInFrames: 8 });
+  const canary = 'CANARY_COMPOSITION_BODY_9f3a';
+  await callJson('write_composition_file', {
+    scene: `${slug}/canary-shot`, path: 'composition.js',
+    content: `// ${canary}\nMotionStudio.registerComposition(() => {});`,
+  });
+
+  // Every production-loop read, at its default and compact details, must
+  // answer without the composition text riding along.
+  for (const [tool, args] of [
+    ['get_production_status', { film: slug }],
+    ['get_production_status', { film: slug, detail: 'scenes' }],
+    ['get_film', { film: slug, detail: 'scenes' }],
+    ['get_film', { film: slug, detail: 'summary' }],
+    ['list_films', {}],
+  ]) {
+    const res = await callJson(tool, args);
+    assert.equal(res.isError, false, `${tool}: ${JSON.stringify(res.data)}`);
+    assert.ok(!JSON.stringify(res.data).includes(canary), `${tool} ${JSON.stringify(args)} leaked the composition body`);
+  }
+});
+
 test('loop: prefer-revision advice round-trip with after-evidence', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
   const film = await callJson('create_film', { name: 'Prefer Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
   const slug = film.data.film;

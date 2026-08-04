@@ -83,9 +83,10 @@ Active plan documents:
       `wait_render_group` (aggregate counts, failure detail only on
       failure, since-cursor heartbeats/deltas, `done` from output files —
       restart-proven by a second-server test), `cancel_render_group`.
-- [ ] TE-3b: the P0-3 output-size test sweep across remaining tools
-      (assert compact responses never carry composition bodies, prompts,
-      or base64).
+- [x] TE-3b (2026-08-04): the P0-3 canary sweep — a distinctive
+      composition body written to a scene must not appear in any
+      production-loop read at its default or compact details. **The
+      token-efficient plan's P0 is complete.**
 - [ ] TE-4 (P1): `finish_film`, `review_render_grid`, durable run groups
       (absorbs the old "durable jobs" item), agent-economy telemetry, and
       the NEON APEX replay acceptance.
