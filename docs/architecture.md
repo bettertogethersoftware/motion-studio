@@ -1448,8 +1448,23 @@ agent reads first. `deploy/` holds the machinery:
   AGENTS.md, CLAUDE.md    generated from deploy\ENTRY.md — identical, generic
   MACHINE.md              machine-owned manifest, created from deploy\MACHINE-template.md
   ffmpeg-*, whisper-*, …  core tools (every machine)
-  comfyui*, *forge, …     optional helpers, each with its own README.md
+  comfyui*, …             optional helpers, each with its own README.md
+  agent_tool\             portable agent CLI tools; agent_tool.md is their contract
+    <tool>\               plateforge, motionforge, videoforge, musicforge, …
+    agent_created\        the sandbox an AI may add a new tool to without asking
+    _log-usage.ps1        one JSON line per invocation → usage.jsonl
+    usage-report.ps1      per-tool frequency, for the human
 ```
+
+The split between `comfyui*` and `agent_tool\` is **portability**: a helper
+bound to a local installation, a virtual environment, and gigabytes of model
+weights is machine infrastructure and stays at the root, while a program that
+resolves its environment at run time travels, and lives one level down under a
+single convention. That convention (`agent_tool\agent_tool.md`) is what lets an
+agent both *use* an unfamiliar tool and *write* a new one without asking: same
+launcher shape, same JSON-only stdout, same exit codes, same usage logging.
+Promotion out of `agent_created\` — and every removal — stays with the human,
+who decides from the usage report rather than from an agent's assertion.
 
 The design rule is that **every fact lives in exactly one layer**, picked by
 what changes it:
@@ -1458,7 +1473,8 @@ what changes it:
 |---|---|---|
 | stable contract | `AGENTS.md`/`CLAUDE.md` (generated, never hand-edited) | the product changes |
 | this machine | `MACHINE.md` | hardware, paths, models, paid services change |
-| each helper | that helper's `README.md` | the helper changes |
+| agent-tool contract | `agent_tool\agent_tool.md` | the agent-tool convention changes |
+| each helper or tool | that folder's `README.md` | the helper or tool changes |
 | production knowledge | `docs/` (this repo) | a lesson is learned anywhere |
 
 The generated guide teaches agents to *discover* helpers (check the directory,

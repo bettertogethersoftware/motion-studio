@@ -53,8 +53,8 @@ second renderer or a second film database.
 Install the tools beside Motion Studio, not inside the app checkout:
 
 ```text
-<MotionStudioToolsRoot>\plateforge\
-<MotionStudioToolsRoot>\motionforge\
+<MotionStudioToolsRoot>\agent_tool\plateforge\
+<MotionStudioToolsRoot>\agent_tool\motionforge\
 ```
 
 Resolve paths in this order at runtime:

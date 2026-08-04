@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### `agent_tool/` — one home, one contract, and a usage record
+
+The tools root had grown a flat row of self-developed CLI tools sitting beside
+GPU installations, with no shared shape and no way to tell which of them anyone
+still used. They now live together in `<toolsRoot>/agent_tool/`: `plateforge`,
+`motionforge`, `videoforge`, `musicforge`, `verticalforge`, and `youtube` moved
+there unchanged in content. The `comfyui*` directories deliberately did **not**
+move — a folder bound to a local install, a virtual environment, and tens of
+gigabytes of weights is machine infrastructure, not a portable tool, and stays
+at the root being described by `MACHINE.md`.
+
+`agent_tool/agent_tool.md` is the new contract an agent reads before creating
+or using one: a folder per tool whose `README.md` is the only usage guide, a
+thin `<name>.ps1` launcher that resolves `MotionStudioRoot` (process → user →
+machine) and forwards an argument **array** rather than an assembled command
+string, JSON-only stdout with human progress on stderr, exit codes 0/1/2, no
+undeclared dependencies, no hardcoded machine values, and tests runnable from
+the tool folder. `videoforge`, `musicforge`, `verticalforge`, and `youtube`
+gained the launcher they were missing; every documented direct invocation still
+works.
+
+Moving a tool one level deeper exposed what "portable" had not meant yet: three
+`videoforge` scripts, `musicforge/compose.py`, `verticalforge/_common.py`, and
+`verticalforge/register.mjs` all derived the tools root or the repository by
+counting parent directories from their own file. Each now resolves from the
+environment first and then by *searching* ancestors (for `MACHINE.md`, or for a
+directory holding `engine/src/mcp/server.js`), so nesting depth stops being a
+load-bearing assumption.
+
+Every launcher now appends one line to `agent_tool/usage.jsonl` after the tool
+exits — timestamp, tool, `argv[0]`, exit code, source, duration. **Never an
+argument value**: prompts, paths, film names and titles cannot reach the log by
+construction, and anything that does not look like a subcommand is recorded as
+`(redacted)`. Logging is best effort in the strict sense — no stdout, no throw,
+no effect on the exit code — and rotates at 5 MB keeping one generation.
+`agent_tool/usage-report.ps1` reads it back as a table (total, last 7/30 days,
+failures, last used, top subcommands; `-Json` for machines). It is the one file
+here that prints prose by default, because it is the one written for the human.
+
+That report is what makes `agent_tool/agent_created/` safe: an AI may add a new
+tool there **without asking**, since a tool is often a one-time job and asking
+costs more than writing it. The rules are the format, the shared logging, and
+not duplicating an existing tool's job — extend it instead. Promotion to
+`agent_tool/` root, the `MACHINE.md` inventory row, and any removal stay with
+the human, decided from evidence rather than from an agent's assertion.
+
 ### Durable group records and agent-economy telemetry (TE P1-3/P1-4)
 
 A render group used to write its record once, at submission, and then never

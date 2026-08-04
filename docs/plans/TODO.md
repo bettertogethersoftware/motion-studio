@@ -43,8 +43,8 @@ Active plan documents:
        dependency and could start alongside item 1 if GPU production
        resumes first.
        **Progress 2026-08-04: plateforge P0 items 1–2 implemented** at the
-       tools root (`<toolsRoot>\plateforge\`, outside this repository, with
-       its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`,
+       tools root (`<toolsRoot>\agent_tool\plateforge\`, outside this
+       repository, with its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`,
        `plan`, `generate`, `review`, `select`, `stage`, and `verify-assets`
        — the shared manifest, path containment, Krea2 sidecar reuse/stale/
        `--force`, the JSONL event log and run-directory layout, the single
@@ -52,8 +52,8 @@ Active plan documents:
        unittests pass against a fake Krea2 helper; real GPU generation is
        still unexercised.
        **Progress 2026-08-05: motionforge implemented** (delivery-order
-       items 3–4) at the tools root (`<toolsRoot>\motionforge\`, with its own
-       `README.md` and an entry in `MACHINE.md`). Ships `doctor`, `link`,
+       items 3–4) at the tools root (`<toolsRoot>\agent_tool\motionforge\`,
+       with its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`, `link`,
        `render`, `build`, `verify`, and the resumable `run` with
        `--plan-only` / `--resume` / `--no-build` / `--visual-review`
        (`--force-plate` is refused and redirected to plateforge). Per the

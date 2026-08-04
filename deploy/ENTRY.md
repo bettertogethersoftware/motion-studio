@@ -18,6 +18,7 @@ and directly run the locally installed media tools.
 |---|---|---|
 | stable contract | this file | Motion Studio itself changes (regenerate, never hand-edit) |
 | this machine | `MACHINE.md` (beside this file) | hardware, paths, models, or paid services change |
+| agent tools | `agent_tool/agent_tool.md` (beside this file) | the agent-tool convention changes |
 | each helper tool | `<tool>/README.md` | that tool changes |
 | production knowledge | `<MOTION_STUDIO_ROOT>/docs/` | lessons are learned anywhere |
 
@@ -37,6 +38,12 @@ Before writing composition HTML, CSS, or JavaScript, also read
 Before producing a music video, beat-synced film, or anything that layers
 generated audio, read `<MOTION_STUDIO_ROOT>/docs/production-lessons.md` — it
 records the measured traps from previous productions so they are paid for once.
+
+Before creating **or** using an agent tool, read `agent_tool/agent_tool.md` at
+the tools root (beside `MACHINE.md`) — the contract for the CLI tools an agent
+runs from a shell: the launcher shape, JSON-only stdout, exit codes, the shared
+usage logging, and the `agent_created/` sandbox in which an AI may write a new
+tool without asking.
 
 If Motion Studio concepts or capabilities are unfamiliar, consult the relevant
 documents under `<MOTION_STUDIO_ROOT>/docs/` before acting. Start with
@@ -318,13 +325,40 @@ Helper families that may be present (non-exhaustive — the inventory in
 | `comfyui_tts/` | authoring-time Kokoro and Qwen3-TTS speech generation through ComfyUI |
 | `comfyui_upscaling/` | Real-HAT GAN video upscaling |
 | `comfyui_video/` | local video generation workflows |
-| `videoforge/` | building a beat-locked cut around long recordings |
-| `musicforge/` | composing an instrumental score with an exported accent map |
-| `verticalforge/` | converting a finished landscape master to a portrait deliverable |
-| `youtube/` | uploading finished deliverables to the configured YouTube account |
 
 A customer- or machine-specific helper not in this table follows the same
 rule: its directory has a `README.md`, and that README is the guide.
+
+The `comfyui*` helpers stay at the tools root because they are bound to local
+installations, virtual environments, and model weights — machine
+infrastructure, not portable tools.
+
+## Agent tools: `agent_tool/`
+
+Portable CLI tools an agent runs from a shell live one level down, in
+`agent_tool/` at the tools root. **Read `agent_tool/agent_tool.md` before
+creating or using one.** It is the contract for the whole folder: one directory
+per tool with its `README.md` as the only usage guide, a thin `<name>.ps1`
+launcher that resolves the environment and forwards an argument **array**,
+JSON-only stdout with human progress on stderr, exit codes 0/1/2, no undeclared
+dependencies, no hardcoded machine values, and tests runnable from the tool
+folder.
+
+| agent tool | what it is for |
+|---|---|
+| `agent_tool/plateforge/` | running a manifest of generated plates to verified files in the workspace library |
+| `agent_tool/motionforge/` | driving staged plates through Motion Studio to a verified delivery |
+| `agent_tool/videoforge/` | building a beat-locked cut around long recordings |
+| `agent_tool/musicforge/` | composing an instrumental score with an exported accent map |
+| `agent_tool/verticalforge/` | converting a finished landscape master to a portrait deliverable |
+| `agent_tool/youtube/` | uploading finished deliverables to the configured YouTube account |
+
+Every launcher records one line per call — tool, subcommand, exit code,
+duration; never an argument value — so
+`agent_tool/usage-report.ps1` can show the human which tools earn their place.
+An AI may add a new tool to `agent_tool/agent_created/` **without asking**, in
+the same format and routed through the same logging; promotion out of that
+sandbox, and any removal, is the human's decision.
 
 ## The generative boundary
 

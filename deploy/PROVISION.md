@@ -32,7 +32,7 @@ agent can orient itself from three generated/curated files at the tools root —
 | profile | adds | for |
 |---|---|---|
 | `minimal` | core four: FFmpeg, Whisper.cpp, Auto-Editor, ImageMagick | any machine; MCP-complete Motion Studio |
-| `standard` | + `videoforge`, `musicforge`, `verticalforge`, `youtube` (if the customer uses YouTube) | production editing work without GPU generation |
+| `standard` | + the `agent_tool\` folder (plateforge, motionforge, videoforge, musicforge, verticalforge; `youtube` if the customer uses YouTube) | production editing work without GPU generation |
 | `gpu` | + ComfyUI and the `comfyui*` helpers the customer's brief needs | machines with a capable NVIDIA GPU |
 
 Customer-specific paid or self-developed tools can be added to any profile:
@@ -185,10 +185,14 @@ user approve once for the batch.
 
 ### 4. Profile helpers
 
-`standard` and up: copy `videoforge`, `musicforge`, `verticalforge`, and (if
-used) `youtube` from the distribution source. These are self-developed,
-standard-library Python tools — no pip installs. Read each helper's
-`README.md` and run any smoke command it defines.
+`standard` and up: copy the **`agent_tool\` folder as one unit** from the
+distribution source (v0.26 layout — it holds `plateforge`, `motionforge`,
+`videoforge`, `musicforge`, `verticalforge`, `youtube`, the `agent_tool.md`
+convention document, the usage logger and `usage-report.ps1`; exclude any
+`usage.jsonl` — usage logs are per-machine). These are self-developed
+tools with no pip/npm installs. Read `agent_tool\agent_tool.md` first,
+then each tool's `README.md`, and run each tool's own doctor/check command.
+Omit `youtube\` if the customer does not use YouTube.
 
 `gpu` only: install ComfyUI per the customer's GPU and brief, then copy the
 `comfyui*` helpers required. Each helper has a `check` command — run every
