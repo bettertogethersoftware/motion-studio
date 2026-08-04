@@ -97,7 +97,9 @@ vendor already searches, so a fetched model needs no env var or setting
 (whisper-cli itself remains an externally installed binary). Hashes are
 pinned from Hugging Face's LFS oids and were confirmed by a real verified
 download. The transcription tier's fix message now names the pack command
-for the model half. Decisions §10.3 (minimal pack = SoundFont; models
+for the model half, and `get_capabilities` gained a `packs` block — every
+fetchable pack with its `installed` state and the fetch command, degrading
+to a structured `error` on a core-only install exactly like `tiers`. Decisions §10.3 (minimal pack = SoundFont; models
 optional) and §10.4 (no npm workspace split — the boundary lives inside the
 engine package, since the GitHub-URL install ships the whole repo) are
 recorded in the plan.

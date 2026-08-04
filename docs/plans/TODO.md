@@ -94,12 +94,15 @@ Active plan documents:
       packed tarball into a scratch project and driving its MCP server
       over stdio. README documents the install and the consumer-side
       Puppeteer config caveat.
+- [x] B-3 (2026-08-04): `get_capabilities` reports a `packs` block — every
+      manifest pack with its `installed` state and the fetch command,
+      degrading structurally on a core-only install (asserted by the
+      core-only test).
 - [ ] B-remainder: treating the pinned browser and FFmpeg as packs (the
-      Slice 0 Phase 0.5 leftovers — now they have a manifest to live in);
-      `list_vendors`/`get_capabilities` reporting pack install state
-      directly (tiers already carry the fix commands). Phase 4 itself
-      shipped with Slice A (dynamic tolerant runtime in both entrypoints,
-      core-only test, structured unavailables).
+      Slice 0 Phase 0.5 leftovers — now they have a manifest to live in;
+      both need the bootstrap to learn archive extraction first). Phase 4
+      itself shipped with Slice A (dynamic tolerant runtime in both
+      entrypoints, core-only test, structured unavailables).
 
 ## Engineering backlog (carried from the retired prioritized todo)
 

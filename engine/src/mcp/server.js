@@ -3104,6 +3104,20 @@ server.registerTool(
       tiers: capabilityTiers
         ? await capabilityTiers().catch((e) => ({ error: e.message }))
         : { error: 'capability tiers unavailable: the default vendor package is not installed (core-only install)' },
+      // Fetchable packs (Slice B): what `npm run fetch-pack -- <id>` can
+      // install and what is already present. The CLI module tolerates a
+      // missing vendor tree itself, so this needs no separate guard.
+      packs: await import('../cli/fetch-pack.js')
+        .then(async ({ listPacks }) => {
+          const list = await listPacks();
+          if (!list.ok) return { error: list.message };
+          return {
+            fetchCommand: 'npm run fetch-pack -- <id>   (from engine/)',
+            root: list.root,
+            packs: list.packs.map((p) => ({ id: p.id, installed: p.installed, enables: p.enables })),
+          };
+        })
+        .catch((e) => ({ error: e.message })),
       productionLoop: {
         advice: 'check_human_advice / acknowledge_human_advice / begin_advice_work / resolve_human_advice / list_human_advice',
         revisions: 'every promoted full-scene render is archived immutably; list_scene_revisions / use_scene_revision',

@@ -76,6 +76,12 @@ test('loop: get_capabilities states the model, identity, and protocol', async ()
   assert.match(caps.data.model.narrativeGrouping, /sequence/);
   assert.equal(caps.data.productionLoop.approvalGate.startsWith('none'), true);
   assert.ok(caps.data.productionLoop.checkpoints.includes('before build_film'));
+  // Fetchable packs (Slice B): every manifest pack with its install state,
+  // and the command that fetches one.
+  assert.match(caps.data.packs.fetchCommand, /fetch-pack/);
+  const packIds = caps.data.packs.packs.map((p) => p.id);
+  assert.ok(packIds.includes('soundfont'), JSON.stringify(packIds));
+  for (const p of caps.data.packs.packs) assert.equal(typeof p.installed, 'boolean');
 });
 
 test('loop: advice left while no agent ran is found, leased, and resolved over MCP', async () => {

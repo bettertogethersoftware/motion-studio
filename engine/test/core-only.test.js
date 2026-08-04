@@ -89,6 +89,7 @@ test('core-only: the server initializes and answers get_capabilities without the
   assert.equal(caps.isError, false);
   assert.ok(caps.data.engine, 'reports an engine version');
   assert.ok(caps.data.formats.includes('mp4'), 'render formats are core, not vendor');
+  assert.match(caps.data.packs.error, /not installed/, 'packs block degrades structurally, like tiers');
 });
 
 test('core-only: non-audio operations work — a film and scene can be created', async () => {
