@@ -9,6 +9,44 @@ and earlier, under `docs/task_completed/` and `docs/todo_task/`.
 
 Newest first.
 
+## v0.26.0 (2026-08-04) — the vendor-boundary program: Slices 0, A, B, C-1, released
+
+The [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md) delivered
+end to end in one day, all seven §10 decisions plus §10.3/§10.4 made along
+the way; the plan document stays for its two open remainders (browser/FFmpeg
+as packs; C-2 packaging, deprioritized by §10.7's "no installer channel").
+What shipped, in slice order:
+
+- **Slice 0** — headless-shell-only browser (−420 MB), `fetch-soundfont`
+  (the pack pilot), the zero-byte per-platform `system` speech backend,
+  capability tiers in doctor/`get_capabilities`.
+- **Slice A** — the physical core/vendors boundary: catalog-driven
+  dispatchers, the default registry, both entrypoints on a dynamic
+  failure-tolerant runtime, eleven modules moved under `vendors/default/`,
+  the import-graph and core-only integration tests, settings-schema
+  injection (`VENDOR_SETTINGS_FIELDS` fallback, drift-guarded). The
+  core-only test caught a real static-import bug on its first run.
+- **Slice B** — the pack mechanism (`core/fetch-verified.js` transport +
+  versioned manifest + `npm run fetch-pack`, whisper model packs landing
+  where the vendor already searches, pins confirmed by real downloads) and
+  the §10.7 GitHub-URL install (root package.json wrapper, drift-guarded,
+  verified by installing the tarball and driving its MCP server over
+  stdio); `get_capabilities` reports the packs.
+- **Slice C-1** — the ComfyUI-style desktop viewer host: `desktop/`
+  Electron shell spawning the Studio on a real Node, kill-the-tree
+  cleanup, smoke-proven.
+- **Release discipline** — versions aligned at 0.26.0 (both package files +
+  lockfile, drift-guarded), the changelog's Unreleased block rolled into
+  the v0.26 release, [release-checklist.md](../release-checklist.md)
+  created, tag `v0.26.0` pushed.
+
+Corrections reality forced: npm's install-scripts policy silently skips
+puppeteer/electron postinstalls (documented in desktop/README.md); the
+whisper pack paths had to match `defaultModelsDir()` exactly
+(`vendor/whisper/models/`, tethered by test); `npm ci` compares the
+lockfile's recorded root version, so a version bump is three files, not
+two. Details: CHANGELOG v0.26.
+
 ## v0.26 (2026-08-03/04) — deployment restructure + Linux L0–L3
 
 Replaced the hand-copied 900-line SETUPME agent guide with layered `deploy/`
