@@ -1064,6 +1064,18 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     }
   }
 
+  // Sequence metadata whose label no longer appears on any segment (v0.27).
+  // Presentation-only data cannot break a build, so this is not a `problem` —
+  // but it is the fingerprint of a play-order patch that replaced the segment
+  // array with bare {slug} entries and cleared every label underneath, leaving
+  // the intent text describing a band that no longer exists. Naming it here is
+  // what lets get_film and the Studio show the damage instead of hiding it.
+  const seqMeta = film.sequences && typeof film.sequences === 'object' && !Array.isArray(film.sequences)
+    ? film.sequences
+    : {};
+  const labelsInUse = new Set(scenes.map((s) => s.sequence).filter(Boolean));
+  const unreferencedSequences = Object.keys(seqMeta).filter((label) => !labelsInUse.has(label));
+
   return {
     scenes,
     totalFrames,
@@ -1072,7 +1084,8 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     format,
     // Narrative bands (v0.23) — what the review UI draws above the timeline
     // and what a "Sequence 2" advice target resolves against.
-    sequences: sequenceBands(scenes, film.sequences ?? {}),
+    sequences: sequenceBands(scenes, seqMeta),
+    ...(unreferencedSequences.length ? { unreferencedSequences } : {}),
     // The structured contract (v0.22). `signature.id` is the string this field
     // used to be, and the one every scene's own `signature` is compared against.
     signature: filmSignature(configs),

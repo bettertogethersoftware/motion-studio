@@ -524,6 +524,10 @@ function planSummary(plan) {
     // engine knows. One edit here covers get_film, list_films, update_film and
     // build_film { plan: true }.
     signature: plan.signature,
+    // Orphaned narrative metadata (v0.27): `sequences` keys no segment carries
+    // any more. Additive and omitted when clean, so a healthy film's plan looks
+    // exactly as it always did.
+    ...(plan.unreferencedSequences?.length ? { unreferencedSequences: plan.unreferencedSequences } : {}),
     sceneLayout: plan.scenes.map((s) => (s.kind === 'footage'
       // Footage segments (v0.22) report the same placement fields as scenes, so
       // "where does segment 6 start" is one question regardless of kind — plus
@@ -858,11 +862,18 @@ server.registerTool(
   {
     title: 'Update a film document',
     description:
-      'Patch the film document: name, scene ORDER (scenes: [{slug}] — this is how you reorder or drop scenes ' +
-      'from the cut; the scene folders themselves are untouched), master audio timeline, overlay track, caption ' +
+      'Patch the film document: name, scene ORDER (`scenes` — this is how you reorder or drop segments from the ' +
+      'cut; the scene folders themselves are untouched), master audio timeline, overlay track, caption ' +
       'track, captionStyle, audioTargetPeakDb, burnCaptions, outputFilename, deliverables, sceneDefaults, and review policy. Omitted fields keep ' +
       'their saved values; ARRAY FIELDS REPLACE WHOLESALE (a timeline edit is a statement of the whole track) — ' +
-      'except that audio has two ADDRESSED alternatives for editing a saved timeline without restating it: ' +
+      'and inside `scenes` each SEGMENT OBJECT REPLACES THAT SEGMENT, so a field you leave out is a field you ' +
+      'ERASE: {slug:"intro"} with no `sequence` CLEARS that segment\'s narrative label and strands its ' +
+      '`sequences` metadata. The safe way to reorder or drop is therefore to CARRY THE SEGMENT OBJECTS THROUGH ' +
+      'from get_film — reorder/filter the array you read and spread each entry ({...seg}) — not to hand-build a ' +
+      'bare [{slug}] list. (Clearing IS how you ungroup: send the segment without `sequence` on purpose, and ' +
+      'drop the now-unused key from `sequences` in the same patch.) The response carries a `warnings` array ' +
+      'whenever a patch cleared labels, and the plan reports `unreferencedSequences`. ' +
+      'Audio, meanwhile, has two ADDRESSED alternatives for editing a saved timeline without restating it: ' +
       'audioPatch (change named tracks by id) and audioGainOffsetDb (shift the whole mix, preserving balance). ' +
       'Audio/overlay src paths are relative to the FILM\'s assets/ — put master audio there by targeting the ' +
       'film id in synthesize_* / write_asset_file. Times are frames on the film timeline; get scene offsets ' +
@@ -897,8 +908,9 @@ server.registerTool(
           'because every later offset derives from it. A prepared clip may also carry the `derivedFrom` object returned ' +
           'by transcode_asset; it makes planFilm flag a source replacement before a build. Reorder or drop segments here; create scenes with create_scene ' +
           'and put footage in the film\'s assets/ first (use_shared_asset or write_asset_file). ' +
-          'Footage segments are stamped with a stable `id` — echo it back when you rewrite the array, or the human\'s ' +
-          'advice on that clip loses its anchor.'),
+          'This array REPLACES the play order and each entry REPLACES that segment, so start from the segments in ' +
+          'get_film and spread them ({...seg}): every field you do not restate is erased, including `sequence` ' +
+          'labels and a footage segment\'s stable `id` — the anchor the human\'s advice on that clip is bound to.'),
       outputFilename: z.string().optional().describe('Bare output filename (default "film")'),
       sceneDefaults: z.object({
         fps: z.number().int().min(1).max(240).optional(),
@@ -927,7 +939,9 @@ server.registerTool(
         intent: z.string().max(500).optional().describe('What this sequence is for — shown to the human, and to future directors'),
       })).optional().describe(
         'Narrative sequence metadata keyed by the labels used on segments (v0.23). Label segments via ' +
-        'scenes[i].sequence; describe each label\'s intent here. Presentation only — renders nothing, moves no files.',
+        'scenes[i].sequence; describe each label\'s intent here. Presentation only — renders nothing, moves no files. ' +
+        'This record replaces the saved one, and it does NOT follow the labels: a key whose label no longer sits on ' +
+        'any segment stays behind describing nothing, and the plan reports it as `unreferencedSequences`.',
       ),
       deliverables: z.array(FILM_DELIVERABLE_INPUT).optional().describe(
         'Whole Stage-A deliverable list. Entries are saved platform snapshots; update their output name, caption style, safe areas, or reframe centers here.',
@@ -947,7 +961,12 @@ server.registerTool(
   },
   wrap(async ({ film, expectedRevision, ...fields }) => {
     const provided = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
-    const doc = await store.updateFilm(qualifyFilm(film), provided, { expectedRevision });
+    const filmId = qualifyFilm(film);
+    // Read the play order BEFORE the write, and only when this patch restates
+    // it — the one case where a label can vanish without anybody saying so.
+    const before = provided.scenes !== undefined ? await store.getFilm(filmId) : null;
+    const doc = await store.updateFilm(filmId, provided, { expectedRevision });
+    const warnings = before ? sequenceLossWarnings(before, doc) : [];
     const plan = await planFilm({ film: doc, store });
     return ok({
       film: doc.slug,
@@ -955,9 +974,52 @@ server.registerTool(
       updatedAt: doc.updatedAt,
       revision: doc.revision,
       plan: planSummary(plan),
+      ...(warnings.length ? { warnings } : {}),
     });
   }),
 );
+
+/**
+ * Narrative labels a `scenes` patch cleared without saying so (v0.27).
+ *
+ * `scenes` replaces the play order and each entry replaces its segment, so a
+ * patch hand-built from bare {slug} objects — the shape it is most tempting to
+ * write for a reorder — erases every `sequence` label while `film.sequences`
+ * stays behind describing nothing. Replacement is the right store semantics
+ * (the Studio's ungroup is exactly a segment sent without its label), so the
+ * fix is not to change the write: it is to say what the write did, here at the
+ * boundary where the agent that wrote it can still read the answer.
+ *
+ * Only segments present in BOTH documents count. Dropping a labelled segment
+ * from the cut is a stated intention, not a loss, and warning about it would
+ * teach agents to ignore the field.
+ */
+function sequenceLossWarnings(before, after) {
+  const key = (s) => (s?.footage !== undefined ? `footage:${s.id}` : `scene:${s.slug}`);
+  const wasLabelled = new Map();
+  for (const s of before.scenes ?? []) if (s?.sequence) wasLabelled.set(key(s), s.sequence);
+  const cleared = [];
+  for (const s of after.scenes ?? []) {
+    const had = wasLabelled.get(key(s));
+    if (had && !s?.sequence) cleared.push(had);
+  }
+  if (!cleared.length) return [];
+  const labels = [...new Set(cleared)];
+  // Only metadata THIS patch stranded: a key that was already describing
+  // nothing before the call is the plan's `unreferencedSequences` to report,
+  // not this call's fault to confess.
+  const wasInUse = new Set((before.scenes ?? []).map((s) => s?.sequence).filter(Boolean));
+  const inUse = new Set((after.scenes ?? []).map((s) => s?.sequence).filter(Boolean));
+  const orphans = Object.keys(after.sequences ?? {}).filter((label) => wasInUse.has(label) && !inUse.has(label));
+  return [
+    `This patch cleared the \`sequence\` label on ${cleared.length} segment${cleared.length === 1 ? '' : 's'} (${labels.join(', ')}).`
+    + (orphans.length
+      ? ` ${orphans.length} \`sequences\` ${orphans.length === 1 ? 'entry is' : 'entries are'} now unreferenced: ${orphans.join(', ')}.`
+      : '')
+    + ' A segment object REPLACES the segment — carry the segment objects through from get_film rather than'
+    + ' rebuilding a bare [{slug}] list. Ignore this if you meant to ungroup.',
+  ];
+}
 
 server.registerTool(
   'remove_film',

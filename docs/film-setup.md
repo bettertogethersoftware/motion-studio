@@ -52,6 +52,19 @@ applies it at the **scene** level, across a film.
   targets ("Sequence 2 drags"). Sequences are presentation only: they render
   nothing, own no files, and relabeling or regrouping never invalidates a
   render or moves a folder. Footage segments take labels too.
+- **Reorder by carrying the segments through, not by rebuilding them (v0.27).**
+  `update_film { scenes }` replaces the play order *and each entry replaces
+  that segment*: a field you leave out is a field you erase. So a reorder
+  written as `scenes: [{slug:"outro"}, {slug:"hook"}]` silently strips every
+  `sequence` label while `film.sequences` stays behind describing bands that no
+  longer exist. Read the film, reorder or filter the segment objects you got
+  back, and spread them (`{...seg}`). Replacement is deliberate — it is exactly
+  how you *ungroup*: send the segment without `sequence` and drop the now-unused
+  key from `sequences` in the same patch — so the engine does not guess. What it
+  does instead is **say what happened**: `update_film` returns a `warnings` array
+  naming the labels a patch cleared and the metadata it stranded, and
+  `plan.unreferencedSequences` lists any `sequences` key no segment carries
+  (both omitted when the film is clean).
 - **Footage clips carry a stable `id` (v0.23).** `normalizeSegment` stamps one
   on every footage segment and preserves it across saves. Keep it when you
   rewrite the play order: it is what human advice on that clip is bound to,

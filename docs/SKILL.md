@@ -809,10 +809,17 @@ what to conclude: `inspect_render` still returns the exact frames and
   those problems are resolved.
 - `create_scene` appends the scene to the film order. Use `update_film.scenes`
   to reorder or mix scene and footage segments.
-- Sequence labels ride on the `scenes` array (`{ slug, sequence }`), so a
-  whole-array rewrite that drops them silently unlabels the film — preserve
-  them like every other segment field. The `sequences` metadata map is
-  patched as one object.
+- **Each `scenes` entry replaces THAT SEGMENT**, so a field you leave out is a
+  field you erase — including a `sequence` label and a footage segment's stable
+  `id`. Never hand-build `scenes: [{slug:"outro"}, {slug:"hook"}]` to reorder:
+  it reorders and unlabels the film in one move, leaving `sequences` metadata
+  describing bands that no longer exist. Read the film, reorder or filter the
+  segment objects you got back, and spread them (`{...seg}`). Clearing a label
+  on purpose is how you *ungroup* — send the segment without `sequence` and drop
+  the unused key from the `sequences` map in the same patch. `update_film`
+  returns a `warnings` array whenever a patch cleared labels, and
+  `plan.unreferencedSequences` lists metadata keys no segment carries; read
+  both. The `sequences` metadata map is patched as one object.
 - Footage segments carry a stable `id`. A whole-array rewrite that drops it
   gets a fresh one, which orphans any human advice aimed at that clip —
   echo it back, exactly like `sequence`.

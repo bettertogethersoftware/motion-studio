@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### The reorder that ate the story layer
+
+Two films in the workspace — `jin-park-midnight-runner` and
+`jin-park-sunshine-vertical` — were found with a full `sequences` block and not
+a single labelled segment: intent text describing bands that no longer existed
+anywhere. Nothing had gone wrong at the storage layer. `update_film { scenes }`
+replaces the play order and each entry replaces *that segment*, so a patch
+built from bare `{slug}` objects erases every `sequence` label on the way past,
+and `sequences` — not in the patch — survives, pointing at nothing.
+
+The root cause was not the semantics. It was the tool's own description, which
+said, in as many words, `scenes: [{slug}] — this is how you reorder or drop
+scenes`. An agent following the instructions it was given destroyed the
+human's story layer, and the film document afterwards said nothing at all about
+it. Replacement itself is *correct* and stays: sending a segment without its
+label is precisely how the Studio's ungroup works, and a merge would make
+un-labelling inexpressible.
+
+So three changes, none of them to the write. **The description now tells the
+truth**: a segment object replaces the segment, a field you leave out is a
+field you erase, and the safe way to reorder or drop is to carry the segment
+objects through from `get_film` — spread what you read — rather than
+hand-building a `[{slug}]` list. The same rule was already protecting a footage
+segment's stable `id`; it just was not stated as a rule. **`update_film` now
+answers back**: when a patch clears labels, the response carries a `warnings`
+array naming how many segments lost which labels and which `sequences` entries
+that patch stranded. It fires on a deliberate ungroup too, because the tool
+cannot read intent — but an ungroup that also drops its metadata key gets the
+short form, with nothing claimed to be orphaned. **And `planFilm` names the
+damage that already exists**: `unreferencedSequences` lists metadata keys no
+segment carries, so `get_film`'s plan and the Studio show the orphaned state
+instead of hiding it. All three are additive — a clean film's response and plan
+look exactly as they always did.
+
+The warning lives at the MCP boundary and nowhere else, deliberately. The
+Studio's ungroup goes through its own PATCH endpoint and is not a mistake, so
+it does not start warning; `store.updateFilm`'s return shape is untouched, and
+the extra pre-write read happens only when a patch actually restates `scenes`.
+
 ### `clone_scene`: copying a scene is now an engine operation
 
 An agent could see every film in its workspace and address every scene in it,

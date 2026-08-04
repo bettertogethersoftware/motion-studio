@@ -1371,7 +1371,19 @@ label per segment plus optional `film.sequences[label].intent` metadata.
 Consecutive same-label segments form bands (`sequenceBands`, pure) used by
 the plan, the film timeline, and advice targets. Sequences render nothing
 and own no files — the deliberate contrast with the scene, which is exactly
-the atomic render unit. (The upstream redesign plan called these "shots"
+the atomic render unit.
+
+Because a `scenes` patch replaces the play order *and each entry replaces its
+segment*, an omitted `sequence` clears that segment's label — which is how the
+Studio's ungroup works and therefore stays. The cost is that a play order
+rebuilt from bare `{slug}` objects wipes the story layer and leaves
+`film.sequences` describing bands that no longer exist. Two v0.27 additions
+make that visible rather than silent: `planFilm` reports
+`unreferencedSequences` (metadata keys no segment carries, omitted when empty),
+and the `update_film` **MCP handler** — not the store — compares the play order
+before and after a `scenes` patch and returns a `warnings` array naming the
+labels it cleared. The asymmetry is deliberate: the Studio ungroups through its
+own PATCH endpoint, where the clearing is the stated intent. (The upstream redesign plan called these "shots"
 inside renamed "scenes"; the shipped model keeps the engine's scene
 vocabulary and names the grouping *sequence*, killing the same ambiguity
 without churning every id, tool, and document. A later revision of that plan
