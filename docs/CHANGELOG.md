@@ -60,6 +60,48 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Install Motion Studio with one npm command (v0.26)
+
+Slice B's §10.7 wrapper: the repository root is now an npm package, so
+`npm install github:bettertogethersoftware/motion-studio` works for anyone
+with repository access — no clone, no publish, no installer. The root
+package.json mirrors the engine's contract (version, dependencies, engines,
+bins behind an `engine/` prefix) and a drift-guard test
+(`engine/test/root-package.test.js`) keeps the two package files from ever
+disagreeing. The packed artifact is ~3 MB — engine source, templates, docs,
+deploy playbooks, examples — and never carries machine state (`data/`,
+`vendor/`, `paths.json`) or the heavyweight optional Windows provider builds
+(`music/`, `tts/`), which are future packs. Verified end to end: the tarball
+installed into a scratch project starts the MCP server over stdio, answers
+`get_capabilities` with all six capability tiers, and runs `fetch-pack`
+against its own manifest. One consumer-side caveat, documented in the README:
+Puppeteer reads its download config from the *installing* project, so a
+consumer wanting the headless-shell-only footprint copies
+`engine/.puppeteerrc.cjs` into their project before installing.
+
+### The pack mechanism is real: a manifest and `npm run fetch-pack` (v0.26)
+
+Slice B generalizes Slice 0's fetch-soundfont pilot exactly as designed
+(plan Phase 3). The transport (pinned URL + SHA-256, stream to `.part`,
+verify before the destination exists, atomic rename, idempotent re-runs,
+structured offline failure) moved to `core/fetch-verified.js`; what exists
+to fetch is now a versioned manifest, `engine/src/vendors/default/packs.js`
+— vendor knowledge behind the boundary, loaded by the CLI dynamically and
+failure-tolerantly so a core-only install answers `packs_unavailable`
+instead of a module crash. `npm run fetch-pack -- <id>` fetches a pack,
+`-- --list` reports what is fetchable and installed. Three entries ship:
+`soundfont` (the Slice 0 pin, unchanged; `npm run fetch-soundfont` stays as
+its alias), and `whisper-model-base-en` / `whisper-model-base` — the model
+half of transcription, landing in `vendor/whisper/models/` where the whisper
+vendor already searches, so a fetched model needs no env var or setting
+(whisper-cli itself remains an externally installed binary). Hashes are
+pinned from Hugging Face's LFS oids and were confirmed by a real verified
+download. The transcription tier's fix message now names the pack command
+for the model half. Decisions §10.3 (minimal pack = SoundFont; models
+optional) and §10.4 (no npm workspace split — the boundary lives inside the
+engine package, since the GitHub-URL install ships the whole repo) are
+recorded in the plan.
+
 ### Settings validation takes its vendor schema from the registry (v0.26)
 
 Slice A P2-d, the last piece of the catalog story: core no longer hard-codes

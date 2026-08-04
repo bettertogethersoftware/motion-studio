@@ -5,6 +5,7 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
     "fetch-soundfont": "node src/cli/fetch-soundfont.js",
+    "fetch-pack": "node src/cli/fetch-pack.js",
     "studio": "node src/studio/server.js",
     "doctor": "node src/cli/render.js --doctor",
     "mcp": "node src/mcp/server.js"

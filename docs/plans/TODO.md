@@ -79,6 +79,28 @@ Active plan documents:
       literal fallback. **Slice A remainder:** the spessasynth_core
       dependency split, gated on §10.4 / Phase 3 packaging (Slice B).
 
+## Slice B progress (vendor-boundary Phases 3–4; started 2026-08-04)
+
+- [x] B-1 (2026-08-04): the pack mechanism — `core/fetch-verified.js`
+      (transport), the versioned manifest `vendors/default/packs.js`
+      (soundfont + two whisper model packs, whisper models landing in the
+      folder the vendor already searches), `npm run fetch-pack -- <id>` /
+      `-- --list` with core-only-tolerant manifest loading;
+      `fetch-soundfont` stays as the alias. Pins confirmed by real verified
+      downloads. §10.3 and §10.4 decided and recorded.
+- [x] B-2 (2026-08-04): the §10.7 GitHub-URL install — root package.json
+      wrapper (bins/deps mirrored from engine with a drift test, machine
+      state and provider builds excluded), verified by installing the
+      packed tarball into a scratch project and driving its MCP server
+      over stdio. README documents the install and the consumer-side
+      Puppeteer config caveat.
+- [ ] B-remainder: treating the pinned browser and FFmpeg as packs (the
+      Slice 0 Phase 0.5 leftovers — now they have a manifest to live in);
+      `list_vendors`/`get_capabilities` reporting pack install state
+      directly (tiers already carry the fix commands). Phase 4 itself
+      shipped with Slice A (dynamic tolerant runtime in both entrypoints,
+      core-only test, structured unavailables).
+
 ## Engineering backlog (carried from the retired prioritized todo)
 
 - [ ] **Release candidate discipline** — package.json still says `0.21.0`

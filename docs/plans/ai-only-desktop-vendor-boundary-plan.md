@@ -617,6 +617,30 @@ Additional estimates:
 >    root package.json wrapper (files/exports pointing into engine, or a
 >    `prepare` script) is required before the URL install works.
 
+> **Decided 2026-08-04 (Slice B — items 3 and 4):**
+>
+> 7. **§10.3 — the minimal pack is the SoundFont; models are optional
+>    packs.** The pack manifest (`engine/src/vendors/default/packs.js`,
+>    fetched via `npm run fetch-pack -- <id>`) ships three entries:
+>    `soundfont` (the one download between a clean clone and
+>    `synthesize_music`), and `whisper-model-base-en` /
+>    `whisper-model-base` as optional model packs covering the model half
+>    of transcription (whisper-cli itself remains an externally installed
+>    binary, per the "point to it but tolerant" decision). Speech needs no
+>    pack at all — the zero-byte per-platform `system` backend is the
+>    default. The bundled Windows provider builds (`music/`, `tts/` at the
+>    repo root) stay out of the npm artifact; they are future platform
+>    packs if ever needed.
+> 8. **§10.4 — no publishable npm workspace split in this release.** The
+>    runtime boundary lives INSIDE the single engine package
+>    (`core/` vs `vendors/default/`, policed by the import-graph test and
+>    the core-only integration test), because §10.7's GitHub-URL install
+>    distributes the whole repository anyway — a separate published core
+>    package would have no consumer. `spessasynth_core` therefore stays in
+>    engine/package.json, imported only (lazily) from
+>    `vendors/default/music/node.js`; the dependency split becomes real if
+>    and when a standalone core artifact ships.
+
 1. Windows default speech provider for new installations: preserve system
    speech for compatibility, ship one cross-platform local voice pack, or —
    recommended — keep the vendor id "system" and give it zero-byte
@@ -625,9 +649,11 @@ Additional estimates:
    nothing downloaded (Phase 0.5). **Decided: yes, this option — see above.**
 2. Whether the first desktop shell is a hidden process or a tray app.
 3. Which local vendor assets belong in the first default pack, versus optional
-   downloads.
+   downloads. **Decided: SoundFont minimal, whisper models optional — see
+   above.**
 4. Whether to make the core/default-vendor split a publishable npm workspace in
    the first release or first implement the runtime boundary inside engine.
+   **Decided: boundary inside engine, no workspace split — see above.**
 5. Whether the existing human Studio remains a supported developer tool after
    the AI-only desktop release.
 6. The runtime injection mechanism: a runtime object threaded through the

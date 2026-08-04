@@ -112,8 +112,8 @@ export async function capabilityTiers({ ffmpegReady = null } = {}) {
       modelReady: whisperModelReady,
       ...(whisperBinReady && whisperModelReady ? {} : {
         fix: linux() || mac()
-          ? 'Build whisper.cpp (cmake -DBUILD_SHARED_LIBS=OFF, target whisper-cli), fetch a ggml-*.bin model from huggingface.co/ggerganov/whisper.cpp, and set MOTION_STUDIO_WHISPER_BIN / MOTION_STUDIO_WHISPER_MODEL.'
-          : `Download a whisper.cpp Windows release and a ggml-*.bin model, then set MOTION_STUDIO_WHISPER_BIN and MOTION_STUDIO_WHISPER_MODEL (or place them under ${path.join(vendorDir(), 'whisper')}).`,
+          ? 'Build whisper.cpp (cmake -DBUILD_SHARED_LIBS=OFF, target whisper-cli) and set MOTION_STUDIO_WHISPER_BIN; for the model half run "npm run fetch-pack -- whisper-model-base-en" in engine/ (one verified download) or set MOTION_STUDIO_WHISPER_MODEL.'
+          : `Download a whisper.cpp Windows release and set MOTION_STUDIO_WHISPER_BIN (or place it under ${path.join(vendorDir(), 'whisper')}); for the model half run "npm run fetch-pack -- whisper-model-base-en" in engine/ (one verified download) or set MOTION_STUDIO_WHISPER_MODEL.`,
       }),
     },
     cloud: {

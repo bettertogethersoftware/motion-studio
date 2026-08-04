@@ -1,0 +1,40 @@
+{
+  "name": "motion-studio",
+  "version": "0.21.0",
+  "description": "Motion Studio: deterministic HTML/CSS/JS-to-video (mp4/webm/gif/prores/png-sequence, alpha support) with an MCP server for AI agents, a Studio web UI, a CLI, and pluggable speech/music/transcription vendors. This root package is the GitHub-URL install wrapper (vendor-boundary plan §10.7): `npm install github:bettertogethersoftware/motion-studio` — the engine itself lives in engine/, and engine/package.json stays the development harness (tests, scripts). The dependency lists are mirrored and drift-guarded by engine/test/root-package.test.js.",
+  "type": "module",
+  "license": "Unlicense",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "motion-studio": "engine/src/studio/server.js",
+    "motion-studio-render": "engine/src/cli/render.js",
+    "motion-studio-mcp": "engine/src/mcp/server.js"
+  },
+  "scripts": {
+    "test": "npm --prefix engine test",
+    "doctor": "node engine/src/cli/render.js --doctor",
+    "mcp": "node engine/src/mcp/server.js",
+    "studio": "node engine/src/studio/server.js",
+    "fetch-pack": "node engine/src/cli/fetch-pack.js",
+    "fetch-soundfont": "node engine/src/cli/fetch-soundfont.js"
+  },
+  "files": [
+    "engine/src",
+    "engine/templates",
+    "engine/package.json",
+    "engine/.puppeteerrc.cjs",
+    "deploy",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "puppeteer": "^23.11.1",
+    "spessasynth_core": "^4.3.15",
+    "zod": "^3.25.76"
+  }
+}

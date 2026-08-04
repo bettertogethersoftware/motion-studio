@@ -92,7 +92,9 @@ canonical mirror with SHA-256 verification into `vendor/soundfonts/`, is
 idempotent (a verified existing file is reused, nothing re-downloads), and
 never runs implicitly — `synthesize_music` without a SoundFont returns
 `music_unavailable` naming this command rather than downloading anything on
-its own.
+its own. (Since Slice B it is an alias for `npm run fetch-pack -- soundfont`;
+`npm run fetch-pack -- --list` shows every fetchable pack, including the
+whisper transcription models.)
 
 | piece | env var | default |
 |---|---|---|

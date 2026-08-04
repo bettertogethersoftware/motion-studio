@@ -44,11 +44,21 @@ git clone https://github.com/ggml-org/whisper.cpp
 cmake -B build -S whisper.cpp && cmake --build build --config Release
 ```
 
-**2. Get a model.** One `.bin` from
+**2. Get a model.** The one-command way (v0.26, Slice B): from `engine/`,
+
+```bash
+npm run fetch-pack -- whisper-model-base-en
+```
+
+downloads `ggml-base.en.bin` with SHA-256 verification into
+`vendor/whisper/models/` — the folder the engine already searches, so no env
+var or setting is needed (`whisper-model-base` is the multilingual sibling;
+`npm run fetch-pack -- --list` shows everything fetchable). Or manually: one
+`.bin` from
 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp),
-e.g. `ggml-small.en.bin`. Put it in a `models` folder **beside the binary** and
-you are done — that is the layout every prebuilt release already has, and the
-engine finds it without being told.
+e.g. `ggml-small.en.bin`, in a `models` folder **beside the binary** — that is
+the layout every prebuilt release already has, and the engine finds it without
+being told.
 
 **3. Point one setting at the binary** — the Studio's ⚙ **transcribe** page, or
 the env var:

@@ -173,6 +173,31 @@ point at it with `--ffmpeg /path/to/ffmpeg` (CLI) or the **ffmpeg → binary
 path** field in the Studio's ⚙ global-settings page, which applies to every
 Studio render and the prerequisite check.
 
+### Install as an npm dependency (GitHub URL)
+
+The repo root is an npm package (v0.26, vendor-boundary plan §10.7), so a
+project with repository access can install Motion Studio without cloning:
+
+```bash
+npm install github:bettertogethersoftware/motion-studio
+```
+
+That puts `motion-studio` (Studio), `motion-studio-mcp` (MCP server), and
+`motion-studio-render` (CLI) in `node_modules/.bin`, with docs and deploy
+playbooks inside the package. Two notes:
+
+- **Browser download**: Puppeteer resolves its download config from *your*
+  project, not from this package — add a `.puppeteerrc.cjs` with
+  `{ chrome: { skipDownload: true }, 'chrome-headless-shell': { skipDownload: false } }`
+  (copy `engine/.puppeteerrc.cjs`) before installing to skip the ~280 MB
+  full-Chrome download the engine does not need, or point
+  `MOTION_STUDIO_CHROME` at an installed Chrome/Edge.
+- **Large assets are packs, not payload**: the install is ~3 MB; fetch what a
+  capability needs on command — `npx --no -- motion-studio-render --doctor`
+  reports the tiers, and `npm run fetch-pack -- --list` (from
+  `node_modules/motion-studio`) shows the fetchable packs (SoundFont, whisper
+  models).
+
 ### Connect an AI agent (MCP)
 
 Point any MCP client at the stdio server — for Claude Desktop:
