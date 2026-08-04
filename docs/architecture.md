@@ -892,6 +892,31 @@ that every scene must share resolution/fps/format to concatenate losslessly
 (§13) used to be discipline enforced only at build time; it is now the
 default path, and diverging takes a deliberate override.
 
+**`cloneScene` (v0.27) is the fourth scene-lifecycle operation**, beside
+`createScene`, `removeScene` and `renameAsset`, and it exists because the
+agent-side recipe it replaces (`createScene` → `updateConfig` →
+`syncSharedFiles` → re-attach assets and library builds) drops exactly the
+steps that get forgotten — and one of them, the binary assets, is not
+expressible over MCP at all, since no tool returns asset *bytes*. It copies the
+source tree with `copySceneTree`, the walk it shares with revision snapshots
+(`core/revisions.js`, §7.2-adjacent), which is why the two agree on what counts
+as authored (composition files, `frame-api.js`, `assets/`, vendored library
+builds) versus derived (`out/`, `revisions/`, staging, `node_modules`,
+dotfiles). The one thing they do not share is the storage decision: a snapshot
+hardlinks large binaries because a revision is immutable, while a clone passes
+`linkThreshold: Infinity` and copies everything, because a clone is a *live*
+scene and an aliased inode would let an in-place asset edit in one scene
+silently rewrite the other. `scene.json` is excluded from the walk and written
+separately — the source config wholesale, with `name` replaced and a
+`clonedFrom` provenance stamp (pinned to the source's current revision id, or
+`null`) that `validateConfig` accepts permissively and `updateConfig`'s ALLOWED
+set deliberately refuses, so provenance is engine-written only. The play-order
+append goes through `updateFilm` rather than around it, so the Studio's
+film-update events fire for free, and a failure before that point removes a
+folder this call created — never leaving the half-scene that later surfaces as
+`unlisted`. Signature divergence from the destination film's `sceneDefaults`
+comes back as `warnings`, not an error: clone-then-reframe is legitimate work.
+
 `<dataDir>/settings.json` sits beside `workspaces/` and holds *user
 preferences*, with the same atomic write and a validated schema:
 `newSceneDefaults` (which seed a new film's `sceneDefaults`),

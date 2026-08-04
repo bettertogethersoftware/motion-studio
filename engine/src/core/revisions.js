@@ -97,15 +97,35 @@ async function linkOrCopy(src, dest) {
 }
 
 /**
- * Snapshot the composition source tree into `destDir`.
+ * Copy the authored part of a scene folder into `destDir`.
  *
  * Includes everything an author wrote — composition files, scene.json,
- * assets — and excludes what a render derives (the out dir, staging,
- * revisions themselves, node_modules, dotfiles, temp files). Small files
- * are copied; large binaries are hardlinked (see module header for why
- * that is immutable enough).
+ * assets, vendored library builds — and excludes what a render derives (the
+ * out dir, staging, revisions themselves, node_modules, dotfiles, temp
+ * files). Files at or above `linkThreshold` bytes are hardlinked instead of
+ * copied; pass `Infinity` to copy everything.
+ *
+ * Two callers with opposite needs share this walk (v0.27). A revision
+ * snapshot is IMMUTABLE, so hardlinking its large binaries is free and safe
+ * (every engine write is temp-file-plus-rename, which replaces the inode
+ * rather than mutating it). A CLONE is a live scene, so it must own its bytes
+ * — a hardlinked asset would alias source and clone, and one in-place edit
+ * would silently change both. Hence the threshold is a parameter rather than
+ * a constant, and `excludeFiles` lets the cloner leave out the one file it
+ * writes itself (scene.json, which gains a new name and its provenance stamp).
+ *
+ * @param {string} srcPath   absolute scene folder to read
+ * @param {string} destDir   absolute folder to write into (created as needed)
+ * @param {object} opts
+ * @param {string} opts.outDirName        the config's output.dir, skipped at the root
+ * @param {string[]} [opts.excludeFiles]  scene-relative paths never copied
+ * @param {number} [opts.linkThreshold]   bytes at or above which to hardlink
+ * @returns {Promise<{path: string, bytes: number, stored: 'link'|'copy'}[]>}
  */
-async function snapshotSource(scenePath, destDir, { outDirName }) {
+export async function copySceneTree(srcPath, destDir, {
+  outDirName, excludeFiles = [], linkThreshold = LINK_THRESHOLD,
+} = {}) {
+  const skip = new Set(excludeFiles.map((f) => String(f).replace(/\\/g, '/')));
   const files = [];
   const walk = async (dir, rel) => {
     let entries;
@@ -119,12 +139,12 @@ async function snapshotSource(scenePath, destDir, { outDirName }) {
         await walk(path.join(dir, d.name), relPath);
         continue;
       }
-      if (!d.isFile()) continue;
+      if (!d.isFile() || skip.has(relPath)) continue;
       const abs = path.join(dir, d.name);
       const st = await fsp.stat(abs).catch(() => null);
       if (!st) continue;
       const dest = path.join(destDir, ...relPath.split('/'));
-      const how = st.size >= LINK_THRESHOLD
+      const how = st.size >= linkThreshold
         ? await linkOrCopy(abs, dest)
         : await (async () => {
           await fsp.mkdir(path.dirname(dest), { recursive: true });
@@ -134,8 +154,13 @@ async function snapshotSource(scenePath, destDir, { outDirName }) {
       files.push({ path: relPath, bytes: st.size, stored: how });
     }
   };
-  await walk(scenePath, '');
+  await walk(srcPath, '');
   return files;
+}
+
+/** Snapshot the composition source tree into a revision's `source/`. */
+async function snapshotSource(scenePath, destDir, { outDirName }) {
+  return copySceneTree(scenePath, destDir, { outDirName, linkThreshold: LINK_THRESHOLD });
 }
 
 /**

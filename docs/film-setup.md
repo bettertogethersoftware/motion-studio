@@ -674,7 +674,52 @@ and all source files are read before anything is written, so a bad path fails
 before it half-updates the film. Note what it does **not** do: it will not touch
 `scene.js` unless you list it (that is the per-scene data, and listing it would
 overwrite every scene with scene 1's), and already-rendered output is not
-invalidated — **re-render the affected scenes yourself**.
+invalidated — **re-render the affected scenes yourself**. The target scenes do
+not have to live in the source's film — `sync_shared_files` has always worked
+across films, so an engine fix can be pushed to every film that borrowed it.
+
+### Reusing an existing scene: `clone_scene`
+
+The pattern above is how a film's scenes stay consistent while it is being
+built. The other half of reuse is starting a *new* scene from one that already
+works — a title card restyled, a second take of a shot, a proven layout carried
+into another film. Do not re-author it from the template: **clone it.**
+
+```
+clone_scene { from: "my-film/title", toFilm: "other-film" }
+  → { scene: "other-film/title-copy", copied: { files: 7, bytes: 812004, assets: 2 }, warnings: [] }
+```
+
+One call brings across everything an author wrote: the composition files,
+`frame-api.js`, every file under `assets/`, any vendored 3D library build, and
+the whole `scene.json` — fps, dimensions, duration, audio tracks, output
+settings — with only `name` replaced. That last part is what the hand-built
+recipe (`create_scene` → `update_scene_config` → `sync_shared_files` →
+re-attach assets and libraries) keeps losing, and the asset step is not even
+expressible through the tool surface: nothing else returns asset *bytes*, so a
+hand-copied scene arrives with dead references and the wrong duration.
+
+What does **not** come across is what a render derived: no `out/`, no
+`revisions/`. The clone starts unrendered, so render it before `build_film`.
+The assets are real copies rather than links, which is the point — the clone is
+a live scene, and editing it, its files, or its assets never reaches back into
+the source. Cloning into the source's own film is fine ("give me another one of
+these"); the slug is derived from the name and auto-deduped (`-2`, `-3`, …),
+while an explicit `slug` that is already taken is an error rather than a
+surprise. The clone lands at the end of the destination film's play order.
+
+Then read `warnings` before moving on. Cloning across films is exactly where
+the consistency invariant bites: a 1920×1080/30 scene dropped into a 1080×1920
+film is reported as a signature mismatch rather than refused, because
+clone-then-reframe is legitimate work. Fix it with `update_scene_config`, or
+keep it deliberately — but decide, rather than discovering it at `build_film`.
+
+The clone also remembers where it came from. `config.clonedFrom` records
+`{ scene, revisionId, at, agent }`, with `revisionId` pinned to the source's
+current revision when it has one and `null` when the source has never been
+rendered — naming a scene that has since been rewritten would answer less than
+it appears to. It is engine-stamped provenance, not a setting:
+`update_scene_config` will not write it.
 
 ## Narration-first timing
 

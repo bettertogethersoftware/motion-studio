@@ -2304,6 +2304,36 @@ async function createNewScene() {
 }
 $('#btn-new-scene').addEventListener('click', createNewScene);
 
+/**
+ * Duplicate a scene into this film — composition, assets, vendored library
+ * builds and settings, in ONE engine call. The hand recipe it replaces (new
+ * scene → retype the config → copy the files → re-attach the assets) is what
+ * leaves half-copied folders behind, and those are exactly the folders that
+ * later show up in the rail as `unused` mysteries.
+ *
+ * The endpoint can clone into another film; the button deliberately does not.
+ * Cross-film is the agent's move — in front of an open film, "give me another
+ * one of these" is the ask, and a film picker would be UI for a rarer case.
+ */
+async function duplicateScene(slug, sourceName) {
+  const name = prompt('Name for the duplicate:', `${sourceName ?? slug} (copy)`);
+  if (name === null || !name.trim()) return;
+  try {
+    await waitForSaved(); // the server appends to the play order it reads from disk
+    const clone = await api(`/api/films/${fid}/scenes/${encodeURIComponent(slug)}/clone`, {
+      method: 'POST', body: { name: name.trim() },
+    });
+    await refresh();
+    const n = clone.copied?.files ?? 0;
+    toast(`Duplicated as “${clone.name}” ✓ — ${n} file${n === 1 ? '' : 's'} copied, appended to the play order`,
+      { kind: 'info' });
+    // A signature warning is not a failure — the copy happened — but it is the
+    // human's to act on (update the clone, or keep the reframe), so it gets the
+    // sticky toast rather than one that vanishes in five seconds.
+    for (const w of clone.warnings ?? []) toast(w, { kind: 'error' });
+  } catch (err) { toastError(err); }
+}
+
 function revealScenesRail() {
   document.querySelector('.fe-frame').classList.remove('rail-collapsed');
   const rail = $('#fe-scenes');
@@ -3065,6 +3095,19 @@ function renderTree() {
       const revs = footage ? null : state.revisions[seg.slug];
       if (revs?.count > 1) {
         row.appendChild(el('span', { class: 'tree-vers mono', text: `v${revs.count}`, title: `${revs.count} archived takes` }));
+      }
+      // Duplicate, beside the take count: both answer "I want another one of
+      // these". Footage has nothing to clone (it is a supplied file, not a
+      // folder), and a missing scene has nothing to copy from.
+      if (!footage && !seg.missing) {
+        row.appendChild(el('button', {
+          class: 'tree-dup', text: '⧉',
+          title: 'duplicate this scene into this film — composition, assets, libraries and settings',
+          // The row itself selects on pointerdown, so the button has to claim
+          // the gesture before the row hears it.
+          onpointerdown: (ev) => ev.stopPropagation(),
+          onclick: (ev) => { ev.stopPropagation(); duplicateScene(seg.slug, seg.name); },
+        }));
       }
       box.appendChild(row);
     }

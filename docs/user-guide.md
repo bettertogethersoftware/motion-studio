@@ -638,7 +638,16 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
 - **scenes and footage** — **drag a scene from the unused list onto the
   timeline** to place it (an insert marker shows where it lands), or hit the
   row's **+** to append it; drag blocks to reorder. **+ new scene** at the
-  foot of the rail scaffolds a fresh scene folder directly into the film.
+  foot of the rail scaffolds a fresh scene folder directly into the film, and
+  the **⧉** on a scene row duplicates an existing one instead — the whole
+  scene, composition files, assets, vendored 3D libraries and settings alike.
+  It is the safe version of the hand-copied folder that otherwise turns up as
+  an unused scene. It asks for a name (offering the source's plus “(copy)”),
+  stays inside this film, and appends the copy to the play order. What it does
+  *not* copy is the render: the duplicate starts unrendered, and anything about
+  it that would break the build — a duration or size that no longer matches the
+  film — comes back as a warning you have to dismiss rather than something
+  silently accepted.
   Incompatible/unrendered scenes and footage with a mismatched signature or
   frame count are flagged before a build. Prepared footage can retain the
   source record returned by `transcode_asset`; its inspector status is

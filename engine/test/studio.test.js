@@ -614,6 +614,112 @@ test('studio: DELETE removes the scene from its film', async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* v0.27 — the film page's duplicate button                            */
+/* ------------------------------------------------------------------ */
+
+/* The store owns the copy itself (clone-scene.test.js proves the bytes); these
+ * cover the endpoint the button calls: default naming and slug dedupe, the
+ * play-order append, `toFilm` reaching another film, and the two answers a
+ * caller has to be able to tell apart — a warning that still copied, and an
+ * error that did not. */
+
+let cloneFilm, cloneTargetFilm, reframeFilm;
+
+test('studio: clone duplicates a scene into the same film and dedupes the derived slug', async () => {
+  const film = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST',
+    body: { name: 'Clone Source', fps: 30, width: 320, height: 240, durationInFrames: 12 },
+  });
+  assert.equal(film.status, 201, JSON.stringify(film.data));
+  cloneFilm = film.data.film.id;
+  const source = await j(`/api/films/${enc(cloneFilm)}/scenes`, { method: 'POST', body: { name: 'Hero Shot' } });
+  assert.equal(source.status, 201, JSON.stringify(source.data));
+
+  // No body at all: the button's plainest call. Name defaults to "<source>
+  // (copy)" and the slug follows from it.
+  const first = await j(`/api/films/${enc(cloneFilm)}/scenes/hero-shot/clone`, { method: 'POST' });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  assert.equal(first.data.id, `${cloneFilm}/hero-shot-copy`);
+  assert.equal(first.data.name, 'Hero Shot (copy)');
+  assert.equal(first.data.config.durationInFrames, 12, 'the source config travels whole');
+  assert.equal(first.data.config.clonedFrom.scene, source.data.id);
+  assert.ok(first.data.copied.files > 0, JSON.stringify(first.data.copied));
+  assert.deepEqual(first.data.warnings, [], 'same film, same signature — nothing to warn about');
+
+  // A derived slug that is taken dedupes rather than failing: "another one of
+  // these" is the whole point of the button.
+  const second = await j(`/api/films/${enc(cloneFilm)}/scenes/hero-shot/clone`, { method: 'POST' });
+  assert.equal(second.status, 201, JSON.stringify(second.data));
+  assert.equal(second.data.id, `${cloneFilm}/hero-shot-copy-2`);
+
+  // Both clones landed in the play order, in the order they were made.
+  const doc = await j(`/api/films/${enc(cloneFilm)}`);
+  assert.deepEqual(doc.data.film.scenes.map((s) => s.slug), ['hero-shot', 'hero-shot-copy', 'hero-shot-copy-2']);
+  assert.equal(doc.data.sceneFolders.some((f) => f.unlisted), false, 'no half-copied folder left behind');
+});
+
+test('studio: clone honours toFilm and an explicit name', async () => {
+  const target = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST',
+    body: { name: 'Clone Target', fps: 30, width: 320, height: 240, durationInFrames: 12 },
+  });
+  cloneTargetFilm = target.data.film.id;
+
+  const clone = await j(`/api/films/${enc(cloneFilm)}/scenes/hero-shot/clone`, {
+    method: 'POST', body: { toFilm: cloneTargetFilm, name: 'Reused Opening' },
+  });
+  assert.equal(clone.status, 201, JSON.stringify(clone.data));
+  assert.equal(clone.data.id, `${cloneTargetFilm}/reused-opening`);
+  assert.equal(clone.data.name, 'Reused Opening');
+  assert.equal(clone.data.config.name, 'Reused Opening');
+  assert.deepEqual(clone.data.warnings, []);
+
+  // The destination gained a scene; the source film is untouched.
+  const dest = await j(`/api/films/${enc(cloneTargetFilm)}`);
+  assert.deepEqual(dest.data.film.scenes.map((s) => s.slug), ['reused-opening']);
+  const src = await j(`/api/films/${enc(cloneFilm)}`);
+  assert.equal(src.data.film.scenes.length, 3);
+});
+
+test('studio: cloning into a differently-shaped film warns, and still copies', async () => {
+  const reframe = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST',
+    body: { name: 'Clone Reframe', fps: 24, width: 640, height: 480, durationInFrames: 12 },
+  });
+  reframeFilm = reframe.data.film.id;
+
+  const clone = await j(`/api/films/${enc(cloneFilm)}/scenes/hero-shot/clone`, {
+    method: 'POST', body: { toFilm: reframeFilm },
+  });
+  // Warn, never refuse: clone-then-reframe is a legitimate move, and the fix is
+  // one config patch away. Refusing would make the tool useless for it.
+  assert.equal(clone.status, 201, JSON.stringify(clone.data));
+  assert.equal(clone.data.warnings.length, 1, JSON.stringify(clone.data.warnings));
+  assert.match(clone.data.warnings[0], /sceneDefaults/);
+  assert.match(clone.data.warnings[0], /fps 30 vs the film's 24/);
+  assert.equal(clone.data.config.fps, 30, 'the clone keeps the SOURCE signature — it is a copy');
+  const dest = await j(`/api/films/${enc(reframeFilm)}`);
+  assert.deepEqual(dest.data.film.scenes.map((s) => s.slug), ['hero-shot-copy']);
+});
+
+test('studio: cloning an unknown scene or into an unknown film is a structured error', async () => {
+  const noScene = await j(`/api/films/${enc(cloneFilm)}/scenes/no-such-scene/clone`, { method: 'POST' });
+  assert.equal(noScene.status, 404);
+  assert.equal(noScene.data.code, 'scene_not_found');
+
+  const noFilm = await j(`/api/films/${enc(cloneFilm)}/scenes/hero-shot/clone`, {
+    method: 'POST', body: { toFilm: `${TEST_WS}/no-such-film` },
+  });
+  assert.equal(noFilm.status, 404);
+  assert.equal(noFilm.data.code, 'film_not_found');
+
+  // The failed clones left nothing behind in either film.
+  const doc = await j(`/api/films/${enc(cloneFilm)}`);
+  assert.equal(doc.data.film.scenes.length, 3);
+  assert.equal(doc.data.sceneFolders.length, 3);
+});
+
+/* ------------------------------------------------------------------ */
 /* v0.22 — the transcription vendor page                               */
 /* ------------------------------------------------------------------ */
 

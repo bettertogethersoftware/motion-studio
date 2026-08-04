@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+### `clone_scene`: copying a scene is now an engine operation
+
+An agent could see every film in its workspace and address every scene in it,
+and still had no way to copy one. The working recipe was a four-step dance —
+`create_scene`, then `update_scene_config` to restore the duration and size,
+then `sync_shared_files` for the source, then re-attach the assets and the
+vendored library builds — and steps two and four are precisely the ones that
+get forgotten, so the copy renders at the wrong length with dead references.
+Step four was worse than forgettable: it was **not expressible**. Nothing in
+the MCP surface returns asset *bytes* — `list_assets` is metadata and
+`write_asset_file` is base64 inbound only — so a scene that depended on its
+`assets/` could not be reproduced through the tool surface at all. The engine,
+which has the files, can simply copy them.
+
+`clone_scene { from, toFilm, name?, slug? }` is that whole sequence as one
+atomic operation. It brings the composition files, `frame-api.js`, everything
+under `assets/`, any vendored 3D library build, and the entire `scene.json`
+(fps, dimensions, duration, audio, output, `libraries`/`libraryBuilds`) with
+only `name` replaced. It does not bring `out/` or `revisions/`: the clone
+starts unrendered, which is honest — nothing has been rendered *of it* yet. The
+slug is derived from the name and auto-deduped `-2`, `-3`, …, because "give me
+another one of these" is a normal ask, while an explicit `slug` that is taken
+is an error the caller asked to see. The clone lands at the end of the
+destination film's play order, appended through `updateFilm` so the Studio's
+film-update events fire for free, and a failure before that point deletes the
+folder this call created rather than leaving the half-scene that shows up
+later as an `unlisted` mystery. The Studio gets the same thing as a
+**duplicate** action on a scene row, same-film, name prompt and all — a
+hand-copied folder is what produces `unlisted` scenes in the first place.
+
+The decisions worth recording. **The copy is verbatim and then diverges**,
+which is correct for creative work: there is no parameterization, no shared
+block indirection, and editing the clone never touches the source. **Assets are
+copied, never hardlinked** — the exact opposite of a revision snapshot, for the
+opposite reason. A revision is immutable, so sharing an inode with it is free
+and safe; a clone is a *live* scene, and an aliased asset would let one
+in-place edit silently rewrite two scenes. The 25 MB asset cap bounds what that
+honesty costs, and the test that mutates a source asset after cloning is the
+one that would catch a well-meaning hardlink optimisation later. The two
+callers now share one walk, `copySceneTree` in `core/revisions.js`, with the
+link threshold as a parameter (`Infinity` means always copy) rather than a
+constant. **Provenance is pinned to a revision**: `config.clonedFrom` records
+`{ scene, revisionId, at, agent }` with the source's current revision id when
+it has one and `null` when it has never been rendered, because naming a scene
+that has since been rewritten answers less than it appears to. It is
+engine-stamped — `validateConfig` accepts it permissively as a *record*, and
+`updateConfig`'s ALLOWED set deliberately omits it. And a signature mismatch
+against the destination film's `sceneDefaults` **warns rather than fails**:
+clone-then-reframe is real work, so the response says the clone will not concat
+losslessly and leaves the fix (`update_scene_config`) or the deliberate
+divergence to the caller.
+
+This supersedes and retires the "block library" idea — curated, parameterized
+reusable components with a human curation gate. The evidence against it was
+already on disk: a ten-scene film had ten bespoke `composition.js` files
+despite `film-setup.md` prescribing the shared-engine pattern. Agents reuse by
+*copying*, so the useful move is to make copying complete and safe, not to
+build a shelf they will walk past. Cross-workspace cloning stays out of scope
+(ids are workspace-bound by construction), and cloning an archived take is
+deferred — `use_scene_revision` then `clone_scene` is the two-step workaround
+until someone actually asks.
+
+One thing changed only in the documentation: `sync_shared_files` has always
+worked across films — `store.syncSharedFiles` never checked film identity — and
+now `film-setup.md` and the tool reference say so.
+
 ### `agent_tool/` — one home, one contract, and a usage record
 
 The tools root had grown a flat row of self-developed CLI tools sitting beside

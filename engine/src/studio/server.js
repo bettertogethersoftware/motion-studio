@@ -49,6 +49,8 @@
  *   POST   /api/films/:fid/build             {outputFilename?,audioTargetPeakDb?,burnCaptions?,deliverable?} → job
  *   POST   /api/films/:fid/preview-audio     master mix as WAV (the build's exact ffmpeg graph)
  *   POST   /api/films/:fid/scenes            {name,fps?,…} → scaffold a scene into the film
+ *   POST   /api/films/:fid/scenes/:slug/clone  {toFilm?,name?} → duplicate a scene
+ *                                            (composition, assets, libraries, settings)
  *   GET    /api/scenes/:sid                  config + file list
  *   PATCH  /api/scenes/:sid/config           {patch}
  *   DELETE /api/scenes/:sid?deleteFiles=1
@@ -1270,6 +1272,26 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           const seed = settings && outputSeedFromSettings(settings, scene.config.output);
           if (seed) scene.config = await store.updateConfig(scene.id, { output: seed });
           return sendJson(res, 201, scene);
+        }
+
+        // POST /api/films/:fid/scenes/:slug/clone — the film page's "duplicate",
+        // and the same store call the MCP clone_scene makes, so a copy the human
+        // asks for and a copy the AI makes are one operation: composition,
+        // assets, vendored libraries and settings, then an append to the play
+        // order. Hand-copied folders are what produce `unlisted` mystery scenes;
+        // this is the button that makes that unnecessary.
+        //
+        // `toFilm` defaults to this film because the button is same-film — the
+        // cross-film move is the agent's, and the body already carries it. No
+        // output seeding here, unlike the scaffold above: a clone's whole point
+        // is that its settings are the SOURCE's, not this install's defaults.
+        if (isFilmRoute && req.method === 'POST' && sub === 'scenes'
+          && parts.length === 6 && parts[5] === 'clone') {
+          const body = await readBody(req);
+          const clone = await store.cloneScene(`${targetId}/${parts[4]}`, body.toFilm ?? targetId, {
+            name: body.name,
+          });
+          return sendJson(res, 201, clone);
         }
 
         // POST /api/films/:id/build — persist any last-minute mastering knobs,

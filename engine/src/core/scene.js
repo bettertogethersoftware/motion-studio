@@ -115,6 +115,23 @@ export function validateConfig(cfg) {
     // actually holds, so a render can be traced to an exact build. The vendor dir
     // is git-ignored and a version string is not enough to identify a build, so
     // the hash is the identity — see core/vendor-lock.js.
+    // Clone provenance (v0.27): where this scene was copied from, stamped by
+    // store.cloneScene and never by a caller — updateConfig's ALLOWED set
+    // deliberately omits it. Checked permissively because it is a RECORD, not
+    // a setting: a scene whose provenance is slightly odd must still open,
+    // render and build, so only obvious garbage is rejected. `revisionId` is
+    // null when the source had never been rendered, and `at`/`agent` are free
+    // text (an agent id is whatever the machine calls this director).
+    if (cfg.clonedFrom !== undefined) {
+      const c = cfg.clonedFrom;
+      if (c === null || typeof c !== 'object' || Array.isArray(c)) {
+        problems.push('clonedFrom: must be an object { scene, revisionId, at?, agent? }');
+      } else {
+        if (typeof c.scene !== 'string' || !c.scene.trim()) problems.push('clonedFrom.scene: non-empty string required');
+        if (c.revisionId !== undefined && c.revisionId !== null && typeof c.revisionId !== 'string')
+          problems.push('clonedFrom.revisionId: string or null');
+      }
+    }
     if (cfg.libraryBuilds !== undefined) {
       const b = cfg.libraryBuilds;
       if (b === null || typeof b !== 'object' || Array.isArray(b)) {

@@ -10,6 +10,7 @@ Active plan documents:
 
 | document | what it is |
 |---|---|
+| [clone-scene-plan.md](clone-scene-plan.md) | `clone_scene` — one-call scene copy across/within films: config + assets + vendored libs + provenance (**shipped code-complete 2026-08-05, targeted v0.27; awaiting commit + skill re-copy**) |
 | [token-efficient-motion-studio-plan.md](token-efficient-motion-studio-plan.md) | compact projections, batch tools, render groups — attacks the measured 49% token bucket of a real production (proposed) |
 | [plate-render-forge-plan.md](plate-render-forge-plan.md) | plateforge/motionforge shell orchestration for Krea2 plates → verified film delivery (proposed; review WITH the token-efficient plan) |
 | [docker-support-plan.md](docker-support-plan.md) | the containerized third distribution tier — demo-in-a-box, server-hosted Studio, MCP sidecar (proposed, 1–2 d) |

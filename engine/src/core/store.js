@@ -69,6 +69,7 @@ import {
 import { normalizeOutputFilename } from './formats.js';
 import { validateFilm, normalizeFilm } from './films.js';
 import { getLibrary, libsVendorDir, LIBRARY_IDS, addonFiles } from './libraries.js';
+import { copySceneTree, currentRevisionId, currentAgentId } from './revisions.js';
 import { detectVersion, sha256 } from './vendor-lock.js';
 import { migrateLegacyLayout } from './migrate.js';
 
@@ -155,6 +156,28 @@ export function footageRefs(scenes, relPath) {
   return (scenes ?? [])
     .map((segment, index) => ({ segment, index }))
     .filter(({ segment }) => segment?.footage !== undefined && norm(segment.footage) === target);
+}
+
+/**
+ * How a scene's picture signature differs from the film it belongs to.
+ *
+ * A warning, never a refusal: cloning a scene into a differently-shaped film
+ * in order to reframe it is a legitimate move, and the fix — updateConfig —
+ * is one call away. Silence would be the bad option, because a mismatched
+ * scene breaks the lossless concat and that only surfaces much later, out of
+ * planFilm, long after the copy that caused it.
+ */
+export function sceneSignatureWarnings(config, film) {
+  const defaults = film?.sceneDefaults ?? {};
+  const off = ['fps', 'width', 'height']
+    .filter((k) => defaults[k] !== undefined && defaults[k] !== null && config[k] !== defaults[k])
+    .map((k) => `${k} ${config[k]} vs the film's ${defaults[k]}`);
+  if (!off.length) return [];
+  return [
+    `This scene does not match "${film?.name ?? film?.slug}"'s sceneDefaults (${off.join(', ')}). ` +
+    'Every scene of a film must share fps and dimensions to be stitched losslessly — fix it with ' +
+    'update_scene_config, or keep it if the reframe is deliberate.',
+  ];
 }
 
 const ASSET_KINDS = (ext) => {
@@ -539,6 +562,123 @@ export class WorkspaceStore {
       await this.updateFilm(filmId, { scenes: [...(film.scenes ?? []), { slug: sceneSlug }] });
     }
     return { id: sceneId, name: config.name, path: scenePath, config };
+  }
+
+  /**
+   * Copy a scene — composition, assets, vendored libraries and settings —
+   * into another film (or the same one) as a new live scene (v0.27).
+   *
+   * Why this is an engine operation and not an agent recipe: the sequence it
+   * replaces (createScene → updateConfig → syncSharedFiles → re-attach assets
+   * and library builds) loses exactly the steps that get forgotten, and the
+   * asset step is not even expressible through the MCP surface — nothing
+   * returns asset BYTES, so a hand-built copy arrives with dead references.
+   * Agents reuse by copying whatever the docs recommend; make copying complete
+   * instead of discouraging it.
+   *
+   * Assets are COPIED, never hardlinked — the opposite of a revision snapshot,
+   * for the opposite reason. A revision is immutable, so sharing an inode with
+   * it is free and safe; a clone is a LIVE scene that will be edited, and an
+   * aliased asset would let an in-place edit in one scene silently rewrite the
+   * other. The 25 MB asset cap bounds what that costs.
+   *
+   * The copy is verbatim and then diverges, which is correct for creative
+   * work: there is no shared-block indirection here and no parameterization.
+   * `clonedFrom` records the origin, pinned to the source's current revision
+   * id when it has one — naming a scene that has since been rewritten answers
+   * less than it appears to.
+   *
+   * @param {string} sourceSceneId  "<ws>/<film>/<scene>" to copy from
+   * @param {string} targetFilmId   "<ws>/<film>" to copy into (may be the source's)
+   * @param {object} [opts]
+   * @param {string} [opts.name]  clone's display name (default: source + " (copy)")
+   * @param {string} [opts.slug]  explicit slug; taken → SCENE_ALREADY_EXISTS
+   * @returns {{ id, name, path, config, copied: {files, bytes, assets}, warnings: string[] }}
+   */
+  async cloneScene(sourceSceneId, targetFilmId, { name = undefined, slug = undefined } = {}) {
+    const source = await this.getScene(sourceSceneId);          // scene_not_found
+    const sourceConfig = await this.readConfig(source.id);
+    const film = await this.getFilm(targetFilmId);              // film_not_found
+
+    const cloneName = (typeof name === 'string' && name.trim()) ? name.trim() : `${sourceConfig.name} (copy)`;
+    const taken = (candidate) =>
+      fs.existsSync(path.join(this.scenePath(`${film.id}/${candidate}`), SCENE_CONFIG));
+
+    let sceneSlug;
+    if (slug !== undefined && slug !== null && String(slug).trim() !== '') {
+      // An explicit slug is a decision; colliding with it is an error the
+      // caller has to see. A DERIVED one is just a consequence of the name, so
+      // it dedupes instead — "give me another one of these" is a normal ask.
+      sceneSlug = checkSlug(String(slug).trim(), 'scene');
+      if (taken(sceneSlug)) {
+        throw new EngineError(ErrorCodes.SCENE_ALREADY_EXISTS,
+          `A scene already exists at ${film.id}/${sceneSlug}`, { sceneId: `${film.id}/${sceneSlug}` });
+      }
+    } else {
+      const base = checkSlug(slugify(cloneName), 'scene');
+      sceneSlug = base;
+      for (let n = 2; taken(sceneSlug); n += 1) sceneSlug = checkSlug(`${base}-${n}`, 'scene');
+    }
+
+    const sceneId = `${film.id}/${sceneSlug}`;
+    const scenePath = this.scenePath(sceneId);
+    // Only a folder this call created may be cleaned up on failure — a folder
+    // that was already there (a hand-copied one with no scene.json, say) holds
+    // someone else's files and is not ours to delete.
+    const preexisting = fs.existsSync(scenePath);
+    const outDirName = sourceConfig.output?.dir ?? 'out';
+
+    let config;
+    let copied;
+    try {
+      // One walk brings the composition files, frame-api.js, assets/ and any
+      // vendored library build across — which is what keeps the copied
+      // `libraries`/`libraryBuilds` truthful. scene.json is excluded because
+      // it is written below with the new name and the provenance stamp.
+      const files = await copySceneTree(source.path, scenePath, {
+        outDirName, excludeFiles: [SCENE_CONFIG], linkThreshold: Infinity,
+      });
+      // A scaffolded scene always has assets/ and out/; a clone of a scene
+      // that had neither should not be shaped differently from a new one.
+      await fsp.mkdir(path.join(scenePath, 'assets'), { recursive: true });
+      await fsp.mkdir(path.join(scenePath, outDirName), { recursive: true });
+      copied = {
+        files: files.length,
+        bytes: files.reduce((n, f) => n + f.bytes, 0),
+        assets: files.filter((f) => f.path.startsWith('assets/')).length,
+      };
+      config = validateConfig({
+        ...sourceConfig,
+        name: cloneName,
+        clonedFrom: {
+          scene: source.id,
+          revisionId: await currentRevisionId(source.path),
+          at: new Date().toISOString(),
+          agent: currentAgentId(),
+        },
+      });
+      await this._writeJsonAtomic(path.join(scenePath, SCENE_CONFIG), config);
+    } catch (err) {
+      // Never leave a half-scene behind: a folder of composition files with no
+      // scene.json is exactly what surfaces later as an `unlisted` mystery.
+      if (!preexisting) await fsp.rm(scenePath, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
+
+    // Same folder-only tolerance as createScene, by the same route: through
+    // updateFilm, so the Studio's film-update events fire for free.
+    if (!(film.scenes ?? []).some((s) => s.slug === sceneSlug)) {
+      await this.updateFilm(film.id, { scenes: [...(film.scenes ?? []), { slug: sceneSlug }] });
+    }
+
+    return {
+      id: sceneId,
+      name: config.name,
+      path: scenePath,
+      config,
+      copied,
+      warnings: sceneSignatureWarnings(config, film),
+    };
   }
 
   /**

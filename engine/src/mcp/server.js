@@ -1075,6 +1075,45 @@ server.registerTool(
 );
 
 server.registerTool(
+  'clone_scene',
+  {
+    title: 'Clone a scene into a film',
+    description:
+      'Copy an existing scene — composition files, assets, vendored 3D library builds AND its settings — into ' +
+      'another film in this workspace, or into the same film again (new in v0.27). This is the one operation ' +
+      'that can move BINARY assets between scenes: nothing else in this tool surface returns asset bytes, so a ' +
+      'hand-built copy (create_scene → update_scene_config → sync_shared_files) arrives with dead references and ' +
+      'the wrong duration. Reach for it whenever a new scene should start from one that already works — a title ' +
+      'card restyled, a second take of a shot, a proven layout reused in another film — instead of re-authoring ' +
+      'it from the template. The copy is verbatim and then DIVERGES BY DESIGN: editing the clone never touches ' +
+      'the source, and its assets are real copies, not links. `name` defaults to the source name + " (copy)" and ' +
+      'the slug is derived from it, auto-deduped ("-2", "-3", …); an explicit `slug` that is already taken is an ' +
+      'error rather than a surprise. The clone lands at the end of the destination film\'s play order and records ' +
+      'where it came from (config.clonedFrom, pinned to the source\'s current revision when it has one). Check ' +
+      '`warnings`: a signature mismatch means the clone\'s fps/dimensions differ from the destination film\'s ' +
+      'sceneDefaults and it will not concat losslessly — fix it with update_scene_config, or keep it if you are ' +
+      'deliberately reframing. Rendered output is NOT copied; render the clone before building the film.',
+    inputSchema: {
+      from: z.string().describe('Source scene id "<film>/<scene>" — any film in this workspace'),
+      toFilm: z.string().describe('Destination film slug; may be the source\'s own film'),
+      name: z.string().min(1).optional().describe('Clone\'s display name (default: the source name + " (copy)")'),
+      slug: z.string().optional().describe('Explicit scene slug; errors if taken. Omit to derive + auto-dedupe.'),
+    },
+  },
+  wrap(async ({ from, toFilm, name, slug }) => {
+    const res = await store.cloneScene(qualifyScene(from), qualifyFilm(toFilm), { name, slug });
+    return ok({
+      scene: localId(res.id),
+      name: res.name,
+      path: res.path,
+      config: res.config,
+      copied: res.copied,
+      warnings: res.warnings,
+    });
+  }),
+);
+
+server.registerTool(
   'get_scene',
   {
     title: 'Get scene details',

@@ -458,6 +458,16 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-meta { font-size: 10px; color: var(--dim); flex-shrink: 0; }
 .tree-vers { font-size: 9px; color: var(--dim); border: 1px solid var(--line); padding: 0 3px; flex-shrink: 0; }
+/* Duplicate: on the row, but only once the pointer is on that row — the tree is
+ * read far more often than it is acted on, and a button per line would be
+ * noise. `visibility` rather than `display` so revealing it never reflows. */
+.tree-dup {
+  visibility: hidden; flex-shrink: 0;
+  background: none; border: 1px solid var(--line); color: var(--dim);
+  font: 10px/1 var(--mono); padding: 2px 4px; cursor: pointer;
+}
+.tree-seg:hover .tree-dup, .tree-seg.selected .tree-dup { visibility: visible; }
+.tree-dup:hover { color: var(--accent); border-color: var(--accent); }
 
 .tree-film { font-weight: 600; letter-spacing: 0.03em; }
 .tree-seq { padding-left: 14px; color: var(--accent); font: 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }

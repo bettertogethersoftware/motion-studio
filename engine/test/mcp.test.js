@@ -200,6 +200,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'finish_film',
     // new in v0.26 (one contact sheet for a whole film, TE P1-2)
     'review_render_grid',
+    // new in v0.27 (copying a scene across films)
+    'clone_scene',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }

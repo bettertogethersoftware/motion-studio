@@ -61,7 +61,7 @@ Use this map to choose the right tool. Read the live schema before calling it.
 
 - Workspace and documents: `get_workspace`, `get_capabilities`, `list_films`,
   `create_film`, `get_film`, `update_film`, `remove_film`, `create_scene`,
-  `get_scene`, `update_scene_config`, `remove_scene`
+  `clone_scene`, `get_scene`, `update_scene_config`, `remove_scene`
 - Composition authoring: `read_composition_file`, `write_composition_file`,
   `write_composition_bundle`, `sync_shared_files`, `add_library`
 - Assets and supplied media: `write_asset_file`, `list_assets`, `probe_asset`,
@@ -462,7 +462,16 @@ sync_shared_files {
 ```
 
 Then re-render every affected scene. Synchronising source does not invalidate
-or refresh old renders automatically.
+or refresh old renders automatically. Targets may be in another film; this
+works across films.
+
+To start a *new* scene from one that already works, use `clone_scene { from,
+toFilm }` rather than scaffolding and re-authoring. It is the only operation
+that copies binary `assets/` between scenes, and it carries the composition
+files, vendored 3D library builds and the whole `scene.json` with it. Rendered
+output and revisions are not copied, so render the clone; check the returned
+`warnings` for an fps/size mismatch against the destination film and resolve it
+with `update_scene_config` before building.
 
 ### 5. Visually verify the composition before rendering
 
