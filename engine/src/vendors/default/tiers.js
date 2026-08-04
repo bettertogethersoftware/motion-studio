@@ -15,11 +15,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { vendorDir } from './paths.js';
-import { resolveTtsExeInfo } from './tts.js';
-import { resolveSoundFont } from './music.js';
-import { resolveWhisper } from './transcribe-whisper.js';
-import { describeBrowserResolution } from './browser.js';
+import { vendorDir } from '../../core/paths.js';
+import { resolveTtsExeInfo } from './speech/system.js';
+import { resolveSoundFont } from './music/fluidsynth.js';
+import { resolveWhisper } from './transcription/whisper-cpp.js';
+import { describeBrowserResolution } from '../../core/browser.js';
 
 const linux = () => process.platform === 'linux';
 const mac = () => process.platform === 'darwin';

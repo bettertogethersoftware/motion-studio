@@ -87,7 +87,7 @@ import {
   preflightFrameList, MAX_PREVIEW_FRAMES, normalizeProxy, proxyOutputPath,
 } from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
-import { capabilityTiers } from '../core/tiers.js';
+import { capabilityTiers } from '../vendors/default/tiers.js';
 import {
   readSettings, resolveFfmpegPath, resolveFfprobePath, withNewSceneDefaults, outputSeedFromSettings,
   DEFAULT_SETTINGS,

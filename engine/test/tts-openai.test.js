@@ -15,10 +15,12 @@ import path from 'node:path';
 import {
   resolveOpenaiConfig, checkOpenaiTts, synthesizeOpenaiSpeech, pickOpenaiVoice,
   openaiVoicesForModel, speedForRate, OPENAI_ENV, OPENAI_VOICES,
-} from '../src/core/tts-openai.js';
-import { synthesizeWithVendor } from '../src/core/tts-vendors.js';
+} from '../src/vendors/default/speech/openai.js';
+import { createSpeechDispatch } from '../src/core/tts-vendors.js';
+import { defaultSpeechCatalog } from '../src/vendors/default/speech/catalog.js';
+const { synthesizeWithVendor } = createSpeechDispatch(defaultSpeechCatalog());
 import { validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
-import { wavDurationSeconds } from '../src/core/tts.js';
+import { wavDurationSeconds } from '../src/vendors/default/speech/system.js';
 import { startFakeOpenai } from './helpers/fake-openai-tts.mjs';
 
 /** The machine running the tests may legitimately have a real OpenAI key set. */

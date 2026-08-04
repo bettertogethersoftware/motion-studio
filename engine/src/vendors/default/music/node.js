@@ -25,8 +25,8 @@
  */
 
 import fsp from 'node:fs/promises';
-import { EngineError, ErrorCodes } from './errors.js';
-import { resolveSoundFont } from './music.js';
+import { EngineError, ErrorCodes } from '../../../core/errors.js';
+import { resolveSoundFont } from './fluidsynth.js';
 
 /** Ticks per quarter note in the MIDI we author. 480 is the DAW convention. */
 const PPQ = 480;
@@ -195,8 +195,8 @@ export function peakOf(channels) {
   return peak;
 }
 
-export const dbToAmp = (db) => 10 ** (db / 20);
-export const ampToDb = (amp) => (amp > 0 ? 20 * Math.log10(amp) : -Infinity);
+export { dbToAmp, ampToDb } from '../../../core/audio.js';
+import { dbToAmp, ampToDb } from '../../../core/audio.js';
 
 /**
  * Probe: is this vendor usable right now? Never throws.

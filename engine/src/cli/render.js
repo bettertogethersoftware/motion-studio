@@ -103,7 +103,7 @@ async function main() {
     const prereqs = await checkPrerequisites({ ffmpegPath });
     // Capability tiers (Slice 0): which capability sits in which tier and,
     // when it is not ready, the exact command that fixes it on this OS.
-    const { capabilityTiers } = await import('../core/tiers.js');
+    const { capabilityTiers } = await import('../vendors/default/tiers.js');
     const tiers = await capabilityTiers({ ffmpegReady: !!prereqs.ffmpeg?.meetsMinimum }).catch((e) => ({ error: e.message }));
     process.stdout.write(
       JSON.stringify(

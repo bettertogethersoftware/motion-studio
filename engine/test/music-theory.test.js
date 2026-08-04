@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
   parseChord, parseKey, compileTheorySpec, THEORY_STYLES, THEORY_STYLE_NAMES,
 } from '../src/core/music-theory.js';
-import { validateMusicSpec } from '../src/core/music-node.js';
+import { validateMusicSpec } from '../src/vendors/default/music/node.js';
 
 const PROG = ['C', 'G', 'Am', 'F'];
 

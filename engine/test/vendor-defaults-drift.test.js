@@ -9,8 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS } from '../src/core/settings.js';
-import { AZURE_DEFAULT_FORMAT, AZURE_WAV_FORMATS } from '../src/core/tts-azure.js';
-import { ELEVENLABS_DEFAULT_FORMAT, ELEVENLABS_WAV_FORMATS } from '../src/core/tts-elevenlabs.js';
+import { AZURE_DEFAULT_FORMAT, AZURE_WAV_FORMATS } from '../src/vendors/default/speech/azure.js';
+import { ELEVENLABS_DEFAULT_FORMAT, ELEVENLABS_WAV_FORMATS } from '../src/vendors/default/speech/elevenlabs.js';
 
 test('settings defaults match the vendor constants they no longer import', () => {
   assert.equal(DEFAULT_SETTINGS.tts.azure.outputFormat, AZURE_DEFAULT_FORMAT);

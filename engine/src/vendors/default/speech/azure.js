@@ -36,8 +36,8 @@
  */
 
 import fsp from 'node:fs/promises';
-import { EngineError, ErrorCodes } from './errors.js';
-import { parseWavHeader } from './audio.js';
+import { EngineError, ErrorCodes } from '../../../core/errors.js';
+import { parseWavHeader } from '../../../core/audio.js';
 
 /** Env hooks, in precedence order. Exported so the UI/docs list one truth. */
 export const AZURE_ENV = Object.freeze({

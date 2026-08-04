@@ -18,8 +18,8 @@ import fsp from 'node:fs/promises';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EngineError, ErrorCodes } from './errors.js';
-import { vendorDir } from './paths.js';
+import { EngineError, ErrorCodes } from '../../../core/errors.js';
+import { vendorDir } from '../../../core/paths.js';
 
 const STDERR_TAIL = 40;
 

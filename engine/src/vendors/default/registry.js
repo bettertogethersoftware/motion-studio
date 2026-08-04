@@ -9,16 +9,18 @@
  * this module, and test/import-graph.test.js fails the build if it ever
  * does.
  *
- * Today the catalogs still live beside their dispatchers in core/ — this
- * module is deliberately thin. Phase 2 moves the catalogs (and the provider
- * implementations they close over) into this tree, at which point core
- * keeps only the generic dispatch factories and this file becomes the one
- * place that knows which providers exist.
+ * Since Phase 2 the catalogs and every provider implementation live in
+ * this tree (speech/, music/, transcription/); core keeps only the generic
+ * dispatch factories, and this file is the one place that knows which
+ * providers exist.
  */
 
-import { createSpeechDispatch, defaultSpeechCatalog } from '../../core/tts-vendors.js';
-import { createMusicDispatch, defaultMusicCatalog } from '../../core/music-vendors.js';
-import { createTranscriptionDispatch, defaultTranscriptionCatalog } from '../../core/transcribe-vendors.js';
+import { createSpeechDispatch } from '../../core/tts-vendors.js';
+import { defaultSpeechCatalog } from './speech/catalog.js';
+import { createMusicDispatch } from '../../core/music-vendors.js';
+import { defaultMusicCatalog } from './music/catalog.js';
+import { createTranscriptionDispatch } from '../../core/transcribe-vendors.js';
+import { defaultTranscriptionCatalog } from './transcription/catalog.js';
 
 /**
  * Build the default runtime: every capability's dispatch surface, each over

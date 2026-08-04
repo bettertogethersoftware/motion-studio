@@ -14,8 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 import {
   synthesizeMusic, checkMusic, resolveMidiExe, resolveFluidSynth, resolveSoundFont,
-} from '../src/core/music.js';
-import { wavDurationSeconds } from '../src/core/tts.js';
+} from '../src/vendors/default/music/fluidsynth.js';
+import { wavDurationSeconds } from '../src/core/audio.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_MIDI = path.resolve(__dirname, 'helpers/fake-music.mjs');

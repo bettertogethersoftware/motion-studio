@@ -30,8 +30,8 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EngineError, ErrorCodes } from './errors.js';
-import { vendorDir } from './paths.js';
+import { EngineError, ErrorCodes } from '../../../core/errors.js';
+import { vendorDir } from '../../../core/paths.js';
 
 const STDERR_TAIL_LINES = 40;
 
@@ -202,9 +202,9 @@ export async function checkTts({ ttsExe, timeoutMs = 10_000 } = {}) {
 /* ------------------------------------------------------------------ */
 /* Generic WAV/audio utilities moved to core/audio.js (Slice A).       */
 /* Re-exported here so existing imports keep working; new code should  */
-/* import from './audio.js' directly.                                  */
+/* import from '../../../core/audio.js' directly.                                  */
 /* ------------------------------------------------------------------ */
 export {
   wavDurationSeconds, parseWavHeader, framesForDuration, splitSentences,
   concatWavBuffers, pcmToWavBuffer, measureWavLevels, measureWavEnvelope,
-} from './audio.js';
+} from '../../../core/audio.js';

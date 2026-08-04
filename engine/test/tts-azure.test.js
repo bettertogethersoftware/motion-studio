@@ -15,8 +15,8 @@ import path from 'node:path';
 import {
   resolveAzureConfig, checkAzureTts, synthesizeAzureSpeech, buildSsml, escapeXml, pickVoice,
   clearAzureVoiceCache, maskKey, AZURE_ENV, AZURE_WAV_FORMATS,
-} from '../src/core/tts-azure.js';
-import { wavDurationSeconds } from '../src/core/tts.js';
+} from '../src/vendors/default/speech/azure.js';
+import { wavDurationSeconds } from '../src/vendors/default/speech/system.js';
 import { startFakeAzure, FAKE_VOICES } from './helpers/fake-azure-speech.mjs';
 
 /** The machine running the tests may legitimately have real Azure vars set. */

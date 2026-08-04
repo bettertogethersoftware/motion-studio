@@ -18,7 +18,7 @@ import {
   renderCues, synthesizeSfx, validateSfxSpec, encodeWavMono16,
   SFX_TYPES, MAX_CUES, MAX_CUE_SECONDS, ALLOWED_SAMPLE_RATES,
 } from '../src/core/sfx.js';
-import { parseWavHeader } from '../src/core/tts.js';
+import { parseWavHeader } from '../src/core/audio.js';
 import { ErrorCodes } from '../src/core/errors.js';
 
 const isSfxSpecError = (e) => e.code === ErrorCodes.INVALID_SFX_SPEC;

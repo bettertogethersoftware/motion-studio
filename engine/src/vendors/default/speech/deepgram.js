@@ -45,9 +45,9 @@
  */
 
 import fsp from 'node:fs/promises';
-import { EngineError, ErrorCodes } from './errors.js';
-import { parseWavHeader, splitSentences, concatWavBuffers } from './audio.js';
-import { maskKey } from './tts-azure.js';
+import { EngineError, ErrorCodes } from '../../../core/errors.js';
+import { parseWavHeader, splitSentences, concatWavBuffers } from '../../../core/audio.js';
+import { maskKey } from './azure.js';
 
 /** Env hooks, in precedence order. Exported so the UI/docs list one truth. */
 export const DEEPGRAM_ENV = Object.freeze({

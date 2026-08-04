@@ -16,13 +16,20 @@ import { fileURLToPath } from 'node:url';
 import { createStudioServer } from '../src/studio/server.js';
 import { makeStore } from './helpers/workspace.mjs';
 import { JobManager } from '../src/core/jobs.js';
-import {
-  resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport, filterVoices,
-  VENDOR_INFO, unavailable, TTS_VENDORS,
-} from '../src/core/tts-vendors.js';
+import { createSpeechDispatch, filterVoices } from '../src/core/tts-vendors.js';
+import { defaultSpeechCatalog } from '../src/vendors/default/speech/catalog.js';
+
+// Slice A Phase 2: the default-bound module exports are gone — tests bind
+// the dispatch over the default catalog, exactly as the registry does.
+const __speech = createSpeechDispatch(defaultSpeechCatalog());
+const {
+  resolveSpeechVendor, checkSpeechVendor, synthesizeWithVendor, listSpeechVoices, speechVendorReport, unavailable,
+} = __speech;
+const TTS_VENDORS = __speech.ids;
+const VENDOR_INFO = Object.fromEntries(Object.entries(__speech.catalog).map(([id, e]) => [id, e.info]));
 import { updateSettings, readSettings, validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
 import { resolveVendorFrom, walkVendorChain, normalizeVendorChain, chainFallbackNote } from '../src/core/vendors.js';
-import { clearAzureVoiceCache } from '../src/core/tts-azure.js';
+import { clearAzureVoiceCache } from '../src/vendors/default/speech/azure.js';
 import { startFakeAzure } from './helpers/fake-azure-speech.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

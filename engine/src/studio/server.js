@@ -112,11 +112,11 @@ import {
   resolvePaths, updateLocations, ensureStableDataDir, PATH_KEYS, PATH_ENV, APP_DATA_DIR,
 } from '../core/paths.js';
 import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
-import { AZURE_ENV, AZURE_WAV_FORMATS } from '../core/tts-azure.js';
-import { ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS } from '../core/tts-elevenlabs.js';
-import { OPENAI_ENV } from '../core/tts-openai.js';
-import { DEEPGRAM_ENV } from '../core/tts-deepgram.js';
-import { WHISPER_ENV, MODEL_PREFERENCE } from '../core/transcribe-whisper.js';
+import { AZURE_ENV, AZURE_WAV_FORMATS } from '../vendors/default/speech/azure.js';
+import { ELEVENLABS_ENV, ELEVENLABS_WAV_FORMATS } from '../vendors/default/speech/elevenlabs.js';
+import { OPENAI_ENV } from '../vendors/default/speech/openai.js';
+import { DEEPGRAM_ENV } from '../vendors/default/speech/deepgram.js';
+import { WHISPER_ENV, MODEL_PREFERENCE } from '../vendors/default/transcription/whisper-cpp.js';
 import { demoSpec, GM_PROGRAMS } from '../core/music-vendors.js';
 
 /* ------------------------------------------------------------------ */
@@ -166,8 +166,8 @@ const { transcriptionVendorReport } = vendorRuntime?.transcription ?? {
   transcriptionVendorReport: missingRuntime('transcription', ErrorCodes.TRANSCRIPTION_UNAVAILABLE),
 };
 import { transcribeMedia, looksTranscribable, MAX_TRANSCRIBE_SECONDS } from '../core/transcribe.js';
-import { maskKey } from '../core/tts-azure.js';
-import { PIPER_ENV } from '../core/tts-piper.js';
+import { maskKey } from '../vendors/default/speech/azure.js';
+import { PIPER_ENV } from '../vendors/default/speech/piper.js';
 import {
   parseWavHeader, wavDurationSeconds, framesForDuration, measureWavLevels, splitSentences, concatWavBuffers,
 } from '../core/audio.js';

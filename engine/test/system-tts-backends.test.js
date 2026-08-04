@@ -13,10 +13,10 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { resolveTtsExeInfo } from '../src/core/tts.js';
+import { resolveTtsExeInfo } from '../src/vendors/default/speech/system.js';
 
 const execFileP = promisify(execFile);
-const backendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/core/system-tts');
+const backendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/vendors/default/speech/system-tts');
 const BACKENDS = ['windows-sapi.mjs', 'macos-say.mjs', 'linux-espeak.mjs'];
 
 const run = async (backend, args) => {

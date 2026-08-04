@@ -17,13 +17,20 @@ import { makeStore } from './helpers/workspace.mjs';
 import { JobManager } from '../src/core/jobs.js';
 import {
   synthesizeNodeMusic, checkNodeMusic, validateMusicSpec, specToMidi, MUSIC_NODE_DEFAULTS,
-} from '../src/core/music-node.js';
+} from '../src/vendors/default/music/node.js';
 import {
-  resolveMusicVendor, checkMusicVendor, musicVendorReport, synthesizeMusicWithVendor,
-  conformWavLevel, demoSpec, GM_PROGRAMS, MUSIC_VENDORS,
+  createMusicDispatch, conformWavLevel, demoSpec, GM_PROGRAMS,
 } from '../src/core/music-vendors.js';
+import { defaultMusicCatalog } from '../src/vendors/default/music/catalog.js';
+import { MUSIC_VENDORS } from '../src/core/settings.js';
+
+// Slice A Phase 2: bind the dispatch over the default catalog, as the
+// registry does.
+const {
+  resolveMusicVendor, checkMusicVendor, musicVendorReport, synthesizeMusicWithVendor,
+} = createMusicDispatch(defaultMusicCatalog());
 import { updateSettings, readSettings, validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
-import { parseWavHeader, wavDurationSeconds } from '../src/core/tts.js';
+import { parseWavHeader, wavDurationSeconds } from '../src/core/audio.js';
 import { writeTinySoundFont } from './helpers/tiny-soundfont.mjs';
 
 let tmp, soundfont, home, store, server, base;

@@ -13,9 +13,9 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
-import { synthesizePiperSpeech } from '../src/core/tts-piper.js';
+import { synthesizePiperSpeech } from '../src/vendors/default/speech/piper.js';
 import { extractSpeechWav } from '../src/core/transcribe.js';
-import { transcribeWithWhisper } from '../src/core/transcribe-whisper.js';
+import { transcribeWithWhisper } from '../src/vendors/default/transcription/whisper-cpp.js';
 
 const TEXT = 'The quick brown fox jumps over the lazy dog.';
 const MUST_SURVIVE = ['quick', 'brown', 'fox', 'lazy', 'dog'];

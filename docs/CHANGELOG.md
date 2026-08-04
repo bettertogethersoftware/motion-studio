@@ -60,6 +60,23 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The vendor boundary is physical: providers and catalogs live in vendors/default (v0.26)
+
+Slice A Phase 2's file moves, done: eleven modules left core/ —
+`tts.js`→`vendors/default/speech/system.js` (with its per-platform
+backends), the five cloud/local speech providers, both music engines
+(`music.js`→`music/fluidsynth.js`, `music-node.js`→`music/node.js`),
+`transcribe-whisper.js`→`transcription/whisper-cpp.js`, and `tiers.js`
+(inherently about the default vendors; both its consumers are entrypoints).
+The three capability catalogs moved beside their providers
+(`vendors/default/*/catalog.js`); the core dispatchers keep only generic
+dispatch plus genuinely generic utilities (filterVoices, GM_PROGRAMS,
+demoSpec, conformWavLevel — whose dB one-liners moved to `core/audio.js`
+where they always belonged). The import-graph test now polices a real
+boundary: core/ contains no vendor code and cannot import any. Tests bind
+dispatches over the default catalogs exactly as the registry does.
+Suite: 877 tests, 0 fail.
+
 ### Both entrypoints build their vendor runtime from the registry (v0.26)
 
 Slice A-5/A-6: `engine/src/vendors/default/registry.js` is the composition

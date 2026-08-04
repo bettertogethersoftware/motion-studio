@@ -18,7 +18,7 @@ import {
   defaultDataDir, workspacesRootFor, settingsFileFor, vendorDir,
   locationsFile, APP_DATA_DIR, APP_VENDOR_DIR, PATH_ENV, PATHS_FILE_ENV,
 } from '../src/core/paths.js';
-import { resolveMidiExe, resolveSoundFont } from '../src/core/music.js';
+import { resolveMidiExe, resolveSoundFont } from '../src/vendors/default/music/fluidsynth.js';
 import { libsVendorDir } from '../src/core/libraries.js';
 import { WorkspaceStore } from '../src/core/store.js';
 import { readSettings, updateSettings } from '../src/core/settings.js';

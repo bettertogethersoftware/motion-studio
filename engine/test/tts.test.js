@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   wavDurationSeconds, parseWavHeader, framesForDuration, synthesizeSpeech, checkTts,
   measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
-} from '../src/core/tts.js';
+} from '../src/vendors/default/speech/system.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_TTS = path.resolve(__dirname, 'helpers/fake-tts.mjs');

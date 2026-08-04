@@ -30,7 +30,8 @@ import {
   transcriptCacheKey, readTranscriptCache, DERIVATION_VERSION,
   WHISPER_SAMPLE_RATE,
 } from '../src/core/transcribe.js';
-import { createTranscriptionDispatch, defaultTranscriptionCatalog } from '../src/core/transcribe-vendors.js';
+import { createTranscriptionDispatch } from '../src/core/transcribe-vendors.js';
+import { defaultTranscriptionCatalog } from '../src/vendors/default/transcription/catalog.js';
 
 // Slice A Phase 2: transcribeMedia receives the transcription dispatch from
 // its caller (core no longer imports the dispatcher). The tests are that
@@ -41,11 +42,11 @@ import {
   resolveWhisper, whisperBinaryIn, listWhisperModels, pickWhisperModel, modelNameFromFile,
   normalizeWhisperJson, checkWhisperTranscription, transcribeWithWhisper,
   MODEL_PREFERENCE, WHISPER_ENV,
-} from '../src/core/transcribe-whisper.js';
-import {
+} from '../src/vendors/default/transcription/whisper-cpp.js';
+import { TRANSCRIPTION_VENDORS } from '../src/core/settings.js';
+const {
   checkTranscriptionVendor, resolveTranscriptionVendor, transcriptionVendorReport,
-  TRANSCRIPTION_VENDORS,
-} from '../src/core/transcribe-vendors.js';
+} = createTranscriptionDispatch(defaultTranscriptionCatalog());
 import { JobManager } from '../src/core/jobs.js';
 import { ErrorCodes } from '../src/core/errors.js';
 import { validateSettings, DEFAULT_SETTINGS, updateSettings, readSettings } from '../src/core/settings.js';

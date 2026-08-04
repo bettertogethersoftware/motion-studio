@@ -262,3 +262,7 @@ export async function measureWavEnvelope(filePath, { bucketSeconds = 1 } = {}) {
     silentTailSeconds: Number((silentBuckets * bucketSeconds).toFixed(1)),
   };
 }
+
+/** dB ↔ linear amplitude, the two one-liners every level path shares. */
+export const dbToAmp = (db) => 10 ** (db / 20);
+export const ampToDb = (amp) => (amp > 0 ? 20 * Math.log10(amp) : -Infinity);

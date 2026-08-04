@@ -26,17 +26,12 @@
  * sentence boundaries by hand, per session, from millisecond offsets.
  */
 
-import {
-  checkWhisperTranscription, transcribeWithWhisper, whisperSetupHint, WHISPER_ENV, MODEL_PREFERENCE,
-} from './transcribe-whisper.js';
-import { readSettings, readStoredSettings, TRANSCRIPTION_VENDORS } from './settings.js';
+import { readSettings, readStoredSettings } from './settings.js';
 import {
   resolveVendorFrom, walkVendorChain, unavailableError, buildReport,
 } from './vendors.js';
 import { EngineError, ErrorCodes } from './errors.js';
 import { defaultDataDir } from './scene.js';
-
-export { TRANSCRIPTION_VENDORS, WHISPER_ENV, MODEL_PREFERENCE };
 
 export const DEFAULT_TRANSCRIPTION_VENDOR = 'whisper-cpp';
 
@@ -45,49 +40,6 @@ export async function transcriptionSettings(dataDir, settings) {
   if (settings) return settings.transcription ?? { vendor: DEFAULT_TRANSCRIPTION_VENDOR, whisper: {} };
   const s = await readSettings(dataDir ?? defaultDataDir()).catch(() => null);
   return s?.transcription ?? { vendor: DEFAULT_TRANSCRIPTION_VENDOR, whisper: {} };
-}
-
-/**
- * The default transcription catalog — same entry contract as the speech and
- * music catalogs: info card, probe, fix sentence, and the capability verb
- * (here `transcribe`). Phase 2 moves this to vendors/default/.
- */
-export function defaultTranscriptionCatalog() {
-  return Object.freeze({
-    'whisper-cpp': {
-      id: 'whisper-cpp',
-      info: Object.freeze({
-        id: 'whisper-cpp',
-        label: 'whisper.cpp (local)',
-        summary: 'OpenAI\'s Whisper models running entirely on this machine through whisper.cpp — no account, no API key, ' +
-          'no network, any OS. One self-contained binary plus one ggml model file you download. Measured ≈6.5× realtime ' +
-          'on ggml-small.en with 8 CPU threads, no GPU.',
-        requires: `${WHISPER_ENV.bin[0]} (or whisper-cli on PATH) + a ggml-*.bin model ` +
-          `(${WHISPER_ENV.model[0]}, ${WHISPER_ENV.models[0]}, or a "models" folder beside the binary)`,
-        offline: true,
-      }),
-      settingsKey: 'whisper',
-      async probe({ section = {}, timeoutMs } = {}) {
-        const probe = await checkWhisperTranscription({ whisper: section, ...(timeoutMs ? { timeoutMs } : {}) });
-        return {
-          available: probe.available,
-          models: probe.models ?? [],
-          modelDetails: probe.modelDetails ?? [],
-          error: probe.error,
-          config: probe.config,
-        };
-      },
-      fix: (status) => whisperSetupHint({ modelsDir: status?.config?.modelsDir }),
-      async transcribe({ wavPath, model, language, threads, timeoutMs, signal }, { section }) {
-        return transcribeWithWhisper({
-          wavPath, model, language, threads,
-          whisper: section ?? {},
-          ...(timeoutMs ? { timeoutMs } : {}),
-          signal,
-        });
-      },
-    },
-  });
 }
 
 /** Build the transcription dispatch surface over a catalog (Slice A). */
@@ -224,22 +176,3 @@ export function createTranscriptionDispatch(catalog) {
     listTranscriptionModels, unavailable, unavailableWithAlternatives, transcribeWithVendor,
   };
 }
-
-/* ------------------------------------------------------------------ */
-/* Default-bound surface — the public API, unchanged for callers.      */
-/* Phase 4 constructs dispatches from the injected registry instead.   */
-/* ------------------------------------------------------------------ */
-
-const defaultDispatch = createTranscriptionDispatch(defaultTranscriptionCatalog());
-
-export const VENDOR_INFO = Object.freeze(
-  Object.fromEntries(Object.entries(defaultDispatch.catalog).map(([id, e]) => [id, e.info])),
-);
-
-export const resolveTranscriptionVendor = defaultDispatch.resolveTranscriptionVendor;
-export const checkTranscriptionVendor = defaultDispatch.checkTranscriptionVendor;
-export const transcriptionVendorReport = defaultDispatch.transcriptionVendorReport;
-export const listTranscriptionModels = defaultDispatch.listTranscriptionModels;
-export const unavailable = defaultDispatch.unavailable;
-export const unavailableWithAlternatives = defaultDispatch.unavailableWithAlternatives;
-export const transcribeWithVendor = defaultDispatch.transcribeWithVendor;

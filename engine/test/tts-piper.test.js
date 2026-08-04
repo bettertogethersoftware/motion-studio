@@ -18,9 +18,11 @@ import { fileURLToPath } from 'node:url';
 import {
   resolvePiper, piperCandidates, listPiperVoices, describePiperVoice, pickPiperVoice, checkPiperTts,
   synthesizePiperSpeech, lengthScaleForRate, PIPER_ENV,
-} from '../src/core/tts-piper.js';
-import { checkSpeechVendor, synthesizeWithVendor, speechVendorReport } from '../src/core/tts-vendors.js';
-import { wavDurationSeconds } from '../src/core/tts.js';
+} from '../src/vendors/default/speech/piper.js';
+import { createSpeechDispatch } from '../src/core/tts-vendors.js';
+import { defaultSpeechCatalog } from '../src/vendors/default/speech/catalog.js';
+const { checkSpeechVendor, synthesizeWithVendor, speechVendorReport } = createSpeechDispatch(defaultSpeechCatalog());
+import { wavDurationSeconds } from '../src/vendors/default/speech/system.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_PIPER = path.resolve(__dirname, 'helpers/fake-piper.mjs');

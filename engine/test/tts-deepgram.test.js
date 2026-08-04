@@ -16,10 +16,12 @@ import path from 'node:path';
 import {
   resolveDeepgramConfig, checkDeepgramTts, synthesizeDeepgramSpeech, pickDeepgramVoice,
   DEEPGRAM_ENV, DEEPGRAM_VOICES, DEEPGRAM_DEFAULT_VOICE,
-} from '../src/core/tts-deepgram.js';
-import { synthesizeWithVendor } from '../src/core/tts-vendors.js';
+} from '../src/vendors/default/speech/deepgram.js';
+import { createSpeechDispatch } from '../src/core/tts-vendors.js';
+import { defaultSpeechCatalog } from '../src/vendors/default/speech/catalog.js';
+const { synthesizeWithVendor } = createSpeechDispatch(defaultSpeechCatalog());
 import { validateSettings, DEFAULT_SETTINGS } from '../src/core/settings.js';
-import { wavDurationSeconds } from '../src/core/tts.js';
+import { wavDurationSeconds } from '../src/vendors/default/speech/system.js';
 import { startFakeDeepgram, FAKE_DEEPGRAM_MODELS } from './helpers/fake-deepgram.mjs';
 
 /** The machine running the tests may legitimately have a real Deepgram key set. */
