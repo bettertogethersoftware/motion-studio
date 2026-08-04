@@ -318,6 +318,7 @@ motion-studio/
     ├── frame-api.md               the authoring contract (v1.4)
     ├── mcp-setup.md               agent setup + full tool reference
     ├── knowledge-base.md          field notes: failure modes seen in real productions
+    ├── release-checklist.md       cutting a release: version ×2, changelog, docs, skills, smokes
     ├── tts-setup.md               speech vendors: Piper (v0.18), Azure (v0.17), exe contract (v0.6)
     ├── 3d-libraries.md            three/babylon add_library + glTF/GLB models (v0.7)
     ├── music-setup.md             music vendors: in-process synth (v0.17) + FluidSynth (v0.8)

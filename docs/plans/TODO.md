@@ -117,9 +117,12 @@ Active plan documents:
 
 ## Engineering backlog (carried from the retired prioritized todo)
 
-- [ ] **Release candidate discipline** — package.json still says `0.21.0`
-      while docs describe v0.26; one release checklist synchronizing
-      version, changelog, tool descriptions, skills, and migration notes.
+- [x] **Release candidate discipline** — done 2026-08-04: both package
+      files bumped to 0.26.0 (drift-guarded by root-package.test), the
+      changelog's Unreleased block became the `v0.26` release rollup, and
+      [docs/release-checklist.md](../release-checklist.md) is the standing
+      list (version ×2, changelog, docs sweep, tool descriptions, skills
+      re-copy, entry-file re-emit, migration notes, suite + smokes, tag).
 - [ ] **CI gate remainder** — lint/format check, coverage artifacts,
       required-check branch protection (the workflow itself shipped
       2026-08-04).

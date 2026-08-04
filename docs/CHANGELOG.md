@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## v0.26 (2026-08-04) — the vendor boundary, cross-platform deployment, and the desktop viewer
+
+One package release rolling up every milestone since v0.21 — the inline
+(v0.22)…(v0.26) tags below record which milestone introduced each change;
+package.json versions lagged the docs until this release aligned them (see
+[release-checklist.md](release-checklist.md), which exists so this cannot
+happen again). Headlines: the storage-location model (v0.22), the
+production loop (v0.23), the vendor-dir move (v0.25), and v0.26's
+cross-platform deployment (Linux supported, deploy/ machinery), the
+core/vendors boundary with capability catalogs, the pack mechanism with
+`fetch-pack`, the GitHub-URL npm install, and the desktop viewer host.
+
 ### Deployment restructure: generated entry files, MACHINE.md, and the generative boundary (v0.26)
 
 Deploying Motion Studio onto a new machine (a customer install, a new dev box)
