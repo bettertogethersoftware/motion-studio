@@ -50,8 +50,26 @@ Active plan documents:
        `--force`, the JSONL event log and run-directory layout, the single
        contact sheet, explicit selection, and safe library staging. 115
        unittests pass against a fake Krea2 helper; real GPU generation is
-       still unexercised. **motionforge (item 3 of the delivery order)
-       remains pending** and is still gated on item 1's P0.
+       still unexercised.
+       **Progress 2026-08-05: motionforge implemented** (delivery-order
+       items 3–4) at the tools root (`<toolsRoot>\motionforge\`, with its own
+       `README.md` and an entry in `MACHINE.md`). Ships `doctor`, `link`,
+       `render`, `build`, `verify`, and the resumable `run` with
+       `--plan-only` / `--resume` / `--no-build` / `--visual-review`
+       (`--force-plate` is refused and redirected to plateforge). Per the
+       architect override, it **consumes the v0.26 engine operations instead
+       of reimplementing them**: `link` is one `use_shared_asset_batch`,
+       `render` is `render_group` + `wait_render_group` with its `since`
+       cursor in a bounded loop (groupId persisted, restart re-attaches and
+       the engine recomputes truth from output files), `build`+`verify` ride
+       one `finish_film` job plus `get_production_status`/`measure_render`
+       and external ffprobe — `get_film` full and the per-scene `render`
+       loop are never called. Dependency-free Node with its own ~150-line
+       stdio MCP client; 37 `node --test` tests (~8 s) run against a REAL
+       engine server on a throwaway `MOTION_STUDIO_HOME` with the fake
+       browser module. **Remaining: the plan's acceptance run on real GPU
+       production** (ten real plates, an interrupted resume, the finished
+       delivery) — everything else in the plan is implemented.
 4. [ ] **Product backlog P0 items** from
        [production-workflow-backlog.md](production-workflow-backlog.md):
        staging→validate→promote delivery, the review artefact, aspect
