@@ -19,6 +19,12 @@ import { outputIdentity } from './delivery.js';
 export const MAX_RENDER_INSPECTION_FRAMES = 24;
 /** A persistent contact sheet needs more coverage than an inline MCP response. */
 export const MAX_DELIVERY_REVIEW_FRAMES = 96;
+/**
+ * One sheet is one image, so its cell count is bounded by extraction time and
+ * by how small a thumbnail stays readable — not by the 24-image inline cap
+ * `inspect_render` lives under (token-efficient plan, P1-2).
+ */
+export const MAX_REVIEW_GRID_CELLS = 48;
 const SAMPLE_WIDTH = 64;
 const SAMPLE_HEIGHT = 36;
 const SAMPLE_BYTES = SAMPLE_WIDTH * SAMPLE_HEIGHT;
@@ -109,15 +115,17 @@ export function classifyReviewWarnings(warnings = [], policy) {
   }));
 }
 
+/** Keep the ends and spread the rest, for any list that has to fit a cap. */
+function evenlySpaced(items, maximum) {
+  if (!maximum || items.length <= maximum) return items;
+  if (maximum === 1) return [items[0]];
+  return Array.from({ length: maximum }, (_, index) => items[Math.round(index * (items.length - 1) / (maximum - 1))]);
+}
+
 /** Return explicitly useful review frames, not a generic uniform sample. */
 export function reviewFrameList({ totalFrames, sceneLayout = [], frames, count = 5, around = 'uniform', maxFrames }) {
   const limit = Math.max(0, totalFrames - 1);
   const unique = (items) => [...new Set(items.map((frame) => Math.max(0, Math.min(limit, Math.round(frame)))))];
-  const evenlySpaced = (items, maximum) => {
-    if (!maximum || items.length <= maximum) return items;
-    if (maximum === 1) return [items[0]];
-    return Array.from({ length: maximum }, (_, index) => items[Math.round(index * (items.length - 1) / (maximum - 1))]);
-  };
   if (frames?.length) return unique(frames);
   if (around === 'cuts' && sceneLayout.length) {
     // A frame triple is useful only together. On long films, choose cut
@@ -496,14 +504,30 @@ function safeGuideFilters(safeAreas) {
   ].filter(Boolean);
 }
 
-async function writeContactSheet({ images, outputPath, safeAreas = null, ffmpegPath, signal, onSpawn }) {
+const TILE_PADDING = 4;
+const TILE_MARGIN = 4;
+
+/** The 16:9-ish packing every Motion Studio contact sheet uses. */
+export function contactSheetGrid(count) {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, count) * (16 / 9))));
+  return { columns, rows: Math.ceil(Math.max(1, count) / columns) };
+}
+
+/**
+ * Tile already-extracted PNGs into one sheet. Shared by the delivery review
+ * (written beside a build) and by `review_render_grid` (one image back to an
+ * agent) so there is exactly one tiler and one packing rule.
+ *
+ * ffmpeg's tile filter requires equal-sized inputs; every caller extracts at
+ * one width from files that share a canvas.
+ */
+export async function buildContactSheet({ images, outputPath, safeAreas = null, ffmpegPath, signal, onSpawn }) {
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-contact-sheet-'));
   try {
     for (let index = 0; index < images.length; index += 1) {
       await fsp.writeFile(path.join(tmp, `frame-${String(index + 1).padStart(4, '0')}.png`), images[index].png);
     }
-    const columns = Math.max(1, Math.ceil(Math.sqrt(images.length * (16 / 9))));
-    const rows = Math.ceil(images.length / columns);
+    const { columns, rows } = contactSheetGrid(images.length);
     await fsp.mkdir(path.dirname(outputPath), { recursive: true });
     const guides = safeGuideFilters(safeAreas);
     await runFfmpeg({
@@ -514,7 +538,7 @@ async function writeContactSheet({ images, outputPath, safeAreas = null, ffmpegP
       args: [
         '-hide_banner', '-loglevel', 'error', '-y',
         '-framerate', '1', '-start_number', '1', '-i', path.join(tmp, 'frame-%04d.png'),
-        '-vf', [...guides, `tile=${columns}x${rows}:padding=4:margin=4:color=0x10141d`].join(','),
+        '-vf', [...guides, `tile=${columns}x${rows}:padding=${TILE_PADDING}:margin=${TILE_MARGIN}:color=0x10141d`].join(','),
         '-frames:v', '1', outputPath,
       ],
     });
@@ -522,6 +546,75 @@ async function writeContactSheet({ images, outputPath, safeAreas = null, ffmpegP
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Plan a review grid's cells over a film's segment layout (P1-2).
+ *
+ * "cuts-and-holds" answers the two questions asked of a finished cut — did
+ * each cut land, and does the middle of each shot hold — with two cells per
+ * segment; "scenes" answers only the second, one cell per segment. A film
+ * with more segments than the cap keeps its ends, samples the middle evenly,
+ * and NAMES the segments it left out rather than quietly shrinking.
+ */
+export function reviewGridCells({ segments = [], scope = 'cuts-and-holds', maxCells = MAX_REVIEW_GRID_CELLS }) {
+  const perSegment = scope === 'scenes' ? 1 : 2;
+  const chosen = evenlySpaced(segments, Math.max(1, Math.floor(maxCells / perSegment)));
+  const kept = new Set(chosen);
+  const cells = chosen.flatMap((segment) => {
+    const start = Math.max(0, Math.round(segment.filmOffset ?? 0));
+    const frames = Math.max(1, Math.round(segment.durationInFrames ?? 1));
+    const hold = start + Math.floor((frames - 1) / 2);
+    const cell = (kind, filmFrame) => ({ segment, kind, filmFrame, localFrame: filmFrame - start });
+    return perSegment === 1 ? [cell('hold', hold)] : [cell('cut', start), cell('hold', hold)];
+  });
+  return {
+    cells,
+    requestedCells: segments.length * perSegment,
+    truncated: chosen.length < segments.length,
+    omitted: segments.filter((segment) => !kept.has(segment)).map((segment) => segment.key),
+  };
+}
+
+/**
+ * Extract one frame per planned cell from ENCODED outputs and tile them into
+ * a single sheet at `outputPath`. `maxWidth` bounds the SHEET, not the
+ * thumbnail: the point of a grid is one bounded image instead of N full
+ * frames, so the per-cell width follows from the packing.
+ */
+export async function buildReviewGrid({ cells, outputPath, maxWidth = 960, ffmpegPath = 'ffmpeg', signal, onSpawn }) {
+  if (!cells.length) {
+    throw new EngineError(ErrorCodes.INVALID_CONFIG, 'review grid: no frames to extract');
+  }
+  const { columns } = contactSheetGrid(cells.length);
+  const usable = maxWidth - (TILE_MARGIN * 2) - (TILE_PADDING * (columns - 1));
+  // Even widths only: the extractor scales height with -2, which needs one.
+  const thumbnailWidth = Math.max(96, Math.floor(usable / columns / 2) * 2);
+  const images = [];
+  for (const cell of cells) {
+    images.push({
+      png: await extractRenderedFrame({
+        filePath: cell.filePath, frame: cell.frame, fps: cell.fps,
+        maxWidth: thumbnailWidth, ffmpegPath, signal, onSpawn,
+      }),
+    });
+  }
+  let sheet;
+  try {
+    sheet = await buildContactSheet({ images, outputPath, ffmpegPath, signal, onSpawn });
+  } catch (error) {
+    if (error?.code === ErrorCodes.FFMPEG_FAILED) {
+      throw new EngineError(
+        ErrorCodes.FFMPEG_FAILED,
+        `${error.message} — a contact sheet tiles equal-sized thumbnails, so sources with different ` +
+        'dimensions cannot be gridded together (build the film first, or fix the mismatched scene sizes).',
+        error.detail,
+      );
+    }
+    throw error;
+  }
+  const stat = await fsp.stat(outputPath).catch(() => null);
+  return { ...sheet, thumbnailWidth, bytes: stat?.size ?? null };
 }
 
 /**
@@ -563,7 +656,7 @@ export async function createDeliveryReview({
       ...(onsetText.has(frame) ? { captionOnset: onsetText.get(frame) } : {}),
     });
   }
-  const contact = await writeContactSheet({
+  const contact = await buildContactSheet({
     images, outputPath: stagedPaths.contactPath, safeAreas, ffmpegPath, signal, onSpawn,
   });
   const probe = await probeMedia({ filePath: stagedOutputPath, ffprobePath, signal, onSpawn }).catch(() => null);

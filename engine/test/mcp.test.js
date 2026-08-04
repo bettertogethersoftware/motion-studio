@@ -198,6 +198,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'render_group', 'wait_render_group', 'cancel_render_group',
     // new in v0.26 (the composite finishing operation, TE P1-1)
     'finish_film',
+    // new in v0.26 (one contact sheet for a whole film, TE P1-2)
+    'review_render_grid',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }

@@ -423,6 +423,101 @@ test('loop: finish_film assesses, refuses blockers, and delivers end to end as o
   assert.equal(dryBlocked.data.readyToFinish, false, 'dryRun reports the same blocker without erroring');
 });
 
+test('loop: review_render_grid returns ONE sheet plus compact per-cell rows (TE P1-2)', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const film = await callJson('create_film', { name: 'Grid Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
+  const slug = film.data.film;
+  await callJson('create_scene', { film: slug, name: 'Grid One', durationInFrames: 8 });
+  await callJson('create_scene', { film: slug, name: 'Grid Two', durationInFrames: 8 });
+
+  // Nothing encoded yet: a structured refusal, never a crash or an empty image.
+  const nothing = await callJson('review_render_grid', { film: slug });
+  assert.equal(nothing.isError, true, JSON.stringify(nothing.data));
+  assert.equal(nothing.data.code, 'file_not_found');
+  assert.match(nothing.data.message, /render|build/i);
+
+  const group = await callJson('render_group', { film: slug });
+  let wait = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 50_000 });
+  for (let i = 0; i < 3 && !wait.data.done; i++) {
+    wait = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 50_000 });
+  }
+  assert.equal(wait.data.done, true, JSON.stringify(wait.data));
+
+  // No build yet → the scene renders are the source. One image block, and one
+  // metadata row per cell (cut + hold for each of the two scenes).
+  const raw = await client.callTool({ name: 'review_render_grid', arguments: { film: slug, maxWidth: 480 } });
+  assert.notEqual(raw.isError, true, JSON.stringify(raw.content));
+  const images = raw.content.filter((block) => block.type === 'image');
+  assert.equal(images.length, 1, 'a grid is exactly one image, whatever the scene count');
+  assert.equal(images[0].mimeType, 'image/png');
+  const meta = JSON.parse(raw.content.find((block) => block.type === 'text').text);
+  assert.equal(meta.source, 'scenes');
+  assert.equal(meta.scope, 'cuts-and-holds');
+  assert.equal(meta.grid.cells, 4);
+  assert.equal(meta.truncated, false);
+  assert.deepEqual(meta.cells.map((cell) => [cell.slug, cell.kind]), [
+    ['grid-one', 'cut'], ['grid-one', 'hold'], ['grid-two', 'cut'], ['grid-two', 'hold'],
+  ]);
+  // Scene files are addressed from their own frame 0; the film timeline
+  // position rides alongside so a finding can be located in the cut.
+  assert.deepEqual(meta.cells.map((cell) => cell.frame), [0, 3, 0, 3]);
+  assert.deepEqual(meta.cells.map((cell) => cell.filmFrame), [0, 3, 8, 11]);
+  assert.deepEqual(meta.cells.map((cell) => cell.filmOffset), [0, 0, 8, 8]);
+  assert.equal(meta.cells[3].timestamp, '0:00.367');
+  assert.equal(meta.cells[0].column, 0);
+  assert.ok(meta.grid.columns >= 1 && meta.grid.rows >= 1);
+  // The sheet is a file under the film, collectable again by id.
+  const sheetPath = path.join(filmPathOf(slug), 'review-grids', `${meta.gridId}.png`);
+  assert.ok((await fsp.stat(sheetPath)).size > 0, sheetPath);
+
+  // Restricting the scenes restricts the rows; scope "scenes" halves them.
+  const one = await client.callTool({
+    name: 'review_render_grid',
+    arguments: { film: slug, scenes: ['grid-two'], scope: 'scenes' },
+  });
+  const oneMeta = JSON.parse(one.content.find((block) => block.type === 'text').text);
+  assert.equal(oneMeta.grid.cells, 1);
+  assert.deepEqual(oneMeta.cells.map((cell) => [cell.slug, cell.kind]), [['grid-two', 'hold']]);
+
+  // An unknown slug is rejected, never silently dropped.
+  const unknown = await callJson('review_render_grid', { film: slug, scenes: ['grid-nine'] });
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.data.code, 'invalid_config');
+  assert.deepEqual(unknown.data.detail.unknown, ['grid-nine']);
+
+  // source: "film" before a build says so instead of guessing.
+  const unbuilt = await callJson('review_render_grid', { film: slug, source: 'film' });
+  assert.equal(unbuilt.isError, true);
+  assert.equal(unbuilt.data.code, 'file_not_found');
+
+  // After a build, auto switches to the encoded film: film-timeline frames,
+  // one file, and the metadata names it.
+  const build = await callJson('build_film', { film: slug });
+  const built = await callJson('wait_for_render', { jobIds: [build.data.jobId], timeoutMs: 50_000 });
+  assert.equal(built.data.jobs[0].state, 'done', JSON.stringify(built.data.jobs[0]));
+
+  const filmGrid = await client.callTool({ name: 'review_render_grid', arguments: { film: slug } });
+  const filmMeta = JSON.parse(filmGrid.content.find((block) => block.type === 'text').text);
+  assert.equal(filmMeta.source, 'film');
+  assert.match(filmMeta.path, /^out\//);
+  assert.deepEqual(filmMeta.cells.map((cell) => cell.frame), [0, 3, 8, 11]);
+  assert.equal(filmMeta.warnings, undefined, 'a current build carries no staleness warning');
+
+  // includeMetadata: false keeps the image and the aggregate facts only.
+  const compact = await client.callTool({
+    name: 'review_render_grid',
+    arguments: { film: slug, gridId: filmMeta.gridId, includeMetadata: false },
+  });
+  assert.equal(compact.content.filter((block) => block.type === 'image').length, 1);
+  const compactMeta = JSON.parse(compact.content.find((block) => block.type === 'text').text);
+  assert.equal(compactMeta.cells, undefined);
+  assert.equal(compactMeta.cellCount, 4);
+  assert.equal(compactMeta.gridId, filmMeta.gridId);
+
+  const gone = await callJson('review_render_grid', { film: slug, gridId: 'grid-nope' });
+  assert.equal(gone.isError, true);
+  assert.equal(gone.data.code, 'file_not_found');
+});
+
 test('loop: compact responses never leak composition bodies (TE P0-3 sweep)', async () => {
   const film = await callJson('create_film', { name: 'Canary Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
   const slug = film.data.film;

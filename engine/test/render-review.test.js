@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import {
   reviewFrameList, deliveryReviewFrameList, extractRenderedFrame, measureRenderedPicture,
   createDeliveryReview, assertReviewAllowsPromotion, resolveReviewPolicy,
+  reviewGridCells, buildReviewGrid, contactSheetGrid,
 } from '../src/core/render-review.js';
 import { ErrorCodes } from '../src/core/errors.js';
 
@@ -42,6 +43,49 @@ test('reviewFrameList keeps a long film review useful within the image cap', () 
   assert.ok(frames.length <= 24);
   assert.ok(frames.includes(0));
   assert.ok(frames.some((frame) => frame >= 110), 'review samples the end as well as the start');
+});
+
+test('reviewGridCells takes a cut and a hold per segment, or one hold in scenes scope', () => {
+  const segments = [
+    { key: 'one', filmOffset: 0, durationInFrames: 10 },
+    { key: 'two', filmOffset: 10, durationInFrames: 10 },
+  ];
+  const both = reviewGridCells({ segments });
+  assert.deepEqual(
+    both.cells.map((cell) => [cell.segment.key, cell.kind, cell.filmFrame, cell.localFrame]),
+    [['one', 'cut', 0, 0], ['one', 'hold', 4, 4], ['two', 'cut', 10, 0], ['two', 'hold', 14, 4]],
+  );
+  assert.equal(both.truncated, false);
+  assert.equal(both.requestedCells, 4);
+
+  const holds = reviewGridCells({ segments, scope: 'scenes' });
+  assert.deepEqual(holds.cells.map((cell) => cell.filmFrame), [4, 14]);
+});
+
+test('reviewGridCells keeps the ends and NAMES what it dropped over the cap', () => {
+  const segments = Array.from({ length: 9 }, (_, index) => ({
+    key: `s${index}`, filmOffset: index * 10, durationInFrames: 10,
+  }));
+  const planned = reviewGridCells({ segments, maxCells: 6 });
+  assert.equal(planned.cells.length, 6, 'three segments × cut+hold');
+  assert.equal(planned.truncated, true);
+  assert.equal(planned.requestedCells, 18);
+  assert.deepEqual(planned.cells.map((cell) => cell.segment.key), ['s0', 's0', 's4', 's4', 's8', 's8']);
+  assert.deepEqual(planned.omitted, ['s1', 's2', 's3', 's5', 's6', 's7']);
+});
+
+test('buildReviewGrid tiles encoded frames into one sheet bounded by maxWidth', { skip: !haveFfmpeg }, async () => {
+  const outputPath = path.join(tmp, 'grid.png');
+  const cells = [0, 10, 20, 30].map((frame) => ({ filePath: fixture, frame, fps: 10 }));
+  const sheet = await buildReviewGrid({ cells, outputPath, maxWidth: 320 });
+  assert.deepEqual({ columns: sheet.columns, rows: sheet.rows }, contactSheetGrid(4));
+  assert.ok(sheet.thumbnailWidth <= 320 / sheet.columns);
+  const { stdout } = await execFileP('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height',
+    '-of', 'csv=p=0:s=x', outputPath,
+  ]);
+  const [width] = stdout.trim().split('x').map(Number);
+  assert.ok(width <= 320, `sheet width ${width} must stay inside maxWidth`);
 });
 
 test('deliveryReviewFrameList anchors a persisted review to first, last, cuts, and caption onsets', () => {

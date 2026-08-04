@@ -85,9 +85,18 @@ Active plan documents:
       task job (advice/plan blockers up front + dryRun, render group →
       build → delivery → picture measurement, cancel cascades to sub-jobs,
       evidence in the job result). Proven end to end in the loop suite.
-- [ ] TE-4b (P1 remainder): `review_render_grid`, durable run groups
-      beyond the persisted group records (absorbs the old "durable jobs"
-      item), agent-economy telemetry, and the NEON APEX replay acceptance.
+- [x] TE-4b (2026-08-04): P1-2 `review_render_grid` — one contact sheet
+      plus one compact row per cell for a whole film, read from the built
+      film or the individual scene renders (cut + hold per segment, or one
+      hold with `scope: "scenes"`). Sheets persist under
+      `<film>/review-grids/` so the async path returns a path and counts,
+      never base64, and the image is collected later by `gridId`. The
+      delivery review's tiler was factored into a shared
+      `buildContactSheet`. `inspect_render` is untouched — this is
+      transport, not a replacement for inspection.
+- [ ] TE-4c (P1 remainder): durable run groups beyond the persisted group
+      records (absorbs the old "durable jobs" item), agent-economy
+      telemetry, and the NEON APEX replay acceptance.
 
 ## Engineering backlog
 

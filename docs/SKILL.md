@@ -70,7 +70,8 @@ Use this map to choose the right tool. Read the live schema before calling it.
 - Audio: `list_vendors`, `list_voices`, `synthesize_speech`,
   `synthesize_music`, `synthesize_sfx`, `preview_audio`
 - Preview and delivery: `capture_preview_frame`, `capture_preview_frames`,
-  `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`
+  `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`,
+  `review_render_grid`
 - Render groups and finishing: `render_group`, `wait_render_group`,
   `cancel_render_group`, `finish_film`
 - Jobs and diagnostics: `get_render_status`, `wait_for_render`,
@@ -761,6 +762,22 @@ measure_render {
 
 Inspect before/at/after scene and footage boundaries. Re-transcribe a finished
 speech-led cut when practical to confirm that intended words survived the edit.
+
+To eyeball a whole film at once, ask for the grid first and inspect what it
+flags:
+
+```json
+review_render_grid {
+  "film": "launch-film"
+}
+```
+
+One contact sheet plus one metadata row per cell (cut and hold of every
+segment, with frame, film offset, and timestamp) replaces a per-scene stream of
+full-width images. It reads the same encoded files — the built film when it
+exists, otherwise the individual scene renders — so it is where to look, not
+what to conclude: `inspect_render` still returns the exact frames and
+`measure_render` still measures the picture.
 
 ## Update semantics agents commonly get wrong
 

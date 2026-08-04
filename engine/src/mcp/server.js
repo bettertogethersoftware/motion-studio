@@ -184,7 +184,8 @@ import {
 } from '../core/encoder.js';
 import { getFormat } from '../core/formats.js';
 import {
-  MAX_RENDER_INSPECTION_FRAMES, reviewFrameList, extractRenderedFrame, measureRenderedPicture,
+  MAX_RENDER_INSPECTION_FRAMES, MAX_REVIEW_GRID_CELLS, reviewFrameList, extractRenderedFrame,
+  measureRenderedPicture, reviewGridCells, buildReviewGrid,
   resolveReviewPolicy, REVIEW_WARNING_CODES,
 } from '../core/render-review.js';
 import { ensureStableDataDir } from '../core/paths.js';
@@ -1492,6 +1493,263 @@ server.registerTool(
       });
     }
     return ok({ jobId: submitted.jobId, target: localId(t.id), path: located.path, ...status.result });
+  }),
+);
+
+/* ------------------------------------------------------------------ */
+/* Review grids (v0.26, TE P1-2): N frames from N scenes as ONE image. */
+/* ------------------------------------------------------------------ */
+
+// A grid is a FILE (sheet + its metadata) under <film>/review-grids/, not a
+// buffer in memory: the image can then be collected after a timeout, after a
+// restart, or by the human's Studio — and the async job's result stays
+// compact (a path and counts, never base64, which get_render_status would
+// otherwise repeat back through every status poll).
+const gridsDirFor = (filmPath) => path.join(filmPath, 'review-grids');
+const MAX_KEPT_REVIEW_GRIDS = 20;
+
+/** m:ss.mmm on the film timeline — the position a producer reads back. */
+function timecode(frames, fps) {
+  const ms = Math.round((Math.max(0, frames) / (fps || 30)) * 1000);
+  return `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+}
+
+/** Review sheets are cheap to rebuild; keep the newest few, drop the rest. */
+async function pruneReviewGrids(dir) {
+  const ids = (await fsp.readdir(dir).catch(() => []))
+    .filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -5));
+  if (ids.length <= MAX_KEPT_REVIEW_GRIDS) return;
+  const dated = await Promise.all(ids.map(async (id) => ({
+    id, mtimeMs: (await fsp.stat(path.join(dir, `${id}.json`)).catch(() => null))?.mtimeMs ?? 0,
+  })));
+  dated.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const { id } of dated.slice(MAX_KEPT_REVIEW_GRIDS)) {
+    await fsp.rm(path.join(dir, `${id}.json`), { force: true }).catch(() => {});
+    await fsp.rm(path.join(dir, `${id}.png`), { force: true }).catch(() => {});
+  }
+}
+
+/** Serve a built sheet: one image block plus its (optionally full) metadata. */
+async function collectReviewGrid({ doc, gridId, includeMetadata }) {
+  const dir = gridsDirFor(doc.path);
+  const meta = await fsp.readFile(path.join(dir, `${gridId}.json`), 'utf8')
+    .then(JSON.parse)
+    .catch(() => null);
+  const png = meta && await fsp.readFile(path.join(dir, `${gridId}.png`)).catch(() => null);
+  if (!meta || !png) {
+    throw new EngineError(ErrorCodes.FILE_NOT_FOUND,
+      `No review grid "${gridId}" for film "${doc.slug}". Sheets live under review-grids/ and only the newest ` +
+      `${MAX_KEPT_REVIEW_GRIDS} are kept — call review_render_grid without gridId to build a fresh one.`,
+      { film: doc.slug, gridId });
+  }
+  const { cells, ...rest } = meta;
+  return {
+    content: [
+      { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
+      {
+        type: 'text',
+        text: JSON.stringify(includeMetadata
+          ? meta
+          : { ...rest, cellCount: cells.length, note: `${rest.note} Call again with includeMetadata (default) for the per-cell rows.` },
+        null, 2),
+      },
+    ],
+  };
+}
+
+server.registerTool(
+  'review_render_grid',
+  {
+    title: 'One contact sheet for a whole film\'s encoded output',
+    description:
+      'Visual review of MANY scenes as ONE image (v0.26, TE P1-2): representative frames are extracted from the ' +
+      'ENCODED outputs — the built film when it exists, otherwise each scene\'s own rendered file — tiled into a ' +
+      'single contact sheet, and returned as one image block plus a compact row per cell (scene, frame, film ' +
+      'offset, timestamp). scope "cuts-and-holds" (default) takes two cells per segment: the first frame (does the ' +
+      'cut land) and the midpoint (does the shot hold); "scenes" takes the midpoint only. This is a TRANSPORT ' +
+      'reduction, not a replacement for inspection: cells are downscaled and the labels live in the metadata, not ' +
+      'burned into the picture, so read the sheet to decide WHERE to look, then use inspect_render for exact ' +
+      'full-width frames and measure_render for the motion/black/cut measurements. Nothing is hidden: scenes with ' +
+      'no encoded output are listed in `unavailable`, and a film with more segments than fit is sampled evenly ' +
+      `with truncated: true naming the omitted ones (max ${MAX_REVIEW_GRID_CELLS} cells). The sheet is a file ` +
+      'under the film\'s review-grids/, so a long extraction returns a jobId and the image is collected later ' +
+      'with { film, gridId }.',
+    inputSchema: {
+      film: z.string().describe('Film id "<film>" — the grid always spans a film, never a single scene'),
+      scope: z.enum(['cuts-and-holds', 'scenes']).optional()
+        .describe('cuts-and-holds (default): first frame + midpoint of every segment. scenes: one midpoint per segment.'),
+      scenes: z.array(z.string()).max(64).optional()
+        .describe('Restrict to these scene slugs (or footage names); an unknown name is rejected, never ignored'),
+      source: z.enum(['auto', 'film', 'scenes']).optional()
+        .describe('auto (default): the built film if it exists, else the per-scene renders. film: require the built film (concat seams, overlays, burned captions). scenes: always the individual scene renders — how you review before a build.'),
+      maxWidth: z.number().int().min(320).max(1920).default(960)
+        .describe('Maximum width of the WHOLE sheet (not of one cell); the per-cell size follows from the packing'),
+      includeMetadata: z.boolean().optional().describe('Return the per-cell rows (default true); false keeps only the image and the aggregate facts'),
+      gridId: z.string().optional().describe('Collect an already-built sheet instead of extracting again (the id a timed-out call returned)'),
+      waitMs: z.number().int().min(0).max(50_000).default(45_000)
+        .describe('Block up to this long; a longer extraction returns a jobId plus its gridId to collect afterwards'),
+    },
+  },
+  wrap(async ({ film, scope = 'cuts-and-holds', scenes, source = 'auto', maxWidth, includeMetadata = true, gridId, waitMs }) => {
+    await requirePrereqs();
+    const doc = await store.getFilm(qualifyFilm(film));
+    if (gridId) return collectReviewGrid({ doc, gridId, includeMetadata });
+
+    // Encoded-file truth, addressed exactly as inspect_render addresses it.
+    let located = null;
+    try {
+      located = await locateRenderedMedia(film, undefined);
+    } catch (error) {
+      if (error?.code !== ErrorCodes.FILE_NOT_FOUND) throw error;
+      if (source === 'film') {
+        throw new EngineError(ErrorCodes.FILE_NOT_FOUND,
+          `Film "${doc.slug}" has no built output to grid. Build it with build_film (or finish_film), or pass ` +
+          'source: "scenes" to review the individual scene renders.', { film: doc.slug });
+      }
+    }
+    const useFilm = source === 'film' || (source === 'auto' && !!located);
+    const plan = located ? located.t.plan : await planFilm({ film: doc, store });
+    const filmFps = located ? located.t.fps : (plan.fps ?? doc.sceneDefaults?.fps ?? 30);
+    const rows = segmentRows(plan, localId);
+    const nameOf = (row) => row.slug ?? row.footage;
+
+    if (scenes?.length) {
+      const known = new Set(rows.map(nameOf));
+      const unknown = scenes.filter((name) => !known.has(name));
+      if (unknown.length) {
+        throw new EngineError(ErrorCodes.INVALID_CONFIG,
+          `No such scene(s) in film "${doc.slug}": ${unknown.join(', ')}.`,
+          { unknown, known: [...known] });
+      }
+    }
+    const wanted = scenes?.length ? rows.filter((row) => scenes.includes(nameOf(row))) : rows;
+
+    const segments = [];
+    const unavailable = [];
+    const stale = [];
+    for (const row of wanted) {
+      const base = { key: nameOf(row), row, filmOffset: row.filmOffset, durationInFrames: row.frames };
+      if (useFilm) {
+        segments.push({ ...base, filePath: located.abs, fps: filmFps });
+        continue;
+      }
+      if (row.kind !== 'scene') {
+        unavailable.push({ segment: base.key, reason: 'supplied footage has no scene render — build the film to see it in a grid' });
+        continue;
+      }
+      const scene = await store.getScene(qualifyScene(`${doc.slug}/${row.slug}`));
+      const config = await store.readConfig(scene.id);
+      const relative = `${config.output.dir}/${config.output.filename}`;
+      const abs = path.join(scene.path, config.output.dir, config.output.filename);
+      if (!(await fsp.stat(abs).catch(() => null))?.isFile()) {
+        unavailable.push({ segment: base.key, reason: `scene is ${row.state} — no encoded output to sample` });
+        continue;
+      }
+      if (row.state === 'stale') stale.push(row.slug);
+      segments.push({ ...base, filePath: abs, fps: config.fps ?? filmFps, path: relative });
+    }
+
+    // A built film shows the LAST build. If scene work moved on since, the
+    // sheet is still real evidence — of the wrong cut, unless it is said.
+    const behind = useFilm
+      ? rows.filter((row) => row.kind === 'scene' && row.state !== 'rendered').map((row) => row.slug)
+      : [];
+
+    const planned = reviewGridCells({ segments, scope, maxCells: MAX_REVIEW_GRID_CELLS });
+    if (!planned.cells.length) {
+      throw new EngineError(ErrorCodes.FILE_NOT_FOUND,
+        `Nothing to review in film "${doc.slug}": no encoded output was found for the requested segments. ` +
+        'Render the scenes (render_group) or build the film (build_film) first.',
+        { film: doc.slug, source: useFilm ? 'film' : 'scenes', unavailable });
+    }
+
+    const newGridId = `grid-${randomUUID().slice(0, 12)}`;
+    const dir = gridsDirFor(doc.path);
+    const contactPath = path.join(dir, `${newGridId}.png`);
+    const ffmpegPath = await ffmpegPathOnly();
+    const extraction = planned.cells.map((cell) => ({
+      filePath: cell.segment.filePath,
+      fps: cell.segment.fps,
+      // A film file is addressed on the film timeline; a scene file is
+      // addressed from its own frame 0.
+      frame: useFilm ? cell.filmFrame : cell.localFrame,
+    }));
+
+    const submitted = jobs.startTask({
+      kind: 'review-grid',
+      targetId: doc.id,
+      run: async ({ onPhase, signal, onChildPid }) => {
+        onPhase('extracting-frames');
+        const sheet = await buildReviewGrid({
+          cells: extraction, outputPath: contactPath, maxWidth, ffmpegPath, signal, onSpawn: onChildPid,
+        });
+        const meta = {
+          film: doc.slug,
+          gridId: newGridId,
+          source: useFilm ? 'film' : 'scenes',
+          scope,
+          fps: filmFps,
+          ...(useFilm ? { path: located.path } : {}),
+          contactPath,
+          grid: {
+            columns: sheet.columns, rows: sheet.rows, cells: extraction.length,
+            thumbnailWidth: sheet.thumbnailWidth, maxWidth, bytes: sheet.bytes,
+          },
+          truncated: planned.truncated,
+          requestedCells: planned.requestedCells,
+          ...(planned.truncated ? { omitted: planned.omitted } : {}),
+          ...(unavailable.length ? { unavailable } : {}),
+          ...(stale.length ? { staleScenes: stale } : {}),
+          ...(behind.length ? {
+            warnings: [`This sheet is the BUILT film; ${behind.join(', ')} ${behind.length === 1 ? 'is' : 'are'} ` +
+              'not currently rendered/current, so the build predates that work. Rebuild, or pass source: "scenes".'],
+          } : {}),
+          cells: planned.cells.map((cell, index) => ({
+            index,
+            row: Math.floor(index / sheet.columns),
+            column: index % sheet.columns,
+            kind: cell.kind,
+            ...(cell.segment.row.kind === 'scene'
+              ? { scene: cell.segment.row.scene, slug: cell.segment.row.slug }
+              : { footage: cell.segment.key }),
+            frame: useFilm ? cell.filmFrame : cell.localFrame,
+            filmOffset: cell.segment.filmOffset,
+            filmFrame: cell.filmFrame,
+            timestamp: timecode(cell.filmFrame, filmFps),
+            ...(useFilm ? {} : { path: cell.segment.path }),
+          })),
+          note: 'Cells run left-to-right, top-to-bottom in `cells` order; `frame` is the frame inside the file ' +
+            'that was read and `filmFrame` its position on the film timeline. Labels are metadata, not burned ' +
+            'into the picture. inspect_render returns exact full-width frames for anything this sheet flags.',
+        };
+        await fsp.writeFile(path.join(dir, `${newGridId}.json`), JSON.stringify(meta, null, 2) + '\n', 'utf8');
+        await pruneReviewGrids(dir);
+        // The job result stays compact on purpose: the image is a file, and
+        // every get_render_status poll would otherwise repeat it.
+        return {
+          gridId: newGridId, film: doc.slug, contactPath,
+          columns: sheet.columns, rows: sheet.rows, cells: extraction.length,
+          truncated: planned.truncated,
+          hint: `Collect the image with review_render_grid { film: "${doc.slug}", gridId: "${newGridId}" }.`,
+        };
+      },
+    });
+
+    const status = (await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 })).jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.FFMPEG_FAILED,
+        status.error?.message ?? 'review grid failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, gridId: newGridId, state: status.state, phase: status.phase,
+        film: doc.slug, cells: extraction.length, stillRunning: true,
+        hint: `Still extracting (${status.phase}). Wait with wait_for_render { jobIds: ["${submitted.jobId}"] }, ` +
+          `then collect the sheet with review_render_grid { film: "${doc.slug}", gridId: "${newGridId}" } — it is a ` +
+          'file, so the image is never lost to a timeout.',
+      });
+    }
+    return collectReviewGrid({ doc, gridId: newGridId, includeMetadata });
   }),
 );
 

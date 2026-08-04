@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### review_render_grid: a whole film's picture as one image (TE P1-2)
+
+Visual review used to cost one image per frame per scene: ten scenes checked
+at a cut and a hold was twenty full-width PNGs riding back through the
+context. `review_render_grid { film }` extracts the same evidence from the
+same encoded files — the built film when it exists, otherwise each scene's
+own rendered output — and returns ONE tiled contact sheet plus a compact row
+per cell (`kind` cut/hold, scene, `frame` inside the file that was read,
+`filmOffset`, `filmFrame`, timestamp). `scope: "scenes"` halves it to one
+hold per segment; `scenes: [...]` restricts it; `maxWidth` bounds the sheet
+rather than a thumbnail. It is a transport reduction and says so: cells are
+downscaled, labels live in the metadata (the bundled FFmpeg has no
+fontconfig, so burning them in is not on the table), and `inspect_render`
+remains the way to get exact full-width frames of whatever the sheet flags.
+Compact never means quiet — scenes with no encoded output come back in
+`unavailable`, a film too long for the 48-cell sheet is sampled evenly with
+`truncated: true` and the `omitted` names, stale renders are named, and
+gridding a built film whose scenes have moved on carries a warning that the
+sheet is the last build. The sheet is a FILE under `<film>/review-grids/`
+(newest 20 kept), which is what makes the async path work: a long extraction
+returns `{ jobId, gridId }`, the job result stays a path plus counts instead
+of base64 that every status poll would repeat, and the image is collected
+later with `{ film, gridId }` — after a timeout or a restart. The delivery
+review's tiler was factored into a shared `buildContactSheet` (plus
+`contactSheetGrid` for the packing rule) rather than copied, so there is
+still exactly one contact sheet in the engine.
+
 ### finish_film: the composite finishing operation (TE P1-1)
 
 The plan's director-facing finish, composed from the pieces P0 built:

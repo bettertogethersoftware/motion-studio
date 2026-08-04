@@ -57,7 +57,8 @@ separate review screen and no mode switch.
   (in-process SoundFont synth or FluidSynth) and sound effects, audition the
    audio mix without a render (`preview_audio`), inspect and measure the
    **encoded deliverable** (`inspect_render` / `measure_render` — frames at known
-   cuts plus static/black/cut checks), pull in the human's
+   cuts plus static/black/cut checks, or a whole film as ONE labelled contact
+   sheet with `review_render_grid`), pull in the human's
   library files (`use_shared_asset`), read a media file's duration /
   dimensions / codecs — and, with `audioPeak`, **where it is loudest**, so a
   one-shot cue lands on the beat instead of wherever its file happens to start

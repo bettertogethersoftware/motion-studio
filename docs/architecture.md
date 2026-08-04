@@ -1236,6 +1236,13 @@ owns what that document *means*:
   expose `staticFrames`; film builds expose the compact `picture` summary on the
   completed job. A title card may correctly be black or static, so these are facts
   for an agent to inspect, never reasons for the engine to reject a deliverable.
+  `review_render_grid` (v0.26) is the same evidence at a tenth of the transport:
+  one tiled contact sheet for a whole film — cut and hold per segment, read from
+  the built film or the individual scene renders — plus one compact metadata row
+  per cell. It shares the delivery review's tiler (`buildContactSheet`), writes
+  its sheet as a file under `<film>/review-grids/` so the async path carries a
+  path instead of base64, and points at `inspect_render` for the exact frames.
+  It reduces transport, never inspection.
 
 ## 14. The production loop (v0.23): AI directs, the human advises
 
