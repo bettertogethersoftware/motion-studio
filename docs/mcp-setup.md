@@ -301,11 +301,46 @@ completion) and never waits or polls for a human response.
 | `use_scene_revision` | `scene`, `revisionId` | Repoints the scene's live output at an archived take (staged + atomic rename, sidecar re-stamped) — the normal answer to prefer-revision advice. Never regenerates media, never deletes newer history. `revision_mismatch` when the scene's settings changed since. Follow with `build_film`. |
 | `list_deliveries` | `film`, `manifest?` | Archived immutable builds, newest first, current one flagged — or one delivery's full frozen manifest (the exact scene revisions/tracks/captions/overlays it played). `build_film`'s finished job reports `deliveryId`. |
 | `report_agent_activity` | `activity` (short present-tense phrase), `film?`, `scene?`, `detail?` | The human's progress line ("Creating scene demo-shot"). Overwrite-in-place heartbeat; expires after ~3 minutes into "Waiting for the next AI run". Call it when your activity changes and periodically during long work. |
-| `render_group` | `film`, `scenePolicy?` = `"missing-or-stale"` (`"all"` re-renders everything), `sceneIds?` (restrict by slug), `workers?`, `note?` | One idempotent operation instead of the per-scene submit loop (v0.26, TE P0-6): plans ONCE, refuses structurally broken films (`invalid_film` naming the missing segments) before submitting anything, skips current scenes, submits only missing/stale ones to the normal FIFO queue. Returns `{ groupId, counts: {submitted, notSubmitted, skipped}, members: [{slug, jobId, state}], skipped, planProblems }` — a `queue_full` is a per-scene `not-submitted` row, and **re-running the group is the designed resume** (rendered scenes skip, the rest submit). The record persists at `<film>/render-groups/<groupId>.json`. |
-| `wait_render_group` | `groupId`, `timeoutMs?` = 30000 (max 50000), `since?` | Waits on a group (v0.26, TE P0-7). Returns aggregate `counts`, compact per-scene `members` (`jobState` + `sceneState`), full detail for FAILED jobs only, and `done` — true when every member scene is rendered per the CURRENT plan, recomputed from output files and sidecars: after a server restart job ids read `not_found` but a scene whose verified output exists still counts done (files are the truth). A timeout is a snapshot, never a failure — call again. `since` works like `get_production_status`: heartbeat when unchanged, `delta` naming exactly the changed scenes otherwise. |
+| `render_group` | `film`, `scenePolicy?` = `"missing-or-stale"` (`"all"` re-renders everything), `sceneIds?` (restrict by slug), `workers?`, `note?` | One idempotent operation instead of the per-scene submit loop (v0.26, TE P0-6): plans ONCE, refuses structurally broken films (`invalid_film` naming the missing segments) before submitting anything, skips current scenes, submits only missing/stale ones to the normal FIFO queue. Returns `{ groupId, counts: {submitted, notSubmitted, skipped}, members: [{slug, jobId, state}], skipped, planProblems }` — a `queue_full` is a per-scene `not-submitted` row, and **re-running the group is the designed resume** (rendered scenes skip, the rest submit). The record persists at `<film>/render-groups/<groupId>.json` and is COMPLETED as the run proceeds (TE P1-3): per-member `terminalState` + `finishedAt`, a group-level `completedAt`, and the `deliveryId` once a build succeeds. |
+| `wait_render_group` | `groupId`, `timeoutMs?` = 30000 (max 50000), `since?` | Waits on a group (v0.26, TE P0-7). Returns aggregate `counts`, compact per-scene `members` (`jobState` + `sceneState`), full detail for FAILED jobs only, and `done` — true when every member scene is rendered per the CURRENT plan, recomputed from output files and sidecars: after a server restart job ids read `not_found` but a scene whose verified output exists still counts done (files are the truth). A timeout is a snapshot, never a failure — call again. `since` works like `get_production_status`: heartbeat when unchanged, `delta` naming exactly the changed scenes otherwise. Waiting is also what **completes the group record** (TE P1-3): every member observed in a terminal job state gains `terminalState` + `finishedAt`, and the group gains `completedAt` once all of them have. A `not_found` job (lost with a previous process) is never stamped as an outcome, and the record never decides `done` — files do. |
 | `cancel_render_group` | `groupId` | Cancels each of the group's jobs with `cancel_render` semantics (running → tree kill, queued → dequeue, terminal/lost → left alone). Idempotent; the record stays for run history. |
-| `finish_film` | `film`, `dryRun?`, `renderPolicy?` = `"missing-or-stale"`, `audioTargetPeakDb?`, `workers?`, `note?`, `verify?` = true | The composite finishing operation (v0.26, TE P1-1), as ONE async task job: checks the adviser loop and plan (unresolved advice or missing segments refuse the call up front with `blockers` — `dryRun: true` returns the same assessment without starting anything), renders missing/stale scenes via a render group, waits, builds, waits for the delivery, and (verify) measures the encoded picture. Returns `{ jobId, willRender, hint }`; `wait_for_render` delivers the evidence as the job result: `{ groupId, rendered, skipped, deliveryId, outputPath, audio, picture, readiness, newerWorkThanDelivery }`. A failed scene render fails the job naming the scenes — nothing bypasses promotion, frame verification, or review policy. Cancelling the finish job cancels the work it started. |
+| `finish_film` | `film`, `dryRun?`, `renderPolicy?` = `"missing-or-stale"`, `audioTargetPeakDb?`, `workers?`, `note?`, `verify?` = true | The composite finishing operation (v0.26, TE P1-1), as ONE async task job: checks the adviser loop and plan (unresolved advice or missing segments refuse the call up front with `blockers` — `dryRun: true` returns the same assessment without starting anything), renders missing/stale scenes via a render group, waits, builds, waits for the delivery, and (verify) measures the encoded picture. Returns `{ jobId, willRender, hint }`; `wait_for_render` delivers the evidence as the job result: `{ groupId, rendered, skipped, deliveryId, outputPath, audio, picture, readiness, newerWorkThanDelivery }`. A failed scene render fails the job naming the scenes — nothing bypasses promotion, frame verification, or review policy. Cancelling the finish job cancels the work it started. It completes the record of the group it rendered through on the way past: member terminal states after the render wait, then `deliveryId` + `deliveredAt` the moment the build succeeds (before the optional verify, so a failed measurement cannot erase a real delivery). |
 | `get_production_status` | `film`, `detail?` = `"summary"`, `since?` | Facts before you report completion: segment readiness, unresolved advice counts, deliveries, the current delivery, `newerWorkThanDelivery`, live agent activity — and (v0.26, TE P0-2) a **`cursor`**. Pass it back as `since` on the next call: unchanged state answers a tiny heartbeat (`{unchanged: true, cursor, activityAt, generatedAt}`); changed state adds `delta: {changed: [rows], removed: [keys]}` naming exactly the changed segments; an unparseable cursor answers `cursorReset: true` plus the full projection, never an error. `detail: "scenes"` adds one compact row per segment; `"full"` is the complete legacy shape (including `sequences` prose). This is the production loop's read — poll it with `since` instead of re-reading `get_film` per scene. |
+
+### The agent-economy report (`<dataDir>/agent-economy.json`)
+
+Every MCP server run writes a small local report of **proxies for what a
+session cost** — Motion Studio cannot see the LLM provider's token ledger and
+does not pretend to (TE P1-4). It lands at the top of the storage root
+(`<MOTION_STUDIO_HOME>/agent-economy.json`, the same `dataDir`
+`get_capabilities` reports), and a new server run REPLACES it — `startedAt`
+names the run:
+
+```json
+{
+  "schema": "motion-studio.agent-economy/1",
+  "workspace": "default", "agent": "director-1",
+  "startedAt": "…", "updatedAt": "…",
+  "tools": { "get_production_status": { "calls": 12, "bytes": 8140, "compact": 11, "full": 1 } },
+  "batches": { "itemsLinked": 24, "bundleTargets": 10, "groupScenes": 10 },
+  "notes": "proxies only — token billing is the LLM provider's ledger"
+}
+```
+
+`bytes` is the UTF-8 length of the text blocks the server returned (images are
+not counted); `compact`/`full` are attributed only for tools that take a
+projection `detail` — an absent argument counts as that tool's own default, so
+a bare `get_production_status` is compact and `detail: "full"` is not. The
+`batches` block counts the per-scene calls a batch operation replaced:
+`use_shared_asset_batch` items, `write_composition_bundle` targets,
+`render_group` scenes. Correlate it with your own token log; nothing else
+reads it.
+
+It is names and numbers only — no arguments, no prompts, no file contents, no
+credentials — and it is strictly best effort: writes are debounced,
+fire-and-forget, and flushed on exit, and a report that cannot be written is
+one stderr line, never a failed tool call. There is no MCP tool for it (it is
+not agent-facing state) — read the file.
 
 ## Typical agent session
 

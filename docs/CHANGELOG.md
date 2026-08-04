@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Durable group records and agent-economy telemetry (TE P1-3/P1-4)
+
+A render group used to write its record once, at submission, and then never
+speak again: the file froze holding job ids that die with the process, and
+nothing on disk ever said how the run ended. The record now COMPLETES itself.
+`wait_render_group` — the one place a group's jobs are actually waited on —
+stamps every member that reached a terminal job state with `terminalState`
+and `finishedAt`, and the group with `completedAt` once all of them have;
+`finish_film`, which never goes through that door, does the same after its
+render wait and then stamps `deliveryId` + `deliveredAt` the instant the
+build succeeds (before the optional verify, so a failed measurement cannot
+erase a real delivery). A `not_found` job is deliberately never stamped as an
+outcome: an id lost with a previous process is missing memory, not a result.
+The restart rule is untouched and is the whole point — records INFORM, output
+files and sidecars DECIDE, so `done` is still recomputed from the current
+plan. Every update is best effort and atomic-ish (temp file + rename, the
+store's idiom): a record that cannot be written is one stderr line and never
+a failed read.
+
+Alongside it, the session's own cost gets a local report: `agent-economy.json`
+at the storage root. Motion Studio cannot see the LLM provider's token ledger
+and refuses to pretend, so it counts PROXIES — per-tool calls and response
+bytes, compact versus full projections (an absent `detail` counts as that
+tool's own default, so a bare `get_production_status` is compact), and the
+per-scene calls each batch replaced (`use_shared_asset_batch` items,
+`write_composition_bundle` targets, `render_group` scenes). Correlate it with
+your own token log; `notes` says so in the file. The wiring is one decoration
+of `registerTool`, so every tool is counted the day it is written and no
+handler carries telemetry code, counting happens after the handler resolved
+and adds no async hop to the response path, the debounced flush is unref'd so
+it cannot hold the process open, and a report that cannot be written is one
+stderr line. It records names and numbers only — no arguments, no prompts, no
+file contents, no credentials — and a canary test holds that line. A new
+server run replaces the file; `startedAt` names the run. There is no MCP tool
+for it and `get_capabilities` is untouched: it is a file for a human or an
+agent that wants it, not agent-facing state.
+
 ### review_render_grid: a whole film's picture as one image (TE P1-2)
 
 Visual review used to cost one image per frame per scene: ten scenes checked

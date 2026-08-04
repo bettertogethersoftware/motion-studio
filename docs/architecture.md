@@ -812,6 +812,7 @@ other code you run.
 ```
 <dataDir>/
   settings.json
+  agent-economy.json      MCP session cost PROXIES, replaced each run (§11.4)
   workspaces/
     <workspace>/            one per AI (and any the human creates)
       workspace.json        { name, createdAt } — display metadata only
@@ -821,6 +822,8 @@ other code you run.
           film.json         the film document (core/films.js owns its schema)
           assets/           master audio / overlay files for this film
           out/              the built film (+ .srt sidecar)
+          render-groups/    <groupId>.json — one render run's membership,
+                            terminal member states and delivery (§11.4)
           scenes/
             <scene>/        a composition folder (scene.json, composition.*)
 ```
@@ -1050,6 +1053,38 @@ literal `"ffmpeg"`, since a worker that re-resolved for itself could pick up an
 env var the parent deliberately overrode and split a fan-out across two
 binaries. A corrupted settings file degrades to defaults rather than bricking
 the UI — or, on the MCP side, rather than taking the server down.
+
+### 11.4 Run records and the agent-economy report (v0.26, TE P1-3/P1-4)
+
+Two files exist purely to answer "what happened", and neither is ever allowed
+to answer "what is true".
+
+A **render group record** (`<film>/render-groups/<groupId>.json`) is written
+at submission with the group's membership, film revision, scene policy and
+engine version, and is then *completed* as the run proceeds:
+`wait_render_group` stamps each member that reached a terminal job state with
+`terminalState` + `finishedAt` and the group with `completedAt`;
+`finish_film`, which waits on its own jobs rather than through that tool, does
+the same and then stamps `deliveryId` + `deliveredAt` when its build succeeds.
+A `not_found` job is never stamped as an outcome — an id lost with a previous
+process is missing memory, not a result. **Records inform, files decide**: a
+group's `done` is recomputed from the current plan's output files and
+sidecars, so a hand-deleted or stale record can only cost history, never
+correctness. Updates are best effort and atomic-ish (temp + rename) and a
+failed update is one stderr line, never a failed read.
+
+The **agent-economy report** (`<dataDir>/agent-economy.json`,
+`src/mcp/agent-economy.js`) is the transport's own cost proxy. Motion Studio
+cannot see the LLM provider's token ledger, so it counts what it can: calls
+and returned text bytes per tool, compact versus full projections, and the
+per-scene calls each batch operation replaced. One decoration of the MCP
+server's `registerTool` counts every tool, so no handler carries telemetry
+code and a new tool is measured the day it is written; counting happens after
+the handler resolved and adds no async hop to the response path. Writes are
+debounced, fire-and-forget, unref'd (telemetry never holds the process open)
+and flushed once more on exit. It holds names and numbers only — never
+arguments, prompts, file contents or credentials — and a new server run
+replaces the file, `startedAt` naming the run.
 
 ## 12. Preview fidelity
 

@@ -94,9 +94,20 @@ Active plan documents:
       delivery review's tiler was factored into a shared
       `buildContactSheet`. `inspect_render` is untouched — this is
       transport, not a replacement for inspection.
-- [ ] TE-4c (P1 remainder): durable run groups beyond the persisted group
-      records (absorbs the old "durable jobs" item), agent-economy
-      telemetry, and the NEON APEX replay acceptance.
+- [x] TE-4c (2026-08-04): P1-3 durable run groups + P1-4 agent-economy
+      telemetry (absorbs the old "durable jobs" item). Group records now
+      complete themselves — per-member `terminalState`/`finishedAt` stamped
+      by `wait_render_group` (and by `finish_film`, which never calls it),
+      group `completedAt`, and `deliveryId`/`deliveredAt` the moment a build
+      succeeds; every update is best effort and atomic-ish, and the restart
+      rule stands (records inform, files decide). `agent-economy.json` at
+      the storage root counts proxies — per-tool calls/bytes, compact vs
+      full, and the per-scene calls each batch replaced — never tokens,
+      never arguments or file contents (canary-tested), wired by one
+      `registerTool` decoration.
+- [ ] TE-4d (P1 remainder): the NEON APEX replay acceptance — replay the
+      ten-scene, 180-second film through the token-efficient path and
+      record the measured saving against the plan's acceptance criteria.
 
 ## Engineering backlog
 

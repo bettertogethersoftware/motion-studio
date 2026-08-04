@@ -655,7 +655,11 @@ missing/stale scenes in one call and returns a `groupId`;
 `cursor` as `since` for heartbeat/delta responses), reports full detail only
 for failed scenes, and its `done` is computed from output files — it survives
 server restarts. Re-running `render_group` after a partial submission is the
-designed resume. `cancel_render_group` aborts the lot.
+designed resume. `cancel_render_group` aborts the lot. The group's record
+under `<film>/render-groups/` completes itself as the run ends (how each
+member finished, when the group did, and the `deliveryId` once a build
+succeeds) — read it for run history, never for whether work remains: that is
+always the current plan's answer.
 
 On `error`, call `get_logs` and read the structured error. On `done`, inspect:
 

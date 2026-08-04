@@ -198,6 +198,7 @@ import { listRevisions, useRevision, currentRevisionId } from '../core/revisions
 import { listDeliveries, getDeliveryManifest, currentDeliveryId } from '../core/deliveries.js';
 import { reportActivity, productionStatus } from '../core/activity.js';
 import { segmentRows, computeCursor, parseCursor, diffRows } from '../core/projections.js';
+import { createAgentEconomy } from './agent-economy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -487,6 +488,28 @@ const enginePkg = JSON.parse(
 );
 
 const server = new McpServer({ name: 'motion-studio', version: enginePkg.version });
+
+/* ------------------------------------------------------------------ */
+/* Agent-economy proxies (TE P1-4)                                     */
+/* ------------------------------------------------------------------ */
+
+// Every tool is counted from ONE place: registerTool is decorated here, so a
+// new tool is measured the day it is written and no handler carries telemetry
+// code. `wrap()` itself cannot do this — it never sees the tool's name.
+// Counting happens AFTER the handler resolved, adds no async hop to the
+// response path, and can never fail a call.
+const economy = createAgentEconomy({ dataDir: store.dataDir, workspace: WORKSPACE, agent: AGENT });
+economy.installExitFlush();
+const registerToolDirect = server.registerTool.bind(server);
+server.registerTool = (name, def, handler) => {
+  const hasInput = def?.inputSchema !== undefined; // the SDK calls cb(extra) when there is none
+  return registerToolDirect(name, def, async (...callArgs) => {
+    const result = await handler(...callArgs);
+    try { economy.record(name, hasInput ? callArgs[0] : undefined, result); }
+    catch { /* a counter is never worth failing a tool call over */ }
+    return result;
+  });
+};
 
 /** Plan projection shared by the film tools: layout + problems, local ids. */
 function planSummary(plan) {
@@ -1304,6 +1327,7 @@ server.registerTool(
         results.push({ scene: target, error: { code: e.code ?? 'error', message: e.message } });
       }
     }
+    economy.addBatch('bundleTargets', targets.length); // per-scene write_composition_file calls replaced
     return ok({
       files: fileHashes,
       counts: {
@@ -1977,6 +2001,63 @@ async function findGroupRecord(groupId) {
     `No render group "${groupId}" in this workspace. Groups persist per film under render-groups/; start one with render_group.`);
 }
 
+// A member ends here and nowhere else. `not_found` is deliberately absent: a
+// job id that died with a previous process is lost memory, not an outcome, and
+// stamping it as one would put a fiction in the run history (the scene's real
+// truth is its output file, which is what `done` is computed from).
+const TERMINAL_MEMBER_STATES = new Set(['done', 'error', 'cancelled', 'not-submitted']);
+
+/**
+ * Complete a persisted group record in place (TE P1-3). Best effort and
+ * atomic-ish (temp file + rename, the store's idiom): a record that cannot be
+ * updated is one stderr line, NEVER an error — the record informs, while
+ * output files and sidecars decide what is done.
+ *
+ * `mutate` returns false when nothing changed, so a heartbeat wait does not
+ * rewrite the file.
+ */
+async function updateGroupRecord(recordPath, mutate) {
+  try {
+    const record = JSON.parse(await fsp.readFile(recordPath, 'utf8'));
+    if (!mutate(record)) return;
+    // The store's temp+rename idiom, with a per-write suffix as well as the
+    // pid: two waits on one group are a normal thing for an agent to do, and
+    // they must not share a temp file.
+    const tmp = `${recordPath}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
+    await fsp.writeFile(tmp, JSON.stringify(record, null, 2));
+    await fsp.rename(tmp, recordPath); // atomic on same volume
+  } catch (e) {
+    process.stderr.write(`[motion-studio-mcp] group record not updated (${recordPath}): ${e.message}\n`);
+  }
+}
+
+/**
+ * Stamp each member that has reached a terminal job state, plus the group's
+ * `completedAt` once every member has. The submission `state` is left alone —
+ * it says what happened at submit time, and `terminalState` says how the
+ * member ended. Already-stamped members are never restamped.
+ *
+ * @param {(member: object) => string|undefined} stateOf  observed job state
+ * @returns {boolean} whether anything changed
+ */
+function stampGroupTerminals(record, stateOf) {
+  const at = new Date().toISOString();
+  let changed = false;
+  for (const m of record.members ?? []) {
+    if (m.terminalState) continue;
+    const state = m.jobId ? stateOf(m) : 'not-submitted';
+    if (!TERMINAL_MEMBER_STATES.has(state)) continue;
+    m.terminalState = state;
+    m.finishedAt = at;
+    changed = true;
+  }
+  if (!record.completedAt && (record.members ?? []).every((m) => m.terminalState)) {
+    record.completedAt = at;
+    changed = true;
+  }
+  return changed;
+}
+
 server.registerTool(
   'render_group',
   {
@@ -1986,7 +2067,8 @@ server.registerTool(
       'ONCE, refuses structurally broken films (missing scene folders/footage) before submitting anything, ' +
       'skips scenes that are already rendered and current, and submits only missing/stale scenes to the normal ' +
       'FIFO render queue (serial policy unchanged — this removes orchestration, not the queue). Returns a ' +
-      'groupId plus per-scene job ids, skipped scenes, and counts. The group record persists with the film, so ' +
+      'groupId plus per-scene job ids, skipped scenes, and counts. The group record persists with the film and ' +
+      'is completed as members end and a delivery is built (TE P1-3), so ' +
       'a server restart recovers scene truth from output files — and re-running render_group after a partial ' +
       'submission (e.g. queue_full rows) is the designed resume: already-rendered scenes are skipped, the rest ' +
       'submit. Wait on it with wait_render_group; cancel with cancel_render_group.',
@@ -2070,6 +2152,7 @@ async function startRenderGroupOp({ film, scenePolicy = 'missing-or-stale', scen
     await fsp.mkdir(path.dirname(recordPath), { recursive: true });
     await fsp.writeFile(recordPath, JSON.stringify(record, null, 2));
     groupIndex.set(groupId, { filmId: doc.id, recordPath });
+    economy.addBatch('groupScenes', members.length); // per-scene render/poll loops replaced
 
     return {
       groupId,
@@ -2098,7 +2181,10 @@ server.registerTool(
       'is rendered per the CURRENT film plan, which is recomputed from output files and sidecars: after a ' +
       'server restart the job ids are gone (state "not_found") but a scene whose verified output exists still ' +
       'counts done — files are the truth, not process memory. Pass the returned `cursor` back as `since` to get ' +
-      'a heartbeat when nothing changed, or a `delta` naming exactly the scenes that did.',
+      'a heartbeat when nothing changed, or a `delta` naming exactly the scenes that did. Waiting also COMPLETES ' +
+      'the persisted group record (TE P1-3): each member that ended gains `terminalState` + `finishedAt`, and ' +
+      'the group gains `completedAt` once every member has — run history for a later reader, never the source ' +
+      'of `done`.',
     inputSchema: {
       groupId: z.string(),
       timeoutMs: z.number().int().min(1_000).max(50_000).default(30_000),
@@ -2106,7 +2192,7 @@ server.registerTool(
     },
   },
   wrap(async ({ groupId, timeoutMs, since }) => {
-    const { record } = await findGroupRecord(groupId);
+    const { record, recordPath } = await findGroupRecord(groupId);
     const liveIds = record.members.filter((m) => m.jobId).map((m) => m.jobId);
     const waited = liveIds.length
       ? await jobs.waitFor(liveIds, { timeoutMs })
@@ -2141,6 +2227,12 @@ server.registerTool(
     const errors = record.members
       .map((m) => (m.jobId ? byJob.get(m.jobId) : null))
       .filter((j) => j && j.state === 'error');
+
+    // The run history is completed where the outcome is first observed (TE
+    // P1-3): this is the only place a group's jobs are waited on, so it is the
+    // only place that can see them end. Awaited because it is one small write
+    // and a caller that got `done` must be able to read the finished record.
+    await updateGroupRecord(recordPath, (rec) => stampGroupTerminals(rec, (m) => byJob.get(m.jobId)?.state));
 
     const memberRows = members.map(({ percent, ...m }) => m); // percent churns; keep it out of the cursor
     const cursor = computeCursor({ film: record.film, rows: memberRows, marks: { groupId, done } });
@@ -2199,7 +2291,9 @@ server.registerTool(
       'cutting corners: unresolved advice or a broken plan refuses the call up front (`blockers` names each), ' +
       'a failed scene render fails the job naming the scenes, and nothing bypasses promotion, frame ' +
       'verification, or review policy — this removes orchestration, not evidence. dryRun: true returns the ' +
-      'assessment (what would render, what blocks) without starting anything.',
+      'assessment (what would render, what blocks) without starting anything. The record of the group it ' +
+      'renders through is completed on disk as it goes: member terminal states, then the final deliveryId ' +
+      '(TE P1-3).',
     inputSchema: {
       film: z.string(),
       dryRun: z.boolean().optional().describe('Assess only: blockers, scenes that would render, plan problems. Starts nothing.'),
@@ -2272,7 +2366,17 @@ server.registerTool(
         }
         const renderIds = group.members.map((m) => m.jobId);
         renderIds.forEach((id) => subJobs.add(id));
-        if (renderIds.length) await jobs.waitFor(renderIds, { timeoutMs: HOUR });
+        const rendered = renderIds.length
+          ? await jobs.waitFor(renderIds, { timeoutMs: HOUR })
+          : { jobs: [] };
+        // finish_film never calls wait_render_group, so it completes its own
+        // group's record here — the run history must not depend on which door
+        // the render was started through (TE P1-3).
+        const renderedByJob = new Map(rendered.jobs.map((j) => [j.jobId, j]));
+        await updateGroupRecord(
+          path.join(groupsDirFor(doc.path), `${group.groupId}.json`),
+          (rec) => stampGroupTerminals(rec, (m) => renderedByJob.get(m.jobId)?.state),
+        );
 
         const plan2 = await planFilm({ film: await store.getFilm(doc.id), store });
         const failed = segmentRows(plan2, localId).filter((r) => r.kind === 'scene' && r.state !== 'rendered');
@@ -2294,6 +2398,20 @@ server.registerTool(
           throw new EngineError(built.error?.code ?? ErrorCodes.FFMPEG_FAILED,
             `The film build did not finish (state ${built.state}): ${built.error?.message ?? 'see get_logs'}.`,
             { jobId: build.jobId, job: built });
+        }
+        // The build succeeded, so the group that fed it now has its delivery.
+        // Stamped here rather than after `verify` so a failed measurement
+        // cannot erase the fact that this group was delivered (TE P1-3).
+        if (built.deliveryId) {
+          await updateGroupRecord(
+            path.join(groupsDirFor(doc.path), `${group.groupId}.json`),
+            (rec) => {
+              if (rec.deliveryId === built.deliveryId) return false;
+              rec.deliveryId = built.deliveryId;
+              rec.deliveredAt = new Date().toISOString();
+              return true;
+            },
+          );
         }
 
         let picture = null;
@@ -3104,6 +3222,7 @@ server.registerTool(
         results.push({ target, path: libPath, result: 'error', error: { code: e.code ?? 'error', message: e.message } });
       }
     }
+    economy.addBatch('itemsLinked', items.length); // per-scene use_shared_asset calls replaced
     return ok({
       counts: {
         items: items.length,

@@ -340,6 +340,13 @@ test('loop: render_group renders the stale set, resumes idempotently, and waits 
   assert.ok(wait.data.members.every((m) => m.sceneState === 'rendered'));
   assert.equal(wait.data.errors, undefined, 'failure detail appears only on failure');
 
+  // The record is COMPLETED by the wait (TE P1-3): how each member ended and
+  // when the group did. Informs a later reader; `done` still comes from files.
+  const completed = JSON.parse(await fsp.readFile(recordPath, 'utf8'));
+  assert.deepEqual(completed.members.map((m) => m.terminalState), ['done', 'done']);
+  assert.ok(completed.members.every((m) => typeof m.finishedAt === 'string'));
+  assert.ok(completed.completedAt, 'completedAt lands once every member is terminal');
+
   // Unchanged since-cursor → heartbeat.
   const beat = await callJson('wait_render_group', { groupId: group.data.groupId, timeoutMs: 1_000, since: wait.data.cursor });
   assert.equal(beat.data.unchanged, true, JSON.stringify(beat.data));
@@ -411,6 +418,16 @@ test('loop: finish_film assesses, refuses blockers, and delivers end to end as o
   assert.equal(result.readiness.rendered, 2);
   assert.ok(result.picture, 'verify: true measured the encoded picture');
   assert.equal(result.newerWorkThanDelivery, false, 'nothing is newer than the delivery it just built');
+
+  // The group finish_film rendered through carries the delivery it produced,
+  // and its members are terminal (TE P1-3) — the run history is complete
+  // whichever door started the render.
+  const groupRecord = JSON.parse(await fsp.readFile(
+    path.join(filmPathOf(slug), 'render-groups', `${result.groupId}.json`), 'utf8'));
+  assert.equal(groupRecord.deliveryId, result.deliveryId);
+  assert.ok(groupRecord.deliveredAt);
+  assert.deepEqual(groupRecord.members.map((m) => m.terminalState), ['done', 'done']);
+  assert.ok(groupRecord.completedAt);
 
   // Unresolved advice is a structural stop, not a corner to cut.
   const filmDoc = await store.getFilm(`loop/${slug}`);
