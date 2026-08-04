@@ -30,17 +30,11 @@ Active plan documents:
        eliminates, and it is engine-side, testable, and consumed by
        everything below. Its P1-3 (durable run groups) absorbs the old
        "durable jobs" backlog item.
-2. [ ] **`prepare_image`** ([plan](image-prep-plan.md)) — elevated
-       2026-08-04 by the user: the measured Env-A hard wall (an MCP-only
-       agent cannot crop, key, or interrogate a supplied still). The plan
-       is implementation-ready; decide its three open questions in flight
-       (lean: test multiply-under-transform before building keyBackground;
-       sync with an input-count cap; contact sheets stay in render-review).
-       ~1 day.
-3. [ ] **Docker support** ([plan](docker-support-plan.md)) — 1–2 days,
-       independent of items 1–2; the best effort-to-impression ratio for
-       the demo tier and server-hosted deployments. Pull it forward
-       whenever a customer demo lands on the calendar.
+2. [ ] **Docker support** ([plan](docker-support-plan.md)) — **blocked on
+       Docker being installed on the dev machine** (checked 2026-08-04:
+       not present; the slice cannot be honestly verified without it).
+       1–2 days once available; the best effort-to-impression ratio for
+       the demo tier and server-hosted deployments.
 3. [ ] **PlateForge/MotionForge** ([plan](plate-render-forge-plan.md)) —
        **after** item 1's P0: the motionforge half should consume
        `use_shared_asset_batch`/`render_group` instead of reimplementing
@@ -87,9 +81,13 @@ Active plan documents:
       composition body written to a scene must not appear in any
       production-loop read at its default or compact details. **The
       token-efficient plan's P0 is complete.**
-- [ ] TE-4 (P1): `finish_film`, `review_render_grid`, durable run groups
-      (absorbs the old "durable jobs" item), agent-economy telemetry, and
-      the NEON APEX replay acceptance.
+- [x] TE-4a (2026-08-04): P1-1 `finish_film` — the composite finish as one
+      task job (advice/plan blockers up front + dryRun, render group →
+      build → delivery → picture measurement, cancel cascades to sub-jobs,
+      evidence in the job result). Proven end to end in the loop suite.
+- [ ] TE-4b (P1 remainder): `review_render_grid`, durable run groups
+      beyond the persisted group records (absorbs the old "durable jobs"
+      item), agent-economy telemetry, and the NEON APEX replay acceptance.
 
 ## Engineering backlog
 
@@ -105,6 +103,14 @@ Active plan documents:
 
 ## Parked, with reasons
 
+- [ ] **`prepare_image`** ([plan](image-prep-plan.md)) — **deferred
+      2026-08-04 by the user**: its Python/Pillow dependency makes it
+      shell-tool territory (an agent-side helper beside the forges), not
+      an engine vendor — consistent with the generative-boundary rule that
+      spawned external interpreters stay outside the MCP surface. The plan
+      document remains valid as the design record for whoever builds the
+      shell version; the Env-A hard wall stands and is the revisit trigger
+      (an MCP-only customer who must prep supplier stills).
 - [ ] **Helper win32 audit remainder**: FFmpeg/FluidSynth *discovery* is
       platform-aware in all tools-root helpers, but their full command
       construction is unaudited for Windows-only conventions. Do before

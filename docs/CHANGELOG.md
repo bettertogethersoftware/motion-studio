@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### finish_film: the composite finishing operation (TE P1-1)
+
+The plan's director-facing finish, composed from the pieces P0 built:
+`finish_film` checks the adviser loop and the film plan (unresolved advice
+or missing segments refuse the call up front with named `blockers`;
+`dryRun: true` returns the same assessment without starting anything),
+renders every missing/stale scene through a render group, waits, builds the
+film, waits for the delivery, and — `verify`, default true — measures the
+encoded picture. It runs as ONE async task job; `wait_for_render` delivers
+the evidence as the result: groupId, deliveryId, output path, the measured
+audio block, picture findings, readiness. It removes orchestration, not
+evidence: a failed scene render fails the job naming the scenes, nothing
+bypasses promotion, frame verification, or review policy, and cancelling
+the finish job cancels the render/build work it started. Also this change:
+prepare_image DEFERRED by the user (its Python dependency makes it
+shell-tool territory), and Docker noted as blocked on Docker being
+installed on the dev machine.
+
 ### Render groups: one operation instead of the submit-and-poll loop (TE P0-6/P0-7)
 
 The dominant token bucket of the measured production — per-scene render

@@ -196,6 +196,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'use_shared_asset_batch', 'write_composition_bundle',
     // new in v0.26 (render groups, TE P0-6/P0-7)
     'render_group', 'wait_render_group', 'cancel_render_group',
+    // new in v0.26 (the composite finishing operation, TE P1-1)
+    'finish_film',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }

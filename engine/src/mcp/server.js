@@ -191,7 +191,7 @@ import { ensureStableDataDir } from '../core/paths.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
 import {
   createAdvice, listAdvice, getAdvice, acknowledgeAdvice, beginAdviceWork, resolveAdvice,
-  ADVICE_OUTCOMES, writeAdviceEvidence, recordEvidenceFailure,
+  ADVICE_OUTCOMES, writeAdviceEvidence, recordEvidenceFailure, adviceSummary,
 } from '../core/advice.js';
 import { listRevisions, useRevision, currentRevisionId } from '../core/revisions.js';
 import { listDeliveries, getDeliveryManifest, currentDeliveryId } from '../core/deliveries.js';
@@ -1746,6 +1746,13 @@ server.registerTool(
   },
   wrap(async ({ film, scenePolicy = 'missing-or-stale', sceneIds, workers, note }) => {
     await requirePrereqs();
+    return ok(await startRenderGroupOp({ film, scenePolicy, sceneIds, workers, note }));
+  }),
+);
+
+/** The render_group core, shared with finish_film (TE P1-1). */
+async function startRenderGroupOp({ film, scenePolicy = 'missing-or-stale', sceneIds, workers, note }) {
+  {
     const doc = await store.getFilm(qualifyFilm(film));
     const plan = await planFilm({ film: doc, store });
     const rows = segmentRows(plan, localId);
@@ -1806,7 +1813,7 @@ server.registerTool(
     await fsp.writeFile(recordPath, JSON.stringify(record, null, 2));
     groupIndex.set(groupId, { filmId: doc.id, recordPath });
 
-    return ok({
+    return {
       groupId,
       film: doc.slug,
       counts: {
@@ -1818,9 +1825,9 @@ server.registerTool(
       // Plan problems that are NOT the unrendered scenes this group exists to
       // fix still matter for build_film — surfaced, never hidden.
       planProblems: plan.problems,
-    });
-  }),
-);
+    };
+  }
+}
 
 server.registerTool(
   'wait_render_group',
@@ -1918,6 +1925,149 @@ server.registerTool(
       catch { return { slug: m.slug, cancelled: false, reason: 'not_found' }; }
     });
     return ok({ groupId, film: record.film, results });
+  }),
+);
+
+server.registerTool(
+  'finish_film',
+  {
+    title: 'Finish a film: render what remains, build, verify — one job',
+    description:
+      'The composite finishing operation (v0.26, TE P1-1): checks the adviser loop and the film plan, renders ' +
+      'every missing/stale scene through a render group, waits, builds the film, waits for the delivery, and ' +
+      '(verify, default true) measures the encoded picture — as ONE async task job. Returns a jobId ' +
+      'immediately; wait_for_render delivers the evidence as the job result: groupId, deliveryId, output path, ' +
+      'the measured audio block, picture findings, and final readiness. It STOPS structurally rather than ' +
+      'cutting corners: unresolved advice or a broken plan refuses the call up front (`blockers` names each), ' +
+      'a failed scene render fails the job naming the scenes, and nothing bypasses promotion, frame ' +
+      'verification, or review policy — this removes orchestration, not evidence. dryRun: true returns the ' +
+      'assessment (what would render, what blocks) without starting anything.',
+    inputSchema: {
+      film: z.string(),
+      dryRun: z.boolean().optional().describe('Assess only: blockers, scenes that would render, plan problems. Starts nothing.'),
+      renderPolicy: z.enum(['missing-or-stale', 'all']).optional()
+        .describe('Which scenes the render phase submits (default missing-or-stale)'),
+      audioTargetPeakDb: nullableNumber(z.number().min(-60).max(0)).optional()
+        .describe('Override + persist the mastering target before building'),
+      workers: z.number().int().min(1).max(16).optional(),
+      note: z.string().max(200).optional().describe('Provenance note stamped on the revisions this run produces'),
+      verify: z.boolean().optional().describe('Measure the encoded picture after the build (default true)'),
+    },
+  },
+  wrap(async ({ film, dryRun, renderPolicy = 'missing-or-stale', audioTargetPeakDb, workers, note, verify = true }) => {
+    await requirePrereqs();
+    const doc = await store.getFilm(qualifyFilm(film));
+    const plan = await planFilm({ film: doc, store });
+    const rows = segmentRows(plan, localId);
+    const advice = await adviceSummary(doc.path);
+
+    const missing = rows.filter((r) => r.state === 'missing');
+    const toRender = rows.filter((r) => r.kind === 'scene')
+      .filter((r) => (renderPolicy === 'all' ? true : r.state !== 'rendered'))
+      .map((r) => r.slug);
+    const blockers = [];
+    if (advice.unresolved > 0) {
+      blockers.push({
+        kind: 'unresolved_advice', count: advice.unresolved,
+        fix: 'check_human_advice, act on each item, resolve_human_advice — the adviser loop is never bypassed.',
+      });
+    }
+    if (missing.length) {
+      blockers.push({ kind: 'missing_segments', segments: missing.map((r) => r.slug ?? r.footage) });
+    }
+    const assessment = {
+      film: doc.slug,
+      wouldRender: toRender,
+      alreadyRendered: rows.filter((r) => r.kind === 'scene' && r.state === 'rendered').length,
+      planProblems: plan.problems,
+      advice,
+      blockers,
+      readyToFinish: blockers.length === 0,
+    };
+    if (dryRun) return ok({ dryRun: true, ...assessment });
+    if (blockers.length) {
+      throw new EngineError(ErrorCodes.INVALID_FILM,
+        `finish_film stopped before doing any work: ${blockers.map((b) => b.kind).join(', ')}.`,
+        { blockers });
+    }
+    if (audioTargetPeakDb !== undefined) await store.updateFilm(doc.id, { audioTargetPeakDb });
+    const ffmpegPath = await ffmpegPathOnly();
+
+    const submitted = jobs.startTask({
+      kind: 'finish-film',
+      targetId: doc.id,
+      run: async ({ onPhase, signal }) => {
+        const HOUR = 60 * 60_000;
+        // Cancelling the finish task cancels the work it started.
+        const subJobs = new Set();
+        const abort = () => { for (const id of subJobs) { try { jobs.cancel(id); } catch { /* already terminal */ } } };
+        signal?.addEventListener?.('abort', abort, { once: true });
+
+        onPhase('rendering');
+        const group = await startRenderGroupOp({ film: doc.slug, scenePolicy: renderPolicy, workers, note });
+        const notSubmitted = group.members.filter((m) => !m.jobId);
+        if (notSubmitted.length) {
+          throw new EngineError(ErrorCodes.QUEUE_FULL,
+            `finish_film could not submit every scene: ${notSubmitted.map((m) => m.slug).join(', ')}. ` +
+            'Drain the queue and run finish_film again — it resumes.',
+            { notSubmitted });
+        }
+        const renderIds = group.members.map((m) => m.jobId);
+        renderIds.forEach((id) => subJobs.add(id));
+        if (renderIds.length) await jobs.waitFor(renderIds, { timeoutMs: HOUR });
+
+        const plan2 = await planFilm({ film: await store.getFilm(doc.id), store });
+        const failed = segmentRows(plan2, localId).filter((r) => r.kind === 'scene' && r.state !== 'rendered');
+        if (failed.length) {
+          const errors = renderIds.map((id) => { try { return jobs.getStatus(id); } catch { return null; } })
+            .filter((j) => j && j.state !== 'done');
+          throw new EngineError(ErrorCodes.INVALID_FILM,
+            `Scenes failed to render: ${failed.map((r) => r.slug).join(', ')} — the film was NOT built.`,
+            { scenes: failed.map((r) => r.slug), jobs: errors });
+        }
+
+        onPhase('building');
+        const build = await submitFilmBuild({
+          film: await store.getFilm(doc.id), store, jobs, ffmpegPath, deliverableId: null, agent: AGENT,
+        });
+        subJobs.add(build.jobId);
+        const built = (await jobs.waitFor([build.jobId], { timeoutMs: HOUR })).jobs[0];
+        if (built.state !== 'done') {
+          throw new EngineError(built.error?.code ?? ErrorCodes.FFMPEG_FAILED,
+            `The film build did not finish (state ${built.state}): ${built.error?.message ?? 'see get_logs'}.`,
+            { jobId: build.jobId, job: built });
+        }
+
+        let picture = null;
+        if (verify) {
+          onPhase('verifying');
+          const located = await locateRenderedMedia(doc.slug, undefined);
+          picture = await measureRenderedPicture({
+            filePath: located.abs, fps: located.t.fps, totalFrames: located.t.durationInFrames,
+            sceneLayout: renderReviewLayout(located.t), ffmpegPath, signal,
+          });
+        }
+
+        const status = await productionStatus({ store, film: await store.getFilm(doc.id) });
+        return {
+          film: doc.slug,
+          groupId: group.groupId,
+          rendered: renderIds.length,
+          skipped: group.skipped.length,
+          deliveryId: built.deliveryId ?? null,
+          outputPath: built.outputPath ?? null,
+          audio: built.audio ?? null,
+          ...(picture ? { picture } : {}),
+          readiness: status.readiness,
+          newerWorkThanDelivery: status.newerWorkThanDelivery,
+        };
+      },
+    });
+    return ok({
+      jobId: submitted.jobId, state: submitted.state, film: doc.slug,
+      willRender: toRender, alreadyRendered: assessment.alreadyRendered,
+      hint: `wait_for_render { jobIds: ["${submitted.jobId}"] } — the finished result carries the delivery evidence.`,
+    });
   }),
 );
 

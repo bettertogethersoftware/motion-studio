@@ -71,7 +71,8 @@ Use this map to choose the right tool. Read the live schema before calling it.
   `synthesize_music`, `synthesize_sfx`, `preview_audio`
 - Preview and delivery: `capture_preview_frame`, `capture_preview_frames`,
   `render`, `render_still`, `build_film`, `inspect_render`, `measure_render`
-- Render groups: `render_group`, `wait_render_group`, `cancel_render_group`
+- Render groups and finishing: `render_group`, `wait_render_group`,
+  `cancel_render_group`, `finish_film`
 - Jobs and diagnostics: `get_render_status`, `wait_for_render`,
   `list_render_jobs`, `get_logs`, `cancel_render`
 - Human advice (the adviser loop — see the protocol below):

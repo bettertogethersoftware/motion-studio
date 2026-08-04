@@ -385,6 +385,44 @@ test('loop: render_group renders the stale set, resumes idempotently, and waits 
   }
 });
 
+test('loop: finish_film assesses, refuses blockers, and delivers end to end as one job (TE P1-1)', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const film = await callJson('create_film', { name: 'Finish Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
+  const slug = film.data.film;
+  await callJson('create_scene', { film: slug, name: 'F One', durationInFrames: 8 });
+  await callJson('create_scene', { film: slug, name: 'F Two', durationInFrames: 8 });
+
+  const dry = await callJson('finish_film', { film: slug, dryRun: true });
+  assert.equal(dry.isError, false, JSON.stringify(dry.data));
+  assert.equal(dry.data.readyToFinish, true);
+  assert.deepEqual(dry.data.wouldRender, ['f-one', 'f-two']);
+
+  const started = await callJson('finish_film', { film: slug, note: 'finish take' });
+  assert.equal(started.isError, false, JSON.stringify(started.data));
+  let job = null;
+  for (let i = 0; i < 6 && (!job || !['done', 'error', 'cancelled'].includes(job.state)); i++) {
+    const waited = await callJson('wait_for_render', { jobIds: [started.data.jobId], timeoutMs: 50_000 });
+    job = waited.data.jobs[0];
+  }
+  assert.equal(job.state, 'done', JSON.stringify(job));
+  const result = job.result;
+  assert.equal(result.rendered, 2);
+  assert.ok(result.deliveryId, 'the finish carries its archived delivery');
+  assert.ok(result.outputPath && result.outputPath.endsWith('.mp4'));
+  assert.equal(result.readiness.rendered, 2);
+  assert.ok(result.picture, 'verify: true measured the encoded picture');
+  assert.equal(result.newerWorkThanDelivery, false, 'nothing is newer than the delivery it just built');
+
+  // Unresolved advice is a structural stop, not a corner to cut.
+  const filmDoc = await store.getFilm(`loop/${slug}`);
+  await createAdvice({ filmPath: filmDoc.path, filmId: filmDoc.id, message: 'Hold the last shot longer' });
+  const blocked = await callJson('finish_film', { film: slug, renderPolicy: 'all' });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.data.code, 'invalid_film');
+  assert.equal(blocked.data.detail.blockers[0].kind, 'unresolved_advice');
+  const dryBlocked = await callJson('finish_film', { film: slug, dryRun: true });
+  assert.equal(dryBlocked.data.readyToFinish, false, 'dryRun reports the same blocker without erroring');
+});
+
 test('loop: compact responses never leak composition bodies (TE P0-3 sweep)', async () => {
   const film = await callJson('create_film', { name: 'Canary Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
   const slug = film.data.film;
