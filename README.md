@@ -173,6 +173,20 @@ point at it with `--ffmpeg /path/to/ffmpeg` (CLI) or the **ffmpeg → binary
 path** field in the Studio's ⚙ global-settings page, which applies to every
 Studio render and the prerequisite check.
 
+### Desktop viewer (Windows/macOS/Linux checkout)
+
+A ComfyUI-style app window for the human adviser — it launches the local
+Studio on a real Node runtime, shows the UI, and cleans the whole process
+tree up on close (agents keep connecting over MCP exactly as before):
+
+```bash
+cd desktop
+npm install
+npm start
+```
+
+See [desktop/README.md](desktop/README.md) for details and the smoke test.
+
 ### Install as an npm dependency (GitHub URL)
 
 The repo root is an npm package (v0.26, vendor-boundary plan §10.7), so a

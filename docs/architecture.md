@@ -1443,3 +1443,30 @@ finish with an end-to-end render. §9.5's generative boundary is what keeps
 this layout stable: the engine stays portable (`npm install` + core binaries),
 while GPU-heavy generative tooling varies per machine without touching the
 engine.
+
+## 17. The desktop viewer host (v0.26, Slice C)
+
+`desktop/` is the ComfyUI-style desktop shell decided in the vendor-boundary
+plan §10.2: an Electron window that **launches and views** the local Studio —
+it owns process lifecycle and nothing else. The layering rule it must never
+break: the shell reimplements no Studio behavior and adds no privileged
+bridge (`contextIsolation`, no `nodeIntegration`); it is a viewer.
+
+Mechanics, in order: resolve a **real Node runtime** (`MOTION_STUDIO_NODE`,
+else PATH) — never Electron's own executable, because the Studio spawns
+render workers from its `process.execPath` and those must be Node; probe a
+free port; spawn `engine/src/studio/server.js` with `PORT`; poll HTTP until
+ready; load the URL in a `BrowserWindow`. Child stdout/stderr stream to
+`studio.log` under Electron's user-data dir. On close the child dies as a
+**tree** (`taskkill /T` on Windows, a process-group signal elsewhere), so no
+Chromium, FFmpeg, or render-worker descendant outlives the window — verified
+by `desktop/smoke.mjs`, which requires the served page to genuinely load and
+the port to stop answering afterward.
+
+The shell changes nothing for agents: MCP connections are configured exactly
+as in [mcp-setup.md](mcp-setup.md), with or without the window open. The
+same Studio can still be served headless and viewed remotely
+(`MOTION_STUDIO_STUDIO_HOST`, §14). `desktop/` is private to the repository
+— excluded from the npm install artifact, Electron a devDependency of that
+folder alone. Packaging (bundled Node, installer) is the plan's remaining
+Slice C work.

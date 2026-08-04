@@ -1,0 +1,15 @@
+{
+  "name": "motion-studio-desktop",
+  "version": "0.1.0",
+  "description": "ComfyUI-style desktop viewer host for Motion Studio (vendor-boundary plan §10.2, Slice C): an Electron shell that launches the local Studio server on a REAL Node runtime, shows the Studio web UI for the human adviser, and owns the child's lifecycle. The AI connects over MCP exactly as without the shell. Private — never part of the npm install artifact; Electron is a devDependency of this folder only.",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node smoke.mjs"
+  },
+  "license": "Unlicense",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

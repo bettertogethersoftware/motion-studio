@@ -60,6 +60,25 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The desktop viewer host: Motion Studio as an app window (v0.26)
+
+Slice C-1, the §10.2 decision made real in its unpackaged form: `desktop/`
+is a ComfyUI-style Electron shell that launches the local Studio server and
+views it — nothing more. It resolves a **real Node runtime** (never
+Electron's own process, so the Studio's render workers spawn from real
+Node), probes a free port, spawns `engine/src/studio/server.js`, polls HTTP
+readiness, and opens the Studio UI in a sandboxed window
+(`contextIsolation`, no `nodeIntegration` — the shell adds no privileged
+bridge). Child output streams to `studio.log` under Electron's user-data
+dir; on close the child dies as a tree (`taskkill /T` on Windows, a
+process-group signal elsewhere) so no Chromium/FFmpeg/worker descendant
+survives. `desktop/smoke.mjs` proves the loop end to end — page genuinely
+loaded, then the port must stop answering — against an isolated temp data
+dir. Agents are unaffected: MCP is configured exactly as before, window or
+no window. `desktop/` is private (never in the npm artifact; Electron is a
+devDependency of that folder only); bundled-Node packaging and an installer
+are the remaining Slice C work. architecture.md §17 documents the layering.
+
 ### Install Motion Studio with one npm command (v0.26)
 
 Slice B's §10.7 wrapper: the repository root is now an npm package, so

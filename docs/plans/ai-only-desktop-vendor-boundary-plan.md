@@ -648,6 +648,8 @@ Additional estimates:
    so existing settings stay valid and the default works on every OS with
    nothing downloaded (Phase 0.5). **Decided: yes, this option — see above.**
 2. Whether the first desktop shell is a hidden process or a tray app.
+   **Resolved by §10.2 (2026-08-04): neither — a visible viewer window, the
+   ComfyUI model. First implemented as the unpackaged `desktop/` host.**
 3. Which local vendor assets belong in the first default pack, versus optional
    downloads. **Decided: SoundFont minimal, whisper models optional — see
    above.**

@@ -104,6 +104,17 @@ Active plan documents:
       itself shipped with Slice A (dynamic tolerant runtime in both
       entrypoints, core-only test, structured unavailables).
 
+## Slice C progress (vendor-boundary Phase 5 / §10.2; started 2026-08-04)
+
+- [x] C-1 (2026-08-04): the unpackaged viewer host — `desktop/` Electron
+      shell that spawns the Studio on a real Node (free port, HTTP
+      readiness, `studio.log` under user-data, kill-the-tree cleanup,
+      sandboxed window). `desktop/smoke.mjs` proves load + cleanup end to
+      end (needs a display; not in headless CI). architecture.md §17.
+- [ ] C-2: packaging — bundled Node, electron-builder installer, update
+      shutdown handling, the packaged-app smoke of plan Phase 6, and the
+      §7 acceptance sweep (orphan checks, no-diagnostics-on-stdout).
+
 ## Engineering backlog (carried from the retired prioritized todo)
 
 - [ ] **Release candidate discipline** — package.json still says `0.21.0`
