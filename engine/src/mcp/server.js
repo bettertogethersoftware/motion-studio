@@ -87,7 +87,6 @@ import {
   preflightFrameList, MAX_PREVIEW_FRAMES, normalizeProxy, proxyOutputPath,
 } from '../core/renderer.js';
 import { checkPrerequisites } from '../core/prereqs.js';
-import { capabilityTiers } from '../vendors/default/tiers.js';
 import {
   readSettings, resolveFfmpegPath, resolveFfprobePath, withNewSceneDefaults, outputSeedFromSettings,
   DEFAULT_SETTINGS,
@@ -116,12 +115,19 @@ import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/setti
 
 let vendorRuntime = null;
 let vendorRuntimeError = null;
+let capabilityTiers = null;
 try {
   const { createDefaultRuntime } = await import('../vendors/default/registry.js');
   vendorRuntime = createDefaultRuntime();
 } catch (e) {
   vendorRuntimeError = e;
 }
+// tiers.js lives in the vendors tree too (it describes the default vendors),
+// so it gets the same tolerant load — the caught core-only test proved a
+// static import here kills the server before initialize.
+try {
+  ({ capabilityTiers } = await import('../vendors/default/tiers.js'));
+} catch { /* core-only install: get_capabilities reports the absence below */ }
 
 const missingRuntime = (capability, code) => async () => {
   throw new EngineError(
@@ -3095,7 +3101,9 @@ server.registerTool(
       // Capability tiers (Slice 0): core / free-local / pack / byok, with the
       // per-OS fix command when a capability is not ready. Existence-level
       // checks only — the deep probes stay behind list_vendors.
-      tiers: await capabilityTiers().catch((e) => ({ error: e.message })),
+      tiers: capabilityTiers
+        ? await capabilityTiers().catch((e) => ({ error: e.message }))
+        : { error: 'capability tiers unavailable: the default vendor package is not installed (core-only install)' },
       productionLoop: {
         advice: 'check_human_advice / acknowledge_human_advice / begin_advice_work / resolve_human_advice / list_human_advice',
         revisions: 'every promoted full-scene render is archived immutably; list_scene_revisions / use_scene_revision',

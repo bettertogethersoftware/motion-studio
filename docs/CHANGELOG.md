@@ -60,6 +60,19 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### The core-only install is a tested reality (v0.26)
+
+The vendor-boundary plan's acceptance test 1 exists and passes: the engine
+source is mirrored to a temp tree WITHOUT src/vendors/ (node_modules
+junctioned in, templates/ carried — app data, not vendor code) and the
+mirrored MCP server is spawned over real stdio. It initializes, answers
+get_capabilities (with the tiers block reporting the vendor package's
+absence), creates films and scenes, and refuses every audio tool with the
+structured `*_unavailable` error. The test caught a real bug on its first
+run: the MCP server still static-imported `tiers.js` from the vendors tree,
+which killed a core-only server before initialize ever ran — tiers now
+loads with the same dynamic, failure-tolerant pattern as the registry.
+
 ### The vendor boundary is physical: providers and catalogs live in vendors/default (v0.26)
 
 Slice A Phase 2's file moves, done: eleven modules left core/ —
