@@ -102,6 +102,7 @@ export function defaultSpeechCatalog() {
         offline: false,
       }),
       settingsKey: 'azure',
+      settingsFields: Object.freeze(['region', 'voice', 'style', 'outputFormat']),
       deterministic: false,
       warn: { azureOnly: false, nonDeterministic: true, unsupported: [] },
       async probe({ section = {}, timeoutMs, force } = {}) {
@@ -139,6 +140,7 @@ export function defaultSpeechCatalog() {
         offline: true,
       }),
       settingsKey: 'piper',
+      settingsFields: Object.freeze(['exe', 'python', 'voicesDir', 'voice']),
       deterministic: true,
       warn: { azureOnly: true, nonDeterministic: false, unsupported: [] },
       async probe({ section = {}, timeoutMs } = {}) {
@@ -172,6 +174,7 @@ export function defaultSpeechCatalog() {
         offline: false,
       }),
       settingsKey: 'elevenlabs',
+      settingsFields: Object.freeze(['voice', 'model', 'outputFormat']),
       deterministic: true,
       // ElevenLabs has no SSML: style/styleDegree/role/pitch/volume have no
       // mapping there. `rate` becomes voice_settings.speed and `deterministic`
@@ -209,6 +212,7 @@ export function defaultSpeechCatalog() {
         offline: false,
       }),
       settingsKey: 'openai',
+      settingsFields: Object.freeze(['voice', 'model', 'instructions']),
       deterministic: false,
       // `style` maps onto the API's free-form `instructions` (the module warns
       // when the configured model predates that parameter); the remaining SSML
@@ -246,6 +250,7 @@ export function defaultSpeechCatalog() {
         offline: false,
       }),
       settingsKey: 'deepgram',
+      settingsFields: Object.freeze(['voice']),
       deterministic: false,
       // Aura takes text and a voice — every prosody knob is reported instead.
       warn: { azureOnly: false, nonDeterministic: true, unsupported: ['rate', 'volume', 'style', 'styleDegree', 'role', 'pitch'] },

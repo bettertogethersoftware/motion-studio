@@ -66,10 +66,18 @@ Active plan documents:
 - [x] A-6: both entrypoints build the runtime from the registry
       (2026-08-04), dynamically and failure-tolerantly per Phase 4; local
       names preserved so no handler changed. **Phase 1 of Slice A is
-      complete.** Next: Phase 2 file moves (catalogs + providers into
-      vendors/default/, spessasynth to the vendor package), the core-only
-      integration test, and the settings-schema injection that finishes
-      the catalog story.
+      complete.**
+- [x] Phase 2 (2026-08-04): P2-a `transcribeMedia` receives the transcription
+      dispatch (null → structured TRANSCRIPTION_UNAVAILABLE); P2-b eleven
+      modules physically moved into `vendors/default/` and the import-graph
+      test polices a real boundary; P2-c the core-only integration test
+      (`engine/test/core-only.test.js`) spawns a vendor-less mirror over real
+      stdio and passes — it caught a live static-import bug in the MCP server
+      on its first run; P2-d settings-schema injection — catalogs declare
+      `settingsFields`, the registry exposes `vendorSettingsFields(runtime)`,
+      the Studio threads it into `updateSettings`, core keeps a tethered
+      literal fallback. **Slice A remainder:** the spessasynth_core
+      dependency split, gated on §10.4 / Phase 3 packaging (Slice B).
 
 ## Engineering backlog (carried from the retired prioritized todo)
 

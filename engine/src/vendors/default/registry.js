@@ -34,3 +34,18 @@ export function createDefaultRuntime({ speech, music, transcription } = {}) {
     transcription: createTranscriptionDispatch(transcription ?? defaultTranscriptionCatalog()),
   });
 }
+
+/**
+ * The settings-schema view of a runtime (Slice A P2-d): which option fields
+ * each vendor section carries, keyed the way validateSettings expects.
+ * Entrypoints inject this so a pack's new vendor section validates without
+ * a core edit.
+ */
+export function vendorSettingsFields(runtime) {
+  const fields = (dispatch) => Object.fromEntries(
+    Object.values(dispatch.catalog)
+      .filter((e) => e.settingsKey)
+      .map((e) => [e.settingsKey, e.settingsFields ?? []]),
+  );
+  return { tts: fields(runtime.speech), transcription: fields(runtime.transcription) };
+}

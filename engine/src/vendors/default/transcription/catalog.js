@@ -27,6 +27,7 @@ export function defaultTranscriptionCatalog() {
         offline: true,
       }),
       settingsKey: 'whisper',
+      settingsFields: Object.freeze(['exe', 'model', 'modelsDir', 'language']),
       async probe({ section = {}, timeoutMs } = {}) {
         const probe = await checkWhisperTranscription({ whisper: section, ...(timeoutMs ? { timeoutMs } : {}) });
         return {

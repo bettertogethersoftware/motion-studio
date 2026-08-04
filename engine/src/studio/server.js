@@ -131,9 +131,11 @@ import { demoSpec, GM_PROGRAMS } from '../core/music-vendors.js';
 
 let vendorRuntime = null;
 let vendorRuntimeError = null;
+let vendorSettingsSchema = null;
 try {
-  const { createDefaultRuntime } = await import('../vendors/default/registry.js');
+  const { createDefaultRuntime, vendorSettingsFields } = await import('../vendors/default/registry.js');
   vendorRuntime = createDefaultRuntime();
+  vendorSettingsSchema = vendorSettingsFields(vendorRuntime);
 } catch (e) {
   vendorRuntimeError = e;
 }
@@ -707,7 +709,7 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           // meant for the NEW settings file, not a parting write to the old one.
           const relocated = body.paths ? await relocateStorage(body.paths) : null;
           const settings = body.patch
-            ? await updateSettings(body.patch, store.dataDir)
+            ? await updateSettings(body.patch, store.dataDir, vendorSettingsSchema ? { vendorSettingsFields: vendorSettingsSchema } : {})
             : await readSettings(store.dataDir);
           return sendJson(res, 200, {
             settings,

@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS } from '../src/core/settings.js';
+import { DEFAULT_SETTINGS, VENDOR_SETTINGS_FIELDS } from '../src/core/settings.js';
 import { AZURE_DEFAULT_FORMAT, AZURE_WAV_FORMATS } from '../src/vendors/default/speech/azure.js';
 import { ELEVENLABS_DEFAULT_FORMAT, ELEVENLABS_WAV_FORMATS } from '../src/vendors/default/speech/elevenlabs.js';
 
@@ -27,4 +27,11 @@ test('settings.js does not import the cloud vendor modules', async () => {
   for (const forbidden of ['tts-azure', 'tts-elevenlabs', 'tts-openai', 'tts-deepgram', 'tts-piper']) {
     assert.ok(!source.includes(`from './${forbidden}.js'`), `settings.js must not import ${forbidden}.js`);
   }
+});
+
+test('settings field table matches what the catalogs declare (P2-d tether)', async () => {
+  const { createDefaultRuntime, vendorSettingsFields } = await import('../src/vendors/default/registry.js');
+  const fromRegistry = vendorSettingsFields(createDefaultRuntime());
+  assert.deepEqual(fromRegistry, JSON.parse(JSON.stringify(VENDOR_SETTINGS_FIELDS)),
+    'core fallback table and catalog-declared settingsFields must agree');
 });

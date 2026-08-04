@@ -60,6 +60,21 @@ replaced by layers picked by *what changes them*
 No engine code changed; `deploy/provision.mjs` is new, standalone, and
 side-effect-free beyond writing the three files (`--dry-run` to preview).
 
+### Settings validation takes its vendor schema from the registry (v0.26)
+
+Slice A P2-d, the last piece of the catalog story: core no longer hard-codes
+which option fields `tts.azure` or `transcription.whisper` may carry. Each
+catalog entry declares its `settingsFields`, the registry exposes them as
+`vendorSettingsFields(runtime)`, and the Studio threads that schema into
+`updateSettings` — so a vendor pack that adds a new section validates it
+without a core edit. Core keeps `VENDOR_SETTINGS_FIELDS` as a literal
+fallback (settings must stay usable in a core-only install), with a
+drift-guard test tethering it to what the catalogs declare. Two behavior
+notes: a settings section core doesn't know is now tolerated untouched
+rather than rejected (an unknown pack's config survives an older build),
+and the `key`/`apiKey` refusal now applies to **every** vendor section
+uniformly — previously `tts.piper` escaped it. Suite: 881 tests, 0 fail.
+
 ### The core-only install is a tested reality (v0.26)
 
 The vendor-boundary plan's acceptance test 1 exists and passes: the engine

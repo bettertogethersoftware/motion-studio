@@ -159,7 +159,30 @@ export const DEFAULT_SETTINGS = Object.freeze({
   }),
 });
 
-export function validateSettings(s) {
+
+/**
+ * Which nullable-string option fields each vendor settings section carries
+ * (Slice A P2-d). This literal table is core's FALLBACK — the registry
+ * declares the same lists on its catalog entries (`settingsFields`) and
+ * entrypoints inject them into validateSettings, so a vendor pack can add a
+ * section without a core edit. test/vendor-defaults-drift.test.js tethers
+ * the two. Secret refusal ('key'/'apiKey') applies to every section here —
+ * a credential in settings.json is never acceptable, whichever vendor.
+ */
+export const VENDOR_SETTINGS_FIELDS = Object.freeze({
+  tts: Object.freeze({
+    azure: Object.freeze(['region', 'voice', 'style', 'outputFormat']),
+    piper: Object.freeze(['exe', 'python', 'voicesDir', 'voice']),
+    elevenlabs: Object.freeze(['voice', 'model', 'outputFormat']),
+    openai: Object.freeze(['voice', 'model', 'instructions']),
+    deepgram: Object.freeze(['voice']),
+  }),
+  transcription: Object.freeze({
+    whisper: Object.freeze(['exe', 'model', 'modelsDir', 'language']),
+  }),
+});
+
+export function validateSettings(s, { vendorSettingsFields = VENDOR_SETTINGS_FIELDS } = {}) {
   const problems = [];
   const isPosInt = (v) => Number.isInteger(v) && v > 0;
   const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -256,64 +279,26 @@ export function validateSettings(s) {
     else {
       if (!TTS_VENDORS.includes(t.vendor)) problems.push(`tts.vendor: one of ${TTS_VENDORS.join(', ')}`);
       vendorChain(t.vendors, 'tts.vendors', TTS_VENDORS);
-      const a = t.azure;
-      if (!a || typeof a !== 'object') problems.push('tts.azure: object required');
-      else {
-        const nullableString = (k) => {
-          if (a[k] !== null && (typeof a[k] !== 'string' || !a[k].trim())) {
-            problems.push(`tts.azure.${k}: non-empty string or null required`);
-          }
-        };
-        nullableString('region');
-        nullableString('voice');
-        nullableString('style');
-        // outputFormat is validated structurally only (Slice A): the Azure
-        // vendor refuses a non-WAV format with a structured error at use
-        // time, which is the authoritative check — and enum-validating here
-        // would destroy a setting written by a newer build that knows a
-        // format this build does not (the forward-compatibility rule from
-        // core/vendors.js).
-        nullableString('outputFormat');
-        // The key is environment-only. Accepting it here — even to "help" —
-        // would write a live credential into a file users share freely.
-        if ('key' in a || 'apiKey' in a) {
-          problems.push('tts.azure.key: the Azure Speech key is read from the environment only and is never stored in settings.json');
-        }
-      }
-      const p = t.piper;
-      if (!p || typeof p !== 'object') problems.push('tts.piper: object required');
-      else {
-        for (const k of ['exe', 'python', 'voicesDir', 'voice']) {
-          if (p[k] !== null && (typeof p[k] !== 'string' || !p[k].trim())) {
-            problems.push(`tts.piper.${k}: non-empty string or null required`);
-          }
-        }
-      }
-      // The v0.20 cloud vendors, mirroring the azure rules above: nullable
-      // strings for the non-secret knobs, and a key is refused rather than
-      // stored — accepting one, even to "help", would write a live credential
-      // into a file users share freely.
-      const cloudVendor = (section, fields, label) => {
+      // Vendor option sections, validated generically from the injected (or
+      // fallback) field table (Slice A P2-d). Structural only — enums are
+      // the vendor's job at use time (the forward-compatibility rule from
+      // core/vendors.js) — and a section for a pack this build does not
+      // know is tolerated untouched rather than destroyed. The secret rule
+      // is not per-vendor: 'key'/'apiKey' in ANY section is refused, because
+      // a credential in a file users share freely is never acceptable.
+      for (const [section, fields] of Object.entries(vendorSettingsFields.tts ?? {})) {
         const c = t[section];
-        if (!c || typeof c !== 'object') {
-          problems.push(`tts.${section}: object required`);
-          return null;
-        }
+        if (c === undefined) continue; // pack not installed / older file — fine
+        if (!c || typeof c !== 'object') { problems.push(`tts.${section}: object or absent required`); continue; }
         for (const k of fields) {
-          if (c[k] !== null && (typeof c[k] !== 'string' || !c[k].trim())) {
+          if (c[k] !== undefined && c[k] !== null && (typeof c[k] !== 'string' || !c[k].trim())) {
             problems.push(`tts.${section}.${k}: non-empty string or null required`);
           }
         }
         if ('key' in c || 'apiKey' in c) {
-          problems.push(`tts.${section}.key: the ${label} API key is read from the environment only and is never stored in settings.json`);
+          problems.push(`tts.${section}.key: API keys are read from the environment only and are never stored in settings.json`);
         }
-        return c;
-      };
-      // outputFormat rides the same structural rule as azure's above: the
-      // vendor validates the enum at use time.
-      cloudVendor('elevenlabs', ['voice', 'model', 'outputFormat'], 'ElevenLabs');
-      cloudVendor('openai', ['voice', 'model', 'instructions'], 'OpenAI');
-      cloudVendor('deepgram', ['voice'], 'Deepgram');
+      }
       // Starred voices (v0.22): a map of vendor → distinct voice names.
       // Unknown vendor keys are refused rather than dropped, same reasoning
       // as duplicate chain entries: they mean the author misunderstood.
@@ -380,7 +365,7 @@ export function validateSettings(s) {
         const w = tr.whisper;
         if (!w || typeof w !== 'object') problems.push('transcription.whisper: object required');
         else {
-          for (const k of ['exe', 'model', 'modelsDir', 'language']) {
+          for (const k of (vendorSettingsFields.transcription?.whisper ?? VENDOR_SETTINGS_FIELDS.transcription.whisper)) {
             if (w[k] !== null && (typeof w[k] !== 'string' || !w[k].trim())) {
               problems.push(`transcription.whisper.${k}: non-empty string or null required`);
             }
@@ -563,7 +548,7 @@ export async function readSettings(dataDir = defaultDataDir()) {
  * Section-wise merge a patch into the stored settings, validate, and persist
  * atomically. Unknown top-level keys are rejected so typos fail loudly.
  */
-export async function updateSettings(patch, dataDir = defaultDataDir()) {
+export async function updateSettings(patch, dataDir = defaultDataDir(), { vendorSettingsFields } = {}) {
   const ALLOWED = new Set(['newSceneDefaults', 'newFilmDefaults', 'deliverablePresets', 'render', 'ffmpeg', 'tts', 'music', 'transcription']);
   for (const k of Object.keys(patch ?? {})) {
     if (!ALLOWED.has(k)) {
@@ -605,7 +590,7 @@ export async function updateSettings(patch, dataDir = defaultDataDir()) {
       ...(patch.transcription ?? {}),
       whisper: { ...cur.transcription.whisper, ...(patch.transcription?.whisper ?? {}) },
     },
-  });
+  }, vendorSettingsFields ? { vendorSettingsFields } : undefined);
   const abs = settingsPath(dataDir);
   // The settings file need not live inside the data dir (v0.22), so create the
   // folder it is actually going into rather than assuming the two agree.
