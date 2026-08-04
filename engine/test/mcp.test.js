@@ -253,10 +253,15 @@ test('mcp: create_film + create_scene scaffold, and the workspace lists them', a
   assert.ok(data.files.some((f) => f.path === 'composition.js'));
   assert.ok(fs.existsSync(path.join(data.path, 'frame-api.js')));
 
+  // Compact by default (TE P0-1): counts, no per-scene layout. detail:'full'
+  // remains the explicit road to the complete resolved plan.
   const list = await callJson('list_films');
   assert.equal(list.data.films.length, 1);
   assert.equal(list.data.films[0].film, 'agent-demo');
-  assert.equal(list.data.films[0].sceneLayout.length, 1);
+  assert.equal(list.data.films[0].readiness.total, 1);
+  assert.equal(list.data.films[0].sceneLayout, undefined, 'summary carries no sceneLayout');
+  const listFull = await callJson('list_films', { detail: 'full' });
+  assert.equal(listFull.data.films[0].sceneLayout.length, 1);
 
   // The workspace is this server's own — every id above is relative to it.
   const ws = await callJson('get_workspace');

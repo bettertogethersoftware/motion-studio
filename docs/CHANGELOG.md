@@ -2,7 +2,27 @@
 
 ## Unreleased
 
-(nothing yet)
+### Production reads are compact by default, with cursors (TE P0-1/P0-2)
+
+The first slice of the token-efficient plan, motivated by a measured
+production run (49% of 57.5 M agent tokens spent re-reading unchanged
+state). `get_production_status` now defaults to a compact summary and
+returns an opaque `cursor`: pass it back as `since` and an unchanged film
+answers a two-line heartbeat; a changed film adds a `delta` naming exactly
+the changed segments (computed statelessly — the cursor carries per-segment
+row hashes, so no server state and no lying after a restart); garbage
+cursors answer `cursorReset: true`, never an error. `detail: "scenes"` adds
+one compact row per segment (`state` folds missing > stale > rendered >
+unrendered); `"full"` remains the complete legacy shape. `list_films`
+defaults to per-film readiness counts (`detail: "full"` restores the
+resolved plans); `get_film` keeps `"full"` as its default — it is the
+editing read — but gains `"scenes"`/`"summary"` for the loop. Compactness
+never hides failure: `problems` stays complete in every projection.
+Projection and cursor logic live in `core/projections.js`, unit-tested;
+timestamps and live-activity heartbeats are deliberately excluded from the
+cursor hash so "unchanged" is actually reachable. SKILL.md now teaches the
+`since` polling pattern (skills are copies — re-copy per the release
+checklist).
 
 ## v0.26 (2026-08-04) — the vendor boundary, cross-platform deployment, and the desktop viewer
 

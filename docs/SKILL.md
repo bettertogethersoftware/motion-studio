@@ -142,7 +142,12 @@ short present-tense phrase ("Creating scene demo-shot", "Building film")
 whenever your activity changes and every minute or two during long work.
 Pass `note` on `render` calls — it becomes the version card the human reads.
 `get_production_status` tells you whether anything is unresolved or unbuilt
-before you report completion.
+before you report completion. It is compact by default and returns a
+`cursor` (v0.26): when you check status repeatedly — waiting out a render,
+re-checking after advice — pass the previous `cursor` back as `since` and an
+unchanged film costs a two-line heartbeat instead of a full re-read;
+`detail: "scenes"` adds one compact state row per segment when you need
+per-scene readiness without the whole film document.
 
 ## The correct end-to-end workflow
 

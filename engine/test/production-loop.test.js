@@ -200,6 +200,52 @@ test('loop: activity heartbeat and production status', async () => {
   assert.equal(status.data.activity[0].stale, false);
 });
 
+test('loop: production status is compact by default, serves scene rows and cursor deltas (TE P0-1/P0-2)', async () => {
+  const film = await callJson('create_film', { name: 'Cursor Film', fps: 30, width: 320, height: 240, durationInFrames: 12 });
+  const slug = film.data.film;
+  await callJson('create_scene', { film: slug, name: 'Row One', durationInFrames: 12 });
+
+  // Summary default: readiness + cursor, no per-scene rows, no sequences prose.
+  const summary = await callJson('get_production_status', { film: slug });
+  assert.equal(summary.isError, false, JSON.stringify(summary.data));
+  assert.ok(summary.data.cursor.startsWith('c1.'));
+  assert.ok(summary.data.revision, 'summary carries the revision for update_film');
+  assert.equal(summary.data.scenes, undefined);
+  assert.equal(summary.data.sequences, undefined, 'sequence prose is detail: full');
+
+  // scenes detail: one compact row per segment — never composition payloads.
+  const scenes = await callJson('get_production_status', { film: slug, detail: 'scenes' });
+  assert.equal(scenes.data.scenes.length, 1);
+  assert.deepEqual(
+    Object.keys(scenes.data.scenes[0]).sort(),
+    ['filmOffset', 'frames', 'kind', 'renderVerified', 'scene', 'slug', 'state'],
+  );
+  assert.equal(scenes.data.scenes[0].state, 'unrendered');
+
+  // Unchanged cursor → tiny heartbeat.
+  const beat = await callJson('get_production_status', { film: slug, since: summary.data.cursor });
+  assert.equal(beat.data.unchanged, true, JSON.stringify(beat.data));
+  assert.ok(beat.data.cursor && beat.data.generatedAt);
+  assert.equal(beat.data.readiness, undefined, 'a heartbeat repeats nothing');
+
+  // A real change → delta naming exactly the new segment, no heartbeat.
+  await callJson('create_scene', { film: slug, name: 'Row Two', durationInFrames: 12 });
+  const delta = await callJson('get_production_status', { film: slug, detail: 'scenes', since: summary.data.cursor });
+  assert.equal(delta.data.unchanged, undefined);
+  assert.deepEqual(delta.data.delta.changed.map((r) => r.slug), ['row-two']);
+  assert.deepEqual(delta.data.delta.removed, []);
+
+  // Garbage cursor → cursorReset plus the full projection, never an error.
+  const reset = await callJson('get_production_status', { film: slug, since: 'not-a-cursor' });
+  assert.equal(reset.isError, false);
+  assert.equal(reset.data.cursorReset, true);
+  assert.ok(reset.data.readiness);
+
+  // full remains the legacy shape, explicitly requested.
+  const full = await callJson('get_production_status', { film: slug, detail: 'full' });
+  assert.ok(Array.isArray(full.data.sequences));
+});
+
 test('loop: render → revision history → rework → use_scene_revision → build → delivery', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
   const film = await callJson('create_film', { name: 'Rev Film', fps: 30, width: 320, height: 240, durationInFrames: 8 });
   const slug = film.data.film;

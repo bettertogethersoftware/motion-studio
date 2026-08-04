@@ -194,6 +194,7 @@ import {
 import { listRevisions, useRevision, currentRevisionId } from '../core/revisions.js';
 import { listDeliveries, getDeliveryManifest, currentDeliveryId } from '../core/deliveries.js';
 import { reportActivity, productionStatus } from '../core/activity.js';
+import { segmentRows, computeCursor, parseCursor, diffRows } from '../core/projections.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRAME_API_DOC = path.resolve(__dirname, '../../../docs/frame-api.md');
@@ -570,27 +571,46 @@ server.registerTool(
   {
     title: 'List this workspace\'s films',
     description:
-      'Every film in this workspace with its resolved plan: scene layout (each scene\'s filmOffset — what you ' +
-      'place master audio and cues against), total length, and a `problems` list (unrendered scenes, signature ' +
-      'mismatches, missing assets). A film with problems can be edited but not built. ' +
-      'Use create_film / update_film to change one, build_film to assemble one.',
-    inputSchema: {},
+      'Every film in this workspace. COMPACT BY DEFAULT (detail "summary"): per film its length, format, ' +
+      'readiness counts, and problem count. detail "full" adds each film\'s complete resolved plan (scene ' +
+      'layout with every filmOffset, the signature, the full problems list) — ask for it only when you need ' +
+      'the layout of every film at once; get_film serves one film\'s plan. A film with problems can be ' +
+      'edited but not built. Use create_film / update_film to change one, build_film to assemble one.',
+    inputSchema: {
+      detail: z.enum(['summary', 'full']).optional()
+        .describe('summary (default): compact per-film rows. full: each film\'s complete resolved plan.'),
+    },
   },
-  wrap(async () => {
+  wrap(async ({ detail = 'summary' } = {}) => {
     const films = await store.listFilms(WORKSPACE);
     const out = [];
     for (const f of films) {
       if (f.broken) { out.push({ film: f.slug, name: f.name, broken: true }); continue; }
       const film = await store.getFilm(f.id).catch(() => null);
       const plan = film && await planFilm({ film, store }).catch(() => null);
+      if (detail === 'full' || !plan) {
+        out.push({ film: f.slug, name: f.name, updatedAt: f.updatedAt, ...(plan ? planSummary(plan) : {}) });
+        continue;
+      }
+      const rows = segmentRows(plan, localId);
       out.push({
         film: f.slug,
         name: f.name,
         updatedAt: f.updatedAt,
-        ...(plan ? planSummary(plan) : {}),
+        totalFrames: plan.totalFrames,
+        durationSeconds: plan.durationSeconds,
+        fps: plan.fps,
+        format: plan.format,
+        readiness: {
+          total: rows.length,
+          rendered: rows.filter((r) => r.state === 'rendered' || r.state === 'present').length,
+          stale: rows.filter((r) => r.state === 'stale').length,
+          missing: rows.filter((r) => r.state === 'missing').length,
+          problems: plan.problems.length,
+        },
       });
     }
-    return ok({ workspace: WORKSPACE, films: out });
+    return ok({ workspace: WORKSPACE, detail, films: out });
   }),
 );
 
@@ -701,12 +721,41 @@ server.registerTool(
       'resolved plan: per-scene filmOffset/duration/rendered state and a `problems` list. filmOffset is what ' +
       'master audio, sfx cues and captions are placed against — never accumulate scene durations by hand. ' +
       'Also returns `revision`: pass it to update_film as expectedRevision so your patch cannot silently ' +
-      'revert edits the human made in the Studio while you were thinking.',
-    inputSchema: { film: z.string().describe('Film id (slug) from list_films/create_film') },
+      'revert edits the human made in the Studio while you were thinking. detail "full" (default) is this ' +
+      'complete editing shape; for the production loop prefer detail "scenes" (readiness + one compact row ' +
+      'per segment, no document body) or "summary" (readiness only) — or get_production_status, which also ' +
+      'carries advice/delivery state and a cursor.',
+    inputSchema: {
+      film: z.string().describe('Film id (slug) from list_films/create_film'),
+      detail: z.enum(['summary', 'scenes', 'full']).optional()
+        .describe('full (default): the complete document + plan, for editing. scenes: compact per-segment rows. summary: readiness facts only.'),
+    },
   },
-  wrap(async ({ film }) => {
+  wrap(async ({ film, detail = 'full' }) => {
     const doc = await store.getFilm(qualifyFilm(film));
     const plan = await planFilm({ film: doc, store });
+    if (detail !== 'full') {
+      const rows = segmentRows(plan, localId);
+      return ok({
+        film: doc.slug,
+        name: doc.name,
+        revision: doc.revision,
+        totalFrames: plan.totalFrames,
+        durationSeconds: plan.durationSeconds,
+        fps: plan.fps,
+        format: plan.format,
+        signature: plan.signature,
+        readiness: {
+          total: rows.length,
+          rendered: rows.filter((r) => r.state === 'rendered' || r.state === 'present').length,
+          stale: rows.filter((r) => r.state === 'stale').length,
+          missing: rows.filter((r) => r.state === 'missing').length,
+          problems: plan.problems.length,
+        },
+        problems: plan.problems, // complete, always
+        ...(detail === 'scenes' ? { scenes: rows } : {}),
+      });
+    }
     const { id, workspace, path: filmPath, ...fields } = doc;
     return ok({
       film: doc.slug,
@@ -3406,21 +3455,87 @@ server.registerTool(
       'One film\'s production facts: segment readiness (rendered / stale / missing / problems), unresolved ' +
       'advice counts, archived deliveries, the current review-pinned delivery, whether promoted work is newer ' +
       'than that delivery (build_film would publish it), and live agent activity. The same projection the ' +
-      'Studio header renders. Use it to decide "is there anything left to do" before reporting completion.',
-    inputSchema: { film: z.string() },
+      'Studio header renders. Use it to decide "is there anything left to do" before reporting completion. ' +
+      'COMPACT BY DEFAULT (detail "summary"); "scenes" adds one compact row per segment; "full" is the ' +
+      'complete legacy shape. Pass the returned `cursor` back as `since` on the next call: unchanged state ' +
+      'answers with a tiny heartbeat, changed state includes a `delta` naming exactly the changed segments.',
+    inputSchema: {
+      film: z.string(),
+      detail: z.enum(['summary', 'scenes', 'full']).optional()
+        .describe('summary (default): readiness/advice/delivery facts. scenes: + one compact row per segment. full: the complete legacy shape.'),
+      since: z.string().optional()
+        .describe('The cursor from a previous call. Unchanged → heartbeat; changed → delta of changed segments; unparseable → cursorReset: true + full projection.'),
+    },
   },
-  wrap(async ({ film }) => {
+  wrap(async ({ film, detail = 'summary', since }) => {
     const doc = await filmForAdvice(film);
-    const status = await productionStatus({ store, film: doc });
-    return ok({
-      ...status,
-      filmId: undefined,
+    const plan = await planFilm({ film: doc, store });
+    const status = await productionStatus({ store, film: doc, plan });
+    const rows = segmentRows(plan, localId);
+    const activity = status.activity.map(({ filmId, sceneId, ...a }) => ({
+      ...a,
+      ...(filmId ? { film: localId(filmId) } : {}),
+      ...(sceneId ? { scene: localId(sceneId) } : {}),
+    }));
+    // Everything summary-visible except rows, timestamps, and live-activity
+    // heartbeats — those churn every call and would make "unchanged"
+    // unreachable (see core/projections.js).
+    const marks = {
+      revision: doc.revision,
+      name: status.name,
+      totalFrames: status.totalFrames,
+      fps: status.fps,
+      durationSeconds: status.durationSeconds,
+      advice: status.advice,
+      deliveries: status.deliveries,
+      currentDeliveryId: status.currentDelivery?.id ?? null,
+      newerWorkThanDelivery: status.newerWorkThanDelivery,
+      problems: plan.problems,
+    };
+    const cursor = computeCursor({ film: doc.slug, rows, marks });
+
+    const parsed = since !== undefined ? parseCursor(since) : undefined;
+    if (parsed && parsed.film === doc.slug && parsed.o === parseCursor(cursor).o) {
+      return ok({
+        film: doc.slug, unchanged: true, cursor,
+        activityAt: activity.reduce((latest, a) => (a.at > latest ? a.at : latest), '') || null,
+        generatedAt: status.generatedAt,
+      });
+    }
+
+    const summary = {
       film: doc.slug,
-      activity: status.activity.map(({ filmId, sceneId, ...a }) => ({
-        ...a,
-        ...(filmId ? { film: localId(filmId) } : {}),
-        ...(sceneId ? { scene: localId(sceneId) } : {}),
-      })),
+      name: status.name,
+      revision: doc.revision,
+      totalFrames: status.totalFrames,
+      fps: status.fps,
+      durationSeconds: status.durationSeconds,
+      readiness: status.readiness,
+      problems: plan.problems, // complete, always — compactness never hides failure
+      advice: status.advice,
+      deliveries: status.deliveries,
+      currentDelivery: status.currentDelivery,
+      newerWorkThanDelivery: status.newerWorkThanDelivery,
+      activity,
+      generatedAt: status.generatedAt,
+      cursor,
+    };
+    // A stale-but-parseable cursor for this film earns a delta naming
+    // exactly the changed segments; garbage earns cursorReset, never an error.
+    const delta = parsed && parsed.film === doc.slug ? diffRows(parsed, rows) : undefined;
+    const reset = since !== undefined && !delta ? { cursorReset: true } : {};
+
+    if (detail === 'full') {
+      return ok({
+        ...status, filmId: undefined, film: doc.slug,
+        activity, cursor, ...(delta ? { delta } : {}), ...reset,
+      });
+    }
+    return ok({
+      ...summary,
+      ...(detail === 'scenes' ? { scenes: rows } : {}),
+      ...(delta ? { delta } : {}),
+      ...reset,
     });
   }),
 );

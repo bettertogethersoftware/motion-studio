@@ -30,9 +30,16 @@ Active plan documents:
        eliminates, and it is engine-side, testable, and consumed by
        everything below. Its P1-3 (durable run groups) absorbs the old
        "durable jobs" backlog item.
-2. [ ] **Docker support** ([plan](docker-support-plan.md)) — 1–2 days,
-       independent of item 1; the best effort-to-impression ratio for the
-       demo tier and server-hosted deployments. Pull it forward past item 1
+2. [ ] **`prepare_image`** ([plan](image-prep-plan.md)) — elevated
+       2026-08-04 by the user: the measured Env-A hard wall (an MCP-only
+       agent cannot crop, key, or interrogate a supplied still). The plan
+       is implementation-ready; decide its three open questions in flight
+       (lean: test multiply-under-transform before building keyBackground;
+       sync with an input-count cap; contact sheets stay in render-review).
+       ~1 day.
+3. [ ] **Docker support** ([plan](docker-support-plan.md)) — 1–2 days,
+       independent of items 1–2; the best effort-to-impression ratio for
+       the demo tier and server-hosted deployments. Pull it forward
        whenever a customer demo lands on the calendar.
 3. [ ] **PlateForge/MotionForge** ([plan](plate-render-forge-plan.md)) —
        **after** item 1's P0: the motionforge half should consume
@@ -53,6 +60,25 @@ Active plan documents:
        **deprioritized by §10.7** ("no installer channel — the Electron
        host follows, never leads"); the unpackaged `desktop/` host covers
        the checkout case today.
+
+## Token-efficient loop progress (started 2026-08-04)
+
+- [x] TE-1 (2026-08-04): P0-1 detail projections + P0-2 cursors —
+      `core/projections.js` (segment rows with folded `state`, stateless
+      cursor/diff), `get_production_status` compact-by-default with
+      `since` heartbeats/deltas/`cursorReset`, `list_films` readiness
+      rows by default, `get_film` gains `scenes`/`summary` (default stays
+      `full` — the editing read). Deferred from the row spec:
+      `outputIdentity {bytes, mtimeMs}` — planFilm does not surface it yet;
+      add when render groups (P0-6) need it.
+- [ ] TE-2: P0-4/P0-5 batch operations — `use_shared_asset_batch`,
+      `write_composition_bundle`.
+- [ ] TE-3: P0-6/P0-7 `render_group` / `wait_render_group` /
+      `cancel_render_group`; then the P0-3 output-size test sweep across
+      remaining tools.
+- [ ] TE-4 (P1): `finish_film`, `review_render_grid`, durable run groups
+      (absorbs the old "durable jobs" item), agent-economy telemetry, and
+      the NEON APEX replay acceptance.
 
 ## Engineering backlog
 
