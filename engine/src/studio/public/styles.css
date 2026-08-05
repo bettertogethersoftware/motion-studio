@@ -1,19 +1,33 @@
 /* Motion Studio — Studio UI.
-   Aesthetic: film-lab instrument panel. Near-black ink, one hot amber accent
-   (record-light), hard corners, hairline rules, monospace numerals. No card
-   soup, no gradients-on-white, no rounded-everything. */
+   Aesthetic: film-lab instrument panel wearing VS Code's shell (v0.27). The
+   surfaces, spacing and chrome are VS Code Dark Modern — an editor lighter than
+   its side bar, hairline #2b2b2b rules, a 48px activity bar, a 22px status bar,
+   list rows that light on hover — because the app already had that shape (a
+   tree, editor tabs, a bottom panel, a secondary side bar) and was only
+   spelling it differently.
+
+   What is deliberately NOT VS Code: the accent. Amber stays the record light —
+   it marks every active tab, selected row and focus ring — because a video tool
+   that looks exactly like an IDE has lost the thing that says which app you are
+   in. Hard corners stay too, bar the 2px VS Code puts on inputs and buttons. */
 
 :root {
-  --ink: #0e0f12;
-  --ink-2: #14161b;
-  --ink-3: #1c1f26;
-  --line: #2a2e38;
-  --text: #d6d9e0;
-  --dim: #7c8394;
+  --ink: #1f1f1f;          /* editor surface — the LIGHTEST of the three */
+  --ink-2: #181818;        /* side bar, panels, activity + status bars */
+  --ink-3: #2a2d2e;        /* list hover */
+  --select: #37373d;       /* list selection without focus */
+  --line: #2b2b2b;
+  --input-bg: #313131;
+  --text: #cccccc;
+  --dim: #9d9d9d;
   --accent: #ffb454;       /* amber record light */
   --accent-ink: #1a1204;
   --ok: #7fd18c;
-  --err: #ff6b5e;
+  --err: #f14c4c;          /* VS Code's error red */
+  --warn: #cca700;
+  --radius: 2px;           /* what VS Code puts on inputs and buttons */
+  --activity-w: 48px;
+  --status-h: 22px;
   --mono: "SFMono-Regular", ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
@@ -33,7 +47,9 @@ body {
 
 /* ------------------------------- layout ------------------------------- */
 
-.frame { display: grid; grid-template-columns: 264px 1fr; height: 100vh; }
+/* Height now comes from .vs-shell, which also holds the activity and status
+   bars; the frame is just the side bar plus the editor area. */
+.frame { display: grid; grid-template-columns: 264px 1fr; flex: 1; min-width: 0; min-height: 0; }
 
 .rail {
   border-right: 1px solid var(--line);
@@ -147,19 +163,15 @@ body {
 .library-table .lib-path { color: var(--text); }
 .lib-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
-/* collapsible rail */
-.collapse-btn { margin-left: auto; padding: 2px 7px; font-size: 12px; align-self: start; }
-.rail-collapsed .rail { border-right: 1px solid var(--line); }
-.rail-collapsed.frame { grid-template-columns: 46px 1fr; }
-.rail-collapsed .brand { padding: 14px 8px; justify-content: center; }
-.rail-collapsed .brand-text,
-.rail-collapsed .brand-mark,
-.rail-collapsed .rail-section { display: none; }
-.rail-collapsed .collapse-btn { margin: 0; }
-/* 46px of rail cannot hold three buttons side by side — stack them. */
-.rail-collapsed .rail-foot { padding: 10px 6px; flex-direction: column; gap: 6px; }
-.rail-collapsed .foot-btn { margin: 0; width: 100%; flex: none; }
-.rail-collapsed .foot-label { display: none; }
+/* Collapsed side bar (v0.27). The Explorer collapses to NOTHING, the way VS
+   Code's does, and the activity bar's ☰ is the way back. It used to leave a
+   46px stub carrying its own »: two controls for one job, and the stub had
+   nothing left to hold once the vendor buttons moved to the activity bar. */
+.rail-collapsed.frame { grid-template-columns: 0 1fr; }
+/* Zero-width and hidden rather than `display: none`: taking it out of flow
+   drops the stage into the 0 track behind it, and the document collapses with
+   the side bar. `visibility` also takes its controls out of the tab order. */
+.rail-collapsed .rail { overflow: hidden; visibility: hidden; border-right: 0; }
 
 /* settings dialog extras */
 label.grow { flex: 1; }
@@ -184,8 +196,7 @@ dialog .note { font-size: 11px; max-width: 420px; margin: 6px 0 0; }
 .workbench {
   display: grid;
   grid-template-rows: 1fr 1fr;
-  height: 100%;
-  min-height: 0;
+  flex: 1; min-height: 0; /* the stage is a flex column; the tab strip is above */
 }
 /* Collapsed: the panel keeps only its tab bar and the viewport takes the rest. */
 .workbench.panel-collapsed { grid-template-rows: 1fr auto; }
@@ -197,6 +208,17 @@ dialog .note { font-size: 11px; max-width: 420px; margin: 6px 0 0; }
   padding-bottom: 8px;
   font-size: 13px;
 }
+/* The return edge: the scene names the film it belongs to, and that name IS
+   the way back. Ellipsised because a film title is longer than the room for
+   it; the whole thing is in the tooltip. */
+.crumb { display: flex; align-items: baseline; gap: 10px; min-width: 0; max-width: 42%; }
+.crumb-link {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dim); text-decoration: none;
+  font: 12px var(--mono); letter-spacing: 0.04em;
+}
+.crumb-link:hover { color: var(--accent); }
+.crumb-sep { color: var(--line); }
 #project-title { color: var(--text); letter-spacing: 0.04em; }
 #hot-reload-dot { margin-left: auto; color: var(--line); font-size: 10px; }
 #hot-reload-dot.live { color: var(--ok); }
@@ -299,9 +321,12 @@ label.check { flex-direction: row; align-items: center; text-transform: none; le
 .deliverable-options .deliverable-size { color: var(--dim); font: 10px var(--mono); margin-left: auto; }
 .deliverable-picker { margin: 12px 0; padding: 8px 10px 2px; border: 1px solid var(--line); }
 .deliverable-picker legend { padding: 0 5px; color: var(--dim); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+/* VS Code's input: a filled well rather than an outlined box, 2px corners, and
+   a one-pixel accent ring on focus (it uses #007fd4; we use the amber). */
 input, select {
-  background: var(--ink);
-  border: 1px solid var(--line);
+  background: var(--input-bg);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
   color: var(--text);
   padding: 6px 8px;
   font: 13px var(--mono);
@@ -309,11 +334,13 @@ input, select {
 }
 input:focus, select:focus { border-color: var(--accent); outline: none; }
 input[type="checkbox"] { accent-color: var(--accent); }
+::selection { background: rgba(255, 180, 84, 0.28); }
 
 button.primary {
   background: var(--accent);
   color: var(--accent-ink);
   border: 1px solid var(--accent);
+  border-radius: var(--radius);
   font: 600 13px var(--mono);
   padding: 7px 16px;
   cursor: pointer;
@@ -324,13 +351,16 @@ button.primary:disabled { opacity: 0.4; cursor: default; }
 button.ghost {
   background: none;
   border: 1px solid var(--line);
+  border-radius: var(--radius);
   color: var(--dim);
   font: 12px var(--mono);
   padding: 6px 12px;
   cursor: pointer;
 }
-button.ghost:hover { color: var(--text); border-color: var(--dim); }
+button.ghost:hover { color: var(--text); border-color: var(--dim); background: var(--ink-3); }
 button.ghost.danger:hover { color: var(--err); border-color: var(--err); }
+/* Keyboard focus is visible everywhere; the mouse never draws a ring. */
+:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ------------------------------- job card ------------------------------ */
 
@@ -490,11 +520,9 @@ dialog .fieldrow { margin-bottom: 10px; }
    264px); collapsed rail: icon only. Settings is icon-only in both (v0.25).
    min-width: max-content, NOT 0: flex's equal split can be narrower than a
    label, and nowrap text wider than its box paints over the next button. */
-.foot-btn { flex: 1; padding: 3px 4px; font-size: 10px; white-space: nowrap; min-width: max-content; }
-.foot-btn .foot-ico { display: none; }
-.foot-btn.icon-only .foot-ico { display: inline; }
-.rail-collapsed .foot-ico { display: inline; }
-.foot-btn.active { color: var(--accent); border-color: var(--accent); }
+/* The four vendor/settings buttons these styled moved to the activity bar in
+   v0.27 and are `.act-btn` now; shell.css shows their icon and hides their
+   label. Only the film document's own rail foot (+ new scene, + seq) is left. */
 .rail-foot { display: flex; align-items: center; gap: 4px; }
 .section-label {
   margin: 12px 0 8px;

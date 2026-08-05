@@ -2,6 +2,238 @@
 
 ## Unreleased
 
+### One Studio, documents inside it
+
+Motion Studio shipped as **two pages** from v0.20 to v0.26: the workspace tree
+lived on one, the film editor on another. Every navigation improvement since —
+the `&scene=` deep link, the breadcrumb, same-tab `open scene ↗`, the document
+strip, the command palette — was an attempt to make moving between them cheaper.
+
+They all treated the symptom. The disease was that opening a film was a **page
+navigation**, so the tree — the thing that tells you what exists — vanished the
+moment you looked at anything, and came back only by leaving what you were
+looking at.
+
+**There is now one page.** `index.html` is the shell: the Explorer tree of every
+workspace → film → scene on the machine, the document tabs, the activity bar,
+the status bar, and the full-stage pages that are not documents (vendors,
+global settings, the shared library). A film opens as a **document tab**. A
+scene opens as a **document tab**. Switching pages no longer exists.
+
+Each open document is a **same-origin iframe** — `/film.html?id=…` or the new
+`/scene.html?scene=…` — mounted once and then only shown or hidden. That is not
+the cheap option, it is the correct one:
+
+- **State survives**, which is what a tab strip means. Leave a film at frame
+  1500, work in a scene, come back: still frame 1500, with its undo stack,
+  timeline zoom and inspector tab intact. Rebuilding the view on each switch
+  would refetch and lose all of it.
+- **Element ids stop colliding.** `film.js` and the scene code both use
+  `#inspector`, `#btn-play`, `#frame-total` and `#timecode`; in one runtime a
+  second open film would quietly drive the first one's controls. Two open films
+  is a normal thing to want, and now it is a non-event.
+- **Documents stay addressable.** `/film.html?id=…` and `/scene.html?scene=…`
+  still open standalone with their own chrome — a scene on a second monitor
+  still works, and the deep links still mean what they meant.
+
+The scene workbench left `index.html` and `app.js` to become that document:
+`scene.html` + `scene.js`, with the preview, transport, render tab, hot-reload
+stream and mounted `ScenePanels`. `app.js` kept everything that is not a
+document and lost ~420 more lines. `studio-util.js` now holds the transport,
+the toast and the embed/shell helpers all three pages need.
+
+The shell asks the active document what to put in the status bar
+(`StudioDoc.status()`), so a film reports its problems, production line, mix
+state and save state, and a scene reports its path, render progress and
+hot-reload state — without either ever reaching up into the shell's DOM. A
+document going behind a full-stage page is told to `suspend()`, so opening
+settings never leaves a film playing behind it.
+
+**Removed by this:** `tabs.js` (the shell owns the strip now), the scene
+breadcrumb when embedded (the Explorer is permanently visible — it survives
+standalone), and every `location.href` between the two surfaces.
+
+**A film opens fitted again, and stays that way.** A document mounted while the
+editor stack was `display:none` — which is what a deep link like `/?page=music`
+does on its way past — had no timeline width at load, so the fit was computed
+against zero, pinned at the `0.005` floor and latched: the whole film squeezed
+into a hundred pixels, with no way back but the fit button. Three things fix it.
+The fit no longer counts as done unless it was measured against a real width
+*and* a film with frames, and that condition now lives in **one** function
+rather than two that had already drifted apart — the drift was what let the
+timeline's own `ResizeObserver` latch the flag on its first firing, before the
+film's frames had loaded, so the real fit was then skipped. A `shown()` hook on
+the document contract is how the shell says "you are on screen now", because a
+`ResizeObserver` inside an iframe the *parent* has hidden never fires — that
+document is not rendered at all. And **fit is a mode, not a value**: while
+nobody has zoomed deliberately, a film that fits keeps fitting as its viewport
+settles or changes, which is how every NLE's fit behaves. The moment you zoom,
+the view is yours and no resize touches it. The scene document got the same
+`shown()` treatment for its preview scaling, which had the identical bug.
+
+### The Studio wears VS Code's shell
+
+The app already had VS Code's shape and was spelling it differently. A workspace
+tree is an Explorer. The document strip is editor tabs. The scene panel is the
+Panel. The film inspector is a secondary side bar. The scene page even had
+breadcrumbs. What was missing were the three surfaces that make that shape
+usable, and they are now there — on **both** documents, from two shared files:
+
+- **An activity bar.** The 48px icon strip VS Code puts at the far left, with
+  the active item marked by a 2px border on its left edge. The vendor and
+  settings buttons moved here out of the rail footer, keeping their ids and
+  handlers: what changed is where they live, not what they do. On the film page
+  those icons are links to `/?page=<speech|music|transcription|settings>`, a
+  parameter the Studio home now honours on boot — two documents, one shell.
+  Its **☰** is now the *only* control for the Explorer: the side bar's own
+  «/» chevron is gone, and collapsing hides the Explorer completely rather than
+  leaving a 46px stub — a stub that had nothing left to hold once the vendor
+  buttons moved out of it. (Zero-width-and-hidden, not `display: none`: taking
+  the rail out of flow drops the stage into the empty grid track behind it and
+  collapses the document along with the side bar.)
+- **A status bar.** The 22px strip along the bottom. The scene page reports the
+  open scene's `workspace / film / scene`, live render progress (visible from
+  any tab, not just the render one), whether hot reload is watching, and a
+  problem count that clicks through to settings. The film page took over the
+  header's save state, the AI production line, the mix chip and the problem
+  count — those are ambient facts, read at a glance and never clicked through,
+  which is exactly what a status bar is for. The film header is four controls
+  lighter for it.
+- **A command palette.** `Ctrl/Cmd+P` quick-opens **any film or scene on the
+  machine** by fuzzy name; `Ctrl/Cmd+Shift+P` runs commands, and either swaps to
+  the other without closing. Until now the workspace tree was the only way to
+  reach something not already in the document strip: expand a workspace, expand
+  a film, read down a list of twelve. That is fine at three films and a hunt at
+  thirty. Films come from one `/api/workspaces` call and scenes stream in behind
+  them per film, so a cold palette is useful immediately instead of blocking on
+  twenty requests. Matching is subsequence-with-scoring — `cldopn` finds
+  "01 Cold Open — The Manor" — and the matched characters are marked in amber so
+  a fuzzy hit explains itself. Each page registers its own commands: the film
+  page offers build, advise, the add-* actions, undo/redo, zoom-to-fit and the
+  five inspector tabs; the scene page offers render, still export, the panel
+  tabs and the vendor pages.
+
+The palette skips scene rows that are missing or nameless, which surfaced a live
+engine defect: `store.listScenes()` maps **every** play-order entry through its
+scene describer, including footage segments — which have no slug — so any film
+containing footage yields one `<film>/undefined` row with no name. The film page
+hides it by accident (its unlisted-scene filter also holds `undefined`), so it
+had gone unnoticed. Filed separately; the palette's guard is deliberate and
+stays regardless.
+
+**Colour and chrome** follow VS Code Dark Modern: an editor surface (`#1f1f1f`)
+*lighter* than its side bar (`#181818`), `#2b2b2b` hairlines, `#2a2d2e` list
+hover, filled `#313131` input wells with 2px corners, and overlay scrollbars
+with no track and no arrows. Editor tabs invert the way VS Code's do — the
+active tab is cut out of the strip in the editor's shade with an accent hairline
+along its top edge, so the open document reads as a continuation of the editor
+beneath it — and their names are sentence-case sans now, because a film called
+"SEPHIROTH — ASHES OF THE MOON" does not need shouting twice.
+
+**What is deliberately not VS Code: the accent.** Amber stays the record light
+on every active tab, selected row, focus ring and marker, instead of VS Code's
+`#007acc` blue. A video tool that looks exactly like an IDE has lost the thing
+that tells you which app you are in.
+
+### A scene explains itself inside the film page
+
+Fixing the round trip made the trip cheap. It did not remove it — and a
+reviewer who leaves the timeline loses the thread of the film they are judging.
+Checking a scene's format, its audio tracks or what it last rendered still
+meant a navigation, because those panels only existed on the scene page.
+
+**They are now the scene inspector's tabs.** Select a scene on the film page
+and it opens on `scene · config · audio · assets · outputs`: the take's facts,
+render and reorder controls, versions and advice on the first, and then the
+scene's real `scene.json` form, its own audio tracks, its `assets/` folder with
+upload/drop/rename/delete, and its renders. Not a summary of the scene page —
+**the same panels**, applying to the same endpoints. A change that moves the
+cut reflows the film immediately. Versions and advice stay on the `scene` tab:
+the other four are focused editing surfaces and the conversation about a take
+is one click away.
+
+The load-bearing decision is that there is **one implementation, mounted
+twice**. Porting the panels into `film.js` would have left two copies of a
+config form, an audio editor and an asset browser, and they would have drifted
+until the film inspector and the scene page disagreed about what editing a
+scene means — the mode error the document strip exists to end, rebuilt one
+layer down. So `scene-panels.js` owns them, builds its own DOM, and takes the
+transport, the notifications and the two callbacks that define what a config
+change and a deletion mean to its host by injection. The scene page adopted it
+first, deliberately: the extraction had to be provable against the surface that
+already worked. `index.html` lost ~120 lines of markup and both its dialogs;
+`app.js` lost ~590 lines and gained a mount.
+
+Two things had to be fixed to make an inspector hold a form at all. The panel
+DOM is now **long-lived** — detached and re-appended, never rebuilt — and
+`renderInspector` captures and restores focus *and caret* across a render;
+without both, the once-a-second scene-job poll would have retyped a config
+field out from under the user while a render ran. (The film-name and caption
+inputs have quietly wanted this since they were written.) And the inspector is
+no longer a fixed 300px: drag its left edge, clamped 280–620px and never more
+than ~55% of the window, remembered in `localStorage`.
+
+Two smaller consequences. **`open scene ↗` is demoted** from a primary action
+beside "render scene" to a note at the foot of the scene tab — it is finally
+what its arrow always claimed, the way to the full-screen workbench for the
+composition preview, scrubbing and the job card, rather than the mandatory
+route to routine information. And switching panel tabs **no longer discards
+staged audio-track edits**; the old scene page reset the draft on every switch
+to the audio tab, silently losing unsaved rows.
+
+No new server routes: `GET /api/scenes/:sid`, `PATCH …/config`, `…/assets`,
+`…/asset` and `…/outputs` already served either page. The two new static files
+join the server's explicit allowlist.
+
+### Studio navigation: the way back, the working set, and movement
+
+Motion Studio ships **two documents**, not one app — the scene workbench at
+`/` and the film page at `/film.html?id=…` — and the edges between them only
+pointed one way. The film inspector's `open scene ↗` opened a new browser tab,
+and the scene page said nothing at all about the film it belonged to, so
+checking a scene's config while reviewing a film was a one-way door: the way
+back was re-finding the film in the workspace tree. Meanwhile the film page had
+honoured `?scene=` / `?sequence=` / `?advice=` deep links since v0.23 — with a
+comment saying "a deep link from anywhere else in the Studio lands on the exact
+thing" — and *nothing in the Studio had ever sent one*.
+
+**The scene page now names its film, and that name is the way back.** A scene
+id is `"<ws>/<film>/<scene>"`, so the page derives its own parent: no `?from=`
+parameter to rot on the first reload. The crumb links to
+`/film.html?id=…&scene=<slug>` — the deep link that already worked — so the
+film page lands with that scene selected and the playhead at its film offset,
+not at the top of the film. A film the workspace tree does not have (a broken
+`film.json`, a failed fetch) falls back to the film slug; the crumb is never
+empty. With a return edge in place, `open scene ↗` **drops `target="_blank"`**
+and opens in the same tab, staying a plain `<a href>` so ctrl/cmd-click still
+does what it always did.
+
+**A document strip carries the working set.** One shared `tabs.js` + `tabs.css`,
+included by both documents, no build step and no router: every film and scene
+opened is a tab, on whichever surface you are looking at, and each document
+upserts its own entry on load and marks itself active. Tabs are plain links, so
+ctrl/cmd-click and middle-click behave like the browser; `✕` drops a document
+from the strip and touches nothing on disk. The set lives in `localStorage`
+(`ms.tabs`) rather than `sessionStorage` because surviving the document swap
+*is* the job — a per-window store would empty on every navigation. The strip
+caps at eight and evicts the oldest entry that is not the one being read. The
+Studio home is deliberately not a tab.
+
+**And the film timeline moves at the granularity a film is reviewed at.**
+Double-click a sequence — its band or its tree row — and the timeline zooms to
+exactly that stretch of film; double-click the empty background and the whole
+film fits again. `PgDn`/`PgUp` step the playhead cut to cut and
+`shift+PgDn`/`PgUp` sequence to sequence, from the offsets the timeline is
+already drawn from, so the keys and the picture cannot disagree. `PgUp`/`PgDn`
+was chosen precisely because it does not collide with ←/→ frame stepping. The
+scene page also gains the film page's `Home`/`End` and shift+arrow ×10: two
+surfaces that scrub must not have two keyboards.
+
+The film page's frame became a flex column on the way past. It was a grid whose
+`1fr` row landed on whichever child happened to be showing, so *which* area
+absorbed the spare height depended on how many banners were up; the main area
+is now always the one that flexes.
+
 ### The reorder that ate the story layer
 
 Two films in the workspace — `jin-park-midnight-runner` and

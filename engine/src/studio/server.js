@@ -656,7 +656,18 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
         return await streamFile(res, path.join(PUBLIC_DIR, 'index.html'));
       }
       if (req.method === 'GET' && parts.length === 1
-          && ['app.js', 'styles.css', 'film.html', 'film.js', 'film.css'].includes(parts[0])) {
+          && ['app.js', 'styles.css', 'film.html', 'film.js', 'film.css',
+            // The document tab strip is one script + one stylesheet shared by
+            // both documents (v0.26) — no build step, so it is served as-is.
+            'tabs.css',
+            // Likewise the scene's own panels (v0.27): config/audio/assets/
+            // outputs, mounted by the scene page AND by the film inspector.
+            'scene-panels.js', 'scene-panels.css',
+            // …and the VS Code shell (v0.27): the activity bar, the status bar
+            // and the command palette, which both documents carry.
+            'shell.css', 'palette.js',
+            // A scene is a document of its own since v0.27, so it has a page.
+            'scene.html', 'scene.js', 'studio-util.js'].includes(parts[0])) {
         return await streamFile(res, path.join(PUBLIC_DIR, parts[0]));
       }
 

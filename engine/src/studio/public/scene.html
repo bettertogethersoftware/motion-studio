@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Studio — Scene</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/scene-panels.css">
+<link rel="stylesheet" href="/shell.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231f1f1f'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
+</head>
+<body class="doc-body">
+<!--
+  ONE scene, as a document (v0.27). This used to be a pane inside index.html,
+  which is why the Studio had to navigate between two pages to show you a film
+  and a scene. Now the Studio is a shell and this opens inside it as a tab —
+  or on its own, if you want a scene on a second monitor.
+-->
+<div id="workbench" class="workbench">
+  <section class="viewport-wrap">
+    <div class="viewport-head">
+      <!-- The return edge (v0.26): a scene id is "<ws>/<film>/<scene>", so
+           the page always knows the film it belongs to and can link back to
+           it with this scene selected. No origin parameter to rot. -->
+      <span class="crumb">
+        <a id="film-crumb" class="crumb-link"></a>
+        <span class="crumb-sep">/</span>
+      </span>
+      <span id="scene-title" class="mono"></span>
+      <span id="viewport-meta" class="dim mono"></span>
+      <span id="hot-reload-dot" title="hot reload connected">●</span>
+    </div>
+    <div class="viewport" id="viewport">
+      <div class="checker" id="checker"></div>
+      <iframe id="preview" title="composition preview" sandbox="allow-scripts allow-same-origin"></iframe>
+    </div>
+
+    <div class="transport">
+      <button id="btn-play" class="transport-btn" title="play/pause (space)">▶</button>
+      <button id="btn-step-back" class="transport-btn" title="step back">‹</button>
+      <button id="btn-step-fwd" class="transport-btn" title="step forward">›</button>
+      <input type="range" id="scrubber" min="0" max="0" value="0" step="1">
+      <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
+      <span class="mono dim" id="timecode">00:00.00</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <nav class="tabs">
+      <button data-tab="render" class="tab active">render</button>
+      <button data-tab="config" class="tab">config</button>
+      <button data-tab="audio" class="tab">audio</button>
+      <button data-tab="assets" class="tab">assets</button>
+      <button data-tab="outputs" class="tab">outputs</button>
+      <button id="btn-panel-toggle" class="panel-toggle" title="collapse this panel">▾</button>
+    </nav>
+
+    <div id="tab-render" class="tab-body">
+      <div class="fieldrow">
+        <label>workers
+          <select id="rd-workers">
+            <option value="1">1 (serial)</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+          </select>
+        </label>
+        <label>range
+          <input id="rd-range" class="mono" placeholder="full (e.g. 0-89)" size="10">
+        </label>
+        <button id="btn-render" class="primary">render →</button>
+        <button id="btn-still" class="ghost" title="export current frame as PNG">still ⤓</button>
+      </div>
+
+      <div id="job-card" class="job-card hidden">
+        <div class="job-line">
+          <span id="job-state" class="pill">—</span>
+          <span id="job-phase" class="mono dim"></span>
+          <span id="job-eta" class="mono dim"></span>
+          <button id="btn-cancel" class="ghost danger">cancel</button>
+        </div>
+        <div class="bar"><div id="job-bar" class="bar-fill"></div></div>
+        <div class="job-line dim mono">
+          <span id="job-frames"></span>
+          <span id="job-fps"></span>
+        </div>
+        <pre id="job-logs" class="logs"></pre>
+        <a id="job-download" class="download hidden" href="#">⤓ download output</a>
+      </div>
+    </div>
+
+  </section>
+</div>
+
+<script src="/studio-util.js"></script>
+<script src="/scene-panels.js"></script>
+<script src="/scene.js"></script>
+</body>
+</html>

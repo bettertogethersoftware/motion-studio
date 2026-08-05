@@ -1,0 +1,56 @@
+/* Motion Studio — the shared scene panels (scene-panels.js).
+ *
+ * The module deliberately emits the SAME class names the scene page's markup
+ * always used, so both documents style it from styles.css and this file holds
+ * only two things: the flex plumbing the extra wrapper element needs, and the
+ * compact layout that lets 4-across panels live in a 300–560px inspector.
+ */
+
+/* The wrapper sits between .panel and its .tab-body children, so it has to
+   forward the flex chain or the bodies stop scrolling and stretch the page. */
+.sp-root { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sp-root.hidden { display: none; }
+.sp-panel.dropping { outline: 1px dashed var(--accent); outline-offset: -6px; }
+.sp-audio-msg.warn { color: var(--accent); }
+
+/* Dialogs the module owns, matching what the page markup used to declare. */
+.sp-dialog .sp-dialog-summary { font-size: 13px; margin: 0 0 10px; }
+.sp-dialog .sp-delete-note { font-size: 11px; max-width: 380px; }
+.sp-dialog-asset { max-width: 520px; }
+
+/* ------------------------------- compact -------------------------------- */
+
+/* The film inspector is a column, not a page: it scrolls as a whole, so each
+   panel is a plain block rather than its own scroll area, and everything that
+   assumed a full-width panel goes single-column. */
+.sp-compact { flex: none; }
+.sp-compact .tab-body { padding: 0; overflow: visible; flex: none; min-height: 0; }
+.sp-compact .config-grid { grid-template-columns: 1fr; gap: 9px 10px; }
+.sp-compact .config-actions { margin-top: 4px; }
+.sp-compact .section-label { margin: 14px 0 7px; }
+.sp-compact .env-list { max-height: 150px; }
+.sp-compact .path-chip { max-width: 100%; }
+
+/* The head rows carry explanatory copy that has nowhere to go at this width;
+   the panels are reached from a labelled tab, so the label is the explanation. */
+.sp-compact .assets-head { flex-wrap: wrap; gap: 8px; row-gap: 6px; }
+.sp-compact .assets-head > .dim { display: none; }
+.sp-compact .assets-head .spacer { display: none; }
+
+/* Asset rows: thumb, name and the actions, with size and badge folded onto a
+   second line rather than squeezed off the end. */
+.sp-compact .asset-list li { flex-wrap: wrap; gap: 6px 8px; padding: 6px 0; }
+.sp-compact .a-name { flex: 1 1 100%; order: 2; }
+.sp-compact .a-thumb { order: 1; }
+.sp-compact .a-size { order: 3; min-width: 0; margin-left: auto; }
+.sp-compact .a-ref { order: 4; }
+.sp-compact .a-actions { order: 5; margin-left: 0; flex: 1 1 100%; justify-content: flex-end; }
+
+/* Audio rows stack: src on its own line, the numbers under it. */
+.sp-compact .audio-list li { flex-wrap: wrap; gap: 6px 8px; }
+.sp-compact .audio-list label.grow { flex: 1 1 100%; }
+.sp-compact .audio-list .t-num { width: 66px; }
+.sp-compact .audio-list .t-at { min-width: 0; }
+
+.sp-compact .logs { max-height: 160px; }
+.sp-compact .meta-row { flex-wrap: wrap; gap: 8px; }

@@ -24,6 +24,50 @@ If Puppeteer's Chromium download is blocked on your network, install any
 Chrome/Chromium yourself and point the engine at it:
 `PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm run studio`.
 
+## Getting around the Studio (v0.27)
+
+**The Studio is one page.** The tree on the left is always there; films and
+scenes open as **document tabs** inside it, the way files open in an editor.
+Clicking a film does not take you anywhere — it opens the film editor in the
+tab area, with the tree still beside it.
+
+| where | what it is |
+|---|---|
+| **activity bar** (far left, 48px) | ☰ toggles the side bar; ⌕ opens the command palette; the bottom group opens the **speech**, **music** and **transcription** vendor pages and **global settings**. The lit icon has an amber bar on its left edge. |
+| **Explorer** (the tree) | every workspace → film → scene on the machine. Click a film or a scene to open it as a tab. It never goes away. |
+| **document tabs** (across the top) | what you have open. The active one is cut out of the strip in the editor's shade with an amber line along its top. **✕** closes a document and touches nothing on disk. |
+| **status bar** (across the bottom) | whatever the active document reports. A film: its problems, what the AI is doing, the master-mix state, save state. A scene: its `workspace / film / scene` path, live render progress, whether hot reload is watching. |
+| **command palette** | see below. |
+
+**Tabs keep their state.** Leave a film paused at 01:02, go read a scene's
+config, come back — the playhead is still at 01:02, with the undo history,
+timeline zoom and inspector tab exactly as you left them. What is open is
+remembered between sessions too, so a reload puts you back where you were.
+
+A film or a scene can also be opened **on its own**, which is how you put a
+scene on a second monitor: `/film.html?id=<workspace>/<film>` and
+`/scene.html?scene=<workspace>/<film>/<scene>`. Standalone they carry their own
+activity bar and status bar; inside the Studio the shell provides those.
+
+### The command palette
+
+| shortcut | what it does |
+|---|---|
+| **Ctrl/Cmd + P** | go to any film or scene **on the machine**, by name |
+| **Ctrl/Cmd + Shift + P** | run a command |
+
+Either one swaps to the other without closing, and `Esc` dismisses. Matching is
+fuzzy: `cldopn` finds *01 Cold Open — The Manor*, and the characters that
+matched are marked so you can see why a result is there. `↑ ↓` move, `Enter`
+opens.
+
+This is the fastest way around a machine with a lot of work on it — the tree
+is a convenience, not the only route. The commands on offer are the shell's
+(new workspace, the vendor pages, settings, close a document) plus whatever the
+active document adds: a film contributes build, advise, the
+add-narration/audio/caption/footage/overlay actions, undo/redo, fit-the-timeline
+and the five inspector tabs.
+
 ## Workspaces, films and scenes
 
 Motion Studio's storage mirrors what you're actually making. A **workspace**
@@ -75,6 +119,50 @@ clicking a scene opens the workbench below. The film row's ✕ deletes it — a 
 asks whether to also delete its scenes, assets and output, or just the film
 definition (the folder then stays on disk, listed as `broken` until cleaned
 up).
+
+### A scene, without leaving the film (v0.27)
+
+Select a scene on the film page and its inspector opens on a row of tabs:
+
+| tab | what is on it |
+|---|---|
+| **scene** | the take itself — name, status, resolution, length, format, film offset — plus **re-render**, **move earlier / later**, **remove**, and the scene's **versions** and **advice** |
+| **config** | the scene's own `scene.json`: name, fps, width, height, frames, and every output setting (format, dir, filename, crf, preset, pix fmt, alpha, audio limiter), with the read-only facts, the raw JSON and the folder path underneath |
+| **audio** | audio tracks *inside* this scene — src, start frame, gain, audition — separate from the film's master audio timeline |
+| **assets** | the scene's `assets/` folder: upload or drop files, copy a scene-relative path, rename (repairing any audio track that pointed at it), delete |
+| **outputs** | what this scene has rendered, with sizes and download links |
+
+These are the same four panels the scene workbench shows, not a summary of
+them: reviewing a film no longer means leaving the timeline to read a format
+or check what an asset is called. Settings apply with **apply**; a change that
+moves the cut (a new frame count) reflows the film immediately.
+
+The **versions** and **advice** sections stay on the **scene** tab. The other
+four are focused editing surfaces, and the tab that carries the conversation
+about a take is one click away.
+
+**open scene ↗** is still there, at the foot of the scene tab — it opens that
+scene as its own document tab, for when you want the composition preview, frame
+scrubbing or the render job card. It is not a navigation and never leaves the
+film: both stay open, one click apart.
+
+**The inspector resizes.** Drag its left edge; the width is remembered between
+sessions (280–620px, and never more than a bit over half the window).
+
+### Moving between a film and its scenes
+
+Nothing carries you between them any more, because they are not separate places.
+A film and its scenes are documents in the same window: open the film from the
+tree, open a scene from the tree or from **open scene ↗** in the film's scene
+inspector, and both sit in the tab strip. Click between them.
+
+The film document also accepts deep links, which is what an agent can hand you
+in a message:
+`/film.html?id=<workspace>/<film>` opens the film,
+`&scene=<scene-slug>` selects that scene and parks the playhead at its offset,
+`&sequence=<label>` selects a sequence, and `&advice=<id>` opens one piece of
+advice. An unknown slug or id is ignored rather than erroring, so a stale link
+still opens the film.
 
 The **config** tab (in the scene workbench) is a complete view of
 `scene.json`: the composition fields (name/fps/size/duration), the whole
@@ -211,9 +299,10 @@ settings are runtime defaults, so they apply to the next render but do not
 rewrite any scene. One thing that file never holds is a credential: API keys
 are read from the environment only.
 
-The sidebar collapses to a slim strip with the **«** button, and each
-workspace's and film's expanded/collapsed state persists the same way — both
-remembered per browser.
+The **☰** at the top of the activity bar hides and shows the Explorer — it
+collapses away entirely and the document takes the space. Each workspace's and
+film's expanded/collapsed state persists the same way, all remembered per
+browser.
 
 The workbench is a fixed half preview, half panel, so switching tabs never
 resizes the preview; long tabs scroll inside their half. The **▾** button at
@@ -225,8 +314,10 @@ for scrubbing, and clicking any tab brings it back.
 Selecting a scene loads its *actual entry HTML* into the preview iframe —
 the same file headless Chromium renders — and the transport drives it
 through the same `window.setFrame(n)` contract. Scrubbing exercises your
-real animation logic. Space plays/pauses at the scene's fps; arrow keys
-step single frames. Transparent scenes preview over a checkerboard.
+real animation logic. Space plays/pauses at the scene's fps; arrow keys step
+single frames, shift+arrow steps ten, and Home/End jump to the first and last
+frame — the same transport keys the film page has (v0.26). Transparent scenes
+preview over a checkerboard.
 
 Saving any scene file hot-reloads the preview automatically (debounced, so
 editor save bursts don't thrash), holding your current frame. If an AI agent
@@ -625,8 +716,10 @@ bar shows the film's **workspace** and name. The left rail is the `Film →
 Sequence → Scene/Footage` tree — the play order, read top to bottom — with
 any scene folder the film does *not* play listed below it as an **unused
 scene** (made by an agent, or copied in by hand) ready to drag in. The right
-panel is the context inspector — and the **build panel** docks there too, so
-assembling never covers the timeline. The timeline holds a sequence band row,
+panel is the context inspector — a selected scene explains itself there in
+full, across the tabs described above — and the **build panel** docks there
+too, so assembling never covers the timeline. Drag the inspector's left edge
+to widen it. The timeline holds a sequence band row,
 scene/footage blocks, audio, caption and overlay tracks, and an advice row:
 
 - **sequences** — the narrative band above the cut. Consecutive segments
@@ -635,6 +728,9 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
   selected segment and everything after it; the inspector renames, ungroups,
   and holds an **intent** note the AI reads. A scene dropped inside a
   sequence joins it rather than splitting the band in three.
+  **Double-click a sequence** — its band on the timeline or its row in the
+  tree — to zoom the timeline to exactly that stretch of film (v0.26);
+  double-click the empty timeline background to fit the whole film again.
 - **scenes and footage** — **drag a scene from the unused list onto the
   timeline** to place it (an insert marker shows where it lands), or hit the
   row's **+** to append it; drag blocks to reorder. **+ new scene** at the
@@ -677,8 +773,11 @@ The **preview plays your real rendered scenes** back to back with overlays
 and captions drawn in place. With a master timeline, pressing play builds the
 mix through **the exact ffmpeg graph the final film uses** (gains, fades,
 ducking, limiter) — what you hear is what ships. Snap, zoom, undo/redo and
-autosave behave the way you'd expect from an NLE; Space plays, arrows step,
-Del removes the selected block.
+autosave behave the way you'd expect from an NLE; Space plays, arrows step
+(shift for ten), Home/End go to the ends, and Del removes the selected block.
+**PgDn/PgUp move the playhead cut to cut** — the next and previous scene
+boundary — and **shift+PgDn/PgUp** move it sequence to sequence (v0.26), which
+is the granularity a film is actually reviewed at.
 
 **You and the AI share this document, so the page watches for its edits.**
 When the AI changes the film while you have the page open, a page with nothing

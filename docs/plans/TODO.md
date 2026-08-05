@@ -15,6 +15,9 @@ Active plan documents:
 | [plate-render-forge-plan.md](plate-render-forge-plan.md) | plateforge/motionforge shell orchestration for Krea2 plates → verified film delivery (proposed; review WITH the token-efficient plan) |
 | [docker-support-plan.md](docker-support-plan.md) | the containerized third distribution tier — demo-in-a-box, server-hosted Studio, MCP sidecar (proposed, 1–2 d) |
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
+| [studio-navigation-plan.md](studio-navigation-plan.md) | Studio UI refinement: the scene ↔ film round trip, AE-style document tabs, sequence zoom/jump (**N-1/N-3/N-6/N-7/N-8 shipped code-complete 2026-08-05**; N-5 handed to [scene-inspector-plan.md](scene-inspector-plan.md), which closes this one) |
+| [studio-shell-plan.md](studio-shell-plan.md) | **one Studio, documents inside it** — index.html becomes the shell (permanent Explorer + document tabs + editor stack); films AND scenes open as same-origin iframe documents; page navigation removed entirely (**shipped code-complete 2026-08-06; awaiting commit**) |
+| [scene-inspector-plan.md](scene-inspector-plan.md) | the whole scene *inside* the film page — N-5(b), the Final Cut answer: one shared panel module (config/audio/assets/outputs) mounted by both documents, a resizable inspector, `open scene ↗` demoted to an escape hatch (**shipped code-complete 2026-08-05; awaiting commit**) |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets |
 | [auto-reframe-plan.md](auto-reframe-plan.md) | `measure_reframe` — the hard half of aspect variants |
 | [image-prep-plan.md](image-prep-plan.md) | `prepare_image` — the still-image hole in the media surface |
@@ -23,14 +26,14 @@ Active plan documents:
 
 ## Next up (ordered)
 
-1. [ ] **Token-efficient production loop, P0** ([plan](token-efficient-motion-studio-plan.md)):
-       `detail` projections + cursors, `use_shared_asset_batch`,
-       `write_composition_bundle`, `render_group`/`wait_render_group`.
-       Highest measured value on the board — a real 180 s production spent
-       ~49% of 57.5 M agent tokens on per-scene orchestration this
-       eliminates, and it is engine-side, testable, and consumed by
-       everything below. Its P1-3 (durable run groups) absorbs the old
-       "durable jobs" backlog item.
+1. [x] **Token-efficient production loop — complete 2026-08-04**
+       ([plan](token-efficient-motion-studio-plan.md)): `detail` projections
+       + cursors, `use_shared_asset_batch`, `write_composition_bundle`,
+       `render_group`/`wait_render_group`, plus the P1 set (`finish_film`,
+       `review_render_grid`, durable run groups, agent-economy telemetry)
+       and the NEON APEX replay acceptance. Slice-by-slice ledger in the
+       progress section below; P1-3 absorbed the old "durable jobs" backlog
+       item.
 2. [ ] **Docker support** ([plan](docker-support-plan.md)) — **blocked on
        Docker being installed on the dev machine** (checked 2026-08-04:
        not present; the slice cannot be honestly verified without it).
@@ -77,7 +80,39 @@ Active plan documents:
        deliverable variants. Then the queued plans, audio-cue first
        (smallest, knowledge-shaped, caught a real 1.5–2.7 s sync defect no
        existing check can see).
-5. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
+5. [x] **Studio UI refinement — shipped code-complete 2026-08-05**
+       ([plan](studio-navigation-plan.md)): the round trip (the scene page
+       derives its own film and links back through the `&scene=` deep link
+       that had existed unused since v0.23), same-tab `open scene ↗`,
+       keyboard parity, the localStorage document strip, and sequence
+       movement (double-click to zoom, PgUp/PgDn cut-to-cut). Awaiting
+       commit.
+6. [x] **The scene inspector — shipped code-complete 2026-08-05**
+       ([plan](scene-inspector-plan.md)). `scene-panels.js` is the single
+       implementation of config/audio/assets/outputs, mounted by the scene
+       page and by the film inspector's tab strip; the inspector is
+       resizable and its panel DOM survives the 1 Hz poll with focus and
+       caret intact; `open scene ↗` is demoted to an escape hatch. Verified
+       in-browser against SEPHIROTH and jin-park-sunshine-vertical; suites
+       green. Awaiting commit. Original framing:
+       N-5(b),
+       the piece the navigation plan left to the user and the user has now
+       taken. Fixing the *return* edge made the trip cheap; it did not
+       remove it, and a reviewer who leaves the timeline loses the thread of
+       the film they are judging. The scene's own panels move **into** the
+       film inspector behind a tab strip. The load-bearing constraint is that
+       they must not be a second copy: one shared `scene-panels.js` mounted
+       by both documents, adopted by the scene page first so the refactor is
+       provable against the surface that already works. ~1 d.
+7. [x] **The Studio shell — shipped code-complete 2026-08-06**
+       ([plan](studio-shell-plan.md)). The two-page Studio is gone: the
+       Explorer tree is permanent and films and scenes open as document tabs
+       in one window, each a same-origin iframe so a tab keeps its playhead,
+       undo stack and scroll while another is in front. Also landed the VS
+       Code chrome (activity bar, status bar, command palette, Dark Modern
+       surfaces with the amber accent kept) and `scene.html`/`scene.js`,
+       extracted from index.html/app.js. `tabs.js` retired. Awaiting commit.
+8. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
        extraction first); C-2 desktop packaging (bundled Node, installer) —
        **deprioritized by §10.7** ("no installer channel — the Electron
@@ -134,7 +169,7 @@ Active plan documents:
       full, and the per-scene calls each batch replaced — never tokens,
       never arguments or file contents (canary-tested), wired by one
       `registerTool` decoration.
-- [ ] TE-4d (P1 remainder): the NEON APEX replay acceptance — replay the
+- [x] TE-4d (P1 remainder): the NEON APEX replay acceptance — replay the
       ten-scene, 180-second film through the token-efficient path and
       record the measured saving against the plan's acceptance criteria.
 

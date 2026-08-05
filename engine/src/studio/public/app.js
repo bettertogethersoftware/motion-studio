@@ -1,119 +1,37 @@
-/* Motion Studio — Studio UI logic (vanilla JS, no build step).
+/* Motion Studio — the Studio shell (vanilla JS, no build step).
  *
- * v0.20 storage model: workspaces → films → scenes. A scene is what a
- * the whole editor below operates on one scene at a
- * time; ids are slug paths ("ws/film/scene") sent URL-encoded as ONE segment.
+ * v0.27: this file is no longer "the page with the scene editor in it". It is
+ * the shell — the Explorer tree of every workspace → film → scene on the
+ * machine, the document tabs, the editor stack those documents mount into, the
+ * activity bar, the status bar, and the full-stage pages that are not documents
+ * (vendors, global settings, the shared library).
  *
- * The preview iframe loads the scene's real entry HTML from /preview/:sid/
- * (same origin), and the transport drives it through the identical
- * window.setFrame(n) contract the headless renderer uses. */
+ * Films and scenes are documents: /film.html and /scene.html, mounted as
+ * same-origin iframes so each keeps its own state while another is in front,
+ * and so two open films cannot fight over the same element ids. Nothing here
+ * navigates any more.
+ */
 
 'use strict';
 
-const $ = (sel) => document.querySelector(sel);
-const api = async (path, opts = {}) => {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.message || res.statusText), { data });
-  return data;
-};
+const { $, api, enc, toast, toastError } = StudioUtil;
 
+/* The shell's own state. Everything a *document* knows — the open scene, its
+ * config, the playhead, the render job — now lives in that document. */
 const state = {
   tree: [],             // workspaces (each with films) from GET /api/workspaces
   filmScenes: {},       // filmId → scene list, fetched lazily when a film expands
-  sceneId: null,        // full "ws/film/scene" id of the open scene
-  scenePath: null,
   libraryWs: null,      // workspace id whose library page is showing, or null
-  config: null,
-  frame: 0,
-  playing: false,
-  playTimer: null,
-  events: null, // SSE
-  jobId: null,
-  jobTimer: null,
-  frameReady: Promise.resolve(),
   settings: null,       // global settings (GET /api/settings)
-  audioPreview: null,   // shared <audio> for asset auditioning
-  audioDraft: [],       // staged config.audio edits (saved with one PATCH)
+  settingsOpen: false,
 };
 
 /* Ids are slug paths; every route takes them URL-encoded as one segment. */
-const enc = encodeURIComponent;
-const sceneUrl = (suffix = '') => `/api/scenes/${enc(state.sceneId)}${suffix}`;
 const filmIdOf = (sceneId) => sceneId.split('/').slice(0, 2).join('/');
 
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
-  }
-}
-
-function flashButton(btn, label = '✓') {
-  const orig = btn.textContent;
-  btn.textContent = label;
-  setTimeout(() => { btn.textContent = orig; }, 1200);
-}
-
-/* ------------------------------- toasts -------------------------------- */
-
-/* Errors used to go through alert(): blocking, and it flattened the engine's
- * structured EngineError (code + a message that already contains the fix and
- * the available alternatives) down to one modal line. Toasts keep the page
- * usable, show the error code as a badge, and stay up long enough to read a
- * multi-sentence fix. Errors persist until dismissed; info fades. */
-function toastContainer() {
-  let el = $('#toasts');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'toasts';
-    document.body.appendChild(el);
-  }
-  return el;
-}
-
-function toast(input, { kind = 'error', timeoutMs = null } = {}) {
-  const err = input instanceof Error ? input : null;
-  const message = err ? err.message : String(input);
-  const code = err?.data?.code ?? null;
-
-  const el = document.createElement('div');
-  el.className = `toast ${kind}`;
-  if (code) {
-    const badge = document.createElement('span');
-    badge.className = 'toast-code mono';
-    badge.textContent = code;
-    el.appendChild(badge);
-  }
-  const body = document.createElement('span');
-  body.className = 'toast-body';
-  body.textContent = message;
-  el.appendChild(body);
-
-  const close = document.createElement('button');
-  close.className = 'toast-close';
-  close.textContent = '✕';
-  close.title = 'dismiss';
-  close.addEventListener('click', () => el.remove());
-  el.appendChild(close);
-
-  toastContainer().appendChild(el);
-  const ttl = timeoutMs ?? (kind === 'error' ? null : 5000);
-  if (ttl) setTimeout(() => el.remove(), ttl);
-  return el;
-}
-
-const toastError = (err) => toast(err, { kind: 'error' });
+/* Small shared helpers live with the shared panels rather than being declared
+ * once per document — scene-panels.js is loaded before this file on both. */
+const { fmtBytes, copyText, flashButton } = ScenePanels;
 
 /* ------------------------------ prereqs ------------------------------- */
 
@@ -154,9 +72,20 @@ async function checkPrereqs() {
         : 'Prerequisites missing (see ⚙ settings for the ffmpeg path).';
       banner.classList.remove('hidden');
     }
+    setStatusProblems(p.ok ? 0 : Math.max(1, prereqProblems(p).length), 'open global settings');
   } catch {
     $('#engine-status').innerHTML = 'engine <span class="err">unreachable</span>';
+    setStatusProblems(1, 'the engine is unreachable');
   }
+}
+
+/** The status bar's problem count — VS Code's ⊗ N, clicking through to the
+ *  place the problem is fixed. */
+function setStatusProblems(n, title) {
+  const btn = $('#sb-problems');
+  btn.textContent = n ? `⊗ ${n}` : '';
+  btn.title = title ?? '';
+  btn.classList.toggle('hidden', !n);
 }
 
 /* --------------------------- workspace tree ---------------------------- */
@@ -192,6 +121,7 @@ async function loadWorkspaces() {
 }
 
 async function loadFilmScenes(filmId) {
+  StudioPalette.invalidate(); // the quick-open index just went stale
   const { sceneFolders } = await api(`/api/films/${enc(filmId)}`);
   state.filmScenes[filmId] = sceneFolders;
   return sceneFolders;
@@ -264,7 +194,7 @@ function appendFilmRows(ul, f) {
   row.append(chev, name, meta, del);
   // One page per film (v0.23.1). It opens in watch & advise and carries the
   // production editor behind a toggle — there is no second surface to choose.
-  row.addEventListener('click', () => { location.href = `/film.html?id=${enc(f.id)}`; });
+  row.addEventListener('click', () => openDocument({ kind: 'film', id: f.id, name: f.name }));
   ul.appendChild(row);
   if (!fOpen) return;
 
@@ -275,11 +205,11 @@ function appendFilmRows(ul, f) {
   }
   for (const s of scenes) {
     const sRow = el('li',
-      'tree-scene' + (s.id === state.sceneId ? ' active' : '') + (s.missing ? ' missing' : ''));
+      'tree-scene' + (docs.has(docKey('scene', s.id)) ? ' active' : '') + (s.missing ? ' missing' : ''));
     const sName = el('span', 'p-name', s.name);
     sName.title = s.id;
     sRow.append(sName, el('span', 'p-meta', s.missing ? 'missing' : s.unlisted ? 'unlisted' : ''));
-    if (!s.missing) sRow.addEventListener('click', () => selectScene(s.id).catch(toastError));
+    if (!s.missing) sRow.addEventListener('click', () => openDocument({ kind: 'scene', id: s.id, name: s.name }));
     ul.appendChild(sRow);
   }
   const addScene = el('li', 'tree-scene scene-add');
@@ -310,7 +240,10 @@ async function deleteFilm(f) {
   try {
     await api(`/api/films/${enc(f.id)}${deleteFiles ? '?deleteFiles=1' : ''}`, { method: 'DELETE' });
     delete state.filmScenes[f.id];
-    if (state.sceneId && filmIdOf(state.sceneId) === f.id && deleteFiles) closeWorkbench();
+    // Its documents are about a thing that no longer exists.
+    for (const d of [...docs.values()]) {
+      if (d.kind === 'film' ? d.id === f.id : filmIdOf(d.id) === f.id) closeDocument(d);
+    }
     await loadWorkspaces();
   } catch (err) { toastError(err); }
 }
@@ -324,893 +257,19 @@ $('#btn-new-workspace').addEventListener('click', async () => {
   } catch (err) { toastError(err); }
 });
 
-/* ------------------------------- scenes ------------------------------- */
-
-async function selectScene(id) {
-  stopPlayback();
-  stopAudition(); // a clip from the previous scene would keep playing with its stop button gone
-  stopJobPolling();
-  if (vendorState.openCapability) showVendorsPage(null); // picking a scene leaves the vendor pages
-  if (state.settingsOpen) showSettingsPage(false);       // …and the settings page
-  if (state.libraryWs) showLibraryPage(null);            // …and the library
-  state.events?.close();
-  state.sceneId = id;
-  const scene = await api(sceneUrl());
-  state.config = scene.config;
-  state.frame = 0;
-
-  state.scenePath = scene.path;
-
-  $('#empty-state').classList.add('hidden');
-  $('#workbench').classList.remove('hidden');
-  $('#scene-title').textContent = scene.name;
-  const sep = scene.path.includes('\\') ? '\\' : '/';
-  const pathEl = $('#scene-path');
-  pathEl.textContent = scene.path;
-  pathEl.title = scene.path;
-  const assetsEl = $('#assets-path');
-  assetsEl.textContent = scene.path + sep + 'assets';
-  assetsEl.title = assetsEl.textContent;
-  updateMeta();
-  fillConfigForm();
-  loadOutputs().catch(() => {});
-  loadAssets().catch(() => {});
-  loadAudioEditor().catch(() => {}); // resets any staged track edits from the previous scene
-
-  // Reveal the scene in the tree (expand its workspace + film) and repaint.
-  const filmId = filmIdOf(id);
-  if (collapsedWs.delete(id.split('/')[0])) saveIdSet('ms.wsCollapsed', collapsedWs);
-  if (!expandedFilms.has(filmId)) {
-    expandedFilms.add(filmId);
-    saveIdSet('ms.filmsOpen', expandedFilms);
-  }
-  if (!state.filmScenes[filmId]) loadFilmScenes(filmId).then(renderTree).catch(() => {});
-  renderTree();
-
-  // Hot reload stream.
-  const es = new EventSource(sceneUrl('/events'));
-  const dot = $('#hot-reload-dot');
-  es.onopen = () => dot.classList.add('live');
-  es.onmessage = () => {
-    dot.classList.add('flash');
-    setTimeout(() => dot.classList.remove('flash'), 400);
-    reloadPreview({ refetchConfig: true });
-  };
-  es.onerror = () => dot.classList.remove('live');
-  state.events = es;
-
-  reloadPreview();
-}
-
-/** Drop the open scene and show the empty state (delete flows). */
-function closeWorkbench() {
-  stopPlayback();
-  stopJobPolling();
-  state.events?.close();
-  state.sceneId = null;
-  state.scenePath = null;
-  state.config = null;
-  $('#workbench').classList.add('hidden');
-  $('#empty-state').classList.remove('hidden');
-}
-
-function updateMeta() {
-  const c = state.config;
-  $('#viewport-meta').textContent =
-    `${c.width}×${c.height} · ${c.fps}fps · ${c.durationInFrames}f · ${c.output.format}` +
-    (c.output.transparent ? ' · alpha' : '');
-  const scrub = $('#scrubber');
-  scrub.max = c.durationInFrames - 1;
-  $('#frame-total').textContent = c.durationInFrames - 1;
-}
-
-/* ------------------------------ preview ------------------------------- */
-
-function fitPreview() {
-  const c = state.config;
-  if (!c) return;
-  const box = $('#viewport').getBoundingClientRect();
-  const scale = Math.min((box.width - 2) / c.width, (box.height - 2) / c.height, 1);
-  const w = c.width * scale, h = c.height * scale;
-  const left = (box.width - w) / 2, top = (box.height - h) / 2;
-  for (const el of [$('#preview'), $('#checker')]) {
-    el.style.width = c.width + 'px';
-    el.style.height = c.height + 'px';
-    el.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
-  }
-  $('#checker').style.display = state.config.output.transparent ? 'block' : 'none';
-}
-
-async function reloadPreview({ refetchConfig = false } = {}) {
-  if (refetchConfig) {
-    try {
-      const scene = await api(sceneUrl());
-      state.config = scene.config;
-      updateMeta();
-      fillConfigForm();
-    } catch { /* keep previous */ }
-  }
-  const iframe = $('#preview');
-  const entry = state.config.entry || 'composition.html';
-  iframe.src = `/preview/${enc(state.sceneId)}/${entry}?t=${Date.now()}`;
-  state.frameReady = new Promise((resolve) => {
-    iframe.onload = async () => {
-      fitPreview();
-      state.frame = Math.min(state.frame, state.config.durationInFrames - 1);
-      await applyFrame(state.frame);
-      resolve();
-    };
-  });
-}
-
-async function applyFrame(n) {
-  state.frame = n;
-  const scrub = $('#scrubber');
-  scrub.value = n;
-  scrub.style.setProperty('--pos', `${(n / Math.max(1, scrub.max)) * 100}%`);
-  $('#frame-now').textContent = n;
-  const sec = n / state.config.fps;
-  $('#timecode').textContent =
-    String(Math.floor(sec / 60)).padStart(2, '0') + ':' +
-    (sec % 60).toFixed(2).padStart(5, '0');
-  try {
-    const win = $('#preview').contentWindow;
-    if (win && typeof win.setFrame === 'function') await win.setFrame(n);
-  } catch { /* iframe mid-reload */ }
-}
-
-/* ----------------------------- transport ------------------------------ */
-
-function startPlayback() {
-  if (state.playing || !state.config) return;
-  state.playing = true;
-  $('#btn-play').textContent = '⏸';
-  $('#btn-play').classList.add('playing');
-  const frameMs = 1000 / state.config.fps;
-  let last = performance.now();
-  let carry = 0;
-  const tick = (now) => {
-    if (!state.playing) return;
-    carry += now - last;
-    last = now;
-    if (carry >= frameMs) {
-      const advance = Math.floor(carry / frameMs);
-      carry -= advance * frameMs;
-      applyFrame((state.frame + advance) % state.config.durationInFrames);
-    }
-    state.playTimer = requestAnimationFrame(tick);
-  };
-  state.playTimer = requestAnimationFrame(tick);
-}
-
-function stopPlayback() {
-  state.playing = false;
-  cancelAnimationFrame(state.playTimer);
-  const btn = $('#btn-play');
-  btn.textContent = '▶';
-  btn.classList.remove('playing');
-}
-
-$('#btn-play').addEventListener('click', () => (state.playing ? stopPlayback() : startPlayback()));
-$('#btn-step-back').addEventListener('click', () => { stopPlayback(); applyFrame(Math.max(0, state.frame - 1)); });
-$('#btn-step-fwd').addEventListener('click', () => { stopPlayback(); applyFrame(Math.min(state.config.durationInFrames - 1, state.frame + 1)); });
-$('#scrubber').addEventListener('input', (e) => { stopPlayback(); applyFrame(Number(e.target.value)); });
-document.addEventListener('keydown', (e) => {
-  if (e.target.matches('input, select, textarea') || !state.config) return;
-  if (e.code === 'Space') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
-  if (e.code === 'ArrowLeft') { stopPlayback(); applyFrame(Math.max(0, state.frame - 1)); }
-  if (e.code === 'ArrowRight') { stopPlayback(); applyFrame(Math.min(state.config.durationInFrames - 1, state.frame + 1)); }
-});
-window.addEventListener('resize', fitPreview);
-
-/* ------------------------------- config ------------------------------- */
-
-/* Which output fields each format actually consumes — mirrors core/formats.js.
- * Irrelevant fields are shown disabled rather than hidden, so the config tab
- * is a complete picture of scene.json instead of a curated subset. */
-const FORMAT_CAPS = {
-  mp4: { crf: 1, preset: 1, pixFmt: 1, transparent: 0, audio: 1 },
-  webm: { crf: 1, preset: 0, pixFmt: 0, transparent: 1, audio: 1 },
-  gif: { crf: 0, preset: 0, pixFmt: 0, transparent: 0, audio: 0 },
-  prores: { crf: 0, preset: 0, pixFmt: 0, transparent: 1, audio: 1 },
-  'png-sequence': { crf: 0, preset: 0, pixFmt: 0, transparent: 1, audio: 0 },
-};
-
-const FORMAT_NOTES = {
-  mp4: 'H.264: crf, preset and pix fmt all apply. No alpha channel.',
-  webm: 'VP9: crf applies; pix fmt is chosen automatically (yuva420p when transparent).',
-  gif: 'GIF encodes with a two-pass palette — crf/preset/pix fmt are unused, and audio tracks are skipped.',
-  prores: 'ProRes: profile and pix fmt follow the alpha setting (4444 when transparent, else 422 HQ).',
-  'png-sequence': 'A folder of frame-%06d.png — "filename" names the folder. No encode settings, no audio.',
-};
-
-function applyFormatCaps() {
-  const f = $('#config-form');
-  const caps = FORMAT_CAPS[f.format.value] ?? FORMAT_CAPS.mp4;
-  for (const [field, on] of Object.entries({ crf: caps.crf, preset: caps.preset, pixFmt: caps.pixFmt, transparent: caps.transparent, audioLimiter: caps.audio })) {
-    const el = f[field];
-    el.disabled = !on;
-    el.closest('label').classList.toggle('disabled', !on);
-  }
-  $('#format-note').textContent = FORMAT_NOTES[f.format.value] ?? '';
-}
-
-function fillConfigForm() {
-  const f = $('#config-form');
-  const c = state.config;
-  const o = c.output;
-  f.name.value = c.name;
-  f.fps.value = c.fps;
-  f.width.value = c.width;
-  f.height.value = c.height;
-  f.durationInFrames.value = c.durationInFrames;
-  f.format.value = o.format;
-  f.dir.value = o.dir ?? 'out';
-  f.filename.value = o.filename ?? '';
-  f.crf.value = o.crf ?? '';
-  f.preset.value = o.preset ?? '';
-  f.pixFmt.value = o.pixFmt ?? '';
-  f.transparent.checked = !!o.transparent;
-  f.audioLimiter.checked = o.audioLimiter !== false;
-  applyFormatCaps();
-  fillConfigFacts();
-}
-
-$('#config-form').format.addEventListener('change', applyFormatCaps);
-
-/** Everything in scene.json the form cannot edit, shown rather than hidden. */
-function fillConfigFacts() {
-  const c = state.config;
-  const dl = $('#config-facts');
-  dl.innerHTML = '';
-  const row = (k, v, dim = false) => {
-    const dt = document.createElement('dt');
-    dt.textContent = k;
-    const dd = document.createElement('dd');
-    dd.textContent = v;
-    dd.classList.toggle('dim', dim);
-    dl.append(dt, dd);
-  };
-  row('entry', c.entry);
-  row('schema', `v${c.schemaVersion ?? 1}`);
-  row('audio tracks', String(c.audio?.length ?? 0), !c.audio?.length);
-  const libs = c.libraries ?? [];
-  row('libraries', libs.length ? libs.join(', ') : 'none', !libs.length);
-  for (const [file, b] of Object.entries(c.libraryBuilds ?? {})) {
-    row(`  ${file}`, `${b.version ?? 'unknown'} · ${b.sha256.slice(0, 12)}… · ${fmtBytes(b.bytes)}`, true);
-  }
-  $('#raw-config-body').textContent = JSON.stringify(c, null, 2);
-}
-
-$('#config-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const f = e.target;
-  const msg = $('#config-msg');
-  msg.textContent = '…';
-  try {
-    // null clears a field (the server drops null-valued output keys); an
-    // omitted field would just keep its current value through the merge.
-    const patch = {
-      name: f.name.value,
-      fps: Number(f.fps.value),
-      width: Number(f.width.value),
-      height: Number(f.height.value),
-      durationInFrames: Number(f.durationInFrames.value),
-      output: {
-        format: f.format.value,
-        dir: f.dir.value.trim() || 'out',
-        filename: f.filename.value.trim() || 'output',
-        transparent: f.transparent.checked,
-        audioLimiter: f.audioLimiter.checked,
-        crf: f.crf.value === '' ? null : Number(f.crf.value),
-        preset: f.preset.value || null,
-        pixFmt: f.pixFmt.value.trim() || null,
-      },
-    };
-    const { config } = await api(sceneUrl('/config'), { method: 'PATCH', body: { patch } });
-    state.config = config;
-    updateMeta();
-    fillConfigForm();
-    msg.textContent = 'saved ✓';
-    // A renamed/retimed scene changes what the tree shows for its film.
-    delete state.filmScenes[filmIdOf(state.sceneId)];
-    loadFilmScenes(filmIdOf(state.sceneId)).then(renderTree).catch(() => {});
-    reloadPreview();
-  } catch (err) {
-    msg.textContent = err.message;
-  }
-  setTimeout(() => { msg.textContent = ''; }, 4000);
-});
-
-/* ------------------------------- render ------------------------------- */
-
-function parseRange(text, total) {
-  const t = text.trim();
-  if (!t) return undefined;
-  const m = /^(\d+)\s*[-–:]\s*(\d+)$/.exec(t);
-  if (!m) throw new Error('range must look like 0-89');
-  const range = [Number(m[1]), Number(m[2])];
-  if (range[1] >= total) throw new Error(`end frame max is ${total - 1}`);
-  return range;
-}
-
-$('#btn-render').addEventListener('click', async () => {
-  try {
-    const body = {
-      workers: Number($('#rd-workers').value),
-      frameRange: parseRange($('#rd-range').value, state.config.durationInFrames),
-    };
-    const job = await api(sceneUrl('/render'), { method: 'POST', body });
-    trackJob(job.jobId);
-  } catch (err) {
-    toastError(err);
-  }
-});
-
-$('#btn-still').addEventListener('click', async () => {
-  try {
-    const res = await api(sceneUrl('/still'), { method: 'POST', body: { frame: state.frame } });
-    loadOutputs();
-    const a = $('#job-download');
-    $('#job-card').classList.remove('hidden');
-    a.classList.remove('hidden');
-    a.textContent = `⤓ ${res.outputPath.split(/[\\/]/).pop()} (frame ${res.frame})`;
-    a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(res.outputPath.split(/[\\/]/).pop())}&download=1`;
-  } catch (err) {
-    toastError(err);
-  }
-});
-
-function trackJob(jobId) {
-  stopJobPolling();
-  state.jobId = jobId;
-  $('#job-card').classList.remove('hidden');
-  $('#job-download').classList.add('hidden');
-  $('#btn-cancel').disabled = false;
-  const poll = async () => {
-    try {
-      const s = await api(`/api/jobs/${jobId}`);
-      const pill = $('#job-state');
-      pill.textContent = s.state + (s.queuePosition ? ` #${s.queuePosition}` : '');
-      pill.className = `pill ${s.state}`;
-      $('#job-phase').textContent = s.phase;
-      $('#job-bar').style.width = `${s.percent}%`;
-      $('#job-frames').textContent = `${s.framesDone}/${s.totalFrames} frames`;
-      $('#job-fps').textContent = s.renderFps ? `${s.renderFps} fps` : '';
-      $('#job-eta').textContent = s.etaMs != null ? `eta ${(s.etaMs / 1000).toFixed(1)}s` : '';
-      const { logs } = await api(`/api/jobs/${jobId}/logs?tail=40`);
-      $('#job-logs').textContent = logs.map((l) => `[${l.level}] ${l.message}`).join('\n');
-
-      if (['done', 'error', 'cancelled'].includes(s.state)) {
-        stopJobPolling();
-        $('#btn-cancel').disabled = true;
-        $('#job-eta').textContent = '';
-        if (s.state === 'done') {
-          $('#job-bar').style.width = '100%';
-          const file = s.outputPath.split(/[\\/]/).pop();
-          const a = $('#job-download');
-          a.classList.remove('hidden');
-          a.textContent = `⤓ ${file}`;
-          a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(file)}&download=1`;
-        }
-        loadOutputs().catch(() => {});
-      }
-    } catch {
-      stopJobPolling();
-    }
-  };
-  poll();
-  state.jobTimer = setInterval(poll, 500);
-}
-
-function stopJobPolling() {
-  clearInterval(state.jobTimer);
-  state.jobTimer = null;
-}
-
-$('#btn-cancel').addEventListener('click', () => {
-  if (state.jobId) api(`/api/jobs/${state.jobId}/cancel`, { method: 'POST' }).catch(() => {});
-});
-
-/* ------------------------------- outputs ------------------------------ */
-
-const fmtBytes = (n) => (n == null ? '—' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' kB');
-
-async function loadOutputs() {
-  const { files } = await api(sceneUrl('/outputs'));
-  const ul = $('#output-list');
-  ul.innerHTML = '';
-  if (!files.length) {
-    ul.innerHTML = '<li class="dim">no outputs yet — render something</li>';
-    return;
-  }
-  for (const f of files) {
-    const li = document.createElement('li');
-    if (f.dir) {
-      li.innerHTML = `<span>${f.name}/ <span class="dim">(png sequence)</span></span><span class="size">folder</span>`;
-    } else {
-      const a = document.createElement('a');
-      a.textContent = f.name;
-      a.href = `/api/scenes/${enc(state.sceneId)}/output?file=${encodeURIComponent(f.name)}&download=1`;
-      const size = document.createElement('span');
-      size.className = 'size';
-      size.textContent = fmtBytes(f.bytes);
-      li.append(a, size);
-    }
-    ul.appendChild(li);
-  }
-}
-
-/* ---------------------------- audition player --------------------------- */
-
-/* One player shared by the assets and audio tabs: starting a clip stops
- * whatever was playing, clicking the same clip again stops it, and every
- * button falls back to ▶ when playback ends, errors, or is superseded.
- * Deliberately one function — the two tabs previously had their own copies
- * and the audio tab's could start a clip but never stop it. */
-
-const auditionButtons = () => document.querySelectorAll('.audition-btn');
-
-function resetAuditionButtons() {
-  for (const b of auditionButtons()) {
-    b.textContent = '▶';
-    b.classList.remove('playing');
-  }
-}
-
-/** Re-mark the ⏸ after a list re-renders, so a clip playing from the assets
- *  tab still shows a stop control on its row in the audio tab (and vice versa). */
-function syncAuditionButtons() {
-  const cur = state.audioPreview;
-  const playing = cur && !cur.paused ? cur.dataset.src : null;
-  for (const b of auditionButtons()) {
-    const on = !!playing && b.dataset.src === playing;
-    b.textContent = on ? '⏸' : '▶';
-    b.classList.toggle('playing', on);
-  }
-}
-
-function stopAudition() {
-  state.audioPreview?.pause();
-  state.audioPreview = null;
-  resetAuditionButtons();
-}
-
-function toggleAudition(relPath, btn) {
-  const src = (relPath ?? '').trim();
-  const cur = state.audioPreview;
-  // Second click on the clip that is currently playing = stop.
-  if (cur && !cur.paused && cur.dataset.src === src) {
-    stopAudition();
-    return;
-  }
-  stopAudition();
-  if (!src) return; // a track row with no path yet
-
-  const audio = new Audio(assetPreviewUrl(src));
-  audio.dataset.src = src;
-  audio.addEventListener('ended', resetAuditionButtons);
-  audio.addEventListener('error', resetAuditionButtons); // typo'd path: don't strand a ⏸
-  audio.play().catch(resetAuditionButtons);
-  state.audioPreview = audio;
-  btn.textContent = '⏸';
-  btn.classList.add('playing');
-}
-
-/* -------------------------------- audio -------------------------------- */
-
-/* config.audio is the only part of scene.json with real structure, and it
- * was previously invisible in the UI — you had to hand-edit JSON to see what a
- * film's timeline was. Edits are staged in state.audioDraft and written with
- * one PATCH, so a half-typed path never reaches disk. */
-
-function audioRow(track, index) {
-  const li = document.createElement('li');
-
-  const src = document.createElement('input');
-  src.className = 'mono t-src';
-  src.value = track.src ?? '';
-  src.placeholder = 'assets/music.mp3';
-  src.setAttribute('list', 'audio-asset-options');
-  src.spellcheck = false;
-  src.addEventListener('input', () => { state.audioDraft[index].src = src.value; markAudioDirty(); });
-
-  const start = document.createElement('input');
-  start.type = 'number';
-  start.className = 'mono t-num';
-  start.min = '0';
-  start.value = track.startInFrames ?? 0;
-  start.title = 'start frame';
-  start.addEventListener('input', () => {
-    state.audioDraft[index].startInFrames = start.value === '' ? 0 : Number(start.value);
-    markAudioDirty();
-    updateAudioSeconds(li, state.audioDraft[index]);
-  });
-
-  const gain = document.createElement('input');
-  gain.type = 'number';
-  gain.className = 'mono t-num';
-  gain.step = '0.5';
-  gain.value = track.gainDb ?? 0;
-  gain.title = 'gain in dB';
-  gain.addEventListener('input', () => {
-    state.audioDraft[index].gainDb = gain.value === '' ? 0 : Number(gain.value);
-    markAudioDirty();
-  });
-
-  const play = document.createElement('button');
-  play.className = 'ghost a-btn audition-btn';
-  play.textContent = '▶';
-  play.title = 'audition this file';
-  play.addEventListener('click', () => toggleAudition(state.audioDraft[index].src, play));
-  // Nothing to audition until the row has a path.
-  const syncPlayEnabled = () => {
-    play.disabled = !src.value.trim();
-    play.dataset.src = src.value.trim();
-  };
-  src.addEventListener('input', syncPlayEnabled);
-  syncPlayEnabled();
-
-  const del = document.createElement('button');
-  del.className = 'ghost a-btn danger';
-  del.textContent = 'remove';
-  del.addEventListener('click', () => {
-    state.audioDraft.splice(index, 1);
-    renderAudioList();
-    markAudioDirty();
-  });
-
-  const at = document.createElement('span');
-  at.className = 't-at dim mono';
-
-  li.append(
-    labelled('src', src), labelled('start', start), at,
-    labelled('gain dB', gain), play, del,
-  );
-  updateAudioSeconds(li, track);
-  return li;
-}
-
-function labelled(text, input) {
-  const l = document.createElement('label');
-  l.className = text === 'src' ? 'grow' : '';
-  l.textContent = text;
-  l.appendChild(input);
-  return l;
-}
-
-function updateAudioSeconds(li, track) {
-  const fps = state.config?.fps ?? 30;
-  li.querySelector('.t-at').textContent = `= ${((track.startInFrames ?? 0) / fps).toFixed(2)}s`;
-}
-
-function markAudioDirty() {
-  $('#audio-msg').textContent = 'unsaved changes';
-  $('#audio-msg').classList.add('warn');
-}
-
-function renderAudioList() {
-  const ul = $('#audio-list');
-  ul.innerHTML = '';
-  if (!state.audioDraft.length) {
-    ul.innerHTML = '<li class="dim">no audio tracks — add one, or leave empty for a silent render</li>';
-  } else {
-    state.audioDraft.forEach((t, i) => ul.appendChild(audioRow(t, i)));
-  }
-  syncAuditionButtons();
-  const caps = FORMAT_CAPS[state.config?.output?.format] ?? FORMAT_CAPS.mp4;
-  $('#audio-note').textContent = caps.audio
-    ? 'Paths are scene-relative. Tracks mix without normalization and are trimmed/padded to the video length.'
-    : `Note: ${state.config.output.format} cannot carry audio — these tracks are skipped at render time with a warning in the logs.`;
-}
-
-async function loadAudioEditor() {
-  state.audioDraft = structuredClone(state.config.audio ?? []);
-  $('#audio-msg').textContent = '';
-  $('#audio-msg').classList.remove('warn');
-  renderAudioList();
-  // Offer the scene's audio assets as autocomplete for src.
-  try {
-    const { files } = await api(sceneUrl('/assets'));
-    const dl = $('#audio-asset-options');
-    dl.innerHTML = '';
-    for (const f of files.filter((x) => x.kind === 'audio')) {
-      const opt = document.createElement('option');
-      opt.value = f.path;
-      dl.appendChild(opt);
-    }
-  } catch { /* autocomplete is a nicety */ }
-}
-
-$('#btn-add-track').addEventListener('click', () => {
-  state.audioDraft.push({ src: '', startInFrames: 0, gainDb: 0 });
-  renderAudioList();
-  markAudioDirty();
-  $('#audio-list').querySelector('li:last-child .t-src')?.focus();
-});
-
-$('#btn-save-audio').addEventListener('click', async () => {
-  const msg = $('#audio-msg');
-  const tracks = state.audioDraft.filter((t) => t.src.trim());
-  msg.classList.remove('warn');
-  msg.textContent = '…';
-  try {
-    const { config } = await api(sceneUrl('/config'), {
-      method: 'PATCH',
-      body: { patch: { audio: tracks } },
-    });
-    state.config = config;
-    state.audioDraft = structuredClone(config.audio ?? []);
-    renderAudioList();
-    fillConfigFacts();
-    loadAssets().catch(() => {}); // track edits change the assets tab's ♫ badges
-    msg.textContent = `saved ✓ (${tracks.length} track${tracks.length === 1 ? '' : 's'})`;
-    setTimeout(() => { msg.textContent = ''; }, 4000);
-  } catch (err) {
-    msg.textContent = err.message;
-    msg.classList.add('warn');
-  }
-});
-
-/* ------------------------------- assets ------------------------------- */
-
-const assetPreviewUrl = (rel) =>
-  `/preview/${enc(state.sceneId)}/${rel.split('/').map(encodeURIComponent).join('/')}`;
-
-const KIND_GLYPH = { image: '🖼', audio: '♫', font: 'Aa', data: '⧉' };
-
-async function loadAssets() {
-  const { files } = await api(sceneUrl('/assets'));
-  const ul = $('#asset-list');
-  ul.innerHTML = '';
-  if (!files.length) {
-    ul.innerHTML = '<li class="dim">no assets yet — upload files, or drop them into the assets/ folder on disk</li>';
-    return;
-  }
-  for (const f of files) {
-    const li = document.createElement('li');
-
-    const thumb = document.createElement('span');
-    thumb.className = 'a-thumb';
-    if (f.kind === 'image') {
-      const img = document.createElement('img');
-      img.src = `${assetPreviewUrl(f.path)}?t=${f.mtime}`;
-      img.alt = '';
-      img.loading = 'lazy';
-      thumb.appendChild(img);
-    } else if (f.kind === 'audio') {
-      const play = document.createElement('button');
-      play.className = 'a-play audition-btn';
-      play.title = 'audition';
-      play.textContent = '▶';
-      play.dataset.src = f.path;
-      play.addEventListener('click', () => toggleAudition(f.path, play));
-      thumb.appendChild(play);
-    } else {
-      thumb.textContent = KIND_GLYPH[f.kind] ?? '⧉';
-    }
-
-    const name = document.createElement('span');
-    name.className = 'a-name mono';
-    name.textContent = f.path.replace(/^assets\//, '');
-    name.title = f.path;
-
-    const size = document.createElement('span');
-    size.className = 'a-size dim mono';
-    size.textContent = fmtBytes(f.bytes);
-
-    // Referenced-by badge, so the consequence of deleting is visible before
-    // the click rather than only in the confirm dialog.
-    const badge = document.createElement('span');
-    if (f.audioRefs) {
-      badge.className = 'a-ref mono';
-      badge.textContent = `♫ ${f.audioRefs}`;
-      badge.title = `used by ${f.audioRefs} audio track${f.audioRefs === 1 ? '' : 's'}`;
-    }
-
-    const actions = document.createElement('span');
-    actions.className = 'a-actions';
-    const mkBtn = (label, title, fn) => {
-      const b = document.createElement('button');
-      b.className = 'ghost a-btn';
-      b.textContent = label;
-      b.title = title;
-      b.addEventListener('click', fn);
-      return b;
-    };
-    actions.append(
-      mkBtn('copy', 'copy the scene-relative path (use this in your composition)', (e) => {
-        copyText(f.path);
-        flashButton(e.target, '✓ copied');
-      }),
-      mkBtn('rename', 'rename or move within assets/', async () => {
-        const to = prompt('New path (must stay under assets/):', f.path);
-        if (!to || to === f.path) return;
-        // Moving a file out from under an audio track breaks it just as badly
-        // as deleting it, and here the repair is unambiguous.
-        let updateAudio = false;
-        if (f.audioRefs) {
-          updateAudio = confirm(
-            `${f.audioRefs} audio track${f.audioRefs === 1 ? '' : 's'} reference ${f.path}.\n\n` +
-            'OK: point them at the new path.\n' +
-            'Cancel: leave them pointing at the old (now missing) file.',
-          );
-        }
-        try {
-          const res = await api(sceneUrl('/asset/rename'), {
-            method: 'POST',
-            body: { from: f.path, to, updateAudio },
-          });
-          await afterAssetMutation(res);
-        } catch (err) { toastError(err); }
-      }),
-      mkBtn('delete', 'delete this asset', () => openAssetDeleteDialog(f)),
-    );
-    const dl = document.createElement('a');
-    dl.className = 'a-btn download-link';
-    dl.textContent = '⤓';
-    dl.title = 'download';
-    dl.href = `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent(f.path)}&download=1`;
-    actions.appendChild(dl);
-
-    li.append(thumb, name, badge, size, actions);
-    ul.appendChild(li);
-  }
-  syncAuditionButtons();
-}
-
-/* An asset delete/rename can also rewrite config.audio, so the endpoints
- * return the new config when they touched it. Adopting it here keeps the
- * audio tab, the config tab's facts and the raw JSON view in step without a
- * second round trip. */
-async function afterAssetMutation(result) {
-  if (result?.config) {
-    state.config = result.config;
-    state.audioDraft = structuredClone(result.config.audio ?? []);
-    updateMeta();
-    fillConfigForm();
-    renderAudioList();
-  }
-  await loadAssets();
-}
-
-function openAssetDeleteDialog(f) {
-  const dlg = $('#asset-delete-dialog');
-  $('#asset-delete-summary').textContent = `Delete ${f.path}?`;
-  const refBox = $('#asset-delete-refs');
-  refBox.classList.toggle('hidden', !f.audioRefs);
-  if (f.audioRefs) {
-    $('#asset-delete-count').textContent =
-      `${f.audioRefs} audio track${f.audioRefs === 1 ? '' : 's'} in this scene reference it.`;
-    const ul = $('#asset-delete-list');
-    ul.innerHTML = '';
-    for (const t of (state.config?.audio ?? []).filter((t) => (t.src ?? '').toLowerCase() === f.path.toLowerCase())) {
-      const li = document.createElement('li');
-      li.textContent = `${t.src} · start ${t.startInFrames ?? 0}f · ${t.gainDb ?? 0} dB`;
-      ul.appendChild(li);
-    }
-    $('#asset-delete-form').updateAudio.checked = true;
-  }
-  dlg.dataset.path = f.path;
-  dlg.dataset.refs = String(f.audioRefs ?? 0);
-  dlg.showModal();
-}
-
-$('#btn-asset-delete-cancel').addEventListener('click', () => $('#asset-delete-dialog').close());
-$('#asset-delete-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const dlg = $('#asset-delete-dialog');
-  const path = dlg.dataset.path;
-  const updateAudio = Number(dlg.dataset.refs) > 0 && e.target.updateAudio.checked;
-  try {
-    const res = await api(
-      `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent(path)}${updateAudio ? '&updateAudio=1' : ''}`,
-      { method: 'DELETE' },
-    );
-    dlg.close();
-    await afterAssetMutation(res);
-  } catch (err) {
-    toastError(err);
-  }
-});
-
-async function uploadAssets(fileList) {
-  const errors = [];
-  for (const file of fileList) {
-    try {
-      const res = await fetch(
-        `/api/scenes/${enc(state.sceneId)}/asset?path=${encodeURIComponent('assets/' + file.name)}`,
-        { method: 'PUT', body: file },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.message || res.statusText);
-      }
-    } catch (err) {
-      errors.push(`${file.name}: ${err.message}`);
-    }
-  }
-  loadAssets().catch(() => {});
-  if (errors.length) toast('Some uploads failed:\n' + errors.join('\n'), { kind: 'error' });
-}
-
-$('#btn-upload').addEventListener('click', () => $('#asset-file-input').click());
-$('#asset-file-input').addEventListener('change', (e) => {
-  if (e.target.files.length) uploadAssets([...e.target.files]);
-  e.target.value = '';
-});
-{
-  const zone = $('#tab-assets');
-  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dropping'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('dropping'));
-  zone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    zone.classList.remove('dropping');
-    if (e.dataTransfer.files.length) uploadAssets([...e.dataTransfer.files]);
-  });
-}
-$('#btn-copy-assets-path').addEventListener('click', (e) => {
-  copyText($('#assets-path').textContent);
-  flashButton(e.target, '✓');
-});
-
-/* ---------------------------- scene actions ---------------------------- */
-
-$('#btn-copy-path').addEventListener('click', (e) => {
-  copyText(state.scenePath ?? '');
-  flashButton(e.target, '✓');
-});
-
-$('#btn-delete-scene').addEventListener('click', () => {
-  $('#delete-summary').textContent = `Remove "${state.config?.name ?? state.sceneId}" from its film?`;
-  $('#delete-form').deleteFiles.checked = false;
-  $('#delete-dialog').showModal();
-});
-$('#btn-delete-cancel').addEventListener('click', () => $('#delete-dialog').close());
-$('#delete-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const deleteFiles = e.target.deleteFiles.checked ? 1 : 0;
-  const filmId = filmIdOf(state.sceneId);
-  try {
-    await api(`${sceneUrl()}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
-    $('#delete-dialog').close();
-    closeWorkbench();
-    delete state.filmScenes[filmId];
-    await loadFilmScenes(filmId).catch(() => {});
-    await loadWorkspaces();
-  } catch (err) {
-    toastError(err);
-  }
-});
-
-/* --------------------------- collapsible panel -------------------------- */
-
-/* Collapsing leaves the tab bar in place, so the viewport gets the full height
- * for scrubbing without losing the way back. */
-function setPanelCollapsed(collapsed) {
-  $('#workbench').classList.toggle('panel-collapsed', collapsed);
-  const btn = $('#btn-panel-toggle');
-  btn.textContent = collapsed ? '▴' : '▾';
-  btn.title = collapsed ? 'expand this panel' : 'collapse this panel';
-  localStorage.setItem('ms.panelCollapsed', collapsed ? '1' : '');
-  requestAnimationFrame(fitPreview); // re-fit after the grid row resizes
-}
-$('#btn-panel-toggle').addEventListener('click', () =>
-  setPanelCollapsed(!$('#workbench').classList.contains('panel-collapsed')));
-if (localStorage.getItem('ms.panelCollapsed') === '1') setPanelCollapsed(true);
-
 /* --------------------------- collapsible rail --------------------------- */
 
+/* Collapsing hides the Explorer completely. The activity bar's ☰ is the only
+ * control for it (v0.27) — the rail used to carry its own «/» chevron as well,
+ * which is one job with two buttons, and the 46px stub it collapsed to had
+ * nothing to show once the vendor buttons moved to the activity bar. */
 function setRailCollapsed(collapsed) {
   $('#frame').classList.toggle('rail-collapsed', collapsed);
-  const btn = $('#btn-collapse');
-  btn.textContent = collapsed ? '»' : '«';
-  btn.title = collapsed ? 'expand sidebar' : 'collapse sidebar';
   localStorage.setItem('ms.railCollapsed', collapsed ? '1' : '');
-  fitPreview(); // the stage just changed width
+  syncExplorerIcon();
+  // The active document sized itself to a box that just changed width.
+  try { activeWindow()?.dispatchEvent(new Event('resize')); } catch { /* still loading */ }
 }
-$('#btn-collapse').addEventListener('click', () =>
-  setRailCollapsed(!$('#frame').classList.contains('rail-collapsed')));
 if (localStorage.getItem('ms.railCollapsed') === '1') setRailCollapsed(true);
 
 /* ---------------------------- global settings --------------------------- */
@@ -1219,11 +278,8 @@ async function loadSettings() {
   const data = await api('/api/settings');
   state.settings = data.settings;
   state.environment = data.environment;
-  const w = $('#rd-workers');
-  if (!w.dataset.touched) w.value = String(data.settings.render.defaultWorkers);
   return data;
 }
-$('#rd-workers').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
 
 /* ----------------------------- storage paths ---------------------------- */
 
@@ -1300,15 +356,10 @@ if (pendingNotice) {
 function showSettingsPage(open) {
   if (open) {
     if (vendorState.openCapability) showVendorsPage(null);
-    stopPlayback();
-    stopAudition();
-    $('#workbench').classList.add('hidden');
-    $('#empty-state').classList.add('hidden');
-  } else {
-    $('#empty-state').classList.toggle('hidden', !!state.sceneId || !!state.libraryWs);
-    $('#workbench').classList.toggle('hidden', !state.sceneId || !!state.libraryWs);
-    if (state.sceneId) fitPreview();
+    suspendActiveDocument();
   }
+  state.settingsOpen = open;
+  syncStagePages();
   $('#settings-page').classList.toggle('hidden', !open);
   $('#btn-settings').classList.toggle('active', open);
   state.settingsOpen = open;
@@ -1742,15 +793,9 @@ function showVendorsPage(capability) {
   if (open) {
     $('#vendors-title').textContent = CAP_LABELS[capability].title;
     $('#vendors-subtitle').textContent = CAP_LABELS[capability].subtitle;
-    stopAudition();
-    $('#workbench').classList.add('hidden');
-    $('#empty-state').classList.add('hidden');
-    stopPlayback();
-  } else {
-    $('#empty-state').classList.toggle('hidden', !!state.sceneId || !!state.libraryWs);
-    $('#workbench').classList.toggle('hidden', !state.sceneId || !!state.libraryWs);
-    if (state.sceneId) fitPreview();
+    suspendActiveDocument();
   }
+  syncStagePages();
 }
 
 /** The open page's button toggles it closed; the other button switches capability. */
@@ -2495,7 +1540,7 @@ async function testVendor(kind) {
   const msg = vendorEl.testMsg(kind);
   if (btn.classList.contains('playing')) { stopVendorPreview(); return; }
   stopVendorPreview();
-  stopAudition(); // never two clips at once
+  suspendActiveDocument(); // never two clips at once
 
   const music = kind === 'music';
   // The music page has one shared test button, so it auditions whichever vendor
@@ -2552,22 +1597,6 @@ for (const kind of [...CAP_VENDORS.speech, 'music']) {
   const btn = vendorEl.testBtn(kind);
   btn.dataset.idleLabel = btn.textContent; // "▶ test" / "▶ listen"
   btn.addEventListener('click', () => testVendor(kind));
-}
-
-/* -------------------------------- tabs -------------------------------- */
-
-for (const tab of document.querySelectorAll('.tab')) {
-  tab.addEventListener('click', () => {
-    // Picking a tab while collapsed means you want to see it.
-    if ($('#workbench').classList.contains('panel-collapsed')) setPanelCollapsed(false);
-    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    for (const body of document.querySelectorAll('.tab-body')) {
-      body.classList.toggle('hidden', body.id !== `tab-${tab.dataset.tab}`);
-    }
-    if (tab.dataset.tab === 'outputs') loadOutputs().catch(() => {});
-    if (tab.dataset.tab === 'assets') loadAssets().catch(() => {});
-    if (tab.dataset.tab === 'audio') loadAudioEditor().catch(() => {});
-  });
 }
 
 /* -------------------------------- films -------------------------------- */
@@ -2706,7 +1735,7 @@ $('#new-scene-form').addEventListener('submit', async (e) => {
     delete state.filmScenes[newSceneFilm];
     await loadFilmScenes(newSceneFilm).catch(() => {});
     await loadWorkspaces();
-    await selectScene(scene.id);
+    openDocument({ kind: 'scene', id: scene.id, name: scene.name });
   } catch (err) {
     toastError(err);
   }
@@ -2723,19 +1752,12 @@ $('#new-scene-form').addEventListener('submit', async (e) => {
 function showLibraryPage(wsId) {
   state.libraryWs = wsId;
   $('#library-page').classList.toggle('hidden', !wsId);
-  if (wsId) {
-    $('#workbench').classList.add('hidden');
-    $('#empty-state').classList.add('hidden');
-  } else {
-    $('#workbench').classList.toggle('hidden', !state.sceneId);
-    $('#empty-state').classList.toggle('hidden', !!state.sceneId);
-  }
+  if (wsId) suspendActiveDocument();
+  syncStagePages();
   renderTree();
 }
 
 async function openLibrary(wsId) {
-  stopPlayback();
-  stopAudition();
   if (vendorState.openCapability) showVendorsPage(null);
   if (state.settingsOpen) showSettingsPage(false);
   showLibraryPage(wsId);
@@ -2796,14 +1818,262 @@ $('#library-upload').addEventListener('change', async (e) => {
   await loadWorkspaces();
 });
 
+/* ------------------------------ documents -------------------------------- */
+
+/* A film or a scene, open as a tab. Each is a same-origin iframe pointing at
+ * the document's own page, mounted once and then only shown or hidden — so a
+ * tab you come back to still has its playhead, its undo stack, its timeline
+ * zoom and its scroll exactly where you left them. That is what a tab strip
+ * promises, and rebuilding the view on every switch would break it.
+ *
+ * Iframes also make two open films a non-event. film.js and scene.js both use
+ * #inspector, #btn-play, #frame-total and #timecode; in one runtime the second
+ * film would quietly drive the first one's controls. */
+
+const docs = new Map();   // "kind:id" -> {kind, id, name, frame}
+let activeDocKey = null;
+
+const docKey = (kind, id) => `${kind}:${id}`;
+const docSrc = (kind, id) => (kind === 'film'
+  ? `/film.html?id=${enc(id)}`
+  : `/scene.html?scene=${enc(id)}`);
+const activeDoc = () => (activeDocKey ? docs.get(activeDocKey) : null);
+const activeWindow = () => { try { return activeDoc()?.frame?.contentWindow ?? null; } catch { return null; } };
+
+const DOCS_KEY = 'ms.docs';
+
+function persistDocs() {
+  try {
+    localStorage.setItem(DOCS_KEY, JSON.stringify({
+      open: [...docs.values()].map((d) => ({ kind: d.kind, id: d.id, name: d.name })),
+      active: activeDocKey,
+    }));
+  } catch { /* private mode / quota: the working set is a convenience */ }
+}
+
+function openDocument({ kind, id, name = null, activate = true }) {
+  if (kind !== 'film' && kind !== 'scene') return;
+  const key = docKey(kind, id);
+  let doc = docs.get(key);
+  if (!doc) {
+    const frame = document.createElement('iframe');
+    frame.className = 'editor-frame';
+    frame.title = name ?? id;
+    frame.src = docSrc(kind, id);
+    $('#editor-stack').appendChild(frame);
+    doc = { kind, id, name: name ?? id.split('/').pop(), frame };
+    docs.set(key, doc);
+  } else if (name) {
+    doc.name = name;
+  }
+  if (activate) showDocument(key);
+  else { renderDocTabs(); persistDocs(); }
+}
+
+function showDocument(key) {
+  if (!docs.has(key)) return;
+  activeDocKey = key;
+  // Opening a document leaves whatever full-stage page was up: they are
+  // alternatives to the editor, not layers over it.
+  if (vendorState.openCapability) showVendorsPage(null);
+  if (state.settingsOpen) showSettingsPage(false);
+  if (state.libraryWs) showLibraryPage(null);
+  syncStagePages();
+  renderDocTabs();
+  renderStatusBar();
+  persistDocs();
+  const doc = docs.get(key);
+  document.title = `${doc.name} - Motion Studio`;
+}
+
+function closeDocument({ kind, id }) {
+  const key = docKey(kind, id);
+  const doc = docs.get(key);
+  if (!doc) return;
+  doc.frame.remove();
+  docs.delete(key);
+  if (activeDocKey === key) {
+    activeDocKey = [...docs.keys()].pop() ?? null;
+    if (activeDocKey) { showDocument(activeDocKey); return; }
+    document.title = 'Motion Studio';
+  }
+  syncStagePages();
+  renderDocTabs();
+  renderStatusBar();
+  persistDocs();
+}
+
+/** Exactly one document is visible, and only when no full-stage page is up. */
+function syncStagePages() {
+  const pageUp = !!vendorState.openCapability || !!state.settingsOpen || !!state.libraryWs;
+  $('#editor-stack').classList.toggle('hidden', pageUp || !docs.size);
+  $('#empty-state').classList.toggle('hidden', pageUp || docs.size > 0);
+  for (const [key, d] of docs) d.frame.classList.toggle('on', key === activeDocKey);
+  if (!pageUp && docs.size) notifyShown();
+}
+
+/* A document that loaded while the stack was display:none had no box at all —
+ * its own ResizeObserver cannot help, because a document inside a hidden
+ * iframe is not rendered and never observes anything. So the shell says when
+ * it is on screen, and the document does whatever it could not do before:
+ * fit its timeline, scale its preview. */
+function notifyShown() {
+  const w = activeWindow();
+  if (!w) return; // still loading; its own boot runs with a real box
+  try {
+    w.StudioDoc?.shown?.();
+    w.dispatchEvent(new Event('resize'));
+  } catch { /* mid-navigation */ }
+}
+
+function renderDocTabs() {
+  const strip = $('#doc-tabs');
+  strip.innerHTML = '';
+  strip.classList.toggle('hidden', !docs.size);
+  for (const [key, d] of docs) {
+    const tab = el('div', 'doc-tab' + (key === activeDocKey ? ' active' : ''));
+    tab.title = `${d.name}\n${d.id}`;
+    tab.append(
+      el('span', 'doc-tab-mark', d.kind === 'film' ? '▶' : '◧'),
+      el('span', 'doc-tab-name', d.name),
+    );
+    const close = el('button', 'doc-tab-close', '✕');
+    close.title = 'close this document';
+    close.addEventListener('click', (ev) => { ev.stopPropagation(); closeDocument(d); });
+    tab.appendChild(close);
+    tab.addEventListener('click', () => showDocument(key));
+    strip.appendChild(tab);
+  }
+}
+
+/** A document has loaded and named itself. */
+function documentReady(doc) {
+  syncDocument(doc);
+  // It may have booted behind a full-stage page and be on screen by now.
+  if (!$('#editor-stack').classList.contains('hidden')) notifyShown();
+}
+
+/** A document's title or status items changed. */
+function syncDocument(doc) {
+  if (!doc?.id) return;
+  const key = docKey(doc.kind, doc.id);
+  const entry = docs.get(key);
+  if (entry) {
+    const name = doc.title?.();
+    if (name && name !== entry.name) {
+      entry.name = name;
+      renderDocTabs();
+      persistDocs();
+      if (key === activeDocKey) document.title = `${name} - Motion Studio`;
+    }
+  }
+  if (key === activeDocKey) renderStatusBar();
+}
+
+/** A document changed what films or scenes exist. */
+function treeChanged() {
+  loadWorkspaces().catch(() => {});
+  StudioPalette.invalidate();
+}
+
+function restoreDocs() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(DOCS_KEY) || 'null'); } catch { saved = null; }
+  for (const d of saved?.open ?? []) openDocument({ ...d, activate: false });
+  if (saved?.active && docs.has(saved.active)) showDocument(saved.active);
+  else if (docs.size) showDocument([...docs.keys()][0]);
+  else { syncStagePages(); renderDocTabs(); }
+}
+
+window.StudioShell = {
+  isShell: true,
+  openDocument,
+  closeDocument,
+  documentReady,
+  syncDocument,
+  treeChanged,
+  openPalette: (mode) => StudioPalette.open(mode),
+};
+
+/* ------------------------ activity bar + status bar ---------------------- */
+
+/* The activity bar's vendor and settings buttons ARE the old rail-footer
+ * buttons - same ids, same handlers, wired above. Only these two are new. */
+$('#btn-explorer').addEventListener('click', () =>
+  setRailCollapsed(!$('#frame').classList.contains('rail-collapsed')));
+$('#btn-palette').addEventListener('click', () => StudioPalette.open('files'));
+$('#sb-problems').addEventListener('click', () => $('#btn-settings').click());
+$('#sb-goto').addEventListener('click', () => StudioPalette.open('files'));
+
+/** A document going behind a full-stage page must stop playing. */
+function suspendActiveDocument() {
+  try { activeWindow()?.StudioDoc?.suspend?.(); } catch { /* still loading */ }
+}
+
+/** The activity bar's explorer icon is lit whenever the side bar is showing. */
+function syncExplorerIcon() {
+  $('#btn-explorer').classList.toggle('active', !$('#frame').classList.contains('rail-collapsed'));
+}
+
+/* The status bar belongs to the shell, but what goes in it belongs to the
+ * active document - so the shell asks it, and the document never reaches up
+ * into this DOM. Items marked align:'right' sit after the spacer. */
+function renderStatusBar() {
+  const host = $('#sb-doc');
+  const right = $('#sb-doc-right');
+  host.innerHTML = '';
+  right.innerHTML = '';
+  let items = [];
+  try { items = activeWindow()?.StudioDoc?.status?.() ?? []; } catch { /* still loading */ }
+  for (const item of items) {
+    const node = el(item.onClick ? 'button' : 'span', `sb-item ${item.cls ?? ''}`, item.text);
+    if (item.title) node.title = item.title;
+    if (item.onClick) node.addEventListener('click', () => { try { item.onClick(); } catch { /* gone */ } });
+    (item.align === 'right' ? right : host).appendChild(node);
+  }
+}
+
+// A document reports on change, but a poll keeps a slow SSE or a job tick from
+// leaving a stale line up.
+setInterval(renderStatusBar, 1000);
+
+/* ------------------------------ the palette ------------------------------ */
+
+/* Commands the SHELL owns. The documents' own commands live with them. */
+StudioPalette.register([
+  { id: 'new.workspace', title: 'Workspace: New…', group: 'commands', run: () => $('#btn-new-workspace').click() },
+  { id: 'page.tts', title: 'Vendors: Speech', group: 'commands', run: () => toggleVendorsPage('speech') },
+  { id: 'page.music', title: 'Vendors: Music', group: 'commands', run: () => toggleVendorsPage('music') },
+  { id: 'page.trans', title: 'Vendors: Transcription', group: 'commands', run: () => toggleVendorsPage('transcription') },
+  { id: 'page.settings', title: 'Preferences: Global Settings', group: 'commands', run: () => $('#btn-settings').click() },
+  { id: 'view.rail', title: 'View: Toggle Side Bar', group: 'commands', run: () => $('#btn-explorer').click() },
+  {
+    id: 'doc.close', title: 'View: Close the Active Document', group: 'commands',
+    when: () => !!activeDocKey, run: () => closeDocument(activeDoc()),
+  },
+  {
+    id: 'doc.closeAll', title: 'View: Close All Documents', group: 'commands',
+    when: () => docs.size > 0, run: () => { for (const d of [...docs.values()]) closeDocument(d); },
+  },
+]);
+
 /* -------------------------------- boot -------------------------------- */
 
 checkPrereqs();
 loadSettings().catch(() => {});
+syncExplorerIcon();
+renderStatusBar();
 loadWorkspaces()
   .then(async () => {
-    // Deep link from the film editor's "open scene ↗".
-    const deep = new URLSearchParams(location.search).get('scene');
-    if (deep) await selectScene(deep).catch(toastError);
+    const params = new URLSearchParams(location.search);
+    // Reopen what was open, then honour the deep links on top of it.
+    restoreDocs();
+    const scene = params.get('scene');
+    if (scene) openDocument({ kind: 'scene', id: scene });
+    const film = params.get('film');
+    if (film) openDocument({ kind: 'film', id: film });
+    const page = params.get('page');
+    if (page === 'settings') $('#btn-settings').click();
+    else if (['speech', 'music', 'transcription'].includes(page)) toggleVendorsPage(page);
   })
   .catch((e) => console.error(e));

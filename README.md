@@ -25,8 +25,13 @@ advice too — the Studio never edits production directly. Everything hands-on
 — add, trim, reorder, render, build — is on that same page. There is no
 separate review screen and no mode switch.
 
-- **Humans**, through the cross-platform **Studio web UI** (`npm run studio`):
-  one tree of every **workspace → film → scene** on the machine, live preview
+- **Humans**, through the cross-platform **Studio web UI** (`npm run studio`) —
+  a **VS Code-style shell**: one permanent Explorer tree of every
+  **workspace → film → scene** on the machine, with films and scenes opening as
+  **document tabs** beside it (each keeping its own playhead, undo stack and
+  scroll while another is in front), an activity bar, a status bar, and a
+  command palette on `Ctrl/Cmd+P` that fuzzy-jumps to anything on the machine
+  (`Ctrl/Cmd+Shift+P` for commands). Inside it: live preview
   that drives your *actual* composition, scrub/play transport, hot reload,
   render queue with progress + ETA, and full scene management — create,
   configure and delete scenes, manage `assets/` (upload, audition, rename,
@@ -43,7 +48,13 @@ separate review screen and no mode switch.
   and only then promoted over its visible output, so a failed revision never
   destroys the previous good movie. A film can also save **platform versions**
   (YouTube 16:9, Shorts/TikTok 9:16, Square 1:1) that share one edit and audio
-  timeline rather than becoming hand-maintained copies. Each workspace also has
+  timeline rather than becoming hand-maintained copies. **A scene explains
+  itself inside the film page**: selecting one opens its settings, audio,
+  assets and renders as inspector tabs — the same panels the scene workbench
+  shows, not a summary — so reviewing a film never means leaving the timeline.
+  When you do want the full-screen scene editor, **open scene ↗** opens it as a
+  second tab rather than taking you anywhere: the film stays open beside it.
+  Each workspace also has
   a **shared-asset library** for the large files you want an agent to use
   without pushing them through the tool channel.
 - **AI agents**, through a local **MCP server** with a fixed, path-sandboxed
@@ -297,7 +308,7 @@ motion-studio/
 │   ├── src/mcp/server.js          MCP entry — stdio server for agents, bound to one workspace
 │   ├── src/studio/                Studio web UI — zero-dependency node:http server
 │   │   ├── server.js                localhost API: workspaces/films/scenes/library/settings/render/jobs/SSE
-│   │   └── public/                  vanilla-JS UI (no build step): index/app + the film page (film.html/js/css)
+│   │   └── public/                  vanilla-JS UI (no build step): index/app = the shell (Explorer, tabs, editor stack, activity + status bars); film.html/js + scene.html/js = documents mounted in it; shared — studio-util, scene-panels, palette, shell.css/tabs.css
 │   ├── src/runtime/frame-api.js   in-page helper library v1.4 (copied into every scene)
 │   ├── templates/default/         scene scaffold (HTML/JS/CSS)
 │   └── test/                      826 tests across 40 suites (see below)

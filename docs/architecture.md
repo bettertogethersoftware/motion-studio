@@ -1304,6 +1304,122 @@ owns what that document *means*:
   path instead of base64, and points at `inspect_render` for the exact frames.
   It reduces transport, never inspection.
 
+### 13.1 The Studio front end: one shell, documents inside it (v0.27)
+
+The Studio UI is vanilla JS with no build step, served as files by
+`studio/server.js` from a small explicit allowlist.
+
+**It is one page.** `index.html`/`app.js` is the *shell*: the Explorer tree of
+every workspace → film → scene, the document tabs, the editor stack, the
+activity bar, the status bar, and the full-stage pages that are not documents
+(vendors, global settings, the shared library). It navigates nowhere.
+
+A **document** is a film or a scene, and each one is a same-origin iframe
+mounted into `#editor-stack`:
+
+| document | page | script |
+|---|---|---|
+| film | `/film.html?id=<ws>/<film>` | `film.js` |
+| scene | `/scene.html?scene=<ws>/<film>/<scene>` | `scene.js` |
+
+Iframes were chosen over refactoring both into one runtime, and the reasons are
+load-bearing rather than convenient:
+
+- **Per-document state survives a tab switch**, which is the only thing a tab
+  strip is for. A film returns with its playhead, undo stack, timeline zoom and
+  inspector tab intact. Tearing down and rebuilding on every switch would
+  refetch and lose all of it.
+- **Element ids stop colliding.** `film.js` and `scene.js` both use
+  `#inspector`, `#btn-play`, `#frame-total`, `#timecode`. In one runtime a
+  second open film would drive the first one's controls, silently.
+- **Documents stay standalone pages**, so a scene still opens on a second
+  monitor and the deep links still mean what they meant.
+
+The shell↔document contract is direct calls, not `postMessage` — same origin:
+
+```js
+window.StudioShell = { openDocument, closeDocument, documentReady,
+                       syncDocument, treeChanged, openPalette }
+window.StudioDoc   = { kind, id, title(), status(), suspend(), shown() }
+```
+
+`shown()` exists because a `ResizeObserver` cannot cover the case it is for: a
+document inside an iframe the **parent** has hidden is not rendered at all, so
+nothing in it observes anything. The shell therefore says when a document is on
+screen, and the document does what it could not do without a box — the film
+fits its timeline, the scene scales its preview. `suspend()` is the inverse.
+
+A document declares `StudioDoc` via `StudioUtil.registerDocument()`, which also
+marks `<html class="embedded">` so the stylesheets drop the chrome the shell
+provides. The shell **asks** the active document for its status items and never
+reads its DOM; a document going behind a full-stage page is told to `suspend()`
+so opening settings cannot leave a film playing. `StudioUtil.openDocument()`
+opens a sibling tab when embedded and falls back to a real navigation when not,
+which is why the same code works both ways.
+
+Files shared by shell and documents alike, loaded as classic scripts before the
+page's own, each an IIFE exporting exactly one global:
+
+| file | global | what it owns |
+|---|---|---|
+| `studio-util.js` | `StudioUtil` | `$`/`api`/`enc`, toasts, and the embed helpers (`registerDocument`, `syncDocument`, `openDocument`) |
+| `scene-panels.js` / `scene-panels.css` | `ScenePanels` | a scene's **config, audio, assets and outputs** panels |
+| `palette.js` | `StudioPalette` | quick open (`Ctrl+P`) and the command palette (`Ctrl+Shift+P`) |
+| `shell.css` / `tabs.css` | — | the activity bar, status bar, editor stack, tabs, palette chrome, and the shared list/scrollbar grammar |
+
+**The chrome is VS Code's (v0.27).** Not as decoration: the app already had
+that shape and was spelling it differently, so adopting the grammar cost markup
+rather than architecture. `.vs-shell` wraps a page as a column of `.vs-body`
+(activity bar + root) over `.status-bar`; `.frame` and `.fe-frame` kept their
+internals and gave up only their `height: 100vh`. The activity bar's vendor and
+settings buttons ARE the old rail-footer buttons, moved with their ids and
+handlers intact. Three status-bar nodes on the film document (`#save-state`,
+`#production-line`, `#mix-state`) moved out of its header the same way, which is
+why their setters preserve an `sb-item` class they did not need before — and why
+each of them calls `StudioUtil.syncDocument()`, since embedded they are read
+through `StudioDoc.status()` rather than seen.
+
+Colours are VS Code Dark Modern: an editor surface (`#1f1f1f`) *lighter* than
+its side bar (`#181818`), `#2b2b2b` hairlines, `#2a2d2e` list hover. The accent
+is deliberately not VS Code's `#007acc` — amber stays the record light, because
+a video tool that looks exactly like an IDE has lost the thing that says which
+app you are in.
+
+`palette.js` indexes films from one `/api/workspaces` call and scenes per film
+from `/api/films/:id?detail=scenes` — the compact projection, no composition
+bodies — fetched lazily at a concurrency of six and cached for the page's life,
+so a cold palette is useful immediately rather than blocking on one request per
+film. It skips `sceneFolders` rows that are `missing` or nameless — a guard that
+is load-bearing today, because `store.listScenes()` describes every play-order
+entry as a scene, including footage segments, which have no slug and therefore
+produce one nameless `<film>/undefined` row per footage clip.
+
+`ScenePanels.create()` builds its own DOM — it adopts no markup from either
+page — and takes everything host-specific by injection: the transport (`api`),
+the notifications, a `compact` flag for the inspector's column, and two
+callbacks that say what a config change and a deletion *mean* to that host
+(the workbench reloads its preview and tree; the film page reflows the whole
+film, because a retimed scene moves every offset after it). It owns its own
+`<dialog>`s and one audition player per instance.
+
+The rule this encodes: **the scene page and the film inspector must not have
+two implementations of the same panel.** They would drift, and within a release
+the two surfaces would disagree about what editing a scene means — the same
+mode error the document strip exists to end, one layer down. The scene page
+adopted the module first precisely so the extraction was provable against the
+surface that already worked.
+
+Two consequences worth knowing when editing `film.js`:
+
+- The inspector is rebuilt from `innerHTML = ''` on selection, mutation, save,
+  SSE and a 1 Hz scene-job poll. The panel root is therefore **long-lived** —
+  detached and re-appended, never rebuilt — and `renderInspector` captures and
+  restores focus and caret across the render. Without both, a background render
+  would retype the user's config field once a second.
+- Everything a panel needs is already REST: `GET /api/scenes/:sid`,
+  `PATCH …/config`, `…/assets`, `…/asset`, `…/outputs`. The film page needed
+  no new server route to show a scene in full.
+
 ## 14. The production loop (v0.23): AI directs, the human advises
 
 Motion Studio's working model is unattended AI production with asynchronous

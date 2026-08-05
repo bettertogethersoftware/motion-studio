@@ -117,6 +117,7 @@ const state = {
   buildPoll: null,
   lastBuild: null,       // {status, logs} — refills the build panel on re-open
   inspectorMode: null,   // null = selection properties | 'build'
+  sceneTab: 'scene',     // inspector tab for a selected scene: scene|config|audio|assets|outputs
   sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
 
@@ -185,7 +186,8 @@ function snapshot() {
 function setSaveState(text, cls = '') {
   const el = $('#save-state');
   el.textContent = text;
-  el.className = `mono ${cls || 'dim'}`;
+  el.className = `sb-item mono ${cls || 'dim'}`;
+  StudioUtil.syncDocument();
 }
 
 function scheduleSave({ now = false } = {}) {
@@ -329,6 +331,7 @@ async function refresh() {
   adoptDetail(detail);
   $('#film-name').value = film.name;
   document.title = `${film.name} — Motion Studio`;
+  StudioUtil.syncDocument();
   await loadAssets();
   await loadOverview();
   renderAll();
@@ -392,7 +395,9 @@ function renderHeader() {
   const problems = d.problems ?? [];
   const btn = $('#btn-problems');
   btn.classList.toggle('hidden', !problems.length);
-  btn.textContent = `⚠ ${problems.length} issue${problems.length === 1 ? '' : 's'}`;
+  btn.textContent = `⊗ ${problems.length} issue${problems.length === 1 ? '' : 's'}`;
+  btn.title = 'what would stop a build — click for the list';
+  $('#sb-film').textContent = filmId;
   const HARD = new Set([
     'scene_missing', 'signature_mismatch', 'format_not_concatenatable', 'asset_missing', 'mixed_scene_audio',
     // Footage problems block a build exactly as their scene equivalents do, so
@@ -609,11 +614,12 @@ function updateMixChip() {
   const el = $('#mix-state');
   const m = state.mix;
   const hasAudio = (state.film?.audio ?? []).length > 0;
-  el.className = 'mono';
+  el.className = 'sb-item mono';
   if (!hasAudio) { el.textContent = ''; return; }
   if (m.building) { el.textContent = '⏳ mixing audio…'; el.classList.add('building'); }
   else if (m.url && !m.dirty) { el.textContent = '♪ master mix ready'; el.classList.add('ready'); }
   else { el.textContent = '♪ mix on next play'; el.classList.add('dim'); }
+  StudioUtil.syncDocument();
 }
 
 async function buildMix() {
@@ -1059,10 +1065,15 @@ function sequenceBlock(band) {
   name.className = 'seq-name';
   name.textContent = band.label ?? '—';
   el.appendChild(name);
+  // Double-click zooms the band to the viewport — movement-to-movement is the
+  // granularity a film is reviewed at, and an anonymous run is still a stretch
+  // of film worth filling the screen with.
+  el.addEventListener('dblclick', (ev) => { ev.stopPropagation(); zoomToRange(band.offset, band.frames); });
   if (band.label) {
     const n = unresolvedCount((a) => a.target?.type === 'sequence' && a.target.sequence === band.label);
     if (n) el.appendChild(adviceBadge(n));
     el.title = `sequence “${band.label}” — ${band.segments.length} segment${band.segments.length === 1 ? '' : 's'}`
+      + ' (double-click to zoom to it)'
       + `${state.film?.sequences?.[band.label]?.intent ? `\n${state.film.sequences[band.label].intent}` : ''}`;
     el.addEventListener('pointerdown', (ev) => {
       ev.stopPropagation();
@@ -1509,6 +1520,23 @@ function select(sel) {
   if (state.aiming) { disarmAim(); openAdviceDialog(); }
 }
 
+/**
+ * Cut-to-cut movement (v0.26): the next scene boundary, or with shift the next
+ * sequence start — the granularity a human actually reviews at, where ←/→ are
+ * for the frame you have already found. PgUp/PgDn so nothing collides with
+ * frame stepping. Boundaries are the offsets the timeline is already drawn
+ * from, so they cannot disagree with the picture.
+ */
+function boundaryFrom(dir, sequencesOnly) {
+  const offsets = sequencesOnly
+    ? sequenceBands().map((b) => b.offset)
+    : (state.detail?.scenes ?? []).map((s) => s.filmOffset ?? 0);
+  const marks = [...new Set([0, ...offsets])].sort((a, b) => a - b);
+  const here = Math.floor(state.playhead);
+  const next = dir > 0 ? marks.find((f) => f > here) : marks.filter((f) => f < here).pop();
+  return next ?? (dir > 0 ? Math.max(0, totalFrames() - 1) : 0);
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
   if ($('#advice-dialog')?.open) return; // the popup owns the keyboard while it is up
@@ -1517,6 +1545,8 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'ArrowRight') { stopPlayback(); setPlayhead(Math.floor(state.playhead) + (e.shiftKey ? 10 : 1)); }
   else if (e.code === 'Home') { stopPlayback(); setPlayhead(0); }
   else if (e.code === 'End') { stopPlayback(); setPlayhead(totalFrames() - 1); }
+  else if (e.code === 'PageDown') { e.preventDefault(); stopPlayback(); setPlayhead(boundaryFrom(1, e.shiftKey)); }
+  else if (e.code === 'PageUp') { e.preventDefault(); stopPlayback(); setPlayhead(boundaryFrom(-1, e.shiftKey)); }
   else if (e.key === '+' || e.key === '=') zoomBy(1.3);
   else if (e.key === '-') zoomBy(1 / 1.3);
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selection) { e.preventDefault(); deleteSelection(); }
@@ -1589,10 +1619,50 @@ function numInput(value, { min = 0, step = 1, onCommit, width }) {
   return i;
 }
 
+/**
+ * True while the inspector is showing one of the shared scene panels rather
+ * than the scene's own summary. Those panels are focused editing surfaces, so
+ * the versions and advice sections stand down for them — the `scene` tab that
+ * carries both is one click away.
+ */
+function isDeepSceneTab() {
+  if (state.inspectorMode === 'build') return false;
+  if (state.selection?.kind !== 'scene' || state.sceneTab === 'scene') return false;
+  return state.detail?.scenes?.[state.selection.index]?.kind !== 'footage';
+}
+
+/* The inspector is rebuilt from scratch on selection, mutation, save, SSE and
+ * the once-a-second scene-job poll. That was survivable when everything in it
+ * was a label; now it holds a config form, so a render running in the
+ * background would retype the user's field out from under them once a second.
+ * The panel DOM itself is long-lived (detached and re-appended, never rebuilt),
+ * and the caret comes back with it. The film-name and caption inputs have
+ * wanted this since they were written. */
+function captureFocus(box) {
+  const node = document.activeElement;
+  if (!node || node === document.body || !box.contains(node)) return null;
+  const at = { node };
+  if (typeof node.selectionStart === 'number') { at.start = node.selectionStart; at.end = node.selectionEnd; }
+  return at;
+}
+
+function restoreFocus(at) {
+  if (!at || !at.node.isConnected || document.activeElement === at.node) return;
+  at.node.focus();
+  // Number and colour inputs throw on setSelectionRange; the focus is the part
+  // that matters, so losing the caret position on those is not worth a guard
+  // list that would rot as input types are added.
+  if (at.start != null) { try { at.node.setSelectionRange(at.start, at.end); } catch { /* not a text field */ } }
+}
+
 function renderInspector() {
   const box = $('#inspector');
+  const at = captureFocus(box);
+  // Leaving the panels must not strand a clip playing with its stop button
+  // gone from the page.
+  if (scenePanels?.root.isConnected && !isDeepSceneTab()) scenePanels.stopAudition();
   box.innerHTML = '';
-  if (state.inspectorMode === 'build') return renderBuildInspector(box);
+  if (state.inspectorMode === 'build') { renderBuildInspector(box); return restoreFocus(at); }
   const sel = state.selection;
   // Properties first, then the conversation about this exact thing: which
   // takes of it exist, and what the human has already said. Advising is
@@ -1604,8 +1674,11 @@ function renderInspector() {
   else if (sel.kind === 'audio') renderAudioInspector(box, sel.id);
   else if (sel.kind === 'caption') renderCaptionInspector(box, sel.id);
   else if (sel.kind === 'overlay') renderOverlayInspector(box, sel.id);
-  renderVersionsSection(box);
-  renderAdviceSection(box);
+  if (!isDeepSceneTab()) {
+    renderVersionsSection(box);
+    renderAdviceSection(box);
+  }
+  restoreFocus(at);
 }
 
 const cloneJson = (value) => JSON.parse(JSON.stringify(value));
@@ -1834,10 +1907,77 @@ function renderFilmInspector(box) {
   box.appendChild(el('p', { class: 'dim note', text: 'Select a block on the timeline to edit it. Drag blocks to move, drag edges to trim, Del to remove.' }));
 }
 
+/* The scene's own panels (v0.27), mounted from scene-panels.js — the same four
+ * the scene page mounts, so a scene cannot mean two different things depending
+ * on which surface you opened it from. Created on first use: a film opened only
+ * to watch never pays for them. */
+let scenePanels = null;
+let scenePanelsSceneId = null;
+
+function ensureScenePanels() {
+  if (scenePanels) return scenePanels;
+  scenePanels = ScenePanels.create({
+    host: null, // the inspector appends root itself, wherever the tab wants it
+    api,
+    toast,
+    toastError,
+    compact: true,
+    async onConfigChanged() {
+      // A renamed or retimed scene moves every offset after it, so the whole
+      // film document is what changed — not one inspector row.
+      try { await refresh(); } catch (err) { toastError(err); }
+      StudioUtil.shell()?.treeChanged();
+    },
+    async onSceneDeleted() {
+      state.selection = null;
+      state.sceneTab = 'scene';
+      scenePanelsSceneId = null;
+      try { await refresh(); } catch (err) { toastError(err); }
+    },
+  });
+  return scenePanels;
+}
+
+const SCENE_TABS = [
+  ['scene', 'this take: its facts, its versions, and the advice on it'],
+  ['config', 'composition and output settings — the scene’s own scene.json'],
+  ['audio', 'audio tracks inside this scene (the film’s master audio is on the timeline)'],
+  ['assets', 'files in this scene’s assets/ folder'],
+  ['outputs', 'what this scene has rendered'],
+];
+
+function sceneTabStrip() {
+  const nav = el('nav', { class: 'tabs insp-tabs' });
+  for (const [name, title] of SCENE_TABS) {
+    nav.appendChild(el('button', {
+      class: 'tab' + (state.sceneTab === name ? ' active' : ''),
+      text: name,
+      title,
+      onclick: () => { state.sceneTab = name; renderInspector(); },
+    }));
+  }
+  return nav;
+}
+
+function mountScenePanels(box, s) {
+  const panels = ensureScenePanels();
+  const sceneId = `${filmId}/${s.slug}`;
+  if (scenePanelsSceneId !== sceneId) {
+    scenePanelsSceneId = sceneId;
+    panels.setScene({ id: sceneId })
+      .then(() => panels.show(state.sceneTab))
+      .catch((err) => { scenePanelsSceneId = null; toastError(err); });
+  }
+  panels.show(state.sceneTab);
+  box.appendChild(panels.root);
+}
+
 function renderSceneInspector(box, index) {
   const s = state.detail.scenes[index];
   if (!s) return renderFilmInspector(box);
   if (s.kind === 'footage') return renderFootageInspector(box, index, s);
+  box.appendChild(sceneTabStrip());
+  if (state.sceneTab !== 'scene') return mountScenePanels(box, s);
   box.appendChild(el('h3', { text: `scene ${index + 1}` }));
   const dl = el('dl', { class: 'insp-facts' });
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
@@ -1861,7 +2001,6 @@ function renderSceneInspector(box, index) {
     });
     if (rendering) btnRender.disabled = true;
     row1.appendChild(btnRender);
-    row1.appendChild(el('a', { class: 'ghost', href: `/?scene=${encodeURIComponent(s.sceneId)}`, target: '_blank', text: 'open scene ↗', style: 'text-decoration:none' }));
   }
   box.appendChild(row1);
   const row2 = el('div', { class: 'insp-row' });
@@ -1875,7 +2014,26 @@ function renderSceneInspector(box, index) {
   }));
   row2.appendChild(el('button', { class: 'ghost danger', text: 'remove', onclick: deleteSelection }));
   box.appendChild(row2);
-  box.appendChild(el('p', { class: 'dim note', text: 'Each scene is its own folder inside the film, stitched losslessly — open it, edit the composition, re-render, and the film picks the new output up automatically. Removing a scene only drops it from the play order; the folder stays in the rail as unlisted.' }));
+  box.appendChild(el('p', { class: 'dim note', text: 'Each scene is its own folder inside the film, stitched losslessly. Its settings, audio, assets and renders are the tabs above; re-render and the film picks the new output up automatically. Removing a scene only drops it from the play order; the folder stays in the rail as unlisted.' }));
+  // Demoted in v0.27. This used to be the only route to a scene's config, so it
+  // sat beside "render scene" as a primary action and every reviewer had to
+  // leave the timeline to read a format. With the tabs above, it is what the
+  // arrow always claimed: an escape hatch to the full-screen editor, for the
+  // preview iframe and the render job card the inspector has no room for. Still
+  // a plain <a href>, so ctrl/cmd-click opens a browser tab.
+  box.appendChild(el('p', { class: 'dim note insp-escape' },
+    el('a', {
+      href: `/scene.html?scene=${encodeURIComponent(s.sceneId)}`,
+      text: 'open scene ↗',
+      title: 'open this scene as its own document',
+      onclick: (ev) => {
+        // Embedded this is a sibling tab; standalone the href is the fallback,
+        // and ctrl/cmd-click still means "a real browser tab" either way.
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+        ev.preventDefault();
+        StudioUtil.openDocument({ kind: 'scene', id: s.sceneId, name: s.name });
+      },
+    })));
 }
 
 /**
@@ -2134,11 +2292,91 @@ function renderOverlayInspector(box, id) {
     el('button', { class: 'ghost danger', text: 'delete', onclick: deleteSelection })));
 }
 
+/* ---------------------------- inspector width ---------------------------- */
+
+/* 300px was right when the inspector held six facts and three buttons. It now
+ * carries a scene's whole configuration, so it is a column the human owns:
+ * dragged from its left edge, clamped so the stage can still show a film, and
+ * remembered. Final Cut's inspector resizes for the same reason. */
+const INSP_MIN = 280;
+const INSP_MAX = 620;
+const INSP_KEY = 'ms.inspectorWidth';
+
+function setInspectorWidth(px) {
+  const w = clamp(Math.round(px), INSP_MIN, Math.max(INSP_MIN, Math.min(INSP_MAX, Math.round(window.innerWidth * 0.55))));
+  document.documentElement.style.setProperty('--insp-w', `${w}px`);
+  return w;
+}
+
+{
+  const stored = Number(localStorage.getItem(INSP_KEY));
+  if (Number.isFinite(stored) && stored > 0) setInspectorWidth(stored);
+
+  $('#insp-grip')?.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startW = $('#inspector').getBoundingClientRect().width;
+    document.body.classList.add('resizing-insp');
+    const move = (e2) => { setInspectorWidth(startW - (e2.clientX - startX)); fitPlayerBox(); };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.classList.remove('resizing-insp');
+      const w = setInspectorWidth($('#inspector').getBoundingClientRect().width);
+      try { localStorage.setItem(INSP_KEY, String(w)); }
+      catch { /* private mode / quota: the width is a convenience, never a blocker */ }
+      fitPlayerBox();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+
+  // The clamp is a fraction of the window, so a shrunk window must re-clamp or
+  // the inspector eats the stage.
+  window.addEventListener('resize', () => setInspectorWidth($('#inspector').getBoundingClientRect().width));
+}
+
 /* --------------------------------- zoom --------------------------------- */
 
+/* `fitMeasured` is false when the timeline has no box yet — a document mounted
+ * behind another tab, or one whose editor stack was display:none while a
+ * full-stage page was up. Fitting to that gives the 0.005 floor, which is the
+ * whole film squeezed into a hundred pixels. Callers must not latch a fit they
+ * did not actually measure. */
 function computeFit() {
   const sc = $('#tl-scroll');
-  state.pxfFit = Math.max(0.005, (sc.clientWidth - HEAD_W - TAIL_PX / 2) / Math.max(1, totalFrames()));
+  const usable = sc.clientWidth - HEAD_W - TAIL_PX / 2;
+  state.fitMeasured = usable > 0;
+  state.pxfFit = Math.max(0.005, usable / Math.max(1, totalFrames()));
+}
+
+/* A film opens fitted, and "has it been fitted yet, for real?" is ONE rule —
+ * both the first render and the ResizeObserver below ask it. Keeping the
+ * condition in two places is what let this break: the observer's own first
+ * firing (before the film's frames had loaded) latched the flag, and the real
+ * fit that should have followed was then skipped.
+ *
+ * A fit is real only when the timeline has a width AND the film has frames.
+ * Neither is true for a document mounted while its editor stack is
+ * display:none — which is what a deep link like /?page=music does on its way
+ * past, and how the whole film ended up squeezed into a hundred pixels. */
+function needsFit() {
+  if (!state.fitMeasured) return false;
+  if (!state._zoomInit) return true;                                 // never fitted
+  if (state._zoomInitFrames === 0 && totalFrames() > 0) return true; // fitted against an empty film
+  // "Fit" is a MODE, not a value it was set to once: while nobody has zoomed
+  // deliberately, a film that fits stays fitting as its viewport settles or
+  // changes. The moment they zoom, the view is theirs and nothing touches it.
+  return !state.userZoomed;
+}
+
+function applyFit() {
+  if (!needsFit()) return false;
+  state.pxf = clamp(state.pxfFit, 0.002, 24);
+  state._zoomInit = true;
+  state._zoomInitFrames = totalFrames();
+  setZoomSlider();
+  return true;
 }
 function setZoomSlider() {
   const lo = Math.log(state.pxfFit), hi = Math.log(Math.max(state.pxfFit * 4, 12));
@@ -2154,11 +2392,55 @@ function setPxf(pxf, anchorFrame = null) {
   sc.scrollLeft = HEAD_W + anchorFrame * state.pxf - anchorPx;
   setZoomSlider();
 }
-function zoomBy(factor) { setPxf(state.pxf * factor); }
+function zoomBy(factor) { state.userZoomed = true; setPxf(state.pxf * factor); }
+/** Fill the timeline viewport with one stretch of film and park it against the
+ *  track heads — "zoom to this movement", the double-click on a sequence. */
+function zoomToRange(offset, frames) {
+  state.userZoomed = true;
+  const sc = $('#tl-scroll');
+  setPxf(Math.max(80, sc.clientWidth - HEAD_W) / Math.max(1, frames));
+  sc.scrollLeft = offset * state.pxf; // a block at frame f sits at HEAD_W + f·pxf
+}
+function zoomFit() { state.userZoomed = false; computeFit(); setPxf(state.pxfFit, 0); }
+
+/* A film opens fitted. It could not when the timeline had no box yet at load —
+ * a document mounted while its editor stack was display:none, which is what a
+ * deep link like /?page=music does on its way past — because the fit was
+ * computed against zero width, pinned at the 0.005 floor, and latched. The
+ * whole film ended up in a hundred pixels with no way back but the fit button.
+ *
+ * This finishes that first fit once the timeline actually has a width. It
+ * deliberately does NOT re-fit on later resizes: once a zoom is on screen it
+ * is the human's, and collapsing the Explorer must not re-zoom the timeline
+ * any more than it re-zooms an editor. Later resizes only keep pxfFit — the
+ * slider's low end, and the floor setPxf clamps against — honest. */
+new ResizeObserver(() => {
+  computeFit();
+  if (!state.fitMeasured) return;              // still no box; try again later
+  if (applyFit()) renderTimeline();
+  else setZoomSlider();                        // keep the slider's scale honest
+}).observe($('#tl-scroll'));
 $('#btn-zoom-in').addEventListener('click', () => zoomBy(1.3));
 $('#btn-zoom-out').addEventListener('click', () => zoomBy(1 / 1.3));
-$('#btn-zoom-fit').addEventListener('click', () => { computeFit(); setPxf(state.pxfFit, 0); });
+$('#btn-zoom-fit').addEventListener('click', zoomFit);
+// Double-clicking the empty timeline is the way back out of a zoomed sequence:
+// the whole film, the same as the fit button. A block or band owns its own
+// double-click, so those are left alone.
+$('#tl-scroll').addEventListener('dblclick', (ev) => {
+  if (ev.target.closest('.seq-band, .blk, .tl-head, .adv-marker')) return;
+  zoomFit();
+});
+// The tree repaints on selection, so the row that took the first click is gone
+// before the second one lands and the dblclick is delivered to this container
+// instead. That first click already selected the band — so zoom to whatever is
+// selected, which is exactly the row the pointer is on.
+$('#fe-tree').addEventListener('dblclick', () => {
+  if (state.selection?.kind !== 'sequence') return;
+  const band = sequenceBands().find((b) => b.label === state.selection.sequence);
+  if (band) zoomToRange(band.offset, band.frames);
+});
 $('#zoom-slider').addEventListener('input', (e) => {
+  state.userZoomed = true;
   const lo = Math.log(state.pxfFit), hi = Math.log(Math.max(state.pxfFit * 4, 12));
   setPxf(Math.exp(lo + (Number(e.target.value) / 100) * (hi - lo)));
 });
@@ -2343,6 +2625,7 @@ function revealScenesRail() {
 }
 $('#btn-scenes-collapse').addEventListener('click', () => {
   document.querySelector('.fe-frame').classList.toggle('rail-collapsed');
+  syncExplorerIcon();
 });
 
 /* ---- audio ---- */
@@ -2978,7 +3261,7 @@ function renderProductionLine() {
   const box = $('#production-line');
   if (!box) return;
   const s = state.status;
-  if (!s) { box.textContent = ''; box.className = 'fe-production mono'; return; }
+  if (!s) { box.textContent = ''; box.className = 'sb-item fe-production mono'; return; }
   const live = (s.activity ?? []).filter((a) => !a.stale);
   let cls = 'idle';
   let text;
@@ -2996,9 +3279,10 @@ function renderProductionLine() {
   } else {
     text = 'waiting for the next AI run';
   }
-  box.className = `fe-production mono ${cls}`;
+  box.className = `sb-item fe-production mono ${cls}`;
   box.innerHTML = '<span class="dot"></span>';
   box.appendChild(document.createTextNode(text));
+  StudioUtil.syncDocument();
 }
 
 function renderUpdatedBanner() {
@@ -3057,10 +3341,16 @@ function renderTree() {
     }));
     bandRow.appendChild(el('span', { class: 'tree-name', text: band.label ?? 'not in a sequence' }));
     bandRow.appendChild(el('span', { class: 'tree-meta mono', text: `${band.segments.length}` }));
+    // Same gesture as its band on the timeline: double-click zooms to it. A
+    // *labelled* row is repainted by the selection its first click makes, so
+    // that case is caught by the delegated handler on #fe-tree; this one is
+    // what an anonymous run (which never selects) still gets.
+    bandRow.addEventListener('dblclick', () => zoomToRange(band.offset, band.frames));
     if (band.label) {
       const n = unresolvedCount((a) => a.target?.type === 'sequence' && a.target.sequence === band.label);
       if (n) bandRow.appendChild(adviceBadge(n));
-      bandRow.title = state.film?.sequences?.[band.label]?.intent ?? 'a narrative sequence';
+      bandRow.title = `${state.film?.sequences?.[band.label]?.intent ?? 'a narrative sequence'}`
+        + '\n(double-click to zoom the timeline to it)';
       bandRow.addEventListener('pointerdown', () => {
         select({ kind: 'sequence', sequence: band.label });
         stopPlayback();
@@ -3701,6 +3991,104 @@ function wireProductionLoop() {
   });
 }
 
+/* ------------------------------ the document ----------------------------- */
+
+/* What the shell needs to draw a tab and a status bar for this film. It asks;
+ * this file never reaches up into the shell's DOM. Standalone — /film.html on
+ * its own — registerDocument finds no shell and this is simply inert, which is
+ * why a film still opens on a second monitor. */
+const filmDoc = {
+  kind: 'film',
+  id: filmId,
+  title: () => state.film?.name ?? filmId.split('/').pop(),
+  status: () => {
+    const out = [];
+    const problems = state.detail?.problems ?? [];
+    if (problems.length) {
+      out.push({
+        text: `⊗ ${problems.length} issue${problems.length === 1 ? '' : 's'}`,
+        cls: 'err',
+        title: 'what would stop a build — click for the list',
+        onClick: () => $('#problems-panel').classList.toggle('hidden'),
+      });
+    }
+    out.push({ text: filmId, cls: 'mono', title: state.film?.path ?? filmId });
+    const line = $('#production-line');
+    if (line?.textContent) {
+      out.push({ text: line.textContent, cls: 'mono ' + (line.classList.contains('live') ? 'ok' : line.classList.contains('pending') ? 'accent' : '') });
+    }
+    const mix = $('#mix-state');
+    if (mix?.textContent) out.push({ text: mix.textContent, cls: 'mono', align: 'right' });
+    const save = $('#save-state');
+    if (save?.textContent) {
+      out.push({ text: save.textContent, align: 'right',
+        cls: 'mono ' + (save.classList.contains('err') ? 'err' : save.classList.contains('dirty') ? 'accent' : '') });
+    }
+    return out;
+  },
+  /* Going behind a full-stage page must not leave the film playing. */
+  suspend: () => { try { stopPlayback(); } catch { /* not up yet */ } },
+  /* On screen at last. A film that loaded behind a full-stage page had no
+   * timeline width to fit against; this is where it gets one. */
+  shown: () => {
+    try {
+      computeFit();
+      if (applyFit()) renderTimeline();
+      fitPlayerBox();
+    } catch { /* not up yet */ }
+  },
+};
+
+StudioUtil.registerDocument(filmDoc);
+
+/* The shell owns Ctrl+P, but the keystroke lands wherever the focus is — and
+ * the focus is usually inside a document. Hand it up rather than swallowing it. */
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'p') return;
+  if (document.querySelector('dialog[open]')) return;
+  const shell = StudioUtil.shell();
+  if (!shell) return;
+  e.preventDefault();
+  shell.openPalette(e.shiftKey ? 'commands' : 'files');
+});
+
+/* ------------------------ activity bar + the palette --------------------- */
+
+$('#btn-explorer').addEventListener('click', () => $('#btn-scenes-collapse').click());
+$('#btn-palette').addEventListener('click', () => StudioPalette.open('files'));
+$('#sb-goto').addEventListener('click', () => StudioPalette.open('files'));
+
+function syncExplorerIcon() {
+  $('#btn-explorer').classList.toggle(
+    'active', !document.querySelector('.fe-frame').classList.contains('rail-collapsed'));
+}
+syncExplorerIcon();
+
+StudioPalette.register([
+  { id: 'film.build', title: 'Film: Build', group: 'commands', run: () => $('#btn-build').click() },
+  { id: 'film.advise', title: 'Film: Advise the AI on the Selection', group: 'commands', run: () => startAdvice() },
+  { id: 'film.newScene', title: 'Film: New Scene…', group: 'commands', run: () => $('#btn-new-scene').click() },
+  { id: 'film.newSeq', title: 'Film: New Sequence from Selection', group: 'commands', run: () => $('#btn-new-sequence').click() },
+  { id: 'film.narration', title: 'Film: Add Narration…', group: 'commands', run: () => $('#btn-add-tts').click() },
+  { id: 'film.audio', title: 'Film: Add Audio…', group: 'commands', run: () => $('#btn-add-audio').click() },
+  { id: 'film.caption', title: 'Film: Add Caption at Playhead', group: 'commands', run: () => $('#btn-add-caption').click() },
+  { id: 'film.footage', title: 'Film: Add Footage…', group: 'commands', run: () => $('#btn-add-footage').click() },
+  { id: 'film.overlay', title: 'Film: Add Overlay…', group: 'commands', run: () => $('#btn-add-overlay').click() },
+  { id: 'view.fit', title: 'Timeline: Fit the Whole Film', group: 'commands', run: () => zoomFit() },
+  { id: 'view.rail', title: 'View: Toggle Side Bar', group: 'commands', run: () => $('#btn-explorer').click() },
+  { id: 'edit.undo', title: 'Edit: Undo', group: 'commands', run: () => undo() },
+  { id: 'edit.redo', title: 'Edit: Redo', group: 'commands', run: () => redo() },
+  { id: 'src.preview', title: 'Player: Watch the Scenes as They Stand', group: 'commands', run: () => setSource('preview') },
+  { id: 'src.delivery', title: 'Player: Watch the Last Built Film', group: 'commands', run: () => setSource('delivery') },
+  ...['scene', 'config', 'audio', 'assets', 'outputs'].map((t) => ({
+    id: `insp.${t}`,
+    title: `Inspector: ${t[0].toUpperCase()}${t.slice(1)}`,
+    group: 'commands',
+    when: () => state.selection?.kind === 'scene',
+    run: () => { state.sceneTab = t; renderInspector(); },
+  })),
+]);
+
 /* --------------------------------- name --------------------------------- */
 
 $('#film-name').addEventListener('change', () => {
@@ -3708,6 +4096,7 @@ $('#film-name').addEventListener('change', () => {
   if (!v) { $('#film-name').value = state.film.name; return; }
   mutate((film) => { film.name = v; }, { silent: true });
   document.title = `${v} — Motion Studio`;
+  StudioUtil.syncDocument();
 });
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
@@ -3717,14 +4106,10 @@ $('#btn-redo').addEventListener('click', redo);
 function renderAll() {
   renderHeader();
   computeFit();
-  // Fit-zoom on first load — and again when the film gains its first scene,
-  // because a fit computed against zero frames is meaningless.
-  if (!state._zoomInit || (state._zoomInitFrames === 0 && totalFrames() > 0)) {
-    state.pxf = clamp(state.pxfFit, 0.002, 24);
-    state._zoomInit = true;
-    state._zoomInitFrames = totalFrames();
-    setZoomSlider();
-  }
+  // Fit-zoom on first load. If the timeline has no width yet — mounted behind
+  // a full-stage page — this does nothing and the ResizeObserver in the zoom
+  // section finishes the job the moment it is on screen.
+  applyFit();
   renderTimeline();
   renderTree();
   renderInspector();

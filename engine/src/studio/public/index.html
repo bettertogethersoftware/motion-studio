@@ -5,11 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Motion Studio</title>
 <link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/tabs.css">
+<link rel="stylesheet" href="/scene-panels.css">
+<link rel="stylesheet" href="/shell.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
 </head>
 <body>
+<div class="vs-shell">
 <div id="prereq-banner" class="banner hidden"></div>
 
+<div class="vs-body">
+  <!-- The activity bar (v0.27). The vendor and settings buttons moved here from
+       the rail footer keeping their ids and handlers: what changed is where
+       they live and how they are marked active, not what they do. -->
+  <nav class="activity-bar" id="activity-bar" aria-label="activity bar">
+    <button id="btn-explorer" class="act-btn active" title="explorer (the workspace tree)">☰</button>
+    <button id="btn-palette" class="act-btn" title="go to a film or scene — Ctrl+P">⌕</button>
+    <span class="act-spacer"></span>
+    <button id="btn-tts" class="act-btn" title="tts vendors"><span class="foot-ico">🗣</span><span class="foot-label">tts</span></button>
+    <button id="btn-music" class="act-btn" title="music vendors"><span class="foot-ico">♫</span><span class="foot-label">music</span></button>
+    <button id="btn-transcribe" class="act-btn" title="transcription vendors — reading speech out of a recording"><span class="foot-ico">✎</span><span class="foot-label">trans</span></button>
+    <button id="btn-settings" class="act-btn icon-only" title="global settings"><span class="foot-ico">⚙</span></button>
+  </nav>
 <div class="frame" id="frame">
   <aside class="rail">
     <!-- v0.25: the version/engine status lines moved into the global-settings
@@ -20,7 +37,6 @@
       <div class="brand-text">
         <h1>MOTION<br>STUDIO</h1>
       </div>
-      <button id="btn-collapse" class="ghost collapse-btn" title="collapse sidebar">«</button>
     </header>
 
     <!-- v0.20: one tree instead of two tabbed lists — workspaces hold films,
@@ -38,15 +54,14 @@
          rail shows the word alone and the collapsed rail shows the icon alone
          (settings is icon-only in both — the gear reads on its own). Full
          names live in the tooltips. -->
-    <footer class="rail-foot">
-      <button id="btn-tts" class="ghost foot-btn" title="tts vendors"><span class="foot-ico">🗣</span><span class="foot-label">tts</span></button>
-      <button id="btn-music" class="ghost foot-btn" title="music vendors"><span class="foot-ico">♫</span><span class="foot-label">music</span></button>
-      <button id="btn-transcribe" class="ghost foot-btn" title="transcription vendors — reading speech out of a recording"><span class="foot-ico">✎</span><span class="foot-label">trans</span></button>
-      <button id="btn-settings" class="ghost foot-btn icon-only" title="global settings"><span class="foot-ico">⚙</span></button>
-    </footer>
   </aside>
 
   <main class="stage">
+    <!-- Open documents (v0.27), painted by the shell. A tab is a film or a
+         scene mounted in the editor stack below; switching is not a navigation
+         and never was one, which is the whole point of the restructure. -->
+    <nav id="doc-tabs" class="doc-tabs hidden"></nav>
+
     <div id="empty-state" class="empty">
       <p>◤ no scene selected</p>
       <p class="dim">Expand a film on the left and pick a scene, or create one.<br>
@@ -589,167 +604,24 @@
       <p id="library-empty" class="dim hidden">Nothing here yet — upload a file, or drop one into the folder above on disk.</p>
     </section>
 
-    <div id="workbench" class="workbench hidden">
-      <section class="viewport-wrap">
-        <div class="viewport-head">
-          <span id="scene-title" class="mono"></span>
-          <span id="viewport-meta" class="dim mono"></span>
-          <span id="hot-reload-dot" title="hot reload connected">●</span>
-        </div>
-        <div class="viewport" id="viewport">
-          <div class="checker" id="checker"></div>
-          <iframe id="preview" title="composition preview" sandbox="allow-scripts allow-same-origin"></iframe>
-        </div>
-
-        <div class="transport">
-          <button id="btn-play" class="transport-btn" title="play/pause (space)">▶</button>
-          <button id="btn-step-back" class="transport-btn" title="step back">‹</button>
-          <button id="btn-step-fwd" class="transport-btn" title="step forward">›</button>
-          <input type="range" id="scrubber" min="0" max="0" value="0" step="1">
-          <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
-          <span class="mono dim" id="timecode">00:00.00</span>
-        </div>
-      </section>
-
-      <section class="panel">
-        <nav class="tabs">
-          <button data-tab="render" class="tab active">render</button>
-          <button data-tab="config" class="tab">config</button>
-          <button data-tab="audio" class="tab">audio</button>
-          <button data-tab="assets" class="tab">assets</button>
-          <button data-tab="outputs" class="tab">outputs</button>
-          <button id="btn-panel-toggle" class="panel-toggle" title="collapse this panel">▾</button>
-        </nav>
-
-        <div id="tab-render" class="tab-body">
-          <div class="fieldrow">
-            <label>workers
-              <select id="rd-workers">
-                <option value="1">1 (serial)</option>
-                <option value="2">2</option>
-                <option value="3">3</option>
-                <option value="4">4</option>
-                <option value="6">6</option>
-                <option value="8">8</option>
-                <option value="10">10</option>
-              </select>
-            </label>
-            <label>range
-              <input id="rd-range" class="mono" placeholder="full (e.g. 0-89)" size="10">
-            </label>
-            <button id="btn-render" class="primary">render →</button>
-            <button id="btn-still" class="ghost" title="export current frame as PNG">still ⤓</button>
-          </div>
-
-          <div id="job-card" class="job-card hidden">
-            <div class="job-line">
-              <span id="job-state" class="pill">—</span>
-              <span id="job-phase" class="mono dim"></span>
-              <span id="job-eta" class="mono dim"></span>
-              <button id="btn-cancel" class="ghost danger">cancel</button>
-            </div>
-            <div class="bar"><div id="job-bar" class="bar-fill"></div></div>
-            <div class="job-line dim mono">
-              <span id="job-frames"></span>
-              <span id="job-fps"></span>
-            </div>
-            <pre id="job-logs" class="logs"></pre>
-            <a id="job-download" class="download hidden" href="#">⤓ download output</a>
-          </div>
-        </div>
-
-        <div id="tab-config" class="tab-body hidden">
-          <form id="config-form" autocomplete="off">
-            <p class="section-label">composition</p>
-            <div class="config-grid">
-              <label>name <input name="name"></label>
-              <label>fps <input name="fps" type="number" min="1" max="240"></label>
-              <label>width <input name="width" type="number" step="2"></label>
-              <label>height <input name="height" type="number" step="2"></label>
-              <label>frames <input name="durationInFrames" type="number" min="1"></label>
-            </div>
-
-            <p class="section-label">output</p>
-            <div class="config-grid">
-              <label>format
-                <select name="format">
-                  <option value="mp4">mp4 · H.264</option>
-                  <option value="webm">webm · VP9</option>
-                  <option value="gif">gif</option>
-                  <option value="prores">prores · .mov</option>
-                  <option value="png-sequence">png sequence</option>
-                </select>
-              </label>
-              <label>dir <input name="dir" spellcheck="false"></label>
-              <label>filename <input name="filename" spellcheck="false"></label>
-              <label>crf <input name="crf" type="number" min="0" max="63"></label>
-              <label>preset
-                <select name="preset">
-                  <option value="">(unset)</option>
-                  <option>ultrafast</option><option>superfast</option><option>veryfast</option>
-                  <option>faster</option><option>fast</option><option>medium</option>
-                  <option>slow</option><option>slower</option><option>veryslow</option>
-                </select>
-              </label>
-              <label>pix fmt <input name="pixFmt" spellcheck="false" placeholder="yuv420p"></label>
-              <label class="check"><input name="transparent" type="checkbox"> transparent (alpha)</label>
-              <label class="check"><input name="audioLimiter" type="checkbox"> audio limiter (−1 dBFS)</label>
-            </div>
-            <p id="format-note" class="dim note"></p>
-
-            <div class="config-actions">
-              <button type="submit" class="primary">apply</button>
-              <span id="config-msg" class="dim"></span>
-            </div>
-          </form>
-
-          <p class="section-label">scene facts <span class="dim">(read-only)</span></p>
-          <dl id="config-facts" class="env-list mono"></dl>
-
-          <details id="raw-config">
-            <summary>raw scene.json</summary>
-            <pre id="raw-config-body" class="logs"></pre>
-          </details>
-
-          <div class="meta-row">
-            <span class="meta-label">location</span>
-            <span id="scene-path" class="mono path-chip" title=""></span>
-            <button id="btn-copy-path" class="ghost" title="copy the scene folder path">copy</button>
-            <button id="btn-delete-scene" class="ghost danger" title="remove this scene">delete scene…</button>
-          </div>
-        </div>
-
-        <div id="tab-audio" class="tab-body hidden">
-          <div class="fieldrow assets-head">
-            <button id="btn-add-track" class="primary">+ add track</button>
-            <span class="dim">tracks are mixed without normalization and trimmed to the video length</span>
-            <span class="spacer"></span>
-            <button id="btn-save-audio" class="ghost">save tracks</button>
-            <span id="audio-msg" class="dim"></span>
-          </div>
-          <ul id="audio-list" class="audio-list"></ul>
-          <datalist id="audio-asset-options"></datalist>
-          <p id="audio-note" class="dim note"></p>
-        </div>
-
-        <div id="tab-assets" class="tab-body hidden">
-          <div class="fieldrow assets-head">
-            <button id="btn-upload" class="primary">+ upload</button>
-            <input type="file" id="asset-file-input" multiple hidden>
-            <span class="dim">or drop files anywhere on this panel · 25 MB max each</span>
-            <span class="spacer"></span>
-            <span id="assets-path" class="mono path-chip" title=""></span>
-            <button id="btn-copy-assets-path" class="ghost" title="copy the assets folder path">copy</button>
-          </div>
-          <ul id="asset-list" class="asset-list"></ul>
-        </div>
-
-        <div id="tab-outputs" class="tab-body hidden">
-          <ul id="output-list" class="output-list"></ul>
-        </div>
-      </section>
-    </div>
+    <!-- Open documents (v0.27). One same-origin iframe per film or scene the
+         user has opened; exactly one is visible. They are iframes so that each
+         document keeps its own state while another is in front — a tab you come
+         back to still has its playhead, undo stack and scroll where you left
+         them — and so two open films cannot fight over the same element ids. -->
+    <div id="editor-stack" class="editor-stack"></div>
   </main>
+  </div>
+</div>
+  <footer class="status-bar" id="status-bar">
+    <button id="sb-problems" class="sb-item err hidden" title="what would stop a render"></button>
+    <!-- Filled from the active document's StudioDoc.status(); display:contents
+         so its items are status-bar flex children, not a nested box. -->
+    <span id="sb-doc" class="sb-group"></span>
+    <span class="sb-spacer"></span>
+    <span id="sb-doc-right" class="sb-group"></span>
+    <button id="sb-goto" class="sb-item" title="go to a film or scene — Ctrl+P"><span class="sb-ico">⌕</span>go to…</button>
+  </footer>
 </div>
 
 <dialog id="new-scene-dialog">
@@ -797,38 +669,9 @@
   </form>
 </dialog>
 
-<dialog id="delete-dialog">
-  <form id="delete-form" method="dialog">
-    <h2>delete scene</h2>
-    <p id="delete-summary"></p>
-    <label class="check"><input name="deleteFiles" type="checkbox"> also delete files on disk</label>
-    <p class="dim" id="delete-note">Unchecked: the scene leaves the film's play order but its folder stays on
-    disk (listed as “unlisted”). Checked: the scene folder and everything in it is deleted.</p>
-    <div class="fieldrow right">
-      <button type="button" id="btn-delete-cancel" class="ghost">cancel</button>
-      <button type="submit" class="primary">delete</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="asset-delete-dialog">
-  <form id="asset-delete-form" method="dialog">
-    <h2>delete asset</h2>
-    <p id="asset-delete-summary"></p>
-    <div id="asset-delete-refs" class="hidden">
-      <p class="warn-line">⚠ <span id="asset-delete-count"></span></p>
-      <ul id="asset-delete-list" class="ref-list mono"></ul>
-      <label class="check"><input name="updateAudio" type="checkbox" checked> also remove those audio tracks</label>
-      <p class="dim note">Left in place, the tracks point at a missing file and the next render fails
-      when ffmpeg tries to mix them.</p>
-    </div>
-    <div class="fieldrow right">
-      <button type="button" id="btn-asset-delete-cancel" class="ghost">cancel</button>
-      <button type="submit" class="primary">delete</button>
-    </div>
-  </form>
-</dialog>
-
+<script src="/studio-util.js"></script>
+<script src="/palette.js"></script>
+<script src="/scene-panels.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

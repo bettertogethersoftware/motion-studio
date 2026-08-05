@@ -1,0 +1,222 @@
+/* Motion Studio — the VS Code shell (v0.27), shared by both Studio documents.
+ *
+ * The app already had VS Code's shape and was spelling it differently: a
+ * workspace tree is an Explorer, the document strip is editor tabs, the scene
+ * panel is the Panel, the film inspector is a secondary side bar, and the scene
+ * page even had breadcrumbs. What was missing were the three surfaces that make
+ * that shape usable — the activity bar, the status bar, and the command
+ * palette. This file is those three, plus the wrapper that holds them.
+ *
+ * Geometry is VS Code's: 48px activity bar, 22px status bar, 2px active-item
+ * markers. The accent is not — amber stays.
+ */
+
+/* --------------------------------- shell -------------------------------- */
+
+.vs-shell { display: flex; flex-direction: column; height: 100vh; min-height: 0; }
+.vs-body { display: flex; flex: 1; min-height: 0; min-width: 0; }
+
+/* ------------------------------ activity bar ----------------------------- */
+
+.activity-bar {
+  width: var(--activity-w);
+  flex-shrink: 0;
+  background: var(--ink-2);
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: stretch;
+  z-index: 4;
+}
+.act-btn {
+  height: 48px; width: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 0;
+  border-left: 2px solid transparent; /* VS Code's active marker */
+  color: #868686; font-size: 18px; line-height: 1;
+  cursor: pointer; text-decoration: none;
+  position: relative;
+}
+.act-btn:hover { color: var(--text); }
+.act-btn.active { color: var(--text); border-left-color: var(--accent); }
+.act-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: -3px; }
+/* The buttons moved here from the rail footer keep their markup. */
+.act-btn .foot-label { display: none; }
+.act-btn .foot-ico { display: inline; }
+.act-spacer { flex: 1; min-height: 0; }
+
+/* A count riding an icon, the way VS Code badges source control. */
+.act-badge {
+  position: absolute; right: 6px; bottom: 8px;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent); color: var(--accent-ink);
+  font: 600 9px/15px var(--mono); text-align: center;
+}
+
+/* ------------------------------- status bar ------------------------------ */
+
+.status-bar {
+  height: var(--status-h); flex-shrink: 0;
+  background: var(--ink-2);
+  border-top: 1px solid var(--line);
+  display: flex; align-items: stretch;
+  font: 12px/1 var(--sans); color: var(--dim);
+  padding: 0 2px;
+  overflow: hidden;
+  z-index: 4;
+}
+.sb-item {
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 8px; height: 100%;
+  background: none; border: 0; color: inherit; font: inherit;
+  white-space: nowrap; text-decoration: none;
+  max-width: 42vw; overflow: hidden; text-overflow: ellipsis;
+}
+button.sb-item, a.sb-item { cursor: pointer; }
+button.sb-item:hover, a.sb-item:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
+button.sb-item:focus-visible, a.sb-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.sb-item.accent { color: var(--accent); }
+.sb-item.err { color: var(--err); }
+.sb-item.ok { color: var(--ok); }
+.sb-item .sb-ico { font-size: 11px; }
+.sb-spacer { flex: 1; min-width: 0; }
+.sb-item.mono { font-family: var(--mono); font-size: 11px; }
+/* A working spinner without a keyframe per caller. */
+.sb-item.busy .sb-ico { animation: sb-spin 1.4s linear infinite; display: inline-block; }
+@keyframes sb-spin { to { transform: rotate(360deg); } }
+
+/* ----------------------------- command palette --------------------------- */
+
+/* VS Code's quick input: a floating well pinned near the top of the window,
+   600px wide, above everything, dismissed on Escape or a click outside. */
+.palette-scrim {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.32);
+}
+.palette {
+  position: fixed; top: 0; left: 50%; transform: translateX(-50%);
+  width: min(600px, calc(100vw - 32px));
+  z-index: 51;
+  background: #1f1f1f;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.62);
+  margin-top: 8px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.palette-input {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: 13px var(--sans);
+  padding: 5px 7px;
+  margin: 6px;
+  width: calc(100% - 12px);
+}
+.palette-input:focus { outline: none; }
+.palette-list { list-style: none; margin: 0; padding: 0 0 4px; max-height: 44vh; overflow-y: auto; }
+.palette-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font: 13px/1.5 var(--sans);
+  color: var(--text);
+}
+.palette-row .pal-ico { width: 14px; flex-shrink: 0; text-align: center; font-size: 11px; color: var(--dim); }
+.palette-row .pal-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-row .pal-detail {
+  color: var(--dim); font: 11px var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-left: auto; padding-left: 12px; flex-shrink: 1; min-width: 0;
+}
+.palette-row .pal-key { color: var(--dim); font: 10px var(--mono); flex-shrink: 0; }
+/* The matched characters, so a fuzzy hit explains itself. */
+.palette-row .pal-hit { color: var(--accent); font-weight: 600; }
+.palette-row.on { background: var(--select); }
+.palette-row.on .pal-detail { color: #b9b9b9; }
+.palette-group {
+  padding: 6px 12px 3px;
+  font: 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+.palette-list li:first-child.palette-group { border-top: 0; }
+.palette-empty { padding: 10px 12px; color: var(--dim); font: 13px var(--sans); }
+.palette-hint {
+  padding: 5px 12px; border-top: 1px solid var(--line);
+  font: 11px var(--sans); color: var(--dim);
+}
+.palette-hint kbd {
+  font: 10px var(--mono); color: var(--text);
+  border: 1px solid var(--line); border-radius: 3px; padding: 0 4px;
+  background: var(--ink-2);
+}
+
+/* --------------------------- VS Code list grammar ------------------------ */
+
+/* Both trees become VS Code lists: 22px rows, a 13px sans name, a twisty that
+   only darkens on hover, and the selected row carrying the amber marker on its
+   left edge. The two documents had drifted to different row metrics; this is
+   where they agree again. */
+.ws-tree li, .fe-tree .tree-row, .scene-rail-list li {
+  min-height: 22px;
+  font-size: 13px;
+  font-family: var(--sans);
+}
+.ws-tree li:hover, .fe-tree .tree-row:hover, .scene-rail-list li:hover { background: var(--ink-3); }
+.ws-tree .chev, .fe-tree .twisty { transition: color 0.08s linear; }
+.ws-tree li:hover .chev { color: var(--text); }
+
+/* A side bar's section heading in VS Code: 11px, uppercase, quiet. */
+.rail-head-label, .rail-head, .fe-rail-head .rail-head-label {
+  font: 11px var(--sans); letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim);
+}
+
+/* ------------------------------- scrollbars ------------------------------ */
+
+/* VS Code's: no track, a translucent thumb that only shows against content,
+   and no arrows. Applied to the whole app rather than per-pane. */
+* { scrollbar-width: thin; scrollbar-color: rgba(121, 121, 121, 0.4) transparent; }
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(121, 121, 121, 0.4); border: 4px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(158, 158, 158, 0.7); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ------------------------------ the editor stack ------------------------- */
+
+/* Open documents. Every one is mounted; exactly one is shown. `visibility` and
+   a zero size rather than `display:none`, because a hidden iframe that has been
+   display:none'd loses its layout — and a film document that forgot its
+   timeline scroll on every tab switch would defeat the point of tabs. */
+.editor-stack { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.editor-frame {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  border: 0; margin: 0; padding: 0;
+  visibility: hidden;
+  z-index: 0;
+}
+.editor-frame.on { visibility: visible; z-index: 1; }
+
+/* display:contents, so the document's status items become flex children of the
+   status bar itself rather than sitting in a box inside it. */
+.sb-group { display: contents; }
+
+/* --------------------------- embedded documents -------------------------- */
+
+/* A document is either the whole page or one tab inside the shell. Embedded,
+   the shell owns the activity bar, the status bar and the tab strip — and the
+   scene document's breadcrumb, which existed only to get back to a film page
+   that is now permanently one click away in the Explorer. */
+html.embedded .activity-bar,
+html.embedded .status-bar,
+html.embedded .doc-tabs,
+html.embedded .crumb,
+html.embedded #btn-back { display: none !important; }
+html.embedded .vs-shell, html.embedded .vs-body { height: 100%; }
+/* Standalone, a document is its own page and needs the viewport height. */
+body.doc-body { height: 100%; }
+body.doc-body > .workbench { height: 100vh; }
+html.embedded body.doc-body > .workbench { height: 100%; }

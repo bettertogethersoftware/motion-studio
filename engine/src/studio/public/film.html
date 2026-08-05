@@ -6,6 +6,8 @@
 <title>Motion Studio — Film</title>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/film.css">
+<link rel="stylesheet" href="/scene-panels.css">
+<link rel="stylesheet" href="/shell.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
 </head>
 <body>
@@ -20,17 +22,27 @@
   before they could trust what they were looking at, for no gain. Advising is
   driven from the inspector, which already knows what is selected.
 -->
+<div class="vs-shell">
+<div class="vs-body">
+  <!-- The activity bar (v0.27), the same strip the scene page carries. The
+       vendor and settings pages live on the Studio home, so here they are links
+       that open it with that page showing — one shell, two documents. -->
+  <nav class="activity-bar" id="activity-bar" aria-label="activity bar">
+    <button id="btn-explorer" class="act-btn active" title="explorer (this film's tree)">☰</button>
+    <button id="btn-palette" class="act-btn" title="go to a film or scene — Ctrl+P">⌕</button>
+    <span class="act-spacer"></span>
+    <a href="/?page=speech" class="act-btn" title="tts vendors">🗣</a>
+    <a href="/?page=music" class="act-btn" title="music vendors">♫</a>
+    <a href="/?page=transcription" class="act-btn" title="transcription vendors">✎</a>
+    <a href="/?page=settings" class="act-btn" title="global settings">⚙</a>
+  </nav>
 <div class="fe-frame">
   <header class="fe-top">
     <a href="/" class="ghost back-btn" id="btn-back" title="back to the Studio">←</a>
     <span class="brand-mark">▶</span>
     <input id="film-name" class="fe-name" spellcheck="false" title="film name">
     <span id="film-facts" class="dim mono"></span>
-    <button id="btn-problems" class="ghost warn hidden"></button>
-    <span id="production-line" class="fe-production mono"
-      title="what the AI is doing — from its own heartbeat and from durable state"></span>
     <span class="spacer"></span>
-    <span id="save-state" class="mono dim">saved</span>
     <button id="btn-undo" class="ghost" title="undo (Ctrl+Z)" disabled>↶</button>
     <button id="btn-redo" class="ghost" title="redo (Ctrl+Y)" disabled>↷</button>
     <button id="btn-build" class="primary">build film →</button>
@@ -95,10 +107,12 @@
           <button id="btn-src-delivery" class="mode-btn" title="the last film the AI actually built">built film</button>
         </div>
         <span class="spacer"></span>
-        <span id="mix-state" class="mono dim" title="master-audio preview: the build's exact ffmpeg mix"></span>
       </div>
     </section>
 
+    <!-- Absolutely positioned, so it rides the inspector's left edge without
+         becoming a fourth grid track. -->
+    <div id="insp-grip" class="insp-grip" title="drag to resize the inspector"></div>
     <aside class="fe-inspector" id="inspector"></aside>
   </main>
 
@@ -121,12 +135,29 @@
         <button id="btn-snap" class="ghost toggle-btn on" title="snap to cuts, clips and the playhead">snap</button>
       </div>
       <span class="spacer"></span>
-      <span id="tl-hint" class="dim mono"></span>
+      <!-- The movement gestures are invisible otherwise, and this slot has been
+           empty since the toolbar was built. -->
+      <span id="tl-hint" class="dim mono">dbl-click a sequence to zoom to it · PgDn/PgUp jump cut to cut (shift: sequence)</span>
     </div>
     <div class="tl-scroll" id="tl-scroll">
       <div class="tl-inner" id="tl-inner"></div>
     </div>
   </section>
+</div>
+</div>
+<!-- The status bar (v0.27). Save state, what the AI is doing and the problem
+     count moved out of the header: they are ambient facts, read at a glance and
+     never clicked through, which is exactly what a status bar is for. -->
+<footer class="status-bar" id="status-bar">
+  <button id="btn-problems" class="sb-item err hidden"></button>
+  <span id="sb-film" class="sb-item mono"></span>
+  <span id="production-line" class="sb-item mono"
+    title="what the AI is doing — from its own heartbeat and from durable state"></span>
+  <span class="sb-spacer"></span>
+  <span id="mix-state" class="sb-item mono" title="master-audio preview: the build's exact ffmpeg mix"></span>
+  <span id="save-state" class="sb-item mono">saved</span>
+  <button id="sb-goto" class="sb-item" title="go to a film or scene — Ctrl+P"><span class="sb-ico">⌕</span>go to…</button>
+</footer>
 </div>
 
 <!--
@@ -233,6 +264,9 @@
   </form>
 </dialog>
 
+<script src="/studio-util.js"></script>
+<script src="/palette.js"></script>
+<script src="/scene-panels.js"></script>
 <script src="/film.js"></script>
 </body>
 </html>

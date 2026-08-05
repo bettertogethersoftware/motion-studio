@@ -11,14 +11,17 @@
 
 /* ------------------------------- layout ------------------------------- */
 
+/* A flex column, not a grid (v0.26): the banners and the document tab strip
+   come and go, and implicit grid rows meant *which* row got the 1fr depended
+   on how many of them happened to be showing. Here the main area is the one
+   that flexes, always. */
 .fe-frame {
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  height: 100vh;
+  display: flex; flex-direction: column;
+  flex: 1; min-width: 0; min-height: 0; /* height comes from .vs-shell */
 }
 
 .fe-top {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--ink-2);
@@ -51,10 +54,22 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 
 /* scenes rail + stage + inspector */
 .fe-main {
-  display: grid; grid-template-columns: 216px minmax(0, 1fr) 300px;
-  min-height: 0;
+  display: grid; grid-template-columns: 216px minmax(0, 1fr) var(--insp-w, 300px);
+  flex: 1; min-height: 0;
+  position: relative; /* the resize grip is absolute against this */
 }
-.rail-collapsed .fe-main { grid-template-columns: 30px minmax(0, 1fr) 300px; }
+.rail-collapsed .fe-main { grid-template-columns: 30px minmax(0, 1fr) var(--insp-w, 300px); }
+
+/* Out of flow, so it never becomes a fourth grid track. */
+.insp-grip {
+  position: absolute; top: 0; bottom: 0;
+  right: var(--insp-w, 300px);
+  width: 7px; margin-right: -3px;
+  cursor: col-resize; z-index: 6;
+}
+.insp-grip:hover { background: var(--accent); opacity: 0.5; }
+body.resizing-insp { cursor: col-resize; user-select: none; }
+body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
 
 .fe-scenes {
   border-right: 1px solid var(--line);
@@ -181,6 +196,22 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 .fe-inspector .insp-facts dt { float: left; clear: left; color: var(--dim); font: 11px/1.9 var(--mono); width: 46%; }
 .fe-inspector .insp-facts dd { margin: 0 0 0 48%; font: 11px/1.9 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fe-inspector .sep { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+
+/* The scene's tabs (v0.27). Same grammar as the scene page's panel tabs, sized
+   for a column: five of them have to fit at the 280px minimum, so they share
+   the width evenly and drop the page-sized padding and letter-spacing. */
+.insp-tabs {
+  margin: -14px -16px 12px; padding: 0 6px;
+  background: var(--ink); position: sticky; top: -14px; z-index: 2;
+}
+.insp-tabs .tab {
+  flex: 1; min-width: 0;
+  padding: 9px 2px; font-size: 10px; letter-spacing: 0.06em;
+}
+/* The escape hatch to the full-screen editor — a note, not an action. */
+.insp-escape { margin-top: 10px; }
+.insp-escape a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted var(--line); }
+.insp-escape a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .range-row { display: flex; align-items: center; gap: 8px; }
 .range-row input[type=range] { flex: 1; accent-color: var(--accent); }
 .range-row .val { font: 12px var(--mono); min-width: 52px; text-align: right; }
@@ -191,7 +222,7 @@ button.warn { color: var(--accent); border-color: var(--accent); }
   border-top: 1px solid var(--line);
   background: var(--ink-2);
   display: flex; flex-direction: column;
-  height: 300px; min-height: 170px;
+  height: 300px; min-height: 170px; flex-shrink: 0;
   resize: vertical; overflow: hidden; /* drag the top edge via the resizer row */
 }
 .fe-tools {

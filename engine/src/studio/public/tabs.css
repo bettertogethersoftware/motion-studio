@@ -1,0 +1,48 @@
+/* Motion Studio — the document tab strip (shared by both Studio documents).
+
+   These are VS Code's editor tabs (v0.27): the strip sits on the side-bar
+   surface and the ACTIVE tab is cut out of it in the editor's lighter shade,
+   with a hairline accent along its top edge. That inversion is the whole trick
+   — the open document reads as a continuation of the editor beneath it, and
+   the rest sit behind glass. Names are sentence-case sans rather than the old
+   uppercase mono: a film is called "SEPHIROTH — ASHES OF THE MOON", and
+   shouting it a second time helps nobody. */
+
+.doc-tabs {
+  display: flex; align-items: stretch;
+  flex-shrink: 0;
+  height: 35px;
+  background: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+.doc-tabs::-webkit-scrollbar { height: 0; }
+
+.doc-tab {
+  display: flex; align-items: center; gap: 7px;
+  max-width: 240px; min-width: 0;
+  padding: 0 8px 0 11px;
+  border-right: 1px solid var(--line);
+  border-top: 1px solid transparent;
+  background: var(--ink-2);
+  color: #9d9d9d; text-decoration: none;
+  font: 13px var(--sans);
+  white-space: nowrap;
+}
+.doc-tab:hover { background: #1f1f1f; color: var(--text); }
+.doc-tab.active {
+  background: var(--ink);           /* the editor surface, continued upward */
+  color: #ffffff;
+  border-top-color: var(--accent);
+}
+.doc-tab-mark { font-size: 10px; flex-shrink: 0; color: var(--accent); opacity: 0.85; }
+.doc-tab-name { overflow: hidden; text-overflow: ellipsis; }
+.doc-tab-close {
+  background: none; border: 0; padding: 1px 3px; line-height: 1;
+  border-radius: var(--radius);
+  color: transparent; font-size: 11px; cursor: pointer; flex-shrink: 0;
+}
+.doc-tab:hover .doc-tab-close, .doc-tab.active .doc-tab-close { color: #9d9d9d; }
+.doc-tab-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.12); }
+.doc-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
