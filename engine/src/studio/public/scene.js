@@ -83,7 +83,7 @@ async function openScene(id) {
   updateMeta();
   // One call points config, audio, assets and outputs at the new scene; the
   // config it already fetched is handed over rather than fetched twice.
-  scenePanels.setScene({ id, config: scene.config, path: scene.path }).catch(toastError);
+  scenePanels.setTarget({ kind: 'scene', id, config: scene.config, path: scene.path }).catch(toastError);
   syncPanelTab();
   sync();
 

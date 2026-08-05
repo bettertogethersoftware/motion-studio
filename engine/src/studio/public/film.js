@@ -118,6 +118,7 @@ const state = {
   lastBuild: null,       // {status, logs} — refills the build panel on re-open
   inspectorMode: null,   // null = selection properties | 'build'
   sceneTab: 'scene',     // inspector tab for a selected scene: scene|config|audio|assets|outputs
+  filmTab: 'film',       // inspector tab for the film itself: film|assets|outputs
   sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
 
@@ -1631,6 +1632,14 @@ function isDeepSceneTab() {
   return state.detail?.scenes?.[state.selection.index]?.kind !== 'footage';
 }
 
+/** The film's own deep panels, on the same rule: focused work stands the
+ *  versions and advice sections down until you come back to the first tab. */
+function isDeepFilmTab() {
+  return state.inspectorMode !== 'build' && !state.selection && state.filmTab !== 'film';
+}
+
+const isDeepInspectorTab = () => isDeepSceneTab() || isDeepFilmTab();
+
 /* The inspector is rebuilt from scratch on selection, mutation, save, SSE and
  * the once-a-second scene-job poll. That was survivable when everything in it
  * was a label; now it holds a config form, so a render running in the
@@ -1661,6 +1670,7 @@ function renderInspector() {
   // Leaving the panels must not strand a clip playing with its stop button
   // gone from the page.
   if (scenePanels?.root.isConnected && !isDeepSceneTab()) scenePanels.stopAudition();
+  if (filmPanels?.root.isConnected && !isDeepFilmTab()) filmPanels.stopAudition();
   box.innerHTML = '';
   if (state.inspectorMode === 'build') { renderBuildInspector(box); return restoreFocus(at); }
   const sel = state.selection;
@@ -1674,7 +1684,7 @@ function renderInspector() {
   else if (sel.kind === 'audio') renderAudioInspector(box, sel.id);
   else if (sel.kind === 'caption') renderCaptionInspector(box, sel.id);
   else if (sel.kind === 'overlay') renderOverlayInspector(box, sel.id);
-  if (!isDeepSceneTab()) {
+  if (!isDeepInspectorTab()) {
     renderVersionsSection(box);
     renderAdviceSection(box);
   }
@@ -1870,7 +1880,64 @@ function renderDeliverablesInspector(box, film) {
   box.appendChild(el('div', { class: 'insp-row deliverable-add' }, labelled('add platform version', choose), add));
 }
 
+/* The film's own panels (v0.27.1). A scene explains itself through tabs; the
+ * film did not, and it has the same two folders on disk — assets/ and out/ —
+ * reachable through the very routes the server calls "shared target routes".
+ *
+ * It stops at two. `config` is not mirrored because a film's settings ARE the
+ * film tab (captions style, platform versions, the facts) and its timing lives
+ * in the timeline; `audio` is not mirrored because a film's audio IS the
+ * timeline's master tracks, with fades and ducking a flat list cannot express.
+ * Either would be a second editor for something already edited elsewhere. */
+let filmPanels = null;
+
+function ensureFilmPanels() {
+  if (filmPanels) return filmPanels;
+  filmPanels = ScenePanels.create({
+    host: null,
+    api,
+    toast,
+    toastError,
+    compact: true,
+    capabilities: { deleteScene: false }, // a film is deleted from the Studio tree
+    onConfigChanged: () => {},            // films have no config panel to change one
+    onSceneDeleted: () => {},
+    // Deleting a film asset can drop master audio tracks with it, which is an
+    // edit to the very document this page is holding open.
+    onAssetsChanged: () => { refresh().catch(toastError); },
+  });
+  filmPanels.setTarget({ kind: 'film', id: filmId, path: state.film?.path ?? null })
+    .catch(toastError);
+  return filmPanels;
+}
+
+const FILM_TABS = [
+  ['film', 'this film: its facts, caption style and platform versions'],
+  ['assets', 'files in the film’s own assets/ folder — master audio, overlays, footage'],
+  ['outputs', 'what this film has built'],
+];
+
+function filmTabStrip() {
+  const nav = el('nav', { class: 'tabs insp-tabs' });
+  for (const [name, title] of FILM_TABS) {
+    nav.appendChild(el('button', {
+      class: 'tab' + (state.filmTab === name ? ' active' : ''),
+      text: name,
+      title,
+      onclick: () => { state.filmTab = name; renderInspector(); },
+    }));
+  }
+  return nav;
+}
+
 function renderFilmInspector(box) {
+  box.appendChild(filmTabStrip());
+  if (state.filmTab !== 'film') {
+    const panels = ensureFilmPanels();
+    panels.show(state.filmTab);
+    box.appendChild(panels.root);
+    return;
+  }
   const d = state.detail, f = state.film;
   box.appendChild(el('h3', { text: 'film' }));
   const dl = el('dl', { class: 'insp-facts' });
@@ -1964,7 +2031,7 @@ function mountScenePanels(box, s) {
   const sceneId = `${filmId}/${s.slug}`;
   if (scenePanelsSceneId !== sceneId) {
     scenePanelsSceneId = sceneId;
-    panels.setScene({ id: sceneId })
+    panels.setTarget({ kind: 'scene', id: sceneId })
       .then(() => panels.show(state.sceneTab))
       .catch((err) => { scenePanelsSceneId = null; toastError(err); });
   }

@@ -141,6 +141,12 @@ The **versions** and **advice** sections stay on the **scene** tab. The other
 four are focused editing surfaces, and the tab that carries the conversation
 about a take is one click away.
 
+Selecting the **film** itself — its row at the top of the tree — gives the same
+treatment: **film · assets · outputs**, where `assets` is the film's own folder
+(master audio, overlays, footage) and `outputs` is what it has built. There is
+deliberately no film-level `config` or `audio` tab: a film's settings are the
+film tab, and its audio is the timeline.
+
 **open scene ↗** is still there, at the foot of the scene tab — it opens that
 scene as its own document tab, for when you want the composition preview, frame
 scrubbing or the render job card. It is not a navigation and never leaves the

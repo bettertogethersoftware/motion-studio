@@ -29,6 +29,10 @@
   color: #9d9d9d; text-decoration: none;
   font: 13px var(--sans);
   white-space: nowrap;
+  /* A tab stopped being an <a> when the shell took the strip over, and took
+     the hand cursor with it — leaving an I-beam over a thing you click. */
+  cursor: pointer;
+  user-select: none;
 }
 .doc-tab:hover { background: #1f1f1f; color: var(--text); }
 .doc-tab.active {

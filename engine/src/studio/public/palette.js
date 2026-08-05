@@ -219,16 +219,19 @@
         .map((c) => ({ kind: 'command', icon: c.icon ?? '›', label: c.title, detail: c.detail ?? '', group: c.group ?? 'commands', run: c.run }));
     }
     const out = [];
+    // Opening is the shell's job, not a navigation: picking a film here used to
+    // take the whole window to the standalone /film.html page, closing every
+    // other document to do it.
     for (const f of index.films) {
       out.push({
         kind: 'film', icon: '▶', label: f.name, detail: f.id, group: 'films',
-        run: () => { location.href = `/film.html?id=${enc(f.id)}`; },
+        run: () => StudioUtil.openDocument({ kind: 'film', id: f.id, name: f.name }),
       });
     }
     for (const s of index.scenes) {
       out.push({
         kind: 'scene', icon: '◧', label: s.name, detail: s.film, group: 'scenes',
-        run: () => { location.href = `/?scene=${enc(s.id)}`; },
+        run: () => StudioUtil.openDocument({ kind: 'scene', id: s.id, name: s.name }),
       });
     }
     return out;

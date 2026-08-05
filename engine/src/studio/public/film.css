@@ -86,6 +86,9 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
 }
 .fe-rail-head .drag-hint { text-transform: none; letter-spacing: 0.02em; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
 .tiny-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
+/* The collapse control belongs on the edge it collapses toward, not tucked
+   against the label — same side as the Explorer's, one rail further in. */
+#btn-scenes-collapse { margin-left: auto; }
 .rail-collapsed .fe-rail-head { border-bottom: none; padding: 8px 4px; justify-content: center; }
 .rail-collapsed .rail-head-label,
 .rail-collapsed .drag-hint,

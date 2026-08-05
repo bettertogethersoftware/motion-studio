@@ -1,4 +1,4 @@
-/* Motion Studio — a scene's own panels, shared by both Studio documents.
+/* Motion Studio — a target's own panels, shared by every Studio surface.
  *
  * config · audio · assets · outputs. These are the deeper fields of one scene,
  * and until v0.27 they existed only on the scene page (/index.html), wired to
@@ -19,6 +19,14 @@
  * and the two callbacks that say what a config change and a deletion MEAN to the
  * host. It reuses the existing class names throughout, so both documents style
  * it from styles.css and only the compact overrides live in scene-panels.css.
+ *
+ * v0.27.1: **assets and outputs are not scene-only.** A film has an assets/
+ * folder and an out/ folder addressed by the same routes — the server calls
+ * them "shared target routes" — so the module takes a `kind` and the film
+ * inspector mounts the same two panels. config and audio stay scene-only, and
+ * for a good reason rather than an unfinished one: a film's timing lives in
+ * film.json edited by the timeline, and its audio IS the timeline. A second
+ * editor for either would be a second source of truth.
  *
  * Loaded as a classic script before app.js / film.js, which each declare their
  * own top-level `$`, `el` and `state` — hence the IIFE: one global, ScenePanels.
@@ -58,7 +66,10 @@
 
   const X264_PRESETS = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'];
 
-  const KIND_GLYPH = { image: '🖼', audio: '♫', font: 'Aa', data: '⧉' };
+  /* `video` earns a glyph now that films mount this panel: a film's assets/ is
+     mostly footage and transparent-overlay stingers, and every one of them was
+     falling through to the generic ⧉. */
+  const KIND_GLYPH = { image: '🖼', video: '▶', audio: '♫', font: 'Aa', data: '⧉' };
 
   const fmtBytes = (n) => (n == null ? '—' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' kB');
 
@@ -121,6 +132,7 @@
     capabilities = {},
     onConfigChanged = () => {},
     onSceneDeleted = () => {},
+    onAssetsChanged = () => {},
   }) {
     const caps = { deleteScene: true, ...capabilities };
     const uid = `sp${++seq}`;
@@ -128,17 +140,31 @@
     /* Per-instance state. The audio draft is staged here and written with one
      * PATCH, so a half-typed path never reaches disk. */
     const st = {
-      sceneId: null,
-      config: null,
-      scenePath: null,
+      kind: 'scene',      // 'scene' | 'film'
+      targetId: null,
+      config: null,       // scenes only
+      targetPath: null,
       audioDraft: [],
       audioPreview: null,
       activeTab: null,
     };
 
-    const sceneUrl = (suffix = '') => `/api/scenes/${enc(st.sceneId)}${suffix}`;
-    const assetPreviewUrl = (rel) => `/preview/${enc(st.sceneId)}/${rel.split('/').map(enc).join('/')}`;
-    const pathSep = () => ((st.scenePath ?? '').includes('\\') ? '\\' : '/');
+    const isFilm = () => st.kind === 'film';
+    const sceneUrl = (suffix = '') => `/api/${isFilm() ? 'films' : 'scenes'}/${enc(st.targetId)}${suffix}`;
+    /* A scene's images are previewed through the sandboxed /preview/ route; a
+     * film has no such route and reads its own assets back through the API —
+     * which already carries a query string, so the cache-buster has to join
+     * with & rather than a second ?. */
+    const assetPreviewUrl = (rel, bust = null) => {
+      const base = isFilm()
+        ? `/api/films/${enc(st.targetId)}/asset?path=${enc(rel)}`
+        : `/preview/${enc(st.targetId)}/${rel.split('/').map(enc).join('/')}`;
+      return bust == null ? base : `${base}${base.includes('?') ? '&' : '?'}t=${enc(bust)}`;
+    };
+    const pathSep = () => ((st.targetPath ?? '').includes('\\') ? '\\' : '/');
+    /** Which panels this kind of target actually has. */
+    const OFFERS = { scene: ['config', 'audio', 'assets', 'outputs'], film: ['assets', 'outputs'] };
+    const offers = (tab) => OFFERS[st.kind].includes(tab);
 
     /* ------------------------------ config ------------------------------ */
 
@@ -184,7 +210,7 @@
 
     const btnCopyPath = el('button', {
       type: 'button', class: 'ghost', title: 'copy the scene folder path', text: 'copy',
-      onclick: (e) => { copyText(st.scenePath ?? ''); flashButton(e.target, '✓'); },
+      onclick: (e) => { copyText(st.targetPath ?? ''); flashButton(e.target, '✓'); },
     });
     const btnDeleteScene = el('button', {
       type: 'button', class: 'ghost danger', title: 'remove this scene', text: 'delete scene…',
@@ -304,7 +330,7 @@
     const deleteDialog = el('dialog', { class: 'sp-dialog' }, deleteForm);
 
     function openDeleteSceneDialog() {
-      deleteSummary.textContent = `Remove "${st.config?.name ?? st.sceneId}" from its film?`;
+      deleteSummary.textContent = `Remove "${st.config?.name ?? st.targetId}" from its film?`;
       deleteFilesBox.checked = false;
       deleteDialog.showModal();
     }
@@ -532,7 +558,7 @@
       for (const file of fileList) {
         try {
           const res = await fetch(
-            `/api/scenes/${enc(st.sceneId)}/asset?path=${enc('assets/' + file.name)}`,
+            sceneUrl(`/asset?path=${enc('assets/' + file.name)}`),
             { method: 'PUT', body: file },
           );
           if (!res.ok) {
@@ -544,11 +570,12 @@
         }
       }
       loadAssets().catch(() => {});
+      onAssetsChanged(null);
       if (errors.length) toast('Some uploads failed:\n' + errors.join('\n'), { kind: 'error' });
     }
 
     async function loadAssets() {
-      if (!st.sceneId) return;
+      if (!st.targetId) return;
       const { files } = await api(sceneUrl('/assets'));
       // The audio panel offers this scene's audio assets as src autocomplete.
       audioOptions.innerHTML = '';
@@ -564,7 +591,7 @@
       for (const a of files) {
         const thumb = el('span', { class: 'a-thumb' });
         if (a.kind === 'image') {
-          thumb.appendChild(el('img', { src: `${assetPreviewUrl(a.path)}?t=${a.mtime}`, alt: '', loading: 'lazy' }));
+          thumb.appendChild(el('img', { src: assetPreviewUrl(a.path, a.mtime), alt: '', loading: 'lazy' }));
         } else if (a.kind === 'audio') {
           const play = el('button', { type: 'button', class: 'a-play audition-btn', title: 'audition', text: '▶' });
           play.dataset.src = a.path;
@@ -593,7 +620,7 @@
           mkBtn('delete', 'delete this asset', () => openAssetDeleteDialog(a)),
           el('a', {
             class: 'a-btn download-link', text: '⤓', title: 'download',
-            href: `/api/scenes/${enc(st.sceneId)}/asset?path=${enc(a.path)}&download=1`,
+            href: sceneUrl(`/asset?path=${enc(a.path)}&download=1`),
           }));
 
         assetList.appendChild(el('li', {},
@@ -630,6 +657,10 @@
      * audio panel, the config facts and the raw JSON view in step without a
      * second round trip. */
     async function afterAssetMutation(result) {
+      // A rename or delete can rewrite the target's own document — config.audio
+      // for a scene, the master tracks for a film — so the host is told before
+      // it saves something built on what was there a moment ago.
+      onAssetsChanged(result);
       if (result?.config) {
         st.config = result.config;
         st.audioDraft = structuredClone(result.config.audio ?? []);
@@ -666,7 +697,7 @@
       assetDeleteSummary.textContent = `Delete ${a.path}?`;
       assetDeleteRefs.classList.toggle('hidden', !a.audioRefs);
       if (a.audioRefs) {
-        assetDeleteCount.textContent = `${a.audioRefs} audio track${a.audioRefs === 1 ? '' : 's'} in this scene reference it.`;
+        assetDeleteCount.textContent = `${a.audioRefs} audio track${a.audioRefs === 1 ? '' : 's'} in this ${st.kind} reference it.`;
         assetDeleteList.innerHTML = '';
         for (const t of (st.config?.audio ?? []).filter((t) => (t.src ?? '').toLowerCase() === a.path.toLowerCase())) {
           assetDeleteList.appendChild(el('li', { text: `${t.src} · start ${t.startInFrames ?? 0}f · ${t.gainDb ?? 0} dB` }));
@@ -683,7 +714,7 @@
       const updateAudio = !!a.audioRefs && assetUpdateAudioBox.checked;
       try {
         const res = await api(
-          `/api/scenes/${enc(st.sceneId)}/asset?path=${enc(a.path)}${updateAudio ? '&updateAudio=1' : ''}`,
+          sceneUrl(`/asset?path=${enc(a.path)}${updateAudio ? '&updateAudio=1' : ''}`),
           { method: 'DELETE' },
         );
         assetDeleteDialog.close();
@@ -697,7 +728,7 @@
     const outputsPanel = el('div', { class: 'tab-body sp-panel hidden' }, outputList);
 
     async function loadOutputs() {
-      if (!st.sceneId) return;
+      if (!st.targetId) return;
       const { files } = await api(sceneUrl('/outputs'));
       outputList.innerHTML = '';
       if (!files.length) {
@@ -711,7 +742,7 @@
             el('span', { class: 'size', text: 'folder' })));
         } else {
           outputList.appendChild(el('li', {},
-            el('a', { text: o.name, href: `/api/scenes/${enc(st.sceneId)}/output?file=${enc(o.name)}&download=1` }),
+            el('a', { text: o.name, href: sceneUrl(`/output?file=${enc(o.name)}&download=1`) }),
             el('span', { class: 'size', text: fmtBytes(o.bytes) })));
         }
       }
@@ -728,29 +759,33 @@
     return {
       root,
       panels: PANELS,
-      get sceneId() { return st.sceneId; },
+      get targetId() { return st.targetId; },
+      get kind() { return st.kind; },
       get config() { return st.config; },
+      /** The panels this target actually has, in tab order. */
+      offered: () => OFFERS[st.kind].slice(),
 
-      /** Point every panel at a scene. `config`/`path` skip a refetch when the
-       *  host already has them (both hosts do, from their own load). */
-      async setScene({ id, config = null, path = null } = {}) {
+      /** Point every panel at a film or a scene. `config`/`path` skip a refetch
+       *  when the host already has them (every host does, from its own load). */
+      async setTarget({ kind = 'scene', id, config = null, path = null } = {}) {
         stopAudition();
-        st.sceneId = id;
-        if (!id) { st.config = null; st.scenePath = null; return; }
-        if (config && path != null) {
+        st.kind = kind === 'film' ? 'film' : 'scene';
+        st.targetId = id;
+        if (!id) { st.config = null; st.targetPath = null; return; }
+        if (path != null && (config || isFilm())) {
           st.config = config;
-          st.scenePath = path;
+          st.targetPath = path;
         } else {
-          const scene = await api(`/api/scenes/${enc(id)}`);
-          st.config = scene.config;
-          st.scenePath = scene.path;
+          // A film's document is not a scene config; only a scene refetches one.
+          const t = await api(sceneUrl());
+          st.config = isFilm() ? null : t.config;
+          st.targetPath = isFilm() ? t.film?.path ?? null : t.path;
         }
-        scenePathChip.textContent = st.scenePath ?? '';
-        scenePathChip.title = st.scenePath ?? '';
-        assetsPathChip.textContent = (st.scenePath ?? '') + pathSep() + 'assets';
+        scenePathChip.textContent = st.targetPath ?? '';
+        scenePathChip.title = st.targetPath ?? '';
+        assetsPathChip.textContent = (st.targetPath ?? '') + pathSep() + 'assets';
         assetsPathChip.title = assetsPathChip.textContent;
-        fillConfigForm();
-        resetAudioDraft();
+        if (!isFilm()) { fillConfigForm(); resetAudioDraft(); }
         await Promise.all([loadAssets().catch(() => {}), loadOutputs().catch(() => {})]);
       },
 
@@ -762,11 +797,13 @@
         renderAudioNote();
       },
 
-      /** Show one panel, or none (the host is showing a panel of its own). */
+      /** Show one panel, or none (the host is showing a panel of its own). A
+       *  panel this kind of target does not have is treated as none. */
       show(tab) {
-        st.activeTab = tab ?? null;
-        for (const [name, panel] of Object.entries(PANELS)) panel.classList.toggle('hidden', name !== tab);
-        root.classList.toggle('hidden', !tab);
+        const wanted = tab && offers(tab) ? tab : null;
+        st.activeTab = wanted;
+        for (const [name, panel] of Object.entries(PANELS)) panel.classList.toggle('hidden', name !== wanted);
+        root.classList.toggle('hidden', !wanted);
       },
 
       get activeTab() { return st.activeTab; },

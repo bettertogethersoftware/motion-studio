@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### A film explains itself too, and four shell fixes
+
+The scene inspector got tabs; the film inspector did not, so a film could tell
+you its duration but not what was in its own `assets/` folder. It has
+**film · assets · outputs** now, mounting the same panel module a scene does —
+the server already called those *shared target routes*, so `scene-panels.js`
+took a `kind` rather than gaining a second implementation.
+
+It stops at two deliberately. `config` is not mirrored because a film's
+settings **are** the film tab (facts, caption style, platform versions) and its
+timing lives in the timeline; `audio` is not mirrored because a film's audio
+**is** the timeline's master tracks, with fades and ducking that a flat list
+cannot express. Either would be a second editor for something already edited
+elsewhere — the exact trap the shared module exists to avoid.
+
+Deleting a film asset can drop master audio tracks with it, which is an edit to
+the document the film page is holding open, so the module now reports asset
+mutations and the film refreshes rather than saving over them.
+
+Three fixes to the shell itself, all reported from use:
+
+- **The command palette opened documents by navigating.** Picking a film took
+  the whole window to the standalone `/film.html` page, closing every other
+  open document to do it — the shell dissolving on the one action meant to move
+  around inside it. It routes through `openDocument` now, which needed
+  `StudioUtil` to resolve a shell in its *own* window as well as a parent's.
+- **Document tabs showed a text caret**, having stopped being `<a>` elements
+  when the shell took the strip over.
+- **The film rail's collapse control** moved to the right edge, the side it
+  collapses toward — matching the Explorer's.
+
+Two bugs found while verifying rather than reported: a film's image thumbnails
+404'd, because the film asset route already carries a query string and the
+cache-buster appended a second `?`; and every video asset fell through to the
+generic file glyph, which matters far more for films (footage and
+transparent-overlay stingers) than it ever did for scenes.
+
 ### One Studio, documents inside it
 
 Motion Studio shipped as **two pages** from v0.20 to v0.26: the workspace tree

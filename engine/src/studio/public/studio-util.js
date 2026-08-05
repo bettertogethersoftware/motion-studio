@@ -91,6 +91,15 @@
   };
 
   /**
+   * The shell that would host a document opened from here: this window when it
+   * IS the shell, otherwise the parent's when we are a document inside it.
+   *
+   * Deliberately separate from shell(): that one answers "am I embedded?", and
+   * the Studio shell must never answer yes to that about itself.
+   */
+  const hostShell = () => window.StudioShell ?? shell();
+
+  /**
    * Call once a document knows what it is. Marks <html> so the stylesheets can
    * drop the chrome the shell provides, and registers the document with the
    * shell so its tab title and status items can be read.
@@ -109,14 +118,20 @@
   }
 
   /**
-   * Open a film or scene. Embedded that is another tab; standalone it is the
-   * navigation it always was, so a document opened on its own still works.
+   * Open a film or scene. With a shell in reach — this window's, or the parent's
+   * when we are a document inside it — that is another tab, which is the whole
+   * point of the shell. Without one (a document opened standalone on a second
+   * monitor) it navigates to the shell carrying a deep link, so you land in the
+   * app with the thing open rather than on another lone page.
    */
   function openDocument({ kind, id, name }) {
-    const s = shell();
+    const s = hostShell();
     if (s) { s.openDocument({ kind, id, name }); return; }
-    location.href = kind === 'film' ? `/film.html?id=${enc(id)}` : `/?scene=${enc(id)}`;
+    location.href = kind === 'film' ? `/?film=${enc(id)}` : `/?scene=${enc(id)}`;
   }
 
-  window.StudioUtil = { $, enc, api, toast, toastError, shell, registerDocument, syncDocument, openDocument };
+  window.StudioUtil = {
+    $, enc, api, toast, toastError,
+    shell, hostShell, registerDocument, syncDocument, openDocument,
+  };
 })();
