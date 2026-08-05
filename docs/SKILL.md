@@ -501,6 +501,17 @@ Actually inspect the returned images. Check:
 
 Never invent product statistics, ratings, certifications, or user counts.
 
+**Exporting a still is a different job from inspecting one.** `render_still {
+scene, frame }` runs the same single-frame render path but *writes* a PNG into
+the scene's `out/` dir and returns `{ outputPath, bytes, frame }` — no image
+comes back inline, so it proves a file exists, not that the picture is right.
+Use it when the still itself is wanted output (a thumbnail, a poster frame, key
+art); use `capture_preview_frame`/`capture_preview_frames` when you need to look
+at the image. `outputFilename` must be a bare `.png` name inside `out/`
+(default `still-<frame>.png`); a path separator or any other extension is
+`path_not_allowed`. It takes a scene, never a film, and it archives no revision
+— rendering a still is not rendering the scene.
+
 ### 6. Build and audition audio before picture rendering
 
 Call `list_vendors` before speech, music, or transcription. Prefer the user's
