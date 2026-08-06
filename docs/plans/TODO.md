@@ -4,20 +4,19 @@ The single entry point for planned work. **How this folder works:** active
 plans keep their own full documents here; this file orders them and holds
 items too small for a document. Finished work moves to a summary in
 [completed.md](completed.md); dropped ideas move to [retired.md](retired.md)
-with the reason. Update this index whenever a linked plan moves.
+with the reason; known defects — things that are wrong *now*, as opposed to
+work we intend to do — live in [bug-backlog.md](bug-backlog.md). Update this
+index whenever a linked plan moves.
 
 Active plan documents:
 
 | document | what it is |
 |---|---|
-| [clone-scene-plan.md](clone-scene-plan.md) | `clone_scene` — one-call scene copy across/within films: config + assets + vendored libs + provenance (**shipped code-complete 2026-08-05, targeted v0.27; awaiting commit + skill re-copy**) |
-| [token-efficient-motion-studio-plan.md](token-efficient-motion-studio-plan.md) | compact projections, batch tools, render groups — attacks the measured 49% token bucket of a real production (proposed) |
-| [plate-render-forge-plan.md](plate-render-forge-plan.md) | plateforge/motionforge shell orchestration for Krea2 plates → verified film delivery (proposed; review WITH the token-efficient plan) |
+| [token-efficient-motion-studio-plan.md](token-efficient-motion-studio-plan.md) | compact projections, batch tools, render groups — **P0+P1 complete 2026-08-04**; kept for the ledger and the two deferred row fields |
+| [plate-render-forge-plan.md](plate-render-forge-plan.md) | plateforge/motionforge shell orchestration for Krea2 plates → verified film delivery (**complete 2026-08-06**; kept for the ledger) |
+| [studio-ui-polish-plan.md](studio-ui-polish-plan.md) | the shell's seams under real load — tab strip, background-tab errors, the edit lost on tab close, six smaller honesty repairs, **and the approved accessibility pass** (proposed 2026-08-06, ~4½ d, U-1…U-13) |
 | [docker-support-plan.md](docker-support-plan.md) | the containerized third distribution tier — demo-in-a-box, server-hosted Studio, MCP sidecar (proposed, 1–2 d) |
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
-| [studio-navigation-plan.md](studio-navigation-plan.md) | Studio UI refinement: the scene ↔ film round trip, AE-style document tabs, sequence zoom/jump (**N-1/N-3/N-6/N-7/N-8 shipped code-complete 2026-08-05**; N-5 handed to [scene-inspector-plan.md](scene-inspector-plan.md), which closes this one) |
-| [studio-shell-plan.md](studio-shell-plan.md) | **one Studio, documents inside it** — index.html becomes the shell (permanent Explorer + document tabs + editor stack); films AND scenes open as same-origin iframe documents; page navigation removed entirely (**shipped code-complete 2026-08-06; awaiting commit**) |
-| [scene-inspector-plan.md](scene-inspector-plan.md) | the whole scene *inside* the film page — N-5(b), the Final Cut answer: one shared panel module (config/audio/assets/outputs) mounted by both documents, a resizable inspector, `open scene ↗` demoted to an escape hatch (**shipped code-complete 2026-08-05; awaiting commit**) |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets |
 | [auto-reframe-plan.md](auto-reframe-plan.md) | `measure_reframe` — the hard half of aspect variants |
 | [image-prep-plan.md](image-prep-plan.md) | `prepare_image` — the still-image hole in the media surface |
@@ -27,99 +26,67 @@ Active plan documents:
 ## Next up (ordered)
 
 1. [x] **Token-efficient production loop — complete 2026-08-04**
-       ([plan](token-efficient-motion-studio-plan.md)): `detail` projections
-       + cursors, `use_shared_asset_batch`, `write_composition_bundle`,
-       `render_group`/`wait_render_group`, plus the P1 set (`finish_film`,
-       `review_render_grid`, durable run groups, agent-economy telemetry)
-       and the NEON APEX replay acceptance. Slice-by-slice ledger in the
-       progress section below; P1-3 absorbed the old "durable jobs" backlog
-       item.
+       ([plan](token-efficient-motion-studio-plan.md), ledger in
+       [completed.md](completed.md)). P1-3 absorbed the old "durable jobs"
+       backlog item.
 2. [ ] **Docker support** ([plan](docker-support-plan.md)) — **blocked on
        Docker being installed on the dev machine** (checked 2026-08-04:
        not present; the slice cannot be honestly verified without it).
        1–2 days once available; the best effort-to-impression ratio for
        the demo tier and server-hosted deployments.
-3. [ ] **PlateForge/MotionForge** ([plan](plate-render-forge-plan.md)) —
-       **after** item 1's P0: the motionforge half should consume
-       `use_shared_asset_batch`/`render_group` instead of reimplementing
-       aggregation client-side (the plan itself says "if a future batch MCP
-       operation exists, use it"). The plateforge/Krea2 half has no such
-       dependency and could start alongside item 1 if GPU production
-       resumes first.
-       **Progress 2026-08-04: plateforge P0 items 1–2 implemented** at the
-       tools root (`<toolsRoot>\agent_tool\plateforge\`, outside this
-       repository, with its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`,
-       `plan`, `generate`, `review`, `select`, `stage`, and `verify-assets`
-       — the shared manifest, path containment, Krea2 sidecar reuse/stale/
-       `--force`, the JSONL event log and run-directory layout, the single
-       contact sheet, explicit selection, and safe library staging. 115
-       unittests pass against a fake Krea2 helper; real GPU generation is
-       still unexercised.
-       **Progress 2026-08-05: motionforge implemented** (delivery-order
-       items 3–4) at the tools root (`<toolsRoot>\agent_tool\motionforge\`,
-       with its own `README.md` and an entry in `MACHINE.md`). Ships `doctor`, `link`,
-       `render`, `build`, `verify`, and the resumable `run` with
-       `--plan-only` / `--resume` / `--no-build` / `--visual-review`
-       (`--force-plate` is refused and redirected to plateforge). Per the
-       architect override, it **consumes the v0.26 engine operations instead
-       of reimplementing them**: `link` is one `use_shared_asset_batch`,
-       `render` is `render_group` + `wait_render_group` with its `since`
-       cursor in a bounded loop (groupId persisted, restart re-attaches and
-       the engine recomputes truth from output files), `build`+`verify` ride
-       one `finish_film` job plus `get_production_status`/`measure_render`
-       and external ffprobe — `get_film` full and the per-scene `render`
-       loop are never called. Dependency-free Node with its own ~150-line
-       stdio MCP client; 37 `node --test` tests (~8 s) run against a REAL
-       engine server on a throwaway `MOTION_STUDIO_HOME` with the fake
-       browser module. **Remaining: the plan's acceptance run on real GPU
-       production** (ten real plates, an interrupted resume, the finished
-       delivery) — everything else in the plan is implemented.
-4. [ ] **Product backlog P0 items** from
-       [production-workflow-backlog.md](production-workflow-backlog.md):
-       staging→validate→promote delivery, the review artefact, aspect
-       deliverable variants. Then the queued plans, audio-cue first
+3. [x] **PlateForge/MotionForge — complete 2026-08-06**
+       ([plan](plate-render-forge-plan.md), ledger in
+       [completed.md](completed.md)): both tools ship at the tools root
+       (`<toolsRoot>\agent_tool\`), with the real-GPU acceptance run closed.
+4. [ ] **Product backlog P0 remainder** from
+       [production-workflow-backlog.md](production-workflow-backlog.md) —
+       **the workable next item.** P0-1 (staging→validate→promote) and P0-2
+       (the review artefact) shipped 2026-07-29, and P0-3 Stage A shipped
+       with them; what is left is **P0-3 Stage B — variant renders**, the
+       correct 9:16/1:1 for text-heavy films that Stage A's reframe metadata
+       cannot fix by cropping alone. Then the queued plans, audio-cue first
        (smallest, knowledge-shaped, caught a real 1.5–2.7 s sync defect no
        existing check can see).
-5. [x] **Studio UI refinement — shipped code-complete 2026-08-05**
-       ([plan](studio-navigation-plan.md)): the round trip (the scene page
-       derives its own film and links back through the `&scene=` deep link
-       that had existed unused since v0.23), same-tab `open scene ↗`,
-       keyboard parity, the localStorage document strip, and sequence
-       movement (double-click to zoom, PgUp/PgDn cut-to-cut). Awaiting
-       commit.
-6. [x] **The scene inspector — shipped code-complete 2026-08-05**
-       ([plan](scene-inspector-plan.md)). `scene-panels.js` is the single
-       implementation of config/audio/assets/outputs, mounted by the scene
-       page and by the film inspector's tab strip; the inspector is
-       resizable and its panel DOM survives the 1 Hz poll with focus and
-       caret intact; `open scene ↗` is demoted to an escape hatch. Verified
-       in-browser against SEPHIROTH and jin-park-sunshine-vertical; suites
-       green. Awaiting commit. Original framing:
-       N-5(b),
-       the piece the navigation plan left to the user and the user has now
-       taken. Fixing the *return* edge made the trip cheap; it did not
-       remove it, and a reviewer who leaves the timeline loses the thread of
-       the film they are judging. The scene's own panels move **into** the
-       film inspector behind a tab strip. The load-bearing constraint is that
-       they must not be a second copy: one shared `scene-panels.js` mounted
-       by both documents, adopted by the scene page first so the refactor is
-       provable against the surface that already works. ~1 d.
-7. [x] **The Studio shell — shipped code-complete 2026-08-06**
-       ([plan](studio-shell-plan.md)). The two-page Studio is gone: the
-       Explorer tree is permanent and films and scenes open as document tabs
-       in one window, each a same-origin iframe so a tab keeps its playhead,
-       undo stack and scroll while another is in front. Also landed the VS
-       Code chrome (activity bar, status bar, command palette, Dark Modern
-       surfaces with the amber accent kept) and `scene.html`/`scene.js`,
-       extracted from index.html/app.js. `tabs.js` retired. Awaiting commit.
-8. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
+       **Progress 2026-08-06 — Stage B's authoring contract shipped**
+       (its prerequisite, not the render path): the engine states
+       `--ms-width`/`--ms-height` and the `--ms-safe-*` rectangles on every
+       page it opens, frame API v1.6 adds `frameSize()`/`safeArea()`, and the
+       proxy path was fixed to keep the authored layout viewport (it shrank
+       the viewport, so relative units were dishonest in drafts). Stage A was
+       exercised for the first time on real work — `same-machine-mv` →
+       `shorts-9x16`, 175 s re-encoded in 59 s, delivery archived, guides
+       clean. **The audit that motivated it:** across all eleven rendered
+       films there is not one `vw`/`vh`/`clamp()`/relative font size, so
+       nothing benefits retroactively — Stage B pays off for films authored
+       to the contract, and among existing ones only `signal-path` (engine-
+       drawn, edge-anchored HUD) is a true Stage B case; the plate-driven
+       MVs crop acceptably, which the shorts build now demonstrates.
+5. [x] **The Studio UI program — shipped and committed 2026-08-05/06**:
+       navigation refinement, the scene inspector, and the Studio shell that
+       closed all three (`bdb1efa`…`2ddef07`). Summarized in
+       [completed.md](completed.md); the three plan documents remain as the
+       design record. **Follow-up open:**
+       [studio-ui-polish-plan.md](studio-ui-polish-plan.md) — the shell was
+       verified with one or two documents in the foreground, and its seams
+       fail under real load (a ten-tab strip whose names render 9 px wide, a
+       render failure raised behind a hidden iframe, a film edit dropped by
+       `frame.remove()`). **The accessibility pass was approved 2026-08-06**
+       and is scheduled in the same document as U-10…U-13 — the two trees,
+       the palette, the icon-only controls, timeline block selection —
+       after investigating it found the palette dropping focus on `<body>`
+       when it closes, which kills every document shortcut until you
+       click. ~4½ days total, splittable; U-1/U-3/U-4/U-11 carry the value,
+       U-13 is the first thing to cut.
+6. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
        extraction first); C-2 desktop packaging (bundled Node, installer) —
        **deprioritized by §10.7** ("no installer channel — the Electron
        host follows, never leads"); the unpackaged `desktop/` host covers
        the checkout case today.
 
-## Token-efficient loop progress (started 2026-08-04)
+## Token-efficient loop progress (2026-08-04, closed)
+
+Summarized in [completed.md](completed.md); kept here as the slice ledger.
 
 - [x] TE-1 (2026-08-04): P0-1 detail projections + P0-2 cursors —
       `core/projections.js` (segment rows with folded `state`, stateless
@@ -184,6 +151,18 @@ Active plan documents:
       delivery" fails rarely under the full parallel run, passes standalone
       and on re-run. Worth one root-cause hour before it erodes trust in
       red suites.
+- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — two open,
+      neither blocking, both one line at the preferred fix. **BUG-1**: a
+      scene's vendored `frame-api.js` is frozen at creation, so every scene
+      made before a runtime bump lacks the helpers
+      [frame-api.md](../frame-api.md) documents (v1.6's `frameSize`/
+      `safeArea` today; v1.4 and v1.5 had the same hole unnoticed) — fix (2),
+      re-copying the runtime on *clone*, is worth taking on its own.
+      **BUG-2**: every film containing footage reports a phantom scene named
+      `undefined`; cosmetic in the Explorer, but it reaches the MCP workspace
+      manifest, so an agent is told a scene exists that cannot be opened,
+      rendered or deleted. Take BUG-2 first — it is the one that misleads a
+      reader rather than merely failing one.
 
 ## Parked, with reasons
 
@@ -214,6 +193,26 @@ Active plan documents:
 
 ## Recently completed (context — details in [completed.md](completed.md))
 
+- 2026-08-06 — **The frame-geometry authoring contract** (`--ms-*` variables,
+  frame API v1.6, the proxy layout-viewport fix) plus the first real Stage A
+  variant build. Stage B's prerequisite; see item 4.
+- 2026-08-06 — **PlateForge/MotionForge complete**: both agent tools at the
+  tools root, motionforge riding the v0.26 batch/group operations, and the
+  real-GPU acceptance run (ten plates, an interrupted resume, a finished
+  delivery) closed.
+- 2026-08-06 — **The Studio shell** (`22d053f`, `2ddef07`): one page, the
+  Explorer permanent, films and scenes as same-origin iframe documents, VS
+  Code chrome, and the film inspector's own **film · assets · outputs** tabs
+  on the shared panel module.
+- 2026-08-05 — **The scene inspector** and the **navigation round trip**:
+  `scene-panels.js` as the single config/audio/assets/outputs implementation
+  mounted by both documents, plus sequence movement and the document strip.
+- 2026-08-05 — **`clone_scene`** (`bdb1efa`, targeted v0.27): one-call scene
+  copy across or within films — config, assets, vendored libs, provenance.
+- 2026-08-04 — **The token-efficient production loop, P0 + P1**: projections
+  and cursors, `use_shared_asset_batch`/`write_composition_bundle`, render
+  groups, `finish_film`, `review_render_grid`, durable group records, and
+  `agent-economy.json`; NEON APEX replay acceptance measured.
 - 2026-08-04 — **v0.26.0 released and tagged**: the whole vendor-boundary
   program (Slices 0/A/B/C-1 — boundary, packs, GitHub-URL install, desktop
   viewer host), release discipline + [release-checklist.md](../release-checklist.md).
