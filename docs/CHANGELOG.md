@@ -36,6 +36,17 @@ closing the dialog stops it — plus the duration it discovers. Choosing between
 eight `stable-audio3-bed-*.flac` takes was previously a guess from the
 filename, resolvable only by placing a clip, playing the film, and undoing.
 
+**The timeline can be resized.** A horizontal splitter above the toolbar
+trades height between the stage and the tracks, with the player re-fitting as
+you drag, a double-click to reset, and the height remembered per browser. The
+wrapper had carried `resize: vertical` and a comment promising a resizer row
+that was never built — and the native handle grows a bottom-pinned panel
+*downward*, off the window, so it resized nothing you could see. Fixing it
+exposed a second thing: `.fe-stage` had no `min-height: 0`, so as a grid item
+it refused to shrink and overflowed instead, which is why the player would not
+have re-fitted even once the height changed. Both siblings in that grid had
+carried the line since they were written.
+
 **Muting takes effect while you are listening.** The preview mix is one ffmpeg
 render of the whole film — that is what makes it the build's own graph — so a
 mute cannot be faded in place: muting stops the audio at once and the re-render

@@ -867,6 +867,12 @@ too, which is what muting a track means in any editor. A single clip can also be
 silenced on its own with **mute this track** in the inspector. Nothing is
 deleted either way: unmute and it all comes back.
 
+**The timeline has its own edge.** Drag the line above the toolbar to trade
+height between the player and the tracks — four audio lanes plus captions and
+overlays do not fit in the default 300px, and a film you are only watching does
+not need them. Double-click the edge to put it back, and the height is
+remembered per browser. The player re-fits as you drag.
+
 **Muting while the film is playing** stops that audio immediately and the mix
 re-renders around it, rejoining a moment later at the same playhead — you do
 not have to stop and press play again. It is a re-render rather than a fader

@@ -456,6 +456,13 @@ the composition end), then `adelay` (frame offset → ms) and `volume`, then
 `amix` with `normalize=0` so adding a quiet voiceover doesn't duck the music
 bed — and muxes with the video stream copied.
 
+The timeline's height is a splitter (v0.27), `--tl-h` persisted per browser,
+clamped so the timeline keeps 120px and the STAGE keeps 200px — measured
+against the frame minus the header and problems banner, since those live inside
+it too. `.fe-stage` needed `min-height: 0` for any of it to work: a grid item's
+automatic minimum is its content, so the stage overflowed rather than shrinking
+and the player never re-fitted.
+
 The film page renders that mix once and caches it, so **the cache key has to
 cover everything that changes the sound** — `audio` *and* `mutedLanes`. It
 covered `audio` alone when lane mute arrived, which left a muted lane still

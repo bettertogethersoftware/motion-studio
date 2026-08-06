@@ -133,7 +133,12 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
   font: 12px var(--mono); padding: 4px 10px;
   transform: translate(-50%, -130%);
 }
-.fe-stage { display: flex; flex-direction: column; min-width: 0; padding: 14px 16px 0; }
+/* `min-height: 0` is load-bearing: a grid item's automatic minimum is its
+   CONTENT, so without it the stage refuses to shrink and simply overflows —
+   which is what the timeline splitter found. The player then never re-fits,
+   because the viewport it measures never got smaller. Its two siblings in this
+   grid have carried the same line since they were written. */
+.fe-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 14px 16px 0; }
 .fe-viewport {
   position: relative; flex: 1; min-height: 120px;
   border: 1px solid var(--line);
@@ -225,9 +230,23 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
   border-top: 1px solid var(--line);
   background: var(--ink-2);
   display: flex; flex-direction: column;
-  height: 300px; min-height: 170px; flex-shrink: 0;
-  resize: vertical; overflow: hidden; /* drag the top edge via the resizer row */
+  height: var(--tl-h, 300px); min-height: 120px; flex-shrink: 0;
+  overflow: hidden;
 }
+
+/* The horizontal splitter (v0.27). The wrapper used to carry `resize: vertical`
+   with a comment promising a resizer row that was never built — and the native
+   handle sits in the bottom-right corner and grows DOWNWARD, which for a panel
+   already pinned to the bottom of the window resizes nothing you can see. This
+   is the inspector's grip turned ninety degrees: it rides the edge, it is 7px
+   of hit area over a 1px line, and it stays out of the flex flow's way. */
+.tl-grip {
+  height: 7px; margin: -3px 0; flex-shrink: 0;
+  cursor: row-resize; z-index: 6;
+}
+.tl-grip:hover { background: var(--accent); opacity: 0.5; }
+body.resizing-tl { cursor: row-resize; user-select: none; }
+body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .fe-tools {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px;

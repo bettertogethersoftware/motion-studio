@@ -657,6 +657,15 @@ immediate, debounced re-render mid-playback that rejoins at the
 playhead; measured by a bandpass on the rendered mix, −50.8 dB in the
 bed's band muted against −24.1 dB unmuted.
 
+A horizontal splitter followed, asked for by the same reading of the
+same screenshot: four audio lanes, captions and overlays do not fit in
+a fixed 300px timeline. The wrapper had `resize: vertical` and a comment
+promising a resizer row nobody built — and the native handle grows a
+bottom-pinned panel downward, off the window. The real fix is the
+inspector's grip turned ninety degrees, and it exposed a layout defect
+underneath: `.fe-stage` had no `min-height: 0`, so it overflowed instead
+of shrinking and the player never re-fitted.
+
 **Not done, deliberately:** footage keeps its single grip. A footage
 segment joins the film without re-encoding, so trimming it is
 `transcode_asset`'s job, not the timeline's.

@@ -2691,6 +2691,69 @@ function setInspectorWidth(px) {
   window.addEventListener('resize', () => setInspectorWidth($('#inspector').getBoundingClientRect().width));
 }
 
+/* The timeline's height, traded against the stage's (v0.27). The wrapper
+ * carried `resize: vertical` and a comment promising a resizer row that was
+ * never built; the native handle grows a bottom-pinned panel downward, off the
+ * window, which is why the timeline was 300px whatever the film needed. Four
+ * audio lanes plus captions and overlays do not fit in 300px, and a film you
+ * are only watching does not need them. */
+const TL_MIN = 120;
+const STAGE_MIN = 200;
+const TL_DEFAULT = 300;
+const TL_KEY = 'ms.timelineHeight';
+
+function setTimelineHeight(px) {
+  // Always leave the player something to be: the STAGE keeps 200px, which is
+  // the frame minus the chrome above it — the header, and the problems banner
+  // when a film has any. Measuring against the frame alone left the stage at
+  // 147px, because that chrome is inside the frame too.
+  const frame = document.querySelector('.fe-frame')?.getBoundingClientRect().height ?? window.innerHeight;
+  const chrome = ['.fe-top', '.problems']
+    .reduce((sum, sel) => sum + (document.querySelector(sel)?.getBoundingClientRect().height ?? 0), 0);
+  const room = Math.round(frame - chrome - STAGE_MIN);
+  const h = clamp(Math.round(px), TL_MIN, Math.max(TL_MIN, room));
+  document.documentElement.style.setProperty('--tl-h', `${h}px`);
+  return h;
+}
+
+{
+  const stored = Number(localStorage.getItem(TL_KEY));
+  if (Number.isFinite(stored) && stored > 0) setTimelineHeight(stored);
+
+  $('#tl-grip')?.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    const startY = ev.clientY;
+    const startH = $('#tl-scroll').closest('.fe-timeline-wrap').getBoundingClientRect().height;
+    document.body.classList.add('resizing-tl');
+    // Up is bigger: the grip is the timeline's TOP edge.
+    const move = (e2) => { setTimelineHeight(startH - (e2.clientY - startY)); fitPlayerBox(); };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.classList.remove('resizing-tl');
+      const h = setTimelineHeight($('#tl-scroll').closest('.fe-timeline-wrap').getBoundingClientRect().height);
+      try { localStorage.setItem(TL_KEY, String(h)); }
+      catch { /* private mode / quota: the height is a convenience, never a blocker */ }
+      fitPlayerBox();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+
+  $('#tl-grip')?.addEventListener('dblclick', () => {
+    const h = setTimelineHeight(TL_DEFAULT);
+    try { localStorage.setItem(TL_KEY, String(h)); } catch { /* see above */ }
+    fitPlayerBox();
+  });
+
+  // A shorter window must re-clamp, or a timeline sized on a big screen leaves
+  // no stage at all on a small one.
+  window.addEventListener('resize', () => {
+    const wrap = $('#tl-scroll')?.closest('.fe-timeline-wrap');
+    if (wrap) setTimelineHeight(wrap.getBoundingClientRect().height);
+  });
+}
+
 /* --------------------------------- zoom --------------------------------- */
 
 /* `fitMeasured` is false when the timeline has no box yet — a document mounted
