@@ -1423,10 +1423,17 @@ app you are in.
 from `/api/films/:id?detail=scenes` — the compact projection, no composition
 bodies — fetched lazily at a concurrency of six and cached for the page's life,
 so a cold palette is useful immediately rather than blocking on one request per
-film. It skips `sceneFolders` rows that are `missing` or nameless — a guard that
-is load-bearing today, because `store.listScenes()` describes every play-order
-entry as a scene, including footage segments, which have no slug and therefore
-produce one nameless `<film>/undefined` row per footage clip.
+film. It skips `sceneFolders` rows that are `missing` or nameless — belt and
+braces since v0.27, when `store.listScenes()` stopped describing footage
+segments as scenes. It used to walk the whole play order, and footage has no
+slug, so every clip produced one nameless `<film>/undefined` row; the palette
+guarded against it, the film page hid it by accident, and the Explorer showed
+it. The guard stays because skipping a row it cannot open is the palette's own
+business, whatever the engine hands it.
+
+A film's counts are split for the same reason: `listFilms` reports `scenes` and
+`footage` separately, because only scenes expand into rows, and a film of pure
+footage that claimed a scene count opened onto nothing.
 
 `ScenePanels.create()` builds its own DOM — it adopts no markup from either
 page — and takes everything host-specific by injection: the transport (`api`),

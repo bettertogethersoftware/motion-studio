@@ -67,7 +67,7 @@ import {
   checkJsSyntax, checkDeterminism, checkCanvasStateBalance, checkSequenceCoverage,
 } from './scene.js';
 import { normalizeOutputFilename } from './formats.js';
-import { validateFilm, normalizeFilm } from './films.js';
+import { validateFilm, normalizeFilm, isFootageSegment } from './films.js';
 import { getLibrary, libsVendorDir, LIBRARY_IDS, addonFiles } from './libraries.js';
 import { copySceneTree, currentRevisionId, currentAgentId } from './revisions.js';
 import { detectVersion, sha256 } from './vendor-lock.js';
@@ -383,18 +383,23 @@ export class WorkspaceStore {
       const filmId = `${ws}/${d.name}`;
       try {
         const doc = await this._readFilmDoc(path.join(wsPath, 'films', d.name), filmId);
+        const segments = Array.isArray(doc.scenes) ? doc.scenes : [];
         out.push({
           id: filmId,
           slug: d.name,
           name: doc.name ?? d.name,
-          scenes: Array.isArray(doc.scenes) ? doc.scenes.length : 0,
+          // Counted apart, because the play order holds both and calling the
+          // total "scenes" is the same lie listScenes used to tell: a film of
+          // pure footage reported a scene count it could not list.
+          scenes: segments.filter((s) => !isFootageSegment(s)).length,
+          footage: segments.filter(isFootageSegment).length,
           updatedAt: doc.updatedAt ?? null,
           createdAt: doc.createdAt ?? null,
         });
       } catch {
         // A folder with a broken/missing film.json is reported, not hidden —
         // hiding it would make "where did my film go" undiagnosable from the UI.
-        out.push({ id: filmId, slug: d.name, name: d.name, scenes: 0, broken: true });
+        out.push({ id: filmId, slug: d.name, name: d.name, scenes: 0, footage: 0, broken: true });
       }
     }
     return out.sort((a, b) => a.slug.localeCompare(b.slug));
@@ -686,10 +691,20 @@ export class WorkspaceStore {
    * document does not list (flagged `unlisted` — e.g. a hand-copied folder).
    * Config unreadable → `missing: true`, same tolerance the old registry had
    * for folders deleted out from under it.
+   *
+   * Footage segments share the play order with scenes and are skipped: they are
+   * supplied files, not scene folders, and have no slug. Describing them anyway
+   * produced one `<film>/undefined` row per clip — nameless, flagged `missing`,
+   * and impossible to act on — in the Studio tree and in the MCP workspace
+   * manifest alike.
+   *
+   * `isFootageSegment` is the stored-shape check — see the note on it in
+   * `films.js` for why `isFootage` from `core/film.js` is the wrong tool here.
    */
   async listScenes(filmId) {
     const film = await this.getFilm(filmId);
-    const listed = new Set((film.scenes ?? []).map((s) => s.slug));
+    const scenes = (film.scenes ?? []).filter((s) => !isFootageSegment(s));
+    const listed = new Set(scenes.map((s) => s.slug));
     const out = [];
     const describe = async (slug, unlisted) => {
       const sceneId = `${film.id}/${slug}`;
@@ -712,7 +727,7 @@ export class WorkspaceStore {
         return { ...base, name: slug, missing: true };
       }
     };
-    for (const s of film.scenes ?? []) out.push(await describe(s.slug, false));
+    for (const s of scenes) out.push(await describe(s.slug, false));
     let onDisk = [];
     try {
       onDisk = (await fsp.readdir(path.join(film.path, 'scenes'), { withFileTypes: true }))

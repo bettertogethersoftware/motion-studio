@@ -186,6 +186,45 @@ test('store: scene order lives in film.json; removeScene keeps the folder as unl
   assert.ok(!fs.existsSync(b.path), 'scene folder deleted');
 });
 
+test('store: listScenes skips footage segments instead of describing them as scenes', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'Mixed' });
+  await store.createScene(film.id, { name: 'A' });
+  await store.createScene(film.id, { name: 'B' });
+  await store.writeAssetFile(film.id, 'assets/clip.mp4', Buffer.from('fake').toString('base64'));
+  // The play order holds scenes AND footage; footage has no slug.
+  await store.updateFilm(film.id, {
+    scenes: [
+      { slug: 'a' },
+      { footage: 'assets/clip.mp4', durationInFrames: 120, label: 'Clip' },
+      { slug: 'b' },
+    ],
+  });
+
+  const persisted = (await store.getFilm(film.id)).scenes;
+  assert.equal(persisted.length, 3, 'the footage segment survives normalization');
+  assert.equal(persisted[1].kind, undefined,
+    'film.json carries no `kind` tag — only planFilm stamps one, which is why isFootage is the wrong guard here');
+
+  const listed = await store.listScenes(film.id);
+  assert.deepEqual(listed.map((s) => s.slug), ['a', 'b'], 'footage does not become a scene row');
+  assert.ok(!listed.some((s) => s.id.endsWith('/undefined')), 'no `<film>/undefined` ghost');
+  assert.ok(!listed.some((s) => s.name == null), 'every row has a name');
+  assert.ok(!listed.some((s) => s.missing), 'and none is falsely flagged missing');
+});
+
+test('store: listScenes still reports a scene whose folder vanished', async () => {
+  const store = await makeStore(path.join(tmp, 'data'));
+  const film = await store.createFilm(TEST_WS, { name: 'Gone' });
+  const a = await store.createScene(film.id, { name: 'A' });
+  fs.rmSync(a.path, { recursive: true, force: true });
+
+  // The footage guard must not swallow this: a play-order entry whose folder was
+  // deleted out from under the film is information, and stays reported.
+  const listed = await store.listScenes(film.id);
+  assert.deepEqual(listed.map((s) => `${s.slug}:${!!s.missing}`), ['a:true']);
+});
+
 test('store: film-level assets and audio tracks (the old "master project" role)', async () => {
   const store = await makeStore(path.join(tmp, 'data'));
   const film = await store.createFilm(TEST_WS, { name: 'Master' });

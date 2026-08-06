@@ -177,6 +177,18 @@ function renderTree() {
   }
 }
 
+/**
+ * What a film row says it holds. Scenes and footage are counted separately
+ * because they are different things: only scenes expand into rows beneath, so
+ * a film of pure footage that claimed "1sc" would open onto nothing.
+ */
+function filmCount(f) {
+  const clips = f.footage ?? 0;
+  if (!clips) return `${f.scenes}sc`;
+  const c = `${clips} clip${clips === 1 ? '' : 's'}`;
+  return f.scenes ? `${f.scenes}sc · ${c}` : c;
+}
+
 /** One film row, plus its scene rows when expanded. */
 function appendFilmRows(ul, f) {
   const fOpen = expandedFilms.has(f.id);
@@ -187,7 +199,7 @@ function appendFilmRows(ul, f) {
   chev.addEventListener('click', (e) => { e.stopPropagation(); toggleFilm(f.id); });
   const name = el('span', 'p-name', f.name);
   name.title = f.broken ? `${f.name} — film.json is broken or missing` : `${f.name} — watch, advise, and edit`;
-  const meta = el('span', 'p-meta', f.broken ? 'broken' : `${f.scenes}sc`);
+  const meta = el('span', 'p-meta', f.broken ? 'broken' : filmCount(f));
   const del = el('button', 'film-del', '✕');
   del.title = 'delete this film…';
   del.addEventListener('click', (e) => { e.stopPropagation(); deleteFilm(f); });

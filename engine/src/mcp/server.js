@@ -590,7 +590,16 @@ server.registerTool(
       workspace: ws.id,
       name: ws.name,
       path: ws.path,
-      films: films.map((f) => ({ film: f.slug, name: f.name, scenes: f.scenes, ...(f.broken ? { broken: true } : {}) })),
+      // `scenes` counts scenes only; footage segments share the play order but
+      // are supplied files, and reporting them as scenes promised rows that
+      // `get_film`/`list_scenes` could never produce.
+      films: films.map((f) => ({
+        film: f.slug,
+        name: f.name,
+        scenes: f.scenes,
+        ...(f.footage ? { footage: f.footage } : {}),
+        ...(f.broken ? { broken: true } : {}),
+      })),
       library: { files: library.length, bytes: library.reduce((n, f) => n + f.bytes, 0) },
     });
   }),

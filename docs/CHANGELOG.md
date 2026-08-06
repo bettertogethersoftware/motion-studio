@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Footage stops pretending to be a scene
+
+`store.listScenes()` walked the whole play order and described every entry as a
+scene. A film's play order holds scenes *and* footage segments, and footage has
+no slug — so each clip produced one `<film>/undefined` row: nameless, flagged
+`missing`, impossible to open, render or delete. Three surfaces, three
+behaviours: the command palette skipped it deliberately, the film page hid it by
+accident (its unlisted filter also held `undefined`), and the Explorer tree
+showed it. The fourth is the one that mattered — the MCP **workspace manifest**
+put it in the structured JSON an agent reads to learn what exists, so an agent
+was being told a scene was there.
+
+Fixed at the source: `listScenes` skips footage. The discriminator is
+`isFootageSegment` in `core/films.js`, keyed on the stored shape the way
+`validateFilm` and `normalizeSegment` already are — **not** `isFootage` from
+`core/film.js`, which reads a `kind` tag that only `planFilm` stamps onto the
+projection it builds. A segment read off disk never carries one, so the tagged
+check is silently false against a stored film; that trap is now written down
+beside both.
+
+The same lie one layer up: `listFilms` counted play-order entries and called the
+total `scenes`, so a film of pure footage advertised a scene count it could not
+list. It now reports `scenes` and `footage` separately, and the Studio tree says
+`2sc · 1 clip` — or just `1 clip` — instead of overstating. `get_workspace`
+gains the same `footage` field.
+
 ### A composition can be told how big its frame is
 
 Aspect variants have had a ceiling since Stage A shipped: `build_film

@@ -110,95 +110,15 @@ dependency the scene chose.
 
 ---
 
-## BUG-2 — every film with footage reports a phantom scene called `undefined`
+## Fixed
 
-**Found** 2026-08-06 while building the command palette; **re-found and
-measured** 2026-08-06 in the Explorer tree. Recorded in
-[CHANGELOG.md](../CHANGELOG.md) and [architecture.md](../architecture.md) as
-"filed separately" — this is that filing. **Severity:** medium — cosmetic in
-the Studio, but it puts a non-existent scene into the structured JSON an agent
-reads. **Area:** `engine/src/core/store.js`.
-
-### What is wrong
-
-`listScenes()` maps **every** play-order entry through its scene describer:
-
-```js
-// engine/src/core/store.js:715
-for (const s of film.scenes ?? []) out.push(await describe(s.slug, false));
-```
-
-A film's play order holds scenes *and* footage segments, and a footage segment
-has no `slug` — it is a supplied file, not a scene folder. So
-`describe(undefined, false)` builds `id: "<film>/undefined"`, fails to read a
-config at that path,
-and falls into its catch (`store.js:712`), which returns
-`{ ...base, name: slug, missing: true }` — with `slug` undefined. **One phantom
-row per footage clip**, named nothing, flagged as a missing scene.
-
-`isFootage` already exists for exactly this distinction
-(`engine/src/core/film.js:268`, keyed on the tagged `kind` rather than on the
-absence of a field).
-
-### Evidence
-
-Measured live in the Studio on 2026-08-06. Expanding
-`default/harmonia-everdark-short` in the Explorer renders a row with an empty
-name, the meta tag `missing`, and a `title` of
-`default/harmonia-everdark-short/undefined`.
-
-Three consumers, three different behaviours — which is why it survived:
-
-| consumer | what it does | result |
-|---|---|---|
-| `palette.js:136` | skips rows that are `missing` **or** nameless | correct, and deliberate |
-| film page | its unlisted-scene filter also happens to hold `undefined` | hidden **by accident** |
-| Explorer tree (`app.js:206`) | renders whatever `sceneFolders` contains | **shows the ghost** |
-| MCP `workspace-manifest` resource (`mcp/server.js:4552`) | pushes every row into the manifest | emits `{ scene: "undefined", slug: undefined, missing: true }` |
-
-The last row is the one that matters. The Studio symptom is a dead row a human
-ignores; the manifest is what an agent reads to learn what exists, and it is
-being told a scene is there.
-
-### Who is bitten
-
-An agent listing a film that contains footage — every music video in this
-workspace that cuts supplied clips against rendered scenes. It sees a scene it
-cannot open, cannot render, and cannot delete, with no name to reason about. A
-diligent agent may try to repair the "missing" scene it was just told about.
-The human sees a nameless row in the Explorer and learns to distrust the tree.
-
-### Workaround
-
-None needed by a human — ignore the row. There is none for an agent short of
-filtering `slug == null` at every call site, which is the bug restated.
-
-### Candidate fixes
-
-1. **Skip non-scene entries at the source (preferred).** Guard the loop with
-   the existing `isFootage`, so `listScenes` returns scenes.
-   One line, and it fixes all four consumers at once. The check to run first:
-   `listScenes` also reconciles against folders on disk, so confirm a footage
-   segment cannot own a `scenes/<slug>/` folder that the on-disk pass would then
-   report as `unlisted`.
-2. **Describe footage honestly instead of skipping it.** Return a tagged
-   `{ kind: 'footage', … }` row so a caller can see the whole play order from
-   one call. Larger, and it changes the shape of `sceneFolders` for the Studio
-   film page as well as the manifest — a design change, not a fix. If this is
-   ever wanted it should leave this file and become a plan.
-3. **Guard each consumer.** What the palette already does. It is what the
-   codebase is doing today by accident, and it is why the defect reached four
-   surfaces with three different behaviours.
-
-Take (1). The Explorer also grows its own guard as
-[studio-ui-polish-plan.md](studio-ui-polish-plan.md) **U-8**, which is correct
-independently — it is the Explorer's job to skip nameless rows whatever the
-engine hands it — and stays correct after (1) lands, at which point it simply
-never fires.
-
-### Not this bug
-
-Genuinely **missing** scenes — a play-order entry whose folder was deleted out
-from under the film — must keep being reported. That row is information, and
-`describe()`'s catch is the right behaviour for it. The defect is only that an
-entry which was never a scene takes the same path.
+- **BUG-2 — every film with footage reported a phantom scene called
+  `undefined`.** `listScenes` walked the whole play order and described footage
+  segments, which have no slug, as scenes. Cosmetic in the Explorer, but it
+  reached the MCP workspace manifest, so an agent was told a scene existed that
+  could not be opened, rendered or deleted. Fixed 2026-08-06 by skipping
+  footage at the source, with `isFootageSegment` in `core/films.js` — keyed on
+  the stored shape, because `isFootage` in `core/film.js` reads a `kind` tag
+  only `planFilm` stamps and is silently false against a film read off disk.
+  The same miscount one layer up (`listFilms` calling play-order entries
+  "scenes") went with it.

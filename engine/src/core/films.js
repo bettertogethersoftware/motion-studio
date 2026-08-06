@@ -103,6 +103,20 @@ function checkTrack(t, i, problems) {
 }
 
 /**
+ * Is this play-order entry footage rather than a scene, as it sits in
+ * `film.json`? One key decides, which is what `validateFilm` and
+ * `normalizeSegment` below both key on.
+ *
+ * Deliberately NOT `isFootage` from `core/film.js`: that reads a `kind` tag
+ * which only `planFilm` stamps, onto the projection it builds. A segment read
+ * straight off disk never carries one, so the tagged check is silently false
+ * against a stored film — which is exactly how a footage clip came to be
+ * described as a scene called `undefined` in every listing that walked
+ * `film.scenes`.
+ */
+export const isFootageSegment = (s) => s?.footage !== undefined;
+
+/**
  * A footage segment (v0.22): a piece of video that joins the timeline as-is,
  * beside the rendered scenes.
  *

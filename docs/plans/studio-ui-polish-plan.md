@@ -336,15 +336,19 @@ The palette is a jump target, so a scene it cannot open is noise; the
 Explorer is the inventory, so a scene folder that vanished must still
 show as `missing`. Same defect, two correct answers.
 
-The engine-side fix is one line (`store.js:715`, guarded with `isFootage`
-from [core/film.js:268](../../engine/src/core/film.js:268)) and is **not
-this slice's job** — it is filed as
-[bug-backlog.md](bug-backlog.md) **BUG-2**, where it belongs, because it
-also changes `sceneFolders` for the film page and the shape of the MCP
-workspace manifest. The Explorer guard is correct independently — skipping
-nameless rows is the Explorer's job whatever the engine hands it — and
-stays correct after BUG-2 lands, at which point it simply never fires.
-Reference BUG-2 in the commit so the two are findable from each other.
+**Update 2026-08-06 — the engine half landed.** BUG-2 is fixed:
+`listScenes` skips footage at the source, so `sceneFolders` no longer
+carries the ghost and the Explorer has nothing to guard against today.
+That does **not** retire this half of the slice. Skipping a row it cannot
+name is the Explorer's own business whatever the engine hands it, and the
+guard costs one line; it simply never fires now. Note in the commit that
+it is belt-and-braces, so the next reader does not delete it as dead code.
+
+What the fix *did* retire from this slice: the row's scene count. It read
+`${f.scenes}sc` from a total that included footage, so a film of pure
+footage claimed a scene count that opened onto nothing. `listFilms` now
+reports `scenes` and `footage` separately and the row renders `2sc · 1
+clip`. Already done.
 
 ### U-9 — favicon  *(~10 min)*
 
