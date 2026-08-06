@@ -176,7 +176,7 @@ import {
   parseWavHeader, wavDurationSeconds, framesForDuration, measureWavLevels, splitSentences, concatWavBuffers,
 } from '../core/audio.js';
 import { JobManager, RENDER_LANE, TASK_LANE } from '../core/jobs.js';
-import { renderComposition, renderParallel, renderStill } from '../core/renderer.js';
+import { renderComposition, renderParallel, renderStill, compositionVariables } from '../core/renderer.js';
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
@@ -1379,7 +1379,13 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             const scene = await store.getScene(targetId);
             const config = await store.readConfig(scene.id);
             const files = await store.listFiles(scene.id);
-            return sendJson(res, 200, { id: scene.id, name: config.name, path: scene.path, config, files });
+            // cssVariables so the preview iframe can set the SAME `--ms-*` the
+            // renderer injects — computed here, never in the page, because a
+            // second copy of the safe-area formula is a second answer.
+            return sendJson(res, 200, {
+              id: scene.id, name: config.name, path: scene.path, config, files,
+              cssVariables: compositionVariables(config),
+            });
           }
           if (req.method === 'DELETE') {
             const deleteFiles = url.searchParams.get('deleteFiles') === '1';

@@ -96,6 +96,111 @@ test('real chromium: serial mp4 render end-to-end', async (t) => {
   assert.equal(Number(s.nb_frames), 10);
 });
 
+/**
+ * The authoring contract, proven where it can actually break (v0.27).
+ *
+ * A composition sized in vw/% and positioned from `--ms-safe-title-left` must
+ * land in the same PROPORTIONAL place in a full render and in a quarter-scale
+ * proxy draft. Before the viewport change, the proxy laid out against the
+ * draft width, so 50vw was half of 40px and then scaled again — the draft and
+ * the deliverable disagreed about the frame.
+ */
+async function writeRelativeProject(dir) {
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.copyFile(path.resolve('src/runtime/frame-api.js'), path.join(dir, 'frame-api.js'));
+  await fsp.writeFile(path.join(dir, 'composition.html'), `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}
+  /* Every number here is relative: half the frame wide, a fifth tall, its left
+     edge on the title safe line the engine states. */
+  #bar{position:absolute;top:0;height:20vh;width:50vw;left:var(--ms-safe-title-left,0px);background:#ffffff}
+</style></head><body>
+<div id="bar"></div>
+<script src="frame-api.js"></script>
+<script>
+  MotionStudio.registerComposition(() => {
+    // Publish what the runtime measured so the test can assert on the numbers
+    // the COMPOSITION saw, not only on pixels.
+    const safe = MotionStudio.safeArea('title');
+    window.__geometry = { frame: MotionStudio.frameSize(), safeLeft: safe.left, barWidth: document.getElementById('bar').getBoundingClientRect().width };
+  });
+</script>
+</body></html>`);
+  return validateConfig(makeConfig({ name: 'Relative', fps: 30, width: 800, height: 600, durationInFrames: 4 }));
+}
+
+/** Decode a PNG to RGBA rows with ffmpeg (no image dependency in this repo). */
+async function decodeRgba(png, file) {
+  await fsp.writeFile(file, png);
+  const { stdout } = await execFileP(
+    'ffmpeg', ['-v', 'error', '-i', file, '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'],
+    { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+  );
+  return stdout;
+}
+
+test('real chromium: a relative-unit composition lands identically in a proxy draft', async (t) => {
+  if (!haveBrowser || !haveFfmpeg) return t.skip('needs Chromium + ffmpeg');
+  const dir = path.join(tmp, 'relative');
+  const config = await writeRelativeProject(dir);
+
+  // Full size: the white bar starts at the title safe line (7% of 800 = 56px)
+  // and is 400px wide (50vw), i.e. columns 56..455 of 800.
+  const full = await decodeRgba(
+    await captureSingleFrame({ scenePath: dir, config, frame: 0 }),
+    path.join(tmp, 'relative-full.png'),
+  );
+  const whiteRun = (rgba, width, row) => {
+    let first = -1, last = -1;
+    for (let x = 0; x < width; x++) {
+      const i = (row * width + x) * 4;
+      if (rgba[i] > 200 && rgba[i + 1] > 200 && rgba[i + 2] > 200) { if (first < 0) first = x; last = x; }
+    }
+    return { first, last };
+  };
+  const fullRun = whiteRun(full, 800, 10);
+  assert.equal(fullRun.first, 56, 'left edge sits on --ms-safe-title-left (7% of 800)');
+  assert.equal(fullRun.last, 455, 'the bar is 50vw = 400px wide');
+
+  // Quarter-scale proxy: a 200×150 raster of the SAME layout. The bar must be
+  // at the same FRACTIONS of the frame — 56/800 and 456/800.
+  const outDir = path.join(dir, 'out');
+  const res = await renderComposition({
+    scenePath: dir,
+    // A PNG sequence so the assertion is on the captured raster itself, with
+    // no encoder colour conversion between the browser and the pixels.
+    config: { ...config, output: { ...config.output, format: 'png-sequence', filename: 'frames' } },
+    outputPath: path.join(outDir, 'frames'),
+    proxy: { scale: 0.25, frameStep: 1 },
+  });
+  const frames = (await fsp.readdir(res.outputPath)).sort();
+  const proxyPng = await fsp.readFile(path.join(res.outputPath, frames[0]));
+  const proxy = await decodeRgba(proxyPng, path.join(tmp, 'relative-proxy.png'));
+  const proxyRun = whiteRun(proxy, 200, 2);
+  // ±1 px of tolerance: the transform lands the edge on a fractional pixel.
+  assert.ok(Math.abs(proxyRun.first - 14) <= 1, `proxy left edge ${proxyRun.first}, expected ~14 (56 × 0.25)`);
+  assert.ok(Math.abs(proxyRun.last - 113) <= 1, `proxy right edge ${proxyRun.last}, expected ~113 (455 × 0.25)`);
+});
+
+test('real chromium: the composition itself reads the frame geometry, proxy or not', async (t) => {
+  if (!haveBrowser) return t.skip('no Chromium available');
+  const dir = path.join(tmp, 'geometry-readback');
+  const config = await writeRelativeProject(dir);
+  const seen = [];
+  // captureSingleFrame drives the same openPage path the render uses; the
+  // composition publishes what IT measured on window.__geometry.
+  const { createPuppeteerBrowser } = await import('../src/core/browser.js');
+  const factory = async (opts) => {
+    const browser = await createPuppeteerBrowser(opts);
+    const openPage = browser.openPage.bind(browser);
+    browser.openPage = async (args) => { seen.push(args); return openPage(args); };
+    return browser;
+  };
+  await captureSingleFrame({ scenePath: dir, config, frame: 0, browserFactory: factory });
+  assert.equal(seen[0].cssVariables['--ms-width'], '800px');
+  assert.equal(seen[0].cssVariables['--ms-safe-title-left'], '56px');
+});
+
 test('real chromium: omitBackground produces genuine alpha in transparent captures', async (t) => {
   if (!haveBrowser) return t.skip('no Chromium available');
   const dir = path.join(tmp, 'alpha');

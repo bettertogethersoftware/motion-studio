@@ -584,6 +584,24 @@ scene can crop badly in a portrait reframe. Use the per-scene crop controls in t
 Studio film inspector, review the safe guides, and reserve a future responsive
 scene rerender for compositions that need a genuinely different layout.
 
+### Authoring for a reframe (the safe-area contract)
+
+Whether a crop is survivable is decided when the composition is written, not
+when the variant is built. Every page the engine opens — preview, still, proxy
+draft, final render — carries the frame's geometry as CSS custom properties:
+`--ms-width`/`--ms-height` and the six `--ms-safe-title-*` /
+`--ms-safe-caption-*` values, computed from the render target and, when a
+deliverable is being rendered, from **its** insets. `MotionStudio.safeArea()`
+and `frameSize()` expose the same numbers to JavaScript. The full contract, with
+the rules and the pitfalls, is [frame-api.md §13](frame-api.md).
+
+The payoff is concrete: a title laid out with `left: var(--ms-safe-title-left)`
+and `width: var(--ms-safe-title-width)` is inside the guides at every geometry,
+so the same film's 9:16 version needs a re-encode rather than an apology. A
+title at `left: 134px; width: 1652px` is correct at 1920×1080 and nowhere else.
+These are the same rectangles the review contact sheet draws, so "passes the
+guides" and "obeys the variables" are one statement.
+
 ## Tool contract
 
 `build_film` is an **async job**: it validates and returns

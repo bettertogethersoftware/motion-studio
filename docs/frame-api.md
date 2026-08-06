@@ -249,7 +249,76 @@ from `get_film`'s plan), so every scene reads the same absolute grid and cuts
 land in the same place whether you address them from the film or from inside a
 scene.
 
-## 13. Checklist before rendering
+## 13. Frame geometry — `--ms-*`, `frameSize()`, `safeArea(kind)`
+
+The engine states the frame's own geometry on every page it opens, in CSS
+custom properties. A composition that reads them can be delivered at another
+aspect ratio; one that hard-codes `1920` is welded to the deliverable it was
+written for.
+
+```css
+:root { /* set by the engine — do not define these yourself */
+  --ms-width: 1920px;  --ms-height: 1080px;
+
+  --ms-safe-title-left: 134px;   --ms-safe-title-right:  134px;
+  --ms-safe-title-top:   65px;   --ms-safe-title-bottom: 540px;
+  --ms-safe-title-width: 1652px; --ms-safe-title-height: 475px;
+
+  --ms-safe-caption-*: /* the same six, for the lower caption region */
+}
+```
+
+```css
+.title {                                  /* survives any deliverable */
+  position: absolute;
+  left:  var(--ms-safe-title-left);
+  top:   var(--ms-safe-title-top);
+  width: var(--ms-safe-title-width);
+  font-size: 4.8vh;                       /* not 52px */
+}
+```
+
+From JavaScript, when an element must be positioned in code:
+
+```js
+const safe = MotionStudio.safeArea('title');    // {left,top,right,bottom,width,height} in px
+const { width, height } = MotionStudio.frameSize();
+```
+
+**The rules.**
+
+- **Size against the frame, not against a number you remember.** `vw`/`vh`/`%`,
+  `var(--ms-width)`, and `MotionStudio.frameSize()` all describe the authored
+  frame in every render path — preview, still, proxy draft, and the deliverable
+  itself. (A proxy shrinks the *screenshot*, never the layout viewport, so
+  `100vw` is the full frame in a draft too.)
+- **Keep titles inside the title safe rectangle and captions inside the caption
+  one.** These are the same rectangles the review contact sheet draws its guides
+  at, so "inside the guides" and "inside `--ms-safe-*`" are the same statement.
+- **The defaults are insets, not a margin:** title 7% left/right, 6% top, 50%
+  bottom (the upper half, clear of platform chrome); caption 8% left/right, 55%
+  top, 8% bottom. A film's deliverable can override them per variant, and then
+  these variables carry the variant's numbers.
+- **Absolute pixels are still fine for things that are not layout** — a 2px
+  rule, a 40px blur radius. The test is whether the value would have to change
+  if the frame became 1080×1920.
+
+A composition that ignores all of this still renders exactly as before; nothing
+here is required. What it buys is that the same film can produce a second aspect
+by re-rendering rather than by cropping — the difference between a title that
+reflows and a title with its right half cut off.
+
+**One caveat for existing scenes.** The **CSS variables** are injected by the
+engine, so they are available in every scene immediately, however old. The
+**JavaScript helpers** live in the `frame-api.js` copied into the scene folder
+when it was created, so `MotionStudio.frameSize()`/`safeArea()` exist only in
+scenes scaffolded at runtime v1.6 or later — check `MotionStudio.version`. In
+an older scene, read the variables directly
+(`getComputedStyle(document.documentElement).getPropertyValue('--ms-safe-title-left')`),
+or copy a current `frame-api.js` in with `sync_shared_files` from a scene that
+has one.
+
+## 14. Checklist before rendering
 
 - [ ] No `Date.now()`, `setTimeout`, `setInterval`, `Math.random()`, or real-time CSS transitions/animations anywhere
 - [ ] Composition registered via `MotionStudio.registerComposition` (or a correct manual `setFrame`)
@@ -265,6 +334,7 @@ scene.
 - [ ] Particle effects use `particles()` — never a library particle system or per-frame velocity accumulation
 - [ ] **Footage** is driven by `seekVideo()`, never `play()`; the file is VP8/VP9/AV1 in `.webm` (H.264 cannot be decoded by the render browser) and long enough for the range the scene uses — confirm both with `probe_asset` (§11)
 - [ ] A frame that never becomes ready: read the whole error message — it lists assets that failed to load, and a missing file a `<video>`/`<img>` was waiting on is the usual cause
+- [ ] Layout is sized against the frame (`vw`/`vh`/`%`, `var(--ms-*)`, `safeArea()`), and titles/captions sit inside their safe rectangles — otherwise this film can only ever be delivered at one aspect ratio (§13)
 - [ ] `frame-api.js` is included via `<script>` **before** `composition.js`
 - [ ] Spot-checked with `capture_preview_frames` at the start, a midpoint, the end, and every `Sequence` boundary — one call, not one per frame
 - [ ] `write_composition_file` returned no `warnings` — or each one is understood and deliberate

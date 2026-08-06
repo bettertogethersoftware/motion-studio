@@ -97,6 +97,35 @@ display, and the runtime provides `MotionStudio.random(seed)` (and, in v1.1,
 closed-form `spring()`) so compositions never need `Math.random()` or
 stateful simulation.
 
+### 2.1 Frame geometry (v0.27)
+
+Every page the engine opens — preview, still, proxy draft, final render —
+carries the frame's own geometry as CSS custom properties, injected before the
+document parses: `--ms-width`/`--ms-height` plus six `--ms-safe-title-*` and
+six `--ms-safe-caption-*` values. `core/deliverables.js` `safeAreaVariables()`
+is the only place they are computed; `renderer.js` `compositionVariables()`
+takes them from the render target (and, when one is rendering, a deliverable's
+own insets), and the Studio's scene API hands the identical map to the preview
+iframe. `MotionStudio.frameSize()`/`safeArea()` (runtime v1.6) read them back,
+falling back to the same documented percentages when a host injects nothing.
+
+Two properties make this load-bearing rather than cosmetic:
+
+- **The safe rectangles are the review artefact's rectangles.** The contact
+  sheet's guides and these variables come from the same insets, so a
+  composition that stays inside them passes the review it will be judged by.
+- **The layout viewport is always the authored size**, including under a proxy
+  (§12.1). Without that, `100vw` would mean one thing in a draft and another in
+  the deliverable, and the contract would be a lie in exactly the cheap render
+  path an agent uses most.
+
+This is the authoring half of aspect variants: Stage A (§13) crops a finished
+master, which is all a fixed-pixel composition can survive; a composition that
+sizes itself from these values can instead be *re-rendered* at the variant's
+geometry — the Stage B path — because its layout is a function of the frame
+rather than a memory of one. The engine states the geometry; it does not
+enforce its use, and a composition that ignores it renders exactly as before.
+
 ## 3. Output formats
 
 `core/formats.js` is the single registry of deliverable formats. Each entry
@@ -1129,18 +1158,21 @@ stills cannot answer: *does the motion read?* A proxy render
 --frame-step N` on the CLI) answers it in roughly 1/8 the time by cutting the
 two costs that dominate a render:
 
-- **Screenshot size** (`scale`, default 0.5): the Puppeteer viewport is set to
+- **Screenshot size** (`scale`, default 0.5): the capture rectangle is
   `width×scale by height×scale`, **floored to even numbers** because
   mp4/webm/prores reject odd dimensions and a proxy must work with whatever
-  format the project is configured for. The fixed-pixel composition is mapped
-  onto the small viewport by an inline `transform: scale(sx, sy);
-  transform-origin: 0 0` on `documentElement` — the one element compositions
-  never style themselves — with per-axis factors derived from the even-floored
-  dims so the content fills the viewport exactly. This is safe because of the
-  frame contract (§2): compositions are pure functions of frame authored at
-  fixed pixel sizes and never read window dimensions. The screenshot is *of the
-  small viewport* — capturing large and downscaling would keep the very cost
-  the proxy exists to cut.
+  format the project is configured for. The composition is mapped onto that
+  rectangle by an inline `transform: scale(sx, sy); transform-origin: 0 0` on
+  `documentElement` — the one element compositions never style themselves —
+  with per-axis factors derived from the even-floored dims so the content fills
+  it exactly, and `page.screenshot({ clip })` captures precisely that rectangle.
+  The **viewport stays the authored size** (v0.27): it is what `vw`, `vh`,
+  percentages and `--ms-safe-*` resolve against, so shrinking it — as the
+  original v0.21 implementation did — would have made a relative-unit
+  composition lay out against the draft width and then be scaled again, i.e. a
+  draft that disagrees with its own deliverable. Rastering only the clip is
+  still the whole saving; capturing large and downscaling would keep the very
+  cost the proxy exists to cut.
 - **Frame count** (`frameStep`, default 2): frames `start, start+N, start+2N, …`
   are captured (exact arithmetic — the final frame is not forced in) and
   encoded at the rational rate `fps/frameStep` (FFmpeg takes `"30/2"`
@@ -1178,7 +1210,9 @@ owns what that document *means*:
   silently change a production already in progress. A request that names
   YouTube and TikTok therefore produces one landscape master and one named
   portrait target from the outset, while an unspecified request remains
-  master-only by default.
+  master-only by default. What a variant can *survive* is decided upstream, in
+  the composition: a layout built against the `--ms-*` frame geometry (§2.1)
+  reflows, a layout built at 1920 fixed pixels can only be cropped.
 - **`validateFilm`** runs on every save and throws `invalid_film` with the
   complete `problems` list. **`planFilm`** resolves a film against reality
   *without throwing* — rendered state, signature mismatches, missing

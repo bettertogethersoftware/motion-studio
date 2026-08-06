@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### A composition can be told how big its frame is
+
+Aspect variants have had a ceiling since Stage A shipped: `build_film
+{ deliverable }` crops a finished master, and a title laid out at
+`left: 134px; width: 1652px` is correct at 1920×1080 and cut in half anywhere
+else. The composition, not the encoder, is where that is decided — so the
+engine now **states the frame's geometry in the page**.
+
+Every page it opens — preview, still, proxy draft, final render — carries
+`--ms-width`/`--ms-height` and six `--ms-safe-title-*` / `--ms-safe-caption-*`
+custom properties, injected before the document parses. They are computed in
+one place (`safeAreaVariables()` in `core/deliverables.js`) from the render
+target and, when a variant is rendering, from its own insets — the *same*
+insets the review contact sheet draws its guides at, so "inside the guides" and
+"inside the variables" are one statement. Frame API v1.6 adds
+`MotionStudio.frameSize()` and `MotionStudio.safeArea(kind)` for layout done in
+JavaScript, with the documented defaults as a fallback for a host that injects
+nothing. Nothing is required: a composition that ignores all of it renders
+exactly as before.
+
+**The bug this surfaced.** A proxy render shrank the *viewport* (v0.21), which
+was correct only for the fixed-pixel authoring style of the time. Under it,
+`100vw` resolved against the draft width and was then scaled again — so a
+relative-unit composition would have laid out differently in the cheap render
+path an agent uses most. Proxies now keep the authored viewport, scale the
+painted content as before, and capture the rectangle it lands in with
+`screenshot({ clip })`. Same saving, same output dimensions; the draft and the
+deliverable now agree about how big the frame is. Proven in real Chromium: a
+`50vw` bar anchored on `--ms-safe-title-left` lands on the same fractions of
+the frame at full size and at quarter-scale.
+
+Known edge: the CSS variables reach **every** scene, since the engine injects
+them, but the JS helpers ship in the `frame-api.js` copied into a scene folder
+at creation — so an older scene has the variables and not the helpers
+(`MotionStudio.version` says which). `sync_shared_files` copies a current
+runtime in when that matters.
+
+Docs: [frame-api.md §13](frame-api.md) is the contract,
+[architecture.md §2.1](architecture.md) the mechanism,
+[film-setup.md](film-setup.md) the authoring-for-a-reframe note beside Stage A.
+
 ### A film explains itself too, and four shell fixes
 
 The scene inspector got tabs; the film inspector did not, so a film could tell

@@ -59,8 +59,8 @@ async function probeVideo(file, field) {
 
 /**
  * Wrap the fake factory so the test can see what the renderer asked the
- * browser for — the proxy contract is "small viewport + contentScale", and
- * the openPage arguments are the only place that contract is visible.
+ * browser for — the proxy contract is "authored viewport + small capture",
+ * and the openPage arguments are the only place that contract is visible.
  */
 function spyingFactory(hooks, seen) {
   const inner = makeFakeBrowserFactory(hooks);
@@ -227,11 +227,13 @@ test('proxy render: scaled viewport, stepped frames, rational rate, no preflight
   // proxy IS the preflight — no probe pass despite the 90-frame duration
   assert.ok(!phases.includes('preflight'), `phases were ${phases.join(', ')}`);
 
-  // the page was opened at the scaled size with the exact per-axis factors
+  // the page was LAID OUT at the authored size and only the capture shrank:
+  // a proxy must not change what 100vw or --ms-safe-* resolve to (v0.27)
   assert.equal(pages.length, 1);
-  assert.equal(pages[0].width, 64);
-  assert.equal(pages[0].height, 36);
-  assert.deepEqual(pages[0].contentScale, { x: 64 / 128, y: 36 / 72 });
+  assert.equal(pages[0].width, 128);
+  assert.equal(pages[0].height, 72);
+  assert.deepEqual(pages[0].capture, { width: 64, height: 36 });
+  assert.equal(pages[0].cssVariables['--ms-width'], '128px');
 
   // the encoded file agrees: proxy dims, and 30/4 = 7.5 fps survived the mp4 path
   assert.equal(await probeVideo(result.outputPath, 'width'), '64');

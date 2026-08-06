@@ -427,6 +427,12 @@ The authoring contract:
 - Pair every `ctx.save()` with `ctx.restore()` and reset canvas styles that
   could leak into later drawing.
 - Preload local images and fonts before registering the composition.
+- Size layout against the frame, not against a remembered number: `vw`/`vh`/`%`,
+  `var(--ms-width)`, and the `--ms-safe-title-*` / `--ms-safe-caption-*`
+  rectangles the engine sets on every page (`MotionStudio.safeArea()` in JS).
+  Keep titles and captions inside their safe rectangles — those are the same
+  guides the review contact sheet draws. A composition welded to 1920×1080 can
+  only ever be delivered by cropping.
 - Never load a CDN dependency. Use assets or `add_library`.
 - Fix every returned lint warning. A successful write still writes files when
   warnings are present.

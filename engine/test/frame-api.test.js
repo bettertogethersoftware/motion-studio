@@ -332,7 +332,12 @@ test('the primitives compositions actually type are exposed as bare globals', ()
   for (const name of ['interpolate', 'Sequence', 'Loop', 'spring', 'interpolateColors', 'particles', 'seekVideo', 'videoReady', 'beatGrid']) {
     assert.equal(typeof win[name], 'function', `${name} must be a bare global`);
   }
-  assert.equal(win.MotionStudio.version, 1.5);
+  assert.equal(win.MotionStudio.version, 1.6);
+  // v1.6 geometry helpers are namespaced only — a bare `safeArea()` global is
+  // too generic a name to claim in a composition's scope.
+  for (const name of ['frameSize', 'safeArea']) {
+    assert.equal(typeof win.MotionStudio[name], 'function', `MotionStudio.${name} must exist`);
+  }
 });
 
 /* ------------------------------ beatGrid --------------------------------- */

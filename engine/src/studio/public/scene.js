@@ -75,6 +75,7 @@ async function openScene(id) {
   state.sceneId = id;
   const scene = await api(sceneUrl());
   state.config = scene.config;
+  state.cssVariables = scene.cssVariables ?? null;
   state.frame = 0;
 
   document.title = `${scene.name} — Motion Studio`;
@@ -129,6 +130,23 @@ function updateMeta() {
 
 /* ------------------------------- preview -------------------------------- */
 
+/**
+ * The `--ms-*` frame geometry the RENDERER injects, applied to the preview
+ * document too — otherwise a composition laid out against
+ * `var(--ms-safe-title-left)` looks right in the render and wrong here, which
+ * is the one discrepancy a preview must never have. Same-origin, so the
+ * iframe's documentElement is reachable; the values come from the engine
+ * (scene API), never recomputed in the page.
+ */
+function applyFrameVariables(iframe) {
+  if (!state.cssVariables) return;
+  try {
+    const root = iframe.contentDocument?.documentElement;
+    if (!root) return;
+    for (const [name, value] of Object.entries(state.cssVariables)) root.style.setProperty(name, value);
+  } catch { /* iframe mid-reload */ }
+}
+
 function fitPreview() {
   const c = state.config;
   if (!c) return;
@@ -149,6 +167,7 @@ async function reloadPreview({ refetchConfig = false } = {}) {
     try {
       const scene = await api(sceneUrl());
       state.config = scene.config;
+      state.cssVariables = scene.cssVariables ?? state.cssVariables;
       updateMeta();
       // Adopt, don't re-setScene: a hot reload must not discard audio-track
       // edits the user has staged but not saved.
@@ -160,6 +179,7 @@ async function reloadPreview({ refetchConfig = false } = {}) {
   iframe.src = `/preview/${enc(state.sceneId)}/${entry}?t=${Date.now()}`;
   state.frameReady = new Promise((resolve) => {
     iframe.onload = async () => {
+      applyFrameVariables(iframe);
       fitPreview();
       state.frame = Math.min(state.frame, state.config.durationInFrames - 1);
       await applyFrame(state.frame);

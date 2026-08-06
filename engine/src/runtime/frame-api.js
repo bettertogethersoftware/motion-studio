@@ -1,5 +1,5 @@
 /*!
- * Motion Studio Frame API runtime — v1.5
+ * Motion Studio Frame API runtime — v1.6
  *
  * Loaded as a classic <script> before composition code. Provides the four
  * primitives of the frame-driven contract (docs/frame-api.md):
@@ -31,6 +31,12 @@
  * seek per frame; every one of them was hand-rolling the same guards, and
  * the one that matters most — never awaiting `seeked` on an element that
  * failed to load — hangs the whole render when omitted.
+ *
+ * v1.6: MotionStudio.frameSize() and MotionStudio.safeArea(kind) — the frame's
+ * own geometry, read from the `--ms-width`/`--ms-height`/`--ms-safe-*` custom
+ * properties the engine sets on every page it opens. A composition that sizes
+ * itself from these (and from %, vw/vh) is the same composition at 1920×1080
+ * and at 1080×1920; one that hard-codes 1920 is welded to one deliverable.
  *
  * v1.5: MotionStudio.beatGrid({bpm, phase, fps, startSeconds?}) — lock visuals
  * to a MEASURED beat grid. Two music videos hand-rolled the same helpers, and
@@ -442,6 +448,60 @@
     });
   }
 
+  /* ---------------------- frame geometry (v1.6) ------------------------ */
+
+  /**
+   * The DEFAULT safe insets, in percent, mirroring core/deliverables.js.
+   * The engine states the real ones as `--ms-safe-*` on every page it opens;
+   * these are the fallback for a host that does not (an older scene page, a
+   * composition opened directly in a browser), so a layout never silently
+   * collapses to the frame edge. The engine's copy is authoritative.
+   */
+  var DEFAULT_SAFE_PCT = {
+    title: { left: 7, right: 7, top: 6, bottom: 50 },
+    caption: { left: 8, right: 8, top: 55, bottom: 8 },
+  };
+
+  function cssPx(name, fallback) {
+    if (typeof document === 'undefined') return fallback;
+    var raw = getComputedStyle(document.documentElement).getPropertyValue(name);
+    var value = parseFloat(raw);
+    return isFinite(value) ? value : fallback;
+  }
+
+  /** The authored frame size in px — never window.innerWidth under a proxy. */
+  function frameSize() {
+    var w = typeof window !== 'undefined' ? window.innerWidth : 0;
+    var h = typeof window !== 'undefined' ? window.innerHeight : 0;
+    return { width: cssPx('--ms-width', w), height: cssPx('--ms-height', h) };
+  }
+
+  /**
+   * The rectangle a title (or caption) must stay inside to survive every
+   * deliverable of this film — the SAME rectangle the review contact sheet
+   * draws its guides at, so passing here is what passing there means.
+   *
+   *   const safe = MotionStudio.safeArea('title');
+   *   title.style.left = safe.left + 'px';
+   *   title.style.width = safe.width + 'px';
+   *
+   * In CSS, prefer the variables directly: `left: var(--ms-safe-title-left)`.
+   */
+  function safeArea(kind) {
+    var which = kind === 'caption' ? 'caption' : 'title';
+    var size = frameSize();
+    var pct = DEFAULT_SAFE_PCT[which];
+    var left = cssPx('--ms-safe-' + which + '-left', (size.width * pct.left) / 100);
+    var right = cssPx('--ms-safe-' + which + '-right', (size.width * pct.right) / 100);
+    var top = cssPx('--ms-safe-' + which + '-top', (size.height * pct.top) / 100);
+    var bottom = cssPx('--ms-safe-' + which + '-bottom', (size.height * pct.bottom) / 100);
+    return {
+      left: left, right: right, top: top, bottom: bottom,
+      width: Math.max(0, size.width - left - right),
+      height: Math.max(0, size.height - top - bottom),
+    };
+  }
+
   /* ------------------------- music sync (v1.5) ------------------------- */
 
   /**
@@ -515,7 +575,8 @@
 
   const api = {
     interpolate, Sequence, Loop, spring, interpolateColors, random, particles, easings,
-    registerComposition, videoReady, seekVideo, beatGrid, version: 1.5,
+    registerComposition, videoReady, seekVideo, beatGrid, frameSize, safeArea,
+    version: 1.6,
   };
   global.MotionStudio = api;
   // Bare-name conveniences for terse composition code.

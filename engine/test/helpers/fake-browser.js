@@ -81,7 +81,11 @@ export function makeFakeBrowserFactory(hooks = {}) {
     hooks.onLaunch?.();
     return {
       pid: null,
-      async openPage({ width, height, transparent = false }) {
+      // width/height are the AUTHORED (layout) size; `capture` is the smaller
+      // screenshot rectangle under a proxy — mirroring the real browser, where
+      // the page lays out full size and only the raster shrinks.
+      async openPage({ width, height, transparent = false, capture = null }) {
+        const shot = capture ?? { width, height };
         return {
           async captureFrame(n) {
             if (hooks.captureDelayMs) await new Promise((r) => setTimeout(r, hooks.captureDelayMs));
@@ -97,8 +101,8 @@ export function makeFakeBrowserFactory(hooks = {}) {
             // Transparent pages produce RGBA frames with a varying alpha
             // gradient, mirroring Puppeteer's omitBackground screenshots.
             return encodePng(
-              width, height,
-              (x, y) => [(x + n * 4) % 256, (y + n * 2) % 256, (x + y + n) % 256, transparent ? (x * 255 / width) | 0 : 255],
+              shot.width, shot.height,
+              (x, y) => [(x + n * 4) % 256, (y + n * 2) % 256, (x + y + n) % 256, transparent ? (x * 255 / shot.width) | 0 : 255],
               { alpha: transparent },
             );
           },

@@ -9,6 +9,101 @@ and earlier, under `docs/task_completed/` and `docs/todo_task/`.
 
 Newest first.
 
+## 2026-08-06 — PlateForge/MotionForge: plates to a verified delivery
+
+The [plate-render-forge plan](plate-render-forge-plan.md) delivered end to
+end. Both tools live at the **tools root** (`<toolsRoot>\agent_tool\`), not in
+this repository, each with its own `README.md` and an entry in `MACHINE.md`.
+
+- **plateforge** — `doctor`, `plan`, `generate`, `review`, `select`, `stage`,
+  `verify-assets`: the shared manifest, path containment, Krea2 sidecar
+  reuse/stale/`--force`, the JSONL event log and run-directory layout, one
+  contact sheet, explicit selection, safe library staging. 115 unittests.
+- **motionforge** — `doctor`, `link`, `render`, `build`, `verify`, and the
+  resumable `run` (`--plan-only` / `--resume` / `--no-build` /
+  `--visual-review`; `--force-plate` is refused and redirected to plateforge).
+  Dependency-free Node with its own ~150-line stdio MCP client; 37
+  `node --test` tests against a real engine server on a throwaway
+  `MOTION_STUDIO_HOME`.
+- **The acceptance run on real GPU production** — ten real plates, an
+  interrupted resume, the finished delivery — closed 2026-08-06.
+
+The load-bearing correction, per the architect override: motionforge
+**consumes the v0.26 engine operations instead of reimplementing them**.
+`link` is one `use_shared_asset_batch`; `render` is `render_group` +
+`wait_render_group` with its `since` cursor in a bounded loop (groupId
+persisted, restart re-attaches and the engine recomputes truth from output
+files); `build`+`verify` ride one `finish_film` plus
+`get_production_status`/`measure_render` and external ffprobe. `get_film` full
+and the per-scene `render` loop are never called — the client-side aggregation
+the plan originally sketched would have been a second, weaker copy of the
+engine's own bookkeeping.
+
+## 2026-08-04 — the token-efficient production loop
+
+The [token-efficient plan](token-efficient-motion-studio-plan.md)'s P0 and P1
+in full; the document stays for the ledger and its two deferred row fields.
+
+- **P0** — `core/projections.js` (segment rows with folded `state`, stateless
+  cursor/diff), `detail` projections and `since` cursors across
+  `get_production_status` / `list_films` / `get_film`;
+  `use_shared_asset_batch` and `write_composition_bundle`; `render_group` /
+  `wait_render_group` / `cancel_render_group`; and the canary sweep proving no
+  composition body leaks into a default or compact production-loop read.
+- **P1** — `finish_film` (render group → build → delivery → measurement as one
+  cancellable job with evidence), `review_render_grid` (one contact sheet plus
+  compact rows, persisted under `<film>/review-grids/`, never base64), durable
+  run groups that complete their own records, and `agent-economy.json` —
+  proxies only (calls, bytes, compact vs full, per-scene calls each batch
+  replaced), never tokens, arguments, or file contents.
+- **Acceptance** — the ten-scene, 180-second NEON APEX film replayed through
+  the token-efficient path, measured against the plan's criteria.
+
+Deferred by choice: `outputIdentity {bytes, mtimeMs}` on the segment row
+(planFilm does not surface it) and `expectedRevisions` on the bundle — the
+single-file write has no revision guard either, so both land together if
+composition drift ever bites. The restart rule earned its own test: group
+records inform, output **files** decide.
+
+## v0.27 (2026-08-05/06) — the Studio becomes one window, and a scene becomes copyable
+
+Four plans, one outcome: the two-page Studio is gone and the workspace tree
+never leaves the screen. Delivered in dependency order, each one exposing the
+next.
+
+- **[clone-scene-plan.md](clone-scene-plan.md)** — `clone_scene` as an engine
+  operation rather than an agent's file-copy ritual: config, assets, vendored
+  libraries and provenance in one call, across or within films.
+- **[studio-navigation-plan.md](studio-navigation-plan.md)** — N-1/N-3/N-6/
+  N-7/N-8: the scene ↔ film round trip (the scene page derives its own film
+  and returns through the `&scene=` deep link that had sat unused since
+  v0.23), same-tab `open scene ↗`, keyboard parity, the localStorage document
+  strip, and sequence movement (double-click to zoom, PgUp/PgDn cut-to-cut).
+- **[scene-inspector-plan.md](scene-inspector-plan.md)** — N-5(b): one
+  `scene-panels.js` implementing config/audio/assets/outputs, mounted by the
+  scene page *first* so the refactor was provable against a working surface,
+  then by the film inspector's tab strip. The inspector resizes and its panel
+  DOM survives the 1 Hz poll with focus and caret intact.
+- **[studio-shell-plan.md](studio-shell-plan.md)** — `index.html` became the
+  shell: permanent Explorer, document tabs, activity bar, status bar, command
+  palette, Dark Modern surfaces with the amber accent kept. Films and scenes
+  open as **same-origin iframes**, so a tab keeps its playhead, undo stack and
+  scroll while another is in front. `scene.html`/`scene.js` were extracted
+  from index.html/app.js; `tabs.js` retired; page navigation removed entirely.
+  The film inspector then gained its own **film · assets · outputs** tabs on
+  the same shared module.
+
+Corrections reality forced: every navigation improvement from v0.20 onward had
+been treating a symptom — opening a film was a *page navigation*, so the tree
+vanished the moment you looked at anything; only removing navigation fixed it.
+The film inspector deliberately mirrors **two** panels, not four: a film's
+`config` *is* the film tab and its `audio` *is* the timeline's master tracks,
+so mirroring either would be a second editor for something already edited
+elsewhere — the exact trap the shared module exists to avoid. The command
+palette had to route through `openDocument`, not navigation, or picking a film
+dissolved the shell it was meant to move around inside. Details: CHANGELOG
+Unreleased.
+
 ## v0.26.0 (2026-08-04) — the vendor-boundary program: Slices 0, A, B, C-1, released
 
 The [vendor-boundary plan](ai-only-desktop-vendor-boundary-plan.md) delivered

@@ -5,10 +5,14 @@
  * `browserFactory` returning this interface:
  *
  *   {
- *     openPage({ url, width, height, transparent?, contentScale? }): Promise<FramePage>
+ *     openPage({ url, width, height, transparent?, capture?, cssVariables? }): Promise<FramePage>
  *     close(): Promise<void>
  *     pid: number | null            // Chromium pid, for process-tree cleanup
  *   }
+ *
+ * `width`/`height` are always the AUTHORED frame size — the layout viewport.
+ * `capture` (proxy renders only) is the smaller rectangle the screenshot is
+ * taken from; see the transform/clip note in openPage.
  *   FramePage: {
  *     captureFrame(n): Promise<Buffer>   // PNG bytes for frame n
  *     close(): Promise<void>
@@ -157,9 +161,31 @@ export async function createPuppeteerBrowser({
     pid: browser.process()?.pid ?? null,
     buildInfo: { ...resolution, build: lastLaunchedBuild },
 
-    async openPage({ url, width, height, transparent = false, contentScale = null }) {
+    async openPage({ url, width, height, transparent = false, capture = null, cssVariables = null }) {
       const page = await browser.newPage();
+      // ALWAYS the authored size, including under a proxy: the layout viewport
+      // is what vw/vh, percentages and --ms-safe-* resolve against, so a
+      // composition must never see a draft-sized window (v0.27).
       await page.setViewport({ width, height, deviceScaleFactor: 1 });
+
+      // The frame's own geometry, before the document parses, so a stylesheet
+      // that opens with `width: var(--ms-safe-title-width)` is correct on its
+      // first layout rather than after a reflow. documentElement does not
+      // exist at document-start, hence the observer.
+      if (cssVariables) {
+        await page.evaluateOnNewDocument((vars) => {
+          const apply = () => {
+            const el = document.documentElement;
+            if (!el) return false;
+            for (const [name, value] of Object.entries(vars)) el.style.setProperty(name, value);
+            return true;
+          };
+          if (!apply()) {
+            const observer = new MutationObserver(() => { if (apply()) observer.disconnect(); });
+            observer.observe(document, { childList: true });
+          }
+        }, cssVariables);
+      }
 
       // Collect composition console errors/page crashes for diagnostics.
       const pageErrors = [];
@@ -191,23 +217,29 @@ export async function createPuppeteerBrowser({
 
       await page.goto(url, { waitUntil: 'load', timeout: COMPOSITION_READY_TIMEOUT_MS });
 
-      // Proxy renders (v0.21): the viewport above is the SMALL proxy size —
-      // shrinking the screenshot is the whole saving — while the composition
-      // is authored at fixed pixel dimensions (the frame contract: a pure
-      // function of frame that never reads window size). This visual-only
-      // transform maps the fixed-px content onto the small viewport. It goes
-      // on documentElement, not body: it is the one element compositions
-      // never style themselves (their world starts at body/their root), so
-      // an inline transform here cannot collide with author CSS, and scaling
-      // at the outermost box scales body and everything in it uniformly.
-      // Per-axis factors because even-floored proxy dims round each axis
-      // independently. The non-proxy path passes no contentScale and is
+      // Proxy renders (v0.21, revised v0.27): shrinking the SCREENSHOT is the
+      // whole saving, so the content is scaled down by a transform and the
+      // capture is clipped to the rectangle it lands in — the viewport itself
+      // stays authored-size (above). Originally the viewport was shrunk
+      // instead, which was correct only for the fixed-pixel authoring style of
+      // the time: a relative-unit composition would have resolved 100vw
+      // against the draft width and then been scaled again.
+      //
+      // The transform goes on documentElement, not body: it is the one element
+      // compositions never style themselves (their world starts at body/their
+      // root), so an inline transform here cannot collide with author CSS, and
+      // scaling at the outermost box scales body and everything in it
+      // uniformly. Per-axis factors because even-floored proxy dims round each
+      // axis independently. The non-proxy path passes no capture and is
       // untouched.
-      if (contentScale) {
+      const clip = capture && (capture.width !== width || capture.height !== height)
+        ? { x: 0, y: 0, width: capture.width, height: capture.height }
+        : null;
+      if (clip) {
         await page.evaluate(({ x, y }) => {
           document.documentElement.style.transformOrigin = '0 0';
           document.documentElement.style.transform = `scale(${x}, ${y})`;
-        }, contentScale);
+        }, { x: capture.width / width, y: capture.height / height });
       }
 
       // The composition must expose window.setFrame (usually via
@@ -277,7 +309,11 @@ export async function createPuppeteerBrowser({
           }
 
           try {
-            return Buffer.from(await page.screenshot({ type: 'png', omitBackground: transparent }));
+            return Buffer.from(await page.screenshot({
+              type: 'png',
+              omitBackground: transparent,
+              ...(clip ? { clip } : {}),
+            }));
           } catch (e) {
             if (isBrowserCrash(e)) throw asCrash(e, n);
             throw e;

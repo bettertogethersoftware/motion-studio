@@ -365,6 +365,46 @@ export function compileReframeFilter({ reframe, sceneLayout, sourceWidth, source
   };
 }
 
+/**
+ * The CSS custom properties a composition is authored against (P0-3 Stage B
+ * authoring contract).
+ *
+ * The engine states the frame's geometry and its safe rectangles in the page
+ * itself, so a composition never has to hard-code 1920 to know how wide it
+ * is. `--ms-safe-*` are the SAME insets the contact-sheet guides draw, which
+ * is the point: what an author lays out to is exactly what the review artefact
+ * checks. Pixels, because layout is in pixels; every value is derived from the
+ * render target, so the identical stylesheet lands correctly at 1920×1080 and
+ * at 1080×1920.
+ */
+export function safeAreaVariables({ width, height, safeAreas = DEFAULT_SAFE_AREAS } = {}) {
+  if (!isPosInt(width) || !isPosInt(height)) {
+    throw new EngineError(ErrorCodes.INVALID_CONFIG, 'safeAreaVariables needs positive integer width and height');
+  }
+  const vars = {
+    '--ms-width': `${width}px`,
+    '--ms-height': `${height}px`,
+  };
+  for (const kind of ['title', 'caption']) {
+    const insets = normalizeInsets(safeAreas?.[kind], DEFAULT_SAFE_AREAS[kind]);
+    const left = Math.round((width * insets.leftPct) / 100);
+    const right = Math.round((width * insets.rightPct) / 100);
+    const top = Math.round((height * insets.topPct) / 100);
+    const bottom = Math.round((height * insets.bottomPct) / 100);
+    Object.assign(vars, {
+      [`--ms-safe-${kind}-left`]: `${left}px`,
+      [`--ms-safe-${kind}-right`]: `${right}px`,
+      [`--ms-safe-${kind}-top`]: `${top}px`,
+      [`--ms-safe-${kind}-bottom`]: `${bottom}px`,
+      // The rectangle itself, so `width: var(--ms-safe-title-width)` needs no
+      // calc() at the call site — the common case in a composition.
+      [`--ms-safe-${kind}-width`]: `${Math.max(0, width - left - right)}px`,
+      [`--ms-safe-${kind}-height`]: `${Math.max(0, height - top - bottom)}px`,
+    });
+  }
+  return vars;
+}
+
 /** Convert inset data into a rectangle in percentages for a contact-sheet guide. */
 export function safeAreaRect(insets) {
   return {

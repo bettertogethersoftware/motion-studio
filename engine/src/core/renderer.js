@@ -65,6 +65,7 @@ import { acquireRenderLock } from './lock.js';
 import { sceneOutputPath, writeRenderMeta } from './film.js';
 import { prepareStagingOutput, promoteStagingOutput, assertDeliveryWritable } from './delivery.js';
 import { archiveRevision } from './revisions.js';
+import { safeAreaVariables } from './deliverables.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -164,6 +165,20 @@ export function normalizeProxy(proxy) {
 export function proxyDimensions(width, height, scale) {
   const even = (n) => Math.max(2, Math.floor((n * scale) / 2) * 2);
   return { width: even(width), height: even(height) };
+}
+
+/**
+ * The `--ms-*` custom properties every page of this composition is opened
+ * with. One helper so preview, still, proxy and full render cannot disagree
+ * about where the safe areas are — a composition that reads them must lay out
+ * identically in all four (v0.27).
+ */
+export function compositionVariables(config) {
+  return safeAreaVariables({
+    width: config.width,
+    height: config.height,
+    ...(config.safeAreas ? { safeAreas: config.safeAreas } : {}),
+  });
 }
 
 /**
@@ -462,21 +477,18 @@ export async function renderComposition(opts) {
   const isPngSequence = output.format === 'png-sequence' && !asIntermediate;
   const encodeOutput = asIntermediate ? { ...output, intermediate: true } : output;
 
-  // Proxy geometry and rate. capture is the viewport (= screenshot) size;
-  // contentScale is the exact per-axis factor that maps the fixed-pixel
-  // composition onto it — derived from the EVEN-floored dims, not the
-  // requested scale, so the content fills the viewport with no letterbox
-  // strip from the rounding. Frames are `every frameStep-th`, encoded at the
-  // rational rate fps/frameStep (FFmpeg accepts "30/2"), which preserves
-  // wall-clock duration exactly. The output name gets ".proxy" here — the
-  // renderer is the single enforcement point for "a proxy never overwrites
-  // the deliverable", whatever path the caller handed in.
+  // Proxy geometry and rate. capture is the SCREENSHOT size — the browser
+  // lays the composition out at its authored size either way (v0.27) and
+  // scales the painted content into this rectangle, derived from the
+  // EVEN-floored dims rather than the requested scale so the content fills it
+  // with no letterbox strip from the rounding. Frames are `every frameStep-th`,
+  // encoded at the rational rate fps/frameStep (FFmpeg accepts "30/2"), which
+  // preserves wall-clock duration exactly. The output name gets ".proxy" here
+  // — the renderer is the single enforcement point for "a proxy never
+  // overwrites the deliverable", whatever path the caller handed in.
   const capture = prx
     ? proxyDimensions(config.width, config.height, prx.scale)
     : { width: config.width, height: config.height };
-  const contentScale = prx
-    ? { x: capture.width / config.width, y: capture.height / config.height }
-    : null;
   const encodeFps = prx && prx.frameStep > 1 ? `${config.fps}/${prx.frameStep}` : config.fps;
   const deliveryPath = prx ? proxyOutputPath(outputPath) : path.resolve(outputPath);
   const stagedDelivery = isStagedFileDelivery({ isPngSequence, skipAudio, asIntermediate });
@@ -535,8 +547,8 @@ export async function renderComposition(opts) {
     throwIfAborted(signal);
     const openPage = () =>
       browser.openPage({
-        url: entryUrl, width: capture.width, height: capture.height, transparent,
-        ...(contentScale ? { contentScale } : {}),
+        url: entryUrl, width: config.width, height: config.height, transparent,
+        capture, cssVariables: compositionVariables(config),
       });
     let page = await openPage();
 
@@ -809,6 +821,7 @@ export async function captureFrames({
       width: config.width,
       height: config.height,
       transparent,
+      cssVariables: compositionVariables(config),
     });
     const out = [];
     for (const frame of frames) {
@@ -955,6 +968,7 @@ export async function renderParallel(opts) {
         width: config.width,
         height: config.height,
         transparent,
+        cssVariables: compositionVariables(config),
       });
       await runPreflight(probePage, preflightFrameList(startFrame, endFrame, preflightCount), signal, progress);
       await probePage.close();
