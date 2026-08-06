@@ -647,6 +647,16 @@ it where the next row put its second. Fixing that surfaced a real hole
 the bottom could never be removed; it now offers `✕`, since an empty
 last lane IS the lane you would have added.
 
+Muting was then reported as not taking effect while the film played,
+and it was two bugs at once: the preview-mix cache keyed on `audio`
+alone (mute lives in `mutedLanes`, so the stale mix looked fresh even
+after a stop and a replay), and invalidation dropped the audio
+element's reference without pausing it — revoking an object URL does
+not stop a media element that already loaded it. Fixed together with an
+immediate, debounced re-render mid-playback that rejoins at the
+playhead; measured by a bandpass on the rendered mix, −50.8 dB in the
+bed's band muted against −24.1 dB unmuted.
+
 **Not done, deliberately:** footage keeps its single grip. A footage
 segment joins the film without re-encoding, so trimming it is
 `transcode_asset`'s job, not the timeline's.

@@ -865,7 +865,14 @@ editor. The head lights amber and its label is struck through; the clips in it
 dim. Mute belongs to the **lane**, so a clip you drag in afterwards is silent
 too, which is what muting a track means in any editor. A single clip can also be
 silenced on its own with **mute this track** in the inspector. Nothing is
-deleted either way: unmute and it all comes back. (Muting *every* track makes
+deleted either way: unmute and it all comes back.
+
+**Muting while the film is playing** stops that audio immediately and the mix
+re-renders around it, rejoining a moment later at the same playhead — you do
+not have to stop and press play again. It is a re-render rather than a fader
+because the preview is **one ffmpeg mix of the whole film**, which is what
+makes it the build's own graph (gains, fades, ducking, limiter); a mute applied
+only to playback would be a mute the finished film did not have. (Muting *every* track makes
 the film silent — the mix refuses with a sentence saying so rather than
 rendering silence you did not ask for.) Before this, lanes were drawn by packing whatever overlapped
 into the fewest rows, so a lane appeared and vanished under the mouse as you

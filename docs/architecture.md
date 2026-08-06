@@ -456,6 +456,16 @@ the composition end), then `adelay` (frame offset → ms) and `volume`, then
 `amix` with `normalize=0` so adding a quiet voiceover doesn't duck the music
 bed — and muxes with the video stream copied.
 
+The film page renders that mix once and caches it, so **the cache key has to
+cover everything that changes the sound** — `audio` *and* `mutedLanes`. It
+covered `audio` alone when lane mute arrived, which left a muted lane still
+audible from a cache that looked fresh. Invalidating also has to **pause** the
+old element before dropping it: revoking an object URL does not stop a media
+element that already loaded it, so releasing the reference alone left the stale
+mix playing to its end. Mid-playback the page re-renders straight away
+(debounced, and re-checked afterwards in case the film moved on again) and
+rejoins at the playhead.
+
 **A muted lane is silent everywhere.** `audibleTracks(film)` in `core/films.js`
 is the single rule — a track is dropped when its own `mute` is true or its lane
 is in `film.mutedLanes.audio` — and the build, `preview_audio` and the balance

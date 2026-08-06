@@ -238,15 +238,42 @@ async function waitForSaved() {
   while (state.dirty || state.saving) await new Promise((r) => setTimeout(r, 80));
 }
 
-let lastAudioJson = '';
+/**
+ * Throw away the rendered preview mix when anything that changes the SOUND
+ * changes — and, mid-playback, replace it there and then.
+ *
+ * Two bugs lived here. The signature covered `audio` alone, so muting a lane
+ * (which is `film.mutedLanes`) left the cache looking fresh and you kept
+ * hearing the lane you had just silenced, even after stopping and playing
+ * again. And revoking an object URL does not stop a media element that has
+ * already loaded it: dropping the reference without pausing left the old mix
+ * playing to its end, which is what "it does not mute in real time" looks and
+ * sounds like.
+ *
+ * The mix is one ffmpeg render of the whole film — that is what makes the
+ * preview the build's actual graph, gains, ducking and limiter included — so a
+ * mute cannot be applied to it in place. Silence is immediate; the re-mixed
+ * audio rejoins at the playhead a moment later.
+ */
+let lastMixJson = '';
+let mixRebuildTimer = null;
+/** Everything the rendered mix depends on — one place, so nothing is forgotten. */
+const mixSignature = (film) => JSON.stringify({
+  audio: film?.audio ?? [],
+  mutedLanes: film?.mutedLanes ?? null,
+});
+
 function invalidateMixIfAudioChanged() {
-  const cur = JSON.stringify(state.film?.audio ?? []);
-  if (cur !== lastAudioJson) {
-    lastAudioJson = cur;
-    if (state.mix.url) URL.revokeObjectURL(state.mix.url);
-    Object.assign(state.mix, { el: null, url: null, dirty: true, active: false });
-    updateMixChip();
-  }
+  const cur = mixSignature(state.film);
+  if (cur === lastMixJson) return;
+  lastMixJson = cur;
+  try { state.mix.el?.pause(); } catch { /* already detached */ }
+  if (state.mix.url) URL.revokeObjectURL(state.mix.url);
+  Object.assign(state.mix, { el: null, url: null, dirty: true, active: false });
+  updateMixChip();
+  // Debounced: dragging a gain slider must not queue a render per pixel.
+  clearTimeout(mixRebuildTimer);
+  if (state.playing) mixRebuildTimer = setTimeout(() => { if (state.playing) buildMix(); }, 350);
 }
 
 function applySnapshot(snap) {
@@ -294,7 +321,7 @@ async function refresh() {
   state.film = film;
   state.settings = settingsResult?.settings ?? state.settings;
   state.sceneFolders = sceneFolders ?? [];
-  lastAudioJson = JSON.stringify(film.audio ?? []);
+  lastMixJson = mixSignature(film);
   adoptDetail(detail);
   $('#film-name').value = film.name;
   document.title = `${film.name} — Motion Studio`;
@@ -592,6 +619,10 @@ function updateMixChip() {
 async function buildMix() {
   if (state.mix.building || !filmId) return;
   state.mix.building = true;
+  // What this render is OF. An edit landing while ffmpeg runs is dropped by the
+  // guard above, so the mix that arrives can already be out of date — compare
+  // at the end and go again rather than leaving a stale one marked ready.
+  const renderingFor = lastMixJson;
   updateMixChip();
   try {
     const res = await fetch(`/api/films/${fid}/preview-audio`, { method: 'POST' });
@@ -617,6 +648,10 @@ async function buildMix() {
     state.mix.dirty = true;
   } finally {
     state.mix.building = false;
+    if (renderingFor !== lastMixJson) {
+      state.mix.dirty = true;
+      if (state.playing) setTimeout(buildMix, 0);
+    }
     updateMixChip();
   }
 }

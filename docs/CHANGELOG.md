@@ -36,6 +36,16 @@ closing the dialog stops it — plus the duration it discovers. Choosing between
 eight `stable-audio3-bed-*.flac` takes was previously a guess from the
 filename, resolvable only by placing a clip, playing the film, and undoing.
 
+**Muting takes effect while you are listening.** The preview mix is one ffmpeg
+render of the whole film — that is what makes it the build's own graph — so a
+mute cannot be faded in place: muting stops the audio at once and the re-render
+rejoins at the playhead a moment later, without stopping and playing again. Two
+bugs made the first version of this inaudible: the mix cache keyed on `audio`
+alone, so muting a lane (which lives in `mutedLanes`) left a stale mix looking
+fresh, and invalidation dropped the element's reference without pausing it —
+revoking an object URL does not stop a media element that has already loaded
+it, so the old mix played on to its end.
+
 **Lanes mute, and the mix believes it.** **♪** on an audio lane head silences
 everything in it — in the preview you play, in `preview_audio`, and in the built
 film — with the head lit amber, its label struck through, and its clips dimmed.
