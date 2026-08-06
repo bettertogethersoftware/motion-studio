@@ -96,13 +96,17 @@ export function validateConfig(cfg) {
         if (t.startInFrames !== undefined && (!Number.isInteger(t.startInFrames) || t.startInFrames < 0))
           problems.push(`audio[${i}].startInFrames: non-negative integer`);
         if (t.gainDb !== undefined && typeof t.gainDb !== 'number') problems.push(`audio[${i}].gainDb: number`);
-        // v0.19: clip-relative trim + fades (frames, like everything else here)
-        for (const key of ['trimEndInFrames', 'fadeInFrames', 'fadeOutFrames']) {
+        // v0.19: trim + fades in frames, like everything else here. Both trims
+        // are offsets into the SOURCE file (v0.27 adds the head one).
+        for (const key of ['trimStartInFrames', 'trimEndInFrames', 'fadeInFrames', 'fadeOutFrames']) {
           if (t[key] !== undefined && (!Number.isInteger(t[key]) || t[key] < 0))
             problems.push(`audio[${i}].${key}: non-negative integer`);
         }
         if (t.trimEndInFrames !== undefined && t.trimEndInFrames === 0)
           problems.push(`audio[${i}].trimEndInFrames: must be >= 1 (0 would silence the track)`);
+        if (Number.isInteger(t.trimStartInFrames) && Number.isInteger(t.trimEndInFrames)
+          && t.trimStartInFrames >= t.trimEndInFrames)
+          problems.push(`audio[${i}].trimStartInFrames: must be before trimEndInFrames (both index the source file)`);
         if (t.duck !== undefined && typeof t.duck !== 'boolean')
           problems.push(`audio[${i}].duck: boolean`);
       });

@@ -21,7 +21,9 @@
 > **U-14 (the Explorer's standing) was added and shipped 2026-08-06** from use
 > rather than from the audit — open-vs-active marks, one glyph per row carrying
 > both kind and standing (and, on a film, doubling as the twisty), a live tree,
-> and one shared production stream.
+> and one shared production stream. **U-15 (the timeline's lanes and trims)
+> followed the same day**, also from use: stored lanes with add/remove/drag,
+> the engine's missing head trim, and an audible audio picker.
 >
 > **Remaining: U-10 (the two trees) and U-13 (timeline blocks) — about 1 day.**
 > U-6 closed 2026-08-06: the name dialog moved into `studio-util.js` and builds
@@ -591,6 +593,63 @@ throwaway store for the live half (a film created mid-session arrives,
 badges, toasts, clears on open; a heartbeat lights its film; three open
 documents, one stream). Verifying it surfaced **BUG-4** (`computeFit`
 throws on a closing document), pre-existing and filed rather than fixed.
+
+### U-15 — the timeline's lanes and trims  *(~1 d)* — **SHIPPED 2026-08-06**
+
+Added from use, like U-14, and reported in one sentence each: adding
+and removing a layer is hard, adding audio forces you to pick a file
+first, a lane disappears when you drag clips around, the picker gives
+you no way to hear what you are choosing, and a clip can only be
+shortened from the end.
+
+Four of the five were the same root cause in two places.
+
+- **Lanes were a picture, not a fact.** `packLanes` re-derived the rows
+  on every repaint, so a lane existed only while something overlapped in
+  it — dragging clips apart deleted the row, and an empty lane was
+  unsayable. Items now carry `lane`, the film carries
+  `lanes: {audio, captions, overlays}` (a new stored field: presentation,
+  but an empty lane you just made has to survive a reload), and the old
+  packing is kept as the migration for films written before this, so
+  opening one looks like nothing happened. Per-lane `+`, `⊕` to add an
+  empty lane, `✕` to take an empty one back, and vertical drag between
+  lanes with the target lit.
+- **The head trim did not exist in the engine.** `trimEndInFrames` was
+  the only trim, so the left grip had nothing to write. Both trims now
+  index the SOURCE (`[start, end)`), which leaves the old field's meaning
+  untouched, and the mixer chain gained `asetpts=PTS-STARTPTS` after
+  `atrim` — without it a head-trimmed clip keeps its source timestamps
+  and arrives `trimStart` late on top of its `adelay`. That one is easy
+  to get wrong and impossible to see in the UI, so it is proven against
+  real ffmpeg rather than asserted: a file of one second of silence then
+  one second of tone reads `-inf` dB in the first quarter-second
+  untrimmed and −24 dB with a 30-frame head trim.
+- **The picker could not be heard.** One shared `<audio>`, a `▶` per row
+  that toggles, stopped by the next play and by the dialog closing.
+
+Accepted in headless Chromium against a throwaway film with real WAVs —
+13 checks: an empty lane added with no file, stored, still there after a
+reload; audition playing and stopping; a clip landing in the lane whose
+`+` was clicked; a drag that does **not** collapse the lane; a drag that
+moves a clip between lanes; the left grip writing `trimStartInFrames`
+while `startInFrames` follows; an empty lane removed. Plus four engine
+tests for the graph and four for the schema.
+
+**Follow-up the same day, from the same use:** a lane can be **muted**
+(`film.mutedLanes.audio`, plus `mute` on a single track), and the mix
+honours it everywhere through one `audibleTracks(film)` rule rather
+than three — muting the editor only would be a lie the build discovers.
+And the head buttons were put into three fixed columns (mute · add ·
+lane) after they were reported as ragged: they had been appended in
+turn with `margin-left:auto` on the first, so a row with one button put
+it where the next row put its second. Fixing that surfaced a real hole
+— the **last** lane only ever offered `⊕`, so an empty lane added at
+the bottom could never be removed; it now offers `✕`, since an empty
+last lane IS the lane you would have added.
+
+**Not done, deliberately:** footage keeps its single grip. A footage
+segment joins the film without re-encoding, so trimming it is
+`transcode_asset`'s job, not the timeline's.
 
 ## Verification
 

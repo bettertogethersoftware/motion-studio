@@ -516,10 +516,13 @@ Drop the files in `assets/` and re-render. mp4 muxes AAC, webm muxes Opus,
 prores muxes PCM; gif and png-sequence cannot carry audio (tracks are
 skipped with a warning in the logs).
 
-Since v0.19 a track also takes (all optional, all in frames, all
-clip-relative):
+Since v0.19 a track also takes (all optional, all in frames):
 
-- **`trimEndInFrames`** — keep only the clip's first N frames.
+- **`trimStartInFrames`** / **`trimEndInFrames`** — the window of the SOURCE
+  file the clip plays, `[start, end)`. `trimEndInFrames` alone means what it
+  always did — keep the clip's first N frames — and `trimStartInFrames`
+  (v0.27) drops the head, which is the trim the timeline could not offer
+  before.
 - **`fadeInFrames`** — fade up from silence at the clip start.
 - **`fadeOutFrames`** — fade to silence ending at `trimEndInFrames` if set,
   otherwise at the composition end. A music bed longer than the video now
@@ -837,13 +840,46 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
   blocks are butt-joined — a film has no gaps — so order is the only thing to
   drag.
 - **audio** — a master timeline laid over the whole film (it replaces
-  per-scene audio, same rule as `build_film`). “+ audio” places an asset at
-  the playhead; “+ narration” synthesizes speech through your configured
-  vendor right into the film, and can drop a **synced caption per sentence**
-  and duck the music bed under the voice in the same click. Tracks show
-  decoded waveforms; drag to move, drag the right edge to trim, and set
-  gain / fades / **duck** in the inspector. Overlapping tracks auto-pack
-  into lanes.
+  per-scene audio, same rule as `build_film`). The **+** on a lane head places
+  an asset at the playhead **in that lane**; the picker lists the film's audio
+  assets with a **▶ to listen to each one before you place it** (a second
+  click stops, and closing the dialog stops it too), so choosing between eight
+  `bed-*.flac` takes is not guesswork. “+ narration” synthesizes speech
+  through your configured vendor right into the film, and can drop a **synced
+  caption per sentence** and duck the music bed under the voice in the same
+  click. Tracks show decoded waveforms of **the part you kept**; drag to move,
+  drag **either edge** to trim, and set gain / fades / **duck** in the
+  inspector.
+**Lanes are yours (v0.27).** Audio, captions and overlays each hold as many
+lanes as you make. Every lane head carries the same three controls, in the same
+three columns down the whole timeline: **♪** mutes (audio only), **+** adds
+an item *into that lane* at the playhead, and the third is the lane itself —
+**⊕** on the last lane adds an **empty** one below (no file needed, and it
+stays through a drag, a reload and an agent's edit), **✕** on an empty lane
+takes it back. Drag a block **up or down** to move it between lanes; the target
+lights up as you cross it, and the lane you drop it in is remembered.
+
+**Muting is real.** A muted lane's clips leave the mix — the preview you play,
+`preview_audio`, and the built film alike — rather than just going quiet in the
+editor. The head lights amber and its label is struck through; the clips in it
+dim. Mute belongs to the **lane**, so a clip you drag in afterwards is silent
+too, which is what muting a track means in any editor. A single clip can also be
+silenced on its own with **mute this track** in the inspector. Nothing is
+deleted either way: unmute and it all comes back. (Muting *every* track makes
+the film silent — the mix refuses with a sentence saying so rather than
+rendering silence you did not ask for.) Before this, lanes were drawn by packing whatever overlapped
+into the fewest rows, so a lane appeared and vanished under the mouse as you
+dragged clips apart, and an empty lane could not exist at all.
+
+**Trimming works from both ends (v0.27).** The **left grip** moves the clip's
+**in-point through the file** while the audio under your cursor stays where it
+is — that is how you drop two seconds of room tone off the front of a take
+without re-cutting the file. The right grip still sets the out-point. The
+inspector shows both as **trim in / trim out**, in source frames, and the
+waveform redraws to the window you kept. Captions and overlays already had
+both edges; footage does not, by design — a footage clip joins the film
+without re-encoding, so trimming one is `transcode_asset`'s job.
+
 - **captions** — text blocks with frame-accurate in/out. A `.srt` sidecar is
   always written next to the built film; tick **burn captions** to also
   render them into the picture (size/position under the film inspector).

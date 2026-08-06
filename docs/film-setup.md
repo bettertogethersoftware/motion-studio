@@ -392,7 +392,13 @@ requirements.
   own audio is preserved through the concat. All scenes must be **consistently
   audio or all silent** (mixing the two breaks a stream copy → `inconsistent_scenes`).
 - **Master audio timeline.** Set it on the film with
-  `update_film { film, audio: [{ src, startInFrames?, gainDb?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }, …] }`
+  `update_film { film, audio: [{ src, startInFrames?, gainDb?, trimStartInFrames?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck?, lane? }, …] }`
+  — the two trims are offsets into the SOURCE file (the clip plays
+  `[trimStartInFrames, trimEndInFrames)`), `lane` is which timeline row the
+  Studio draws the track in (presentation only; the mixer never sees it), and
+  `mute: true` leaves that one track out of the mix. Whole lanes are muted with
+  the film's `mutedLanes: { audio: [1] }` — a track is audible only when
+  neither it nor its lane is muted
   — or let `synthesize_speech` / `synthesize_music` / `synthesize_sfx` append to
   it automatically by passing the **film id** as `target`. `src` is relative to
   the **film's own** `assets/`. This lays **one** music-bed-plus-narration

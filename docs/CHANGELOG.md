@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### The timeline's lanes are yours, and clips trim from both ends
+
+Four things the film editor made harder than they are, reported from real use.
+
+**Lanes are stored, not inferred.** They used to be a picture: on every repaint
+the editor packed items into the fewest non-overlapping rows. So a lane
+appeared when two clips overlapped and **vanished the moment you dragged them
+apart** — the track you had built disappeared under the mouse — and an empty
+lane could not exist at all, which is why adding one meant picking a file
+first. Now an item carries `lane`, the film carries `lanes: {audio, captions,
+overlays}`, and **⊕** on the last lane head adds an **empty** lane that
+survives a drag, a reload and an agent's edit. **✕** takes an empty one back,
+each lane's **+** adds an item *into that lane*, and a block can be **dragged
+up or down between lanes** with the target lit as you cross it. Films written
+before this open exactly as they did — the old packing is the migration, and
+the first lane edit writes it down.
+
+**Audio trims from the head, not just the tail** (`trimStartInFrames`). The
+left grip moves the clip's in-point through the file while the audio under the
+cursor stays put, so dropping two seconds of room tone off the front of a take
+no longer means re-cutting the file. Both trims now index the **source**: the
+clip plays `[trimStartInFrames, trimEndInFrames)`, which leaves
+`trimEndInFrames` alone meaning exactly what it did before. The waveform
+redraws to the window you kept, the inspector reads **trim in / trim out**, and
+the mixer chain follows `atrim` with `asetpts=PTS-STARTPTS` — without it a
+head-trimmed clip keeps its source timestamps and lands `trimStart` late on top
+of its `adelay`. Verified against ffmpeg on a file of one second of silence
+then one second of tone: the mix opens at `-inf` dB untrimmed, −24 dB trimmed.
+
+**The audio picker plays.** Every row has a **▶** — a second click stops, and
+closing the dialog stops it — plus the duration it discovers. Choosing between
+eight `stable-audio3-bed-*.flac` takes was previously a guess from the
+filename, resolvable only by placing a clip, playing the film, and undoing.
+
+**Lanes mute, and the mix believes it.** **♪** on an audio lane head silences
+everything in it — in the preview you play, in `preview_audio`, and in the built
+film — with the head lit amber, its label struck through, and its clips dimmed.
+Mute belongs to the lane, so a clip dragged in afterwards is silent too; one
+clip can also be muted alone from the inspector. `audibleTracks(film)` in
+`core/films.js` is the single rule all three paths read. Muting everything makes
+a silent film, and `preview_audio` says so rather than mixing nothing.
+
+**The lane-head buttons line up.** Each head now renders the same three columns
+— mute · add · lane — with an empty slot where it has nothing to put, instead of
+appending buttons in turn with `margin-left:auto` on the first, which put a
+one-button row's control where the row below put its second. The scenes and
+sequences rows use the same columns. An empty **last** lane now offers **✕**
+rather than **⊕**: it is already the empty lane you would have added.
+
+Captions and overlays already trimmed from both ends; footage still does not,
+by design — it joins the film without re-encoding, so trimming one belongs to
+`transcode_asset`.
+
 ### The Explorer says where you are and how far along everything is
 
 The rail listed twenty films that looked identical. Which one is in front,

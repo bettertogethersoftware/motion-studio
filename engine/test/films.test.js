@@ -14,7 +14,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
-  validateFilm, normalizeFilm, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm, submitFilmBuild,
+  validateFilm, normalizeFilm, toMixerTracks, audibleTracks, captionsToSrt, captionsToAss, buildOverlayGraph, planFilm, submitFilmBuild,
 } from '../src/core/films.js';
 import { sceneSignature } from '../src/core/film.js';
 import { probeMedia } from '../src/core/encoder.js';
@@ -61,6 +61,73 @@ test('normalizeFilm stamps ids and fills defaults', () => {
   assert.equal(film.burnCaptions, false);
   assert.deepEqual(film.audio, []);
   validateFilm(film); // defaults must validate
+});
+
+test('film: lanes are stored, so an empty one survives a save', () => {
+  // The editor's lanes used to be derived by packing items into the fewest
+  // non-overlapping rows, which is why a lane vanished the moment you dragged
+  // its clips apart, and why an empty one could not exist at all.
+  const film = normalizeFilm({
+    name: 'F',
+    lanes: { audio: 3 },
+    audio: [{ src: 'assets/a.wav', lane: 2 }],
+  });
+  assert.deepEqual(film.lanes, { audio: 3 });
+  validateFilm(film);
+  assert.equal(film.audio[0].lane, 2);
+});
+
+test('film: a lane is presentation, and never reaches the mixer', () => {
+  const [track] = toMixerTracks([{ src: 'assets/a.wav', lane: 2, label: 'bed', trimStartInFrames: 30 }]);
+  assert.deepEqual(track, { src: 'assets/a.wav', trimStartInFrames: 30 });
+});
+
+test('film: a muted lane leaves the mix, and so does a muted track', () => {
+  // Mute is the LANE's: drop another clip into a muted lane and it is silent
+  // too, which is what every editor means by muting a track.
+  const film = normalizeFilm({
+    name: 'F',
+    lanes: { audio: 3 },
+    mutedLanes: { audio: [1] },
+    audio: [
+      { src: 'assets/bed.wav', lane: 0 },
+      { src: 'assets/vox.wav', lane: 1 },
+      { src: 'assets/late.wav', lane: 1 },
+      { src: 'assets/sfx.wav', lane: 2, mute: true },
+    ],
+  });
+  validateFilm(film);
+  assert.deepEqual(audibleTracks(film).map((t) => t.src), ['assets/bed.wav']);
+  // Nothing was deleted — unmuting brings them all back.
+  assert.equal(film.audio.length, 4);
+  assert.deepEqual(audibleTracks({ ...film, mutedLanes: {} }).map((t) => t.src),
+    ['assets/bed.wav', 'assets/vox.wav', 'assets/late.wav']);
+});
+
+test('validateFilm rejects a mutedLanes that is not audio lane indexes', () => {
+  for (const mutedLanes of [{ audio: ['1'] }, { audio: 1 }, { captions: [0] }]) {
+    assert.throws(() => validateFilm(normalizeFilm({ name: 'F', mutedLanes })),
+      (e) => e.code === 'invalid_film', JSON.stringify(mutedLanes));
+  }
+});
+
+test('validateFilm rejects a lane count that is not a small positive integer', () => {
+  for (const lanes of [{ audio: 0 }, { audio: 1.5 }, { audio: 99 }, { nope: 2 }]) {
+    assert.throws(() => validateFilm(normalizeFilm({ name: 'F', lanes })),
+      (e) => e.code === 'invalid_film', JSON.stringify(lanes));
+  }
+});
+
+test('validateFilm rejects an audio window that ends before it starts', () => {
+  // Both trims index the SOURCE file, so an inverted pair is a clip of no
+  // length — silence the mixer would render without complaint.
+  assert.throws(() => validateFilm(normalizeFilm({
+    name: 'F',
+    audio: [{ src: 'assets/a.wav', trimStartInFrames: 90, trimEndInFrames: 60 }],
+  })), (e) => e.code === 'invalid_film');
+  // The valid window passes, and so does a head trim with no tail trim.
+  validateFilm(normalizeFilm({ name: 'F', audio: [{ src: 'assets/a.wav', trimStartInFrames: 30, trimEndInFrames: 90 }] }));
+  validateFilm(normalizeFilm({ name: 'F', audio: [{ src: 'assets/a.wav', trimStartInFrames: 30 }] }));
 });
 
 test('validateFilm rejects a path-escaping outputFilename', () => {

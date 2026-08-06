@@ -140,7 +140,11 @@ function frameOfEvent(ev) {
 const EDITABLE = ['name', 'scenes', 'audio', 'overlays', 'captions', 'captionStyle',
   // `sequences` carries the narrative labels' intent text. The labels themselves
   // live on the segments inside `scenes`, so a regrouping is one atomic patch.
-  'sequences', 'audioTargetPeakDb', 'burnCaptions', 'outputFilename', 'deliverables'];
+  'sequences', 'audioTargetPeakDb', 'burnCaptions', 'outputFilename', 'deliverables',
+  // How many lanes each family shows, and which of them are muted. The first
+  // is presentation (but an empty lane you just made must survive a reload);
+  // the second changes what the film sounds like.
+  'lanes', 'mutedLanes'];
 
 function snapshot() {
   return JSON.parse(JSON.stringify(Object.fromEntries(EDITABLE.map((k) => [k, state.film[k]]))));
@@ -735,10 +739,16 @@ function loadWave(src) {
   })();
 }
 
+/* Both trims index the SOURCE file: the clip plays [trimStart, trimEnd). The
+ * head trim is v0.27 — before it, a clip could only be shortened from the end,
+ * so dropping two seconds of silence off the front of a take meant editing the
+ * file. `clipFrames` is what the timeline draws; `naturalFrames` is the file. */
+const headFrames = (track) => track.trimStartInFrames ?? 0;
 function clipFrames(track) {
-  if (track.trimEndInFrames) return track.trimEndInFrames;
-  const wave = state.waves.get(track.src);
-  if (wave?.duration) return Math.max(1, Math.round(wave.duration * fps()));
+  const head = headFrames(track);
+  if (track.trimEndInFrames) return Math.max(1, track.trimEndInFrames - head);
+  const nat = naturalFrames(track);
+  if (nat) return Math.max(1, nat - head);
   return FALLBACK_CLIP_FRAMES;
 }
 function naturalFrames(track) {
@@ -753,11 +763,17 @@ function drawWave(canvas, track) {
   if (!wave?.peaks) return;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = track.duck ? 'rgba(178,142,230,0.75)' : 'rgba(127,209,140,0.7)';
+  // Draw the KEPT WINDOW of the file, not its first N seconds: with a head
+  // trim the block shows source frames [trimStart, trimEnd), and a waveform
+  // that still started at the file's beginning would be a picture of audio the
+  // build no longer plays.
   const total = naturalFrames(track) ?? clipFrames(track);
-  const shownFrac = clamp(clipFrames(track) / total, 0, 1); // trim hides the tail
-  const buckets = Math.floor(wave.peaks.length * shownFrac);
+  const from = clamp(headFrames(track) / total, 0, 1);
+  const to = clamp((track.trimEndInFrames ?? total) / total, from, 1);
+  const i0 = Math.floor(wave.peaks.length * from);
+  const i1 = Math.max(i0 + 1, Math.floor(wave.peaks.length * to));
   for (let x = 0; x < W; x++) {
-    const p = wave.peaks[Math.floor((x / W) * buckets)] ?? 0;
+    const p = wave.peaks[i0 + Math.floor((x / W) * (i1 - i0))] ?? 0;
     const h = Math.max(1, p * (H - 4));
     ctx.fillRect(x, (H - h) / 2, 1, h);
   }
@@ -774,6 +790,159 @@ function packLanes(items) {
     lane.end = Math.max(lane.end, it.end);
   }
   return lanes.map((l) => l.items);
+}
+
+/* ------------------------------ lanes ----------------------------------- */
+
+/* Lanes used to be a picture, not a fact: rows were derived by packing items
+ * into the fewest non-overlapping rows on every repaint. So a lane appeared
+ * when two clips overlapped and VANISHED the moment you dragged them apart —
+ * the track you had carefully built disappeared underneath the mouse — and
+ * "give me an empty lane to work in" was unsayable, because a lane with
+ * nothing in it could not exist. Now an item carries `lane`, the film carries
+ * how many lanes each family shows, and the packing below is only the
+ * migration for films authored before this. */
+
+const LANE_FAMILIES = ['audio', 'captions', 'overlays'];
+/* Which lane the next item of each family goes into — set by the `+` you
+ * clicked, cleared as soon as it is used, so "add audio" from the toolbar or
+ * the palette still means lane 1. */
+const pendingLane = { audio: 0, captions: 0, overlays: 0 };
+function takeLane(family) {
+  const lane = pendingLane[family] ?? 0;
+  pendingLane[family] = 0;
+  return Math.max(0, Math.min(laneRows(family).length - 1, lane));
+}
+const MAX_LANES = 32;
+const laneItems = (family) => state.film?.[family] ?? [];
+const laneStartOf = (family, it) => (family === 'audio' ? (it.startInFrames ?? 0) : it.fromFrame);
+const laneEndOf = (family, it) => (family === 'audio'
+  ? (it.startInFrames ?? 0) + clipFrames(it)
+  : it.toFrame);
+
+/** Which lane each item is drawn in — stored when it has one, packed when not. */
+function laneAssignment(family) {
+  const items = laneItems(family);
+  const map = new Map();
+  const legacy = items.filter((it) => !Number.isInteger(it.lane));
+  for (const it of items) if (Number.isInteger(it.lane)) map.set(it, Math.min(MAX_LANES - 1, it.lane));
+  if (legacy.length) {
+    // Films written before lanes were real: keep exactly the rows they have
+    // always been drawn in, so opening one looks like nothing happened.
+    packLanes(legacy.map((it) => ({ item: it, start: laneStartOf(family, it), end: laneEndOf(family, it) })))
+      .forEach((group, li) => group.forEach(({ item }) => map.set(item, li)));
+  }
+  return map;
+}
+
+/** The rows to draw for a family: at least one, never fewer than it needs. */
+function laneRows(family) {
+  const map = laneAssignment(family);
+  const declared = state.film?.lanes?.[family] ?? 0;
+  const needed = Math.max(...[...map.values()].map((n) => n + 1), 0);
+  const count = Math.min(MAX_LANES, Math.max(1, declared, needed));
+  const rows = Array.from({ length: count }, () => []);
+  for (const it of laneItems(family)) rows[Math.min(count - 1, map.get(it) ?? 0)].push(it);
+  return rows;
+}
+
+/**
+ * Write down what the rows currently say, inside a mutation.
+ *
+ * Called by every lane-affecting edit, so a film converts from packed to
+ * explicit lanes the first time someone touches one — and from then on a drag
+ * moves a clip without rearranging everything around it.
+ */
+function persistLanes(film, family, rows) {
+  rows.forEach((items, li) => {
+    for (const it of items) {
+      const stored = (film[family] ?? []).find((x) => x.id === it.id);
+      if (stored) stored.lane = li;
+    }
+  });
+  film.lanes = { ...(film.lanes ?? {}), [family]: rows.length };
+}
+
+/** Add an empty lane at the bottom of a family — the thing that was unsayable. */
+function addLane(family) {
+  const rows = laneRows(family);
+  if (rows.length >= MAX_LANES) return toast(`${family} already has ${MAX_LANES} lanes.`, { kind: 'error' });
+  mutate((film) => {
+    persistLanes(film, family, rows);
+    film.lanes = { ...(film.lanes ?? {}), [family]: rows.length + 1 };
+  });
+}
+
+/** Remove one empty lane, and pull the lanes below it up. */
+function removeLane(family, index) {
+  const rows = laneRows(family);
+  if (rows.length <= 1 || rows[index]?.length) return;
+  const kept = rows.filter((_, i) => i !== index);
+  mutate((film) => {
+    persistLanes(film, family, kept);
+    // The lanes below the removed one move up, and their mute has to move with
+    // them — otherwise deleting lane 1 silences whatever was in lane 2.
+    if (family === 'audio' && film.mutedLanes?.audio) {
+      const shifted = film.mutedLanes.audio
+        .filter((n) => n !== index)
+        .map((n) => (n > index ? n - 1 : n));
+      if (shifted.length) film.mutedLanes = { ...film.mutedLanes, audio: shifted };
+      else delete film.mutedLanes.audio;
+    }
+  });
+}
+
+/* ------------------------------- mute ---------------------------------- */
+
+/* Mute is the LANE's, not the clip's: mute lane 2 to hear the film without the
+ * bed, drop another bed clip in, and it is silent too. A single clip can still
+ * be silenced on its own from the inspector — the mix drops a track when either
+ * says so, which is `audibleTracks` in core/films.js, so what you hear here,
+ * what preview_audio mixes and what the build renders cannot disagree. */
+const mutedLanes = () => state.film?.mutedLanes?.audio ?? [];
+const isLaneMuted = (lane) => mutedLanes().includes(lane);
+const isTrackAudible = (t) => !t.mute && !isLaneMuted(t.lane ?? 0);
+
+function toggleLaneMute(lane) {
+  const next = isLaneMuted(lane)
+    ? mutedLanes().filter((n) => n !== lane)
+    : [...mutedLanes(), lane].sort((a, b) => a - b);
+  // Always STATE the list, never delete the key: a patch that omits a field
+  // keeps the field's saved value, so `delete` would leave the lane muted on
+  // disk while the editor showed it live.
+  mutate((film) => { film.mutedLanes = { ...(film.mutedLanes ?? {}), audio: next }; });
+}
+
+/** Move one item to another lane (the vertical half of a drag). */
+function moveToLane(family, id, lane) {
+  const rows = laneRows(family);
+  const target = Math.max(0, Math.min(rows.length - 1, lane));
+  const from = rows.findIndex((items) => items.some((it) => it.id === id));
+  if (from === target) return;
+  const next = rows.map((items) => items.filter((it) => it.id !== id));
+  const moved = rows[from]?.find((it) => it.id === id);
+  if (moved) next[target].push(moved);
+  mutate((film) => persistLanes(film, family, next));
+}
+
+/**
+ * Which lane row is under the pointer, for a drag that crosses lanes.
+ *
+ * Measured once when the drag starts: the rows do not move under it, and
+ * hit-testing live would re-measure on every pointermove.
+ */
+function laneHitboxes(family) {
+  return [...document.querySelectorAll(`.tl-row[data-family="${family}"]`)].map((r) => {
+    const box = r.getBoundingClientRect();
+    return { lane: Number(r.dataset.lane), top: box.top, bottom: box.bottom, row: r };
+  });
+}
+
+function laneUnder(boxes, clientY) {
+  if (!boxes.length) return null;
+  const hit = boxes.find((b) => clientY >= b.top && clientY < b.bottom);
+  if (hit) return hit;
+  return clientY < boxes[0].top ? boxes[0] : boxes[boxes.length - 1];
 }
 
 function snapTargets(exclude) {
@@ -806,17 +975,47 @@ function snapFrame(f, exclude) {
 
 function tlWidth() { return HEAD_W + Math.max(1, totalFrames()) * state.pxf + TAIL_PX; }
 
+/**
+ * One row: a sticky head and the lane beside it.
+ *
+ * The head's controls sit in a fixed three-column group — mute · add · lane —
+ * and every row renders all three, using an empty slot where it has nothing to
+ * put. Before this each button was appended in turn with `margin-left: auto`
+ * on the first, so a row with one button put it where the row below put its
+ * second, and no two columns lined up down the timeline.
+ */
 function row(cls, headText, laneWidth) {
   const r = document.createElement('div');
   r.className = `tl-row ${cls}`;
   const head = document.createElement('div');
   head.className = 'tl-head';
-  head.textContent = headText;
+  const label = document.createElement('span');
+  label.className = 'tl-head-label';
+  label.textContent = headText;
+  label.title = headText;
+  const btns = document.createElement('div');
+  btns.className = 'lane-btns';
+  head.append(label, btns);
   const lane = document.createElement('div');
   lane.className = 'lane';
   lane.style.width = `${laneWidth}px`;
   r.append(head, lane);
-  return { row: r, head, lane };
+  return { row: r, head, lane, btns, label };
+}
+
+/** A head button in one of the three slots, or the empty slot that holds it. */
+function laneBtn(text, title, onClick, cls = '') {
+  if (!onClick) {
+    const slot = document.createElement('span');
+    slot.className = 'lane-slot';
+    return slot;
+  }
+  const b = document.createElement('button');
+  b.className = `lane-add ${cls}`.trim();
+  b.textContent = text;
+  b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
 }
 
 function addCutlines(lane) {
@@ -875,89 +1074,75 @@ function renderTimeline() {
 
   /* sequences — the narrative band above the cut (v0.23) */
   {
-    const { row: r, head, lane } = row('row-sequences', 'sequences', laneW);
-    const addSeq = document.createElement('button');
-    addSeq.className = 'lane-add';
-    addSeq.textContent = '+';
-    addSeq.title = 'group the selected segment onward into a new sequence';
-    addSeq.addEventListener('click', createSequenceFromSelection);
-    head.appendChild(addSeq);
+    const { row: r, lane, btns } = row('row-sequences', 'sequences', laneW);
+    btns.append(
+      laneBtn('', '', null),
+      laneBtn('+', 'group the selected segment onward into a new sequence', createSequenceFromSelection),
+      laneBtn('', '', null),
+    );
     for (const band of sequenceBands()) lane.appendChild(sequenceBlock(band));
     inner.appendChild(r);
   }
 
   /* scenes */
   {
-    const { row: r, head, lane } = row('row-scenes', 'scenes', laneW);
-    const addScene = document.createElement('button');
-    addScene.className = 'lane-add';
-    addScene.textContent = '+';
-    addScene.title = 'add scenes — drag one from the left rail, or create a new one there';
-    addScene.addEventListener('click', revealScenesRail);
-    head.appendChild(addScene);
+    const { row: r, lane, btns } = row('row-scenes', 'scenes', laneW);
+    btns.append(
+      laneBtn('', '', null),
+      laneBtn('+', 'add scenes — drag one from the left rail, or create a new one there', revealScenesRail),
+      laneBtn('', '', null),
+    );
     addCutlines(lane);
     (state.detail?.scenes ?? []).forEach((s, i) => lane.appendChild(sceneBlock(s, i)));
     inner.appendChild(r);
   }
 
-  /* audio lanes */
-  {
-    const lanes = packLanes((state.film.audio ?? []).map((t) => ({
-      item: t, start: t.startInFrames ?? 0, end: (t.startInFrames ?? 0) + clipFrames(t),
-    })));
-    if (!lanes.length) lanes.push([]);
-    lanes.forEach((items, li) => {
-      const { row: r, head, lane } = row('row-audio', lanes.length > 1 ? `audio ${li + 1}` : 'audio', laneW);
-      if (li === 0) {
-        const add = document.createElement('button');
-        add.className = 'lane-add';
-        add.textContent = '+';
-        add.title = 'add audio at the playhead';
-        add.addEventListener('click', openAudioDialog);
-        head.appendChild(add);
-      }
-      addCutlines(lane);
-      for (const { item } of items) lane.appendChild(audioBlock(item));
-      inner.appendChild(r);
-    });
-  }
+  /* audio · captions · overlays — the lane families (v0.27: lanes are stored,
+   * so one you added is still there after a drag, a reload, or an agent's
+   * edit, and one you emptied is still there to drop the next clip into). */
+  for (const family of LANE_FAMILIES) {
+    const spec = {
+      audio: { cls: 'row-audio', label: 'audio', add: openAudioDialog, addTitle: 'add audio at the playhead, in this lane', block: (it) => audioBlock(it) },
+      captions: { cls: 'row-captions', label: 'captions', add: addCaptionAtPlayhead, addTitle: 'add a caption at the playhead, in this lane', block: (it) => rangeBlock(it, 'caption') },
+      overlays: { cls: 'row-overlays', label: 'overlay', add: openOverlayDialog, addTitle: 'add an overlay at the playhead, in this lane', block: (it) => rangeBlock(it, 'overlay') },
+    }[family];
+    const rows = laneRows(family);
+    rows.forEach((items, li) => {
+      const { row: r, lane, btns } = row(spec.cls, rows.length > 1 ? `${spec.label} ${li + 1}` : spec.label, laneW);
+      r.dataset.family = family;
+      r.dataset.lane = String(li);
 
-  /* captions */
-  {
-    const lanes = packLanes((state.film.captions ?? []).map((c) => ({ item: c, start: c.fromFrame, end: c.toFrame })));
-    if (!lanes.length) lanes.push([]);
-    lanes.forEach((items, li) => {
-      const { row: r, head, lane } = row('row-captions', li ? `captions ${li + 1}` : 'captions', laneW);
-      if (li === 0) {
-        const add = document.createElement('button');
-        add.className = 'lane-add';
-        add.textContent = '+';
-        add.title = 'add a caption at the playhead';
-        add.addEventListener('click', addCaptionAtPlayhead);
-        head.appendChild(add);
+      // Slot 1 — mute. Audio only: a caption lane makes no sound to silence.
+      const muted = family === 'audio' && isLaneMuted(li);
+      if (family === 'audio') {
+        const m = laneBtn('♪', muted ? 'unmute this lane' : 'mute this lane — its clips leave the mix, the build and the preview',
+          () => toggleLaneMute(li), `lane-mute${muted ? ' on' : ''}`);
+        m.setAttribute('aria-pressed', String(muted));
+        btns.appendChild(m);
+        r.classList.toggle('lane-muted', muted);
+      } else {
+        btns.appendChild(laneBtn('', '', null));
       }
-      addCutlines(lane);
-      for (const { item } of items) lane.appendChild(rangeBlock(item, 'caption'));
-      inner.appendChild(r);
-    });
-  }
 
-  /* overlays */
-  {
-    const lanes = packLanes((state.film.overlays ?? []).map((o) => ({ item: o, start: o.fromFrame, end: o.toFrame })));
-    if (!lanes.length) lanes.push([]);
-    lanes.forEach((items, li) => {
-      const { row: r, head, lane } = row('row-overlays', li ? `overlay ${li + 1}` : 'overlay', laneW);
-      if (li === 0) {
-        const add = document.createElement('button');
-        add.className = 'lane-add';
-        add.textContent = '+';
-        add.title = 'add an overlay at the playhead';
-        add.addEventListener('click', openOverlayDialog);
-        head.appendChild(add);
+      // Slot 2 — add an item, into THIS lane.
+      btns.appendChild(laneBtn('+', spec.addTitle, () => { pendingLane[family] = li; spec.add(); }));
+
+      // Slot 3 — the lane itself. An empty lane below the first offers to go;
+      // otherwise the last lane offers another below it. The two never compete
+      // for the slot, because an empty last lane IS the lane you would add.
+      // The first lane never goes: a family always has somewhere to put its
+      // next item.
+      if (li > 0 && !items.length) {
+        btns.appendChild(laneBtn('✕', 'remove this empty lane', () => removeLane(family, li), 'lane-del'));
+      } else if (li === rows.length - 1) {
+        btns.appendChild(laneBtn('⊕', `add another ${spec.label} lane — empty, and it stays`,
+          () => addLane(family), 'lane-more'));
+      } else {
+        btns.appendChild(laneBtn('', '', null));
       }
+
       addCutlines(lane);
-      for (const { item } of items) lane.appendChild(rangeBlock(item, 'overlay'));
+      for (const it of items) lane.appendChild(spec.block(it));
       inner.appendChild(r);
     });
   }
@@ -1284,7 +1469,10 @@ function audioBlock(t) {
   loadWave(t.src);
   const start = t.startInFrames ?? 0;
   const frames = clipFrames(t);
-  const el = baseBlock('audio', t.id, start * state.pxf, frames * state.pxf, `blk-audio${t.duck ? ' duck' : ''}`);
+  const silent = !isTrackAudible(t);
+  const el = baseBlock('audio', t.id, start * state.pxf, frames * state.pxf,
+    `blk-audio${t.duck ? ' duck' : ''}${silent ? ' muted' : ''}`);
+  if (silent) el.title = t.mute ? 'muted track — not in the mix' : 'muted lane — not in the mix';
 
   const wave = document.createElement('canvas');
   wave.className = 'wave';
@@ -1308,17 +1496,24 @@ function audioBlock(t) {
 
   const label = document.createElement('span');
   label.className = 'blk-label';
-  label.textContent = `${t.duck ? '⤓ ' : ''}${t.label || t.src.replace(/^assets\//, '')}${t.gainDb ? ` · ${t.gainDb > 0 ? '+' : ''}${t.gainDb}dB` : ''}`;
+  label.textContent = `${t.mute ? 'muted · ' : ''}${t.duck ? '⤓ ' : ''}${t.label || t.src.replace(/^assets\//, '')}${t.gainDb ? ` · ${t.gainDb > 0 ? '+' : ''}${t.gainDb}dB` : ''}`;
   el.appendChild(label);
 
-  // Move.
+  // Move — horizontally in time, vertically between lanes.
   el.addEventListener('pointerdown', (ev) => {
     if (ev.target.classList.contains('grip')) return;
     const orig = t.startInFrames ?? 0;
     let next = orig;
+    const boxes = laneHitboxes('audio');
+    let lane = Number(el.closest('.tl-row')?.dataset.lane ?? 0);
     pointerDrag(ev, {
       onMove: (d, e2) => {
         el.classList.add('dragging');
+        const hit = laneUnder(boxes, e2.clientY);
+        if (hit && hit.lane !== lane) {
+          lane = hit.lane;
+          for (const b of boxes) b.row.classList.toggle('lane-drop', b.lane === lane);
+        }
         const rawStart = Math.max(0, orig + d);
         // Snap whichever edge is closer to a target.
         const s1 = snapFrame(rawStart, { kind: 'audio', id: t.id });
@@ -1331,19 +1526,71 @@ function audioBlock(t) {
       },
       onDone: (moved) => {
         el.classList.remove('dragging');
-        if (!moved || next === orig) return;
-        mutate((film) => {
-          const tr = film.audio.find((x) => x.id === t.id);
-          if (tr) tr.startInFrames = next;
-        });
+        for (const b of boxes) b.row.classList.remove('lane-drop');
+        const startLane = Number(el.closest('.tl-row')?.dataset.lane ?? 0);
+        if (!moved || (next === orig && lane === startLane)) return;
+        if (next !== orig) {
+          mutate((film) => {
+            const tr = film.audio.find((x) => x.id === t.id);
+            if (tr) tr.startInFrames = next;
+          });
+        }
+        if (lane !== startLane) moveToLane('audio', t.id, lane);
         if (state.selection?.kind === 'audio' && state.selection.id === t.id) renderInspector();
       },
     });
   });
 
-  // Right grip = trim.
+  /* Left grip = head trim (v0.27). Dragging it moves the clip's IN-POINT
+   * through the file while the audio under the cursor stays where it is —
+   * `startInFrames` follows the edge, so the rest of the take does not slide.
+   * Before this the only grip was the right one, and cutting two seconds off
+   * the front of a narration meant re-cutting the file. */
+  const head = document.createElement('div');
+  head.className = 'grip left';
+  head.title = 'trim the clip start — the head of the file, not its place on the timeline';
+  head.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation();
+    const origHead = headFrames(t);
+    const clipEnd = start + frames;          // fixed: only the in-point moves
+    let nextHead = origHead;
+    let nextStart = start;
+    pointerDrag(ev, {
+      onMove: (d, e2) => {
+        const nat = naturalFrames(t);
+        const maxHead = (t.trimEndInFrames ?? nat ?? (origHead + frames)) - 1;
+        // Never past the clip's own end, never before the file's first frame,
+        // and never so far left that the clip would start before frame 0.
+        // Frames are integers everywhere in this document: an un-rounded drag
+        // delta would store 44.31 and the film would fail validation on save.
+        let h = Math.round(Math.max(0, Math.min(maxHead, origHead + d, origHead + start)));
+        const s1 = snapFrame(start + (h - origHead), { kind: 'audio', id: t.id });
+        if (s1.snapped !== null) h = Math.max(0, origHead + (s1.f - start));
+        showSnapline(s1.snapped);
+        nextHead = h;
+        nextStart = Math.max(0, start + (h - origHead));
+        el.style.left = `${nextStart * state.pxf}px`;
+        el.style.width = `${Math.max(6, (clipEnd - nextStart) * state.pxf)}px`;
+        dragTip(`in ${nextHead}f · ${((clipEnd - nextStart) / fps()).toFixed(2)}s left`, e2);
+      },
+      onDone: (moved) => {
+        if (!moved || nextHead === origHead) return;
+        mutate((film) => {
+          const tr = film.audio.find((x) => x.id === t.id);
+          if (!tr) return;
+          if (nextHead > 0) tr.trimStartInFrames = nextHead;
+          else delete tr.trimStartInFrames;
+          tr.startInFrames = nextStart;
+        });
+        if (state.selection?.kind === 'audio' && state.selection.id === t.id) renderInspector();
+      },
+    });
+  });
+  el.appendChild(head);
+
+  // Right grip = tail trim.
   const grip = document.createElement('div');
-  grip.className = 'grip';
+  grip.className = 'grip right';
   grip.title = 'trim the clip end';
   grip.addEventListener('pointerdown', (ev) => {
     ev.stopPropagation();
@@ -1352,12 +1599,14 @@ function audioBlock(t) {
     pointerDrag(ev, {
       onMove: (d, e2) => {
         const nat = naturalFrames(t);
+        const h = headFrames(t);
         let f2 = Math.max(1, Math.round(origFrames + d));
-        if (nat) f2 = Math.min(f2, nat);
+        if (nat) f2 = Math.min(f2, nat - h);     // the kept window ends at the file's end
         const se = snapFrame(start + f2, { kind: 'audio', id: t.id });
         if (se.snapped !== null && se.f > start) f2 = se.f - start;
         showSnapline(se.snapped);
-        nextTrim = (nat && f2 >= nat - 2) ? null : f2; // release ≈ untrimmed
+        // trimEnd indexes the SOURCE, so it is the head plus what is kept.
+        nextTrim = (nat && f2 >= nat - h - 2) ? null : h + f2; // release ≈ untrimmed
         el.style.width = `${Math.max(6, f2 * state.pxf)}px`;
         dragTip(`${f2}f · ${(f2 / fps()).toFixed(2)}s${nextTrim === null ? ' (full clip)' : ''}`, e2);
       },
@@ -1395,9 +1644,17 @@ function rangeBlock(item, kind) {
     const len = item.toFrame - item.fromFrame;
     const orig = item.fromFrame;
     let next = orig;
+    const family = kind === 'caption' ? 'captions' : 'overlays';
+    const boxes = laneHitboxes(family);
+    let lane = Number(el.closest('.tl-row')?.dataset.lane ?? 0);
     pointerDrag(ev, {
       onMove: (d, e2) => {
         el.classList.add('dragging');
+        const hit = laneUnder(boxes, e2.clientY);
+        if (hit && hit.lane !== lane) {
+          lane = hit.lane;
+          for (const b of boxes) b.row.classList.toggle('lane-drop', b.lane === lane);
+        }
         const raw = Math.max(0, orig + d);
         const s1 = snapFrame(raw, { kind, id: item.id });
         const s2 = snapFrame(raw + len, { kind, id: item.id });
@@ -1409,11 +1666,16 @@ function rangeBlock(item, kind) {
       },
       onDone: (moved) => {
         el.classList.remove('dragging');
-        if (!moved || next === orig) return;
-        mutate(() => {
-          const it = list().find((x) => x.id === item.id);
-          if (it) { it.toFrame = next + len; it.fromFrame = next; }
-        });
+        for (const b of boxes) b.row.classList.remove('lane-drop');
+        const startLane = Number(el.closest('.tl-row')?.dataset.lane ?? 0);
+        if (!moved || (next === orig && lane === startLane)) return;
+        if (next !== orig) {
+          mutate(() => {
+            const it = list().find((x) => x.id === item.id);
+            if (it) { it.toFrame = next + len; it.fromFrame = next; }
+          });
+        }
+        if (lane !== startLane) moveToLane(family, item.id, lane);
         renderSelectionAffected(kind, item.id);
       },
     });
@@ -2198,7 +2460,7 @@ function renderAudioInspector(box, id) {
   const srcSel = el('select', {
     onchange: () => mutate((film) => {
       const tr = film.audio.find((x) => x.id === id);
-      if (tr) { tr.src = srcSel.value; delete tr.trimEndInFrames; }
+      if (tr) { tr.src = srcSel.value; delete tr.trimEndInFrames; delete tr.trimStartInFrames; }
     }),
   });
   for (const a of state.assets.filter((a) => a.kind === 'audio')) {
@@ -2213,9 +2475,14 @@ function renderAudioInspector(box, id) {
   box.appendChild(srcRow);
 
   const start = numInput(t.startInFrames ?? 0, { min: 0, onCommit: (v) => mutate((film) => { const tr = film.audio.find((x) => x.id === id); if (tr) tr.startInFrames = v ?? 0; }) });
+  // Both trims index the source file, so they read as a window: in at N, out
+  // at M. The timeline's two grips write these same two numbers.
+  const trimIn = numInput(t.trimStartInFrames ?? '', { min: 0, onCommit: (v) => mutate((film) => { const tr = film.audio.find((x) => x.id === id); if (!tr) return; if (v) tr.trimStartInFrames = v; else delete tr.trimStartInFrames; }) });
   const trim = numInput(t.trimEndInFrames ?? '', { min: 1, onCommit: (v) => mutate((film) => { const tr = film.audio.find((x) => x.id === id); if (!tr) return; if (v) tr.trimEndInFrames = v; else delete tr.trimEndInFrames; }) });
+  trimIn.placeholder = 'file start';
   trim.placeholder = 'full';
-  box.appendChild(el('div', { class: 'insp-row' }, labelled('start (frames)', start), labelled('trim end (frames)', trim)));
+  box.appendChild(el('div', { class: 'insp-row' }, labelled('start (frames)', start)));
+  box.appendChild(el('div', { class: 'insp-row' }, labelled('trim in (source f)', trimIn), labelled('trim out (source f)', trim)));
 
   // Gain: slider + numeric readout.
   const gainWrap = el('div', { class: 'range-row' });
@@ -2234,6 +2501,15 @@ function renderAudioInspector(box, id) {
   const fout = numInput(t.fadeOutFrames ?? '', { min: 0, onCommit: (v) => mutate((film) => { const tr = film.audio.find((x) => x.id === id); if (!tr) return; if (v) tr.fadeOutFrames = v; else delete tr.fadeOutFrames; }) });
   fin.placeholder = 'none'; fout.placeholder = 'none';
   box.appendChild(el('div', { class: 'insp-row' }, labelled('fade in (frames)', fin), labelled('fade out (frames)', fout)));
+
+  const mute = el('input', { type: 'checkbox' });
+  mute.checked = !!t.mute;
+  mute.addEventListener('change', () => mutate((film) => {
+    const tr = film.audio.find((x) => x.id === id);
+    if (tr) { if (mute.checked) tr.mute = true; else delete tr.mute; }
+  }));
+  box.appendChild(el('label', { class: 'check' }, mute, document.createTextNode(
+    ` mute this track${isLaneMuted(t.lane ?? 0) ? ' (its lane is muted too)' : ''}`)));
 
   const duck = el('input', { type: 'checkbox' });
   duck.checked = !!t.duck;
@@ -2685,8 +2961,52 @@ $('#btn-scenes-collapse').addEventListener('click', () => {
 
 /* ---- audio ---- */
 
+/* One audition player for every picker: a second ▶ stops the first, and
+ * closing the dialog stops it too. Without this the only way to know which of
+ * eight `stable-audio3-bed-*.flac` was the right one was to place it on the
+ * timeline, play the film, and undo. */
+let pickAudition = null;
+function stopPickAudition() {
+  if (!pickAudition) return;
+  pickAudition.el.pause();
+  pickAudition.btn?.classList.remove('playing');
+  if (pickAudition.btn) pickAudition.btn.textContent = '▶';
+  pickAudition = null;
+}
+for (const id of ['audio-dialog', 'overlay-dialog', 'footage-dialog']) {
+  $(`#${id}`)?.addEventListener('close', stopPickAudition);
+}
+
+function auditionButton(a, li) {
+  const btn = el('button', {
+    class: 'pk-play', text: '▶', title: `listen to ${a.path.replace(/^assets\//, '')}`,
+  });
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();                 // the row itself picks the file
+    const mine = pickAudition?.btn === btn;
+    stopPickAudition();
+    if (mine) return;                     // second click = stop
+    const audio = new Audio(assetUrl(a.path));
+    audio.addEventListener('loadedmetadata', () => {
+      if (!Number.isFinite(audio.duration)) return;
+      const m = Math.floor(audio.duration / 60);
+      const sec = Math.round(audio.duration % 60);
+      li.querySelector('.pk-dur').textContent = `${m}:${String(sec).padStart(2, '0')}`;
+    });
+    audio.addEventListener('ended', stopPickAudition);
+    audio.addEventListener('error', () => { toast(`Could not play ${a.path}`, { kind: 'error' }); stopPickAudition(); });
+    audio.play().then(() => {
+      btn.textContent = '■';
+      btn.classList.add('playing');
+      pickAudition = { el: audio, btn };
+    }).catch(() => { /* autoplay policy: the click IS the gesture, so this is a real failure */ });
+  });
+  return btn;
+}
+
 function pickListForAssets(ulSel, kinds, onPick) {
   const ul = $(ulSel);
+  stopPickAudition();
   ul.innerHTML = '';
   const files = state.assets.filter((a) => kinds.includes(a.kind));
   if (!files.length) {
@@ -2696,8 +3016,10 @@ function pickListForAssets(ulSel, kinds, onPick) {
   for (const a of files) {
     const li = document.createElement('li');
     if (a.kind === 'image') li.appendChild(el('img', { class: 'pk-thumb', src: assetUrl(a.path) }));
+    if (a.kind === 'audio') li.appendChild(auditionButton(a, li));
     li.append(
       el('span', { class: 'pk-name mono', text: a.path.replace(/^assets\//, '') }),
+      el('span', { class: 'pk-dur mono dim', text: '' }),
       el('span', { class: 'pk-meta', text: a.bytes > 1e6 ? `${(a.bytes / 1e6).toFixed(1)} MB` : `${Math.round(a.bytes / 1e3)} kB` }),
     );
     li.addEventListener('click', () => onPick(a));
@@ -2706,9 +3028,10 @@ function pickListForAssets(ulSel, kinds, onPick) {
 }
 
 function openAudioDialog() {
+  const lane = takeLane('audio');
   pickListForAssets('#audio-pick', ['audio'], (a) => {
     mutate((film) => film.audio.push({
-      id: uuid(), src: a.path, startInFrames: Math.round(state.playhead), gainDb: 0,
+      id: uuid(), src: a.path, startInFrames: Math.round(state.playhead), gainDb: 0, lane,
     }));
     $('#audio-dialog').close();
     select({ kind: 'audio', id: state.film.audio[state.film.audio.length - 1].id });
@@ -2737,7 +3060,7 @@ async function uploadInto(files, msgSel, afterUpload) {
 $('#btn-audio-upload').addEventListener('click', () => $('#audio-file-input').click());
 $('#audio-file-input').addEventListener('change', (e) => {
   if (e.target.files.length) uploadInto([...e.target.files], '#audio-upload-msg', () => pickListForAssets('#audio-pick', ['audio'], (a) => {
-    mutate((film) => film.audio.push({ id: uuid(), src: a.path, startInFrames: Math.round(state.playhead), gainDb: 0 }));
+    mutate((film) => film.audio.push({ id: uuid(), src: a.path, startInFrames: Math.round(state.playhead), gainDb: 0, lane: takeLane('audio') }));
     $('#audio-dialog').close();
   }));
   e.target.value = '';
@@ -2791,9 +3114,10 @@ $('#footage-file-input').addEventListener('change', (e) => {
 $('#btn-add-footage').addEventListener('click', openFootageDialog);
 
 function openOverlayDialog() {
+  const lane = takeLane('overlays');
   pickListForAssets('#overlay-pick', ['image', 'video'], (a) => {
     mutate((film) => film.overlays.push({
-      id: uuid(), src: a.path,
+      id: uuid(), src: a.path, lane,
       fromFrame: Math.round(state.playhead),
       toFrame: Math.min(Math.round(state.playhead) + fps() * 3, Math.max(totalFrames(), Math.round(state.playhead) + fps() * 3)),
       xPct: 4, yPct: 6, widthPct: 28, opacity: 1,
@@ -2815,7 +3139,7 @@ $('#btn-add-overlay').addEventListener('click', openOverlayDialog);
 
 function addCaptionAtPlayhead() {
   const from = Math.round(state.playhead);
-  const cap = { id: uuid(), text: 'Caption', fromFrame: from, toFrame: from + fps() * 3 };
+  const cap = { id: uuid(), text: 'Caption', fromFrame: from, toFrame: from + fps() * 3, lane: takeLane('captions') };
   mutate((film) => film.captions.push(cap));
   select({ kind: 'caption', id: cap.id });
   updateLayers(state.playhead);

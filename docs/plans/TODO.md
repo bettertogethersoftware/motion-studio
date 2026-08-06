@@ -92,7 +92,13 @@ Active plan documents:
        how far along it is (built / edited-since-built / draft, rendered /
        stale / not yet — and on a film it is the twisty too), refreshes
        itself from `/api/events` (badging what an agent just created), and
-       fans that one stream out to every document instead of one socket each. **Remaining: U-10 (both trees) and U-13
+       fans that one stream out to every document instead of one socket each.
+       **U-15 followed**: the film timeline's lanes are stored rather than
+       re-derived on every repaint (so one stops vanishing mid-drag, an empty
+       one can exist, and a clip can be dragged between them), audio clips trim
+       from the head as well as the tail — a new engine field,
+       `trimStartInFrames`, proven against ffmpeg — and the audio picker plays
+       each file before you place it. **Remaining: U-10 (both trees) and U-13
        (timeline blocks) — about 1 day.**
 6. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive

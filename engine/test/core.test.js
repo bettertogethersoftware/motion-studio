@@ -698,8 +698,31 @@ test('encoder: unmeasurable clips are skipped, not warned about', () => {
 
 test('encoder: trimEndInFrames caps the clip before placement', () => {
   const f = buildAudioFilter([{ src: 'a.wav', trimEndInFrames: 90, startInFrames: 30 }], 30, { limiter: false });
-  // clip-relative: trim first, THEN adelay
-  assert.match(f, /\[1:a\]atrim=0:3\.000,adelay=1000\|1000,volume=0dB,aformat=/);
+  // source-relative: trim first, THEN adelay
+  assert.match(f, /\[1:a\]atrim=0\.000:3\.000,asetpts=PTS-STARTPTS,adelay=1000\|1000,volume=0dB,aformat=/);
+});
+
+test('encoder: trimStartInFrames drops the head and resets the clip to zero', () => {
+  // The head trim is the one the timeline could not offer. atrim alone would
+  // keep the source timestamps, so the clip would arrive `trimStart` late on
+  // top of its adelay — asetpts is what makes the placement mean what it says.
+  const f = buildAudioFilter([{ src: 'a.wav', trimStartInFrames: 60, startInFrames: 30 }], 30, { limiter: false });
+  assert.match(f, /\[1:a\]atrim=2\.000,asetpts=PTS-STARTPTS,adelay=1000\|1000/);
+});
+
+test('encoder: both trims name points in the source, and the fade-out follows the kept window', () => {
+  const f = buildAudioFilter(
+    [{ src: 'a.wav', trimStartInFrames: 60, trimEndInFrames: 150, fadeOutFrames: 15 }], 30, { limiter: false });
+  assert.match(f, /atrim=2\.000:5\.000/);
+  // Kept window is 3s long, so a half-second fade-out starts at 2.5s — NOT at
+  // 4.5s, which is where the source-relative end would have put it.
+  assert.match(f, /afade=t=out:st=2\.500:d=0\.500/);
+});
+
+test('encoder: an untrimmed track keeps its chain free of atrim entirely', () => {
+  const f = buildAudioFilter([{ src: 'a.wav', startInFrames: 30 }], 30, { limiter: false });
+  assert.ok(!f.includes('atrim'), f);
+  assert.ok(!f.includes('asetpts'), f);
 });
 
 test('encoder: fadeInFrames fades up from the clip start', () => {

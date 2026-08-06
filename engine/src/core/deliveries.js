@@ -268,7 +268,8 @@ export function resolveDeliveryFrame(manifest, filmFrame) {
       // Without a recorded trim there is no end to test against; report the
       // track as present from its start onward, which is what the UI needs
       // to offer "this narration" as a target.
-      const end = t.trimEndInFrames != null ? start + t.trimEndInFrames : Infinity;
+      const head = t.trimStartInFrames ?? 0;
+      const end = t.trimEndInFrames != null ? start + (t.trimEndInFrames - head) : Infinity;
       return clamped >= start && clamped < end;
     })
     .map((t) => ({ ...t }));

@@ -237,12 +237,23 @@ export async function concatSegments({ segmentPaths, outputPath, ffmpegPath = 'f
  * Exported separately so it is unit-testable without running ffmpeg.
  *
  * Track: { src, startInFrames = 0, gainDb = 0,
- *          trimEndInFrames?, fadeInFrames?, fadeOutFrames? }   (v0.19)
+ *          trimStartInFrames?, trimEndInFrames?, fadeInFrames?, fadeOutFrames? }
  *
- * trimEndInFrames is CLIP-relative: keep only the clip's first N frames.
- * fadeOutFrames ends at the clip's effective end — trimEndInFrames when set,
- * otherwise where the composition ends (videoDurationSec), which is exactly
- * the "music bed longer than the video" case that used to hard-cut.
+ * Both trims are SOURCE-relative, and both name a point in the file rather than
+ * a length: the clip plays the source window [trimStartInFrames,
+ * trimEndInFrames). trimEndInFrames alone therefore keeps its v0.19 meaning
+ * exactly — "the clip's first N frames" — so no stored film changes behaviour.
+ * trimStartInFrames (v0.27) is the head trim the timeline could not offer:
+ * dropping the first two seconds of a take used to mean editing the file.
+ *
+ * After atrim the chain MUST reset timestamps — a head-trimmed stream still
+ * carries its source PTS, so adelay would place it at start + trimStart and
+ * every head trim would silently slide the clip late.
+ *
+ * fadeInFrames runs from the trimmed clip's own start, and fadeOutFrames ends
+ * at its effective end — trimEndInFrames when set, otherwise where the
+ * composition ends (videoDurationSec), which is exactly the "music bed longer
+ * than the video" case that used to hard-cut.
  *
  * Every track chain ends in aformat pinning 44.1 kHz stereo, so no single
  * input (a 16 kHz mono narration WAV, say) can drag the negotiated mix format
@@ -293,14 +304,24 @@ export function buildAudioFilter(tracks, fps, { limiter = true, videoDurationSec
     const steps = [];
     // Clip-relative operations first (trim, fades), then placement (adelay)
     // and gain — so frame numbers in the track config mean clip frames.
+    const headSec = t.trimStartInFrames ? t.trimStartInFrames / fps : 0;
     const trimSec = t.trimEndInFrames !== undefined ? t.trimEndInFrames / fps : null;
-    if (trimSec !== null) steps.push(`atrim=0:${trimSec.toFixed(3)}`);
+    if (headSec > 0 || trimSec !== null) {
+      steps.push(`atrim=${headSec.toFixed(3)}:${trimSec !== null ? trimSec.toFixed(3) : ''}`
+        .replace(/:$/, ''));
+      // atrim keeps the source timestamps, so without this a clip trimmed two
+      // seconds into the file arrives two seconds late on top of its adelay.
+      steps.push('asetpts=PTS-STARTPTS');
+    }
     if (t.fadeInFrames) {
       steps.push(`afade=t=in:st=0:d=${(t.fadeInFrames / fps).toFixed(3)}`);
     }
     if (t.fadeOutFrames) {
-      const boundSec = trimSec
-        ?? (videoDurationSec !== null ? Math.max(0, videoDurationSec - startFrames / fps) : null);
+      // Bounds are clip-relative now that the head may be cut: the fade ends
+      // where the kept window ends, not where the source would have.
+      const boundSec = trimSec !== null
+        ? Math.max(0, trimSec - headSec)
+        : (videoDurationSec !== null ? Math.max(0, videoDurationSec - startFrames / fps) : null);
       if (boundSec !== null) {
         const d = t.fadeOutFrames / fps;
         steps.push(`afade=t=out:st=${Math.max(0, boundSec - d).toFixed(3)}:d=${d.toFixed(3)}`);
@@ -399,9 +420,10 @@ export function buildAudioFilter(tracks, fps, { limiter = true, videoDurationSec
 export function computeBalanceWarnings(tracks, { fps, videoDurationSec, thresholdDb = 8 } = {}) {
   const infos = tracks.map((t) => {
     const start = (t.startInFrames ?? 0) / fps;
+    const headSec = (t.trimStartInFrames ?? 0) / fps;
     const clipLen = t.trimEndInFrames !== undefined
-      ? t.trimEndInFrames / fps
-      : (typeof t.clipDurationSec === 'number' ? t.clipDurationSec : null);
+      ? Math.max(0, t.trimEndInFrames / fps - headSec)
+      : (typeof t.clipDurationSec === 'number' ? Math.max(0, t.clipDurationSec - headSec) : null);
     const end = Math.min(clipLen !== null ? start + clipLen : videoDurationSec, videoDurationSec);
     const gain = t.gainDb ?? 0;
     const level = typeof t.clipMeanDb === 'number' ? t.clipMeanDb + gain : null;

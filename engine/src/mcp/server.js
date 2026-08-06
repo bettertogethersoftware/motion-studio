@@ -831,10 +831,17 @@ const FILM_AUDIO_TRACK = z.object({
   src: z.string().describe('Film-relative audio under the film\'s assets/'),
   startInFrames: z.number().int().min(0).optional(),
   gainDb: z.number().optional(),
-  trimEndInFrames: z.number().int().min(1).optional(),
+  trimStartInFrames: z.number().int().min(0).optional()
+    .describe('Start N frames INTO the source file — the head trim (v0.27)'),
+  trimEndInFrames: z.number().int().min(1).optional()
+    .describe('Stop at frame N of the source file; with no head trim, the clip first N frames'),
   fadeInFrames: z.number().int().min(0).optional(),
   fadeOutFrames: z.number().int().min(0).optional(),
   duck: z.boolean().optional(),
+  mute: z.boolean().optional()
+    .describe('Silence this one track — it stays on the timeline and out of the mix'),
+  lane: z.number().int().min(0).optional()
+    .describe('Which timeline lane the Studio draws this track in; the mixer ignores it'),
 });
 const FILM_OVERLAY = z.object({
   id: z.string().optional(),
@@ -944,6 +951,20 @@ server.registerTool(
         sizePct: z.number().min(1).max(20).optional().describe('Font size as % of frame height (default 4.5)'),
         position: z.enum(['bottom', 'top']).optional(),
       }).optional(),
+      lanes: z.object({
+        audio: z.number().int().min(1).max(32).optional(),
+        captions: z.number().int().min(1).max(32).optional(),
+        overlays: z.number().int().min(1).max(32).optional(),
+      }).optional().describe(
+        'How many timeline lanes the Studio shows per family. Presentation only — nothing renders differently — '
+        + 'but stored, so an empty lane a human made to work in survives your edit.',
+      ),
+      mutedLanes: z.object({
+        audio: z.array(z.number().int().min(0)).optional(),
+      }).optional().describe(
+        'Which audio lanes are muted. A track in a muted lane is left OUT of the mix — as is a track with '
+        + 'mute:true — so this changes what the film sounds like, not just what the editor shows.',
+      ),
       sequences: z.record(z.object({
         intent: z.string().max(500).optional().describe('What this sequence is for — shown to the human, and to future directors'),
       })).optional().describe(
@@ -1229,7 +1250,8 @@ server.registerTool(
       'give the composition a transparent background). The output filename extension follows the format automatically. ' +
       'output.audioLimiter (default true) brick-walls the mixed audio at -1 dBFS; set false only if you want the ' +
       'summed mix passed through untouched, and remember track gains sum directly (amix runs with normalize=0). ' +
-      'Audio tracks take clip-relative trim/fades (v0.19): trimEndInFrames keeps only the clip\'s first N frames; ' +
+      'Audio tracks take source-relative trims and clip-relative fades: the clip plays the source window '
+      + '[trimStartInFrames, trimEndInFrames), so trimEndInFrames alone still keeps the clip\'s first N frames; ' +
       'fadeInFrames fades up from the clip start; fadeOutFrames fades to silence ending at trimEndInFrames if set, ' +
       'else at the composition end — so a music bed longer than the video resolves instead of hard-cutting. ' +
       'duck:true on a track auto-ducks it under the mix of all non-ducked tracks (sidechain compression — the bed ' +
@@ -1252,8 +1274,10 @@ server.registerTool(
                 src: z.string().describe('Scene-relative audio path, e.g. assets/music.mp3'),
                 startInFrames: z.number().int().min(0).optional(),
                 gainDb: z.number().optional(),
+                trimStartInFrames: z.number().int().min(0).optional()
+                  .describe('Start N frames INTO the source file — the head trim (v0.27)'),
                 trimEndInFrames: z.number().int().min(1).optional()
-                  .describe('Keep only the clip\'s first N frames (clip-relative)'),
+                  .describe('Stop at frame N of the source file; with no head trim, the clip\'s first N frames'),
                 fadeInFrames: z.number().int().min(0).optional()
                   .describe('Fade up from silence over the clip\'s first N frames'),
                 fadeOutFrames: z.number().int().min(0).optional()

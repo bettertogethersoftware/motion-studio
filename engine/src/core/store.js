@@ -488,7 +488,7 @@ export class WorkspaceStore {
    */
   async updateFilm(filmId, patch, { expectedRevision = undefined } = {}) {
     const ALLOWED = new Set(['name', 'scenes', 'outputFilename', 'audio', 'overlays', 'captions',
-      'captionStyle', 'sequences', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables',
+      'captionStyle', 'lanes', 'mutedLanes', 'sequences', 'audioTargetPeakDb', 'burnCaptions', 'review', 'sceneDefaults', 'deliverables',
       // Resolved against the CURRENT timeline below, then merged as `audio`.
       'audioPatch', 'audioGainOffsetDb']);
     for (const k of Object.keys(patch ?? {})) {

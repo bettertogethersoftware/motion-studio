@@ -181,7 +181,7 @@ import { renderComposition, renderParallel, renderStill, compositionVariables } 
 import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
-import { planFilm, submitFilmBuild, toMixerTracks } from '../core/films.js';
+import { planFilm, submitFilmBuild, toMixerTracks, audibleTracks } from '../core/films.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
 import { resolveReviewPolicy, extractRenderedFrame } from '../core/render-review.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
@@ -1396,7 +1396,14 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           if (!detail.totalFrames || !detail.fps) {
             throw new EngineError(ErrorCodes.INVALID_FILM, 'Add at least one scene first — the mix length is the film length');
           }
-          const tracks = toMixerTracks(film.audio).map((t) => {
+          const audible = audibleTracks(film);
+          if (!audible.length) {
+            throw new EngineError(ErrorCodes.INVALID_FILM,
+              (film.audio ?? []).length
+                ? 'Every track on this film is muted — unmute a lane (or a track) to hear the mix'
+                : 'Add an audio track first — there is nothing to mix');
+          }
+          const tracks = toMixerTracks(audible).map((t) => {
             const abs = resolveInTarget(film.path, t.src.replace(/\\/g, '/'));
             if (!fs.existsSync(abs)) {
               throw new EngineError(ErrorCodes.FILE_NOT_FOUND, `audio not found: ${t.src}`, { path: t.src });

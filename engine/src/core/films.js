@@ -70,7 +70,25 @@ export const MAX_CAPTION_CHARS = 500;
 
 /** Track fields the ffmpeg mixer understands — everything else on an audio
  *  track (id, label) is editor metadata and is stripped before the build. */
-const MIXER_TRACK_FIELDS = ['src', 'startInFrames', 'gainDb', 'trimEndInFrames', 'fadeInFrames', 'fadeOutFrames', 'duck'];
+const MIXER_TRACK_FIELDS = ['src', 'startInFrames', 'gainDb', 'trimStartInFrames', 'trimEndInFrames',
+  'fadeInFrames', 'fadeOutFrames', 'duck'];
+
+/**
+ * The master tracks that actually reach the mix.
+ *
+ * A track is silent when it says so (`mute`) or when its lane is muted
+ * (`film.mutedLanes.audio`). Lane mute is a property of the LANE, not of what
+ * happens to be sitting in it: mute lane 2 to hear the film without the bed,
+ * drop another bed clip in, and it is silent too — which is what every editor
+ * means by muting a track.
+ *
+ * One function, because "what is audible" is asked in three places (the build,
+ * preview_audio, the balance warnings) and three answers would drift.
+ */
+export function audibleTracks(film) {
+  const muted = new Set(film?.mutedLanes?.audio ?? []);
+  return (film?.audio ?? []).filter((t) => !t.mute && !muted.has(t.lane ?? 0));
+}
 
 /** Strip editor metadata from film audio tracks, keeping only mixer fields. */
 export function toMixerTracks(tracks) {
@@ -95,7 +113,15 @@ function checkTrack(t, i, problems) {
   }
   if (t.startInFrames !== undefined && !isNonNegInt(t.startInFrames)) problems.push(`${at}.startInFrames must be a non-negative integer`);
   if (t.gainDb !== undefined && typeof t.gainDb !== 'number') problems.push(`${at}.gainDb must be a number`);
+  if (t.trimStartInFrames !== undefined && !isNonNegInt(t.trimStartInFrames)) problems.push(`${at}.trimStartInFrames must be a non-negative integer`);
   if (t.trimEndInFrames !== undefined && !isPosInt(t.trimEndInFrames)) problems.push(`${at}.trimEndInFrames must be a positive integer`);
+  // Both name a point in the SOURCE, so an inverted pair is a clip of no
+  // length — silence the mixer would render without complaint.
+  if (isNonNegInt(t.trimStartInFrames) && isPosInt(t.trimEndInFrames) && t.trimStartInFrames >= t.trimEndInFrames) {
+    problems.push(`${at}.trimStartInFrames must be before trimEndInFrames (both are offsets into the source file)`);
+  }
+  if (t.lane !== undefined && !isNonNegInt(t.lane)) problems.push(`${at}.lane must be a non-negative integer`);
+  if (t.mute !== undefined && typeof t.mute !== 'boolean') problems.push(`${at}.mute must be a boolean`);
   if (t.fadeInFrames !== undefined && !isNonNegInt(t.fadeInFrames)) problems.push(`${at}.fadeInFrames must be a non-negative integer`);
   if (t.fadeOutFrames !== undefined && !isNonNegInt(t.fadeOutFrames)) problems.push(`${at}.fadeOutFrames must be a non-negative integer`);
   if (t.duck !== undefined && typeof t.duck !== 'boolean') problems.push(`${at}.duck must be a boolean`);
@@ -386,6 +412,30 @@ export function validateFilm(film) {
     }
   }
 
+  const lanes = film.lanes;
+  if (lanes !== undefined && lanes !== null) {
+    if (typeof lanes !== 'object' || Array.isArray(lanes)) problems.push('lanes must be an object');
+    else {
+      for (const [k, v] of Object.entries(lanes)) {
+        if (!['audio', 'captions', 'overlays'].includes(k)) problems.push(`lanes.${k} is not a lane family`);
+        else if (!isPosInt(v) || v > 32) problems.push(`lanes.${k} must be an integer 1..32`);
+      }
+    }
+  }
+
+  const ml = film.mutedLanes;
+  if (ml !== undefined && ml !== null) {
+    if (typeof ml !== 'object' || Array.isArray(ml)) problems.push('mutedLanes must be an object');
+    else {
+      for (const [k, v] of Object.entries(ml)) {
+        if (k !== 'audio') problems.push(`mutedLanes.${k} is not a mutable family (only audio makes sound)`);
+        else if (!Array.isArray(v) || v.some((n) => !isNonNegInt(n))) {
+          problems.push('mutedLanes.audio must be an array of lane indexes');
+        }
+      }
+    }
+  }
+
   const cs = film.captionStyle;
   if (cs !== undefined && cs !== null) {
     if (typeof cs !== 'object') problems.push('captionStyle must be an object');
@@ -459,6 +509,23 @@ function normalizeSegment(s) {
 }
 
 /** Fill defaults and stamp ids on timeline items so editors can address them. */
+/**
+ * Sort, dedupe, and drop the key when nothing is muted — but pass anything
+ * malformed straight through, so `validateFilm` reports it instead of this
+ * quietly discarding it. Silently accepting `{audio: ["1"]}` would leave a
+ * caller certain it had muted a lane that is still playing.
+ */
+function normalizeMutedLanes(input) {
+  if (input === undefined) return {};
+  const wellFormed = input !== null && typeof input === 'object' && !Array.isArray(input)
+    && Object.keys(input).every((k) => k === 'audio')
+    && (input.audio === undefined
+      || (Array.isArray(input.audio) && input.audio.every((n) => Number.isInteger(n) && n >= 0)));
+  if (!wellFormed) return { mutedLanes: input };
+  const audio = [...new Set(input.audio ?? [])].sort((a, b) => a - b);
+  return audio.length ? { mutedLanes: { audio } } : {};
+}
+
 export function normalizeFilm(input = {}) {
   const stampIds = (arr) => (Array.isArray(arr) ? arr.map((x) => (x && typeof x === 'object' && !x.id ? { ...x, id: randomUUID() } : x)) : arr);
   const sd = input.sceneDefaults;
@@ -475,6 +542,19 @@ export function normalizeFilm(input = {}) {
     overlays: stampIds(input.overlays ?? []),
     captions: stampIds(input.captions ?? []),
     captionStyle: { sizePct: 4.5, position: 'bottom', ...(input.captionStyle ?? {}) },
+    // How many lanes the editor shows per family. Presentation only — the
+    // mixer and the burn-in read `lane` on the items, never this — but it has
+    // to be stored, because an empty lane you just made is exactly the thing
+    // that must survive both a drag and a reload.
+    ...(input.lanes && typeof input.lanes === 'object' && !Array.isArray(input.lanes)
+      ? { lanes: input.lanes }
+      : {}),
+    // Which lanes are muted. Kept beside `lanes` rather than on the tracks so
+    // that muting a lane silences whatever is dropped into it next, too.
+    // Normalized rather than stored as sent: sorted, deduped, and dropped
+    // entirely when nothing is muted, so "unmute the last lane" leaves a clean
+    // document instead of an empty object a human has to interpret.
+    ...normalizeMutedLanes(input.mutedLanes),
     sequences: input.sequences ?? {},
     audioTargetPeakDb: input.audioTargetPeakDb ?? null,
     burnCaptions: input.burnCaptions ?? false,
@@ -1327,6 +1407,8 @@ async function resolveFilmForBuild({ film, store, requireRendered = true, delive
       ...(s.sequence ? { sequence: s.sequence } : {}),
     });
   }
+  // Declared, not audible: muting every track must not flip the film back to
+  // per-scene audio — it means "this film is silent", not "use the scenes'".
   const hasMasterAudio = !!(film.audio ?? []).length;
   const info = validateScenes(sceneData, { hasMasterAudio, requireRendered });
 
@@ -1339,7 +1421,7 @@ async function resolveFilmForBuild({ film, store, requireRendered = true, delive
   let audioTracks;
   if (hasMasterAudio) {
     audioTracks = [];
-    for (const t of film.audio) {
+    for (const t of audibleTracks(film)) {
       const rel = t.src.replace(/\\/g, '/');
       const abs = resolveInTarget(film.path, rel, { asAsset: true });
       if (!fs.existsSync(abs)) {

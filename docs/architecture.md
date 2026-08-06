@@ -449,12 +449,33 @@ pressure typically erases the speedup on desktop hardware.
 ## 9. Audio
 
 `scene.json` may declare `audio: [{ src, startInFrames?, gainDb?,
-trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }]` (the last four new
-in v0.19). After the silent video exists, a single FFmpeg pass builds a
-`-filter_complex` graph — per-track clip-relative `atrim`/`afade` (fade-out
-bounded by the trim, else by the composition end), then `adelay` (frame offset
-→ ms) and `volume`, then `amix` with `normalize=0` so adding a quiet voiceover
-doesn't duck the music bed — and muxes with the video stream copied. Every
+trimStartInFrames?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck? }]`.
+After the silent video exists, a single FFmpeg pass builds a `-filter_complex`
+graph — per-track `atrim`/`afade` (fade-out bounded by the kept window, else by
+the composition end), then `adelay` (frame offset → ms) and `volume`, then
+`amix` with `normalize=0` so adding a quiet voiceover doesn't duck the music
+bed — and muxes with the video stream copied.
+
+**A muted lane is silent everywhere.** `audibleTracks(film)` in `core/films.js`
+is the single rule — a track is dropped when its own `mute` is true or its lane
+is in `film.mutedLanes.audio` — and the build, `preview_audio` and the balance
+warnings all read it, because three answers to "what is audible" would drift.
+`hasMasterAudio` stays keyed on the *declared* timeline: muting every track
+means the film is silent, not that per-scene audio comes back. Lane mute lives
+on the film rather than on the tracks so that a clip dragged into a muted lane
+is silent too — which is what muting a track means in any editor.
+
+**Both trims index the source file**, and both name a point rather than a
+length: the clip plays `[trimStartInFrames, trimEndInFrames)`. That keeps
+`trimEndInFrames` alone meaning exactly what it meant in v0.19 — the clip's
+first N frames — while `trimStartInFrames` (v0.27) adds the head trim the
+timeline could not offer, which is what "drop the room tone off the front of
+this take" needs. A head-trimmed chain **must** follow `atrim` with
+`asetpts=PTS-STARTPTS`: atrim keeps the source timestamps, so without it every
+head trim would silently arrive `trimStart` late on top of its `adelay`. Proven
+against ffmpeg with a file of one second of silence then one second of tone —
+the mix's first quarter-second reads `-inf` dB untrimmed and −24 dB with a
+30-frame head trim. Every
 track chain ends in `aformat` pinning **44.1 kHz stereo**: without it, ffmpeg
 negotiates a common format across the mix inputs, and one 16 kHz mono
 narration WAV (Piper's native output) silently downsampled the entire mix —
