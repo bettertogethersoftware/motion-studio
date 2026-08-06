@@ -234,7 +234,10 @@ of asking the agent to retype either.
 3. Set the complete play order with `update_film { scenes: [...] }`, mixing
    rendered entries (`{ slug: "title" }`) and footage entries
    (`{ footage: "assets/clip.mp4", durationInFrames: N }`). The engine verifies
-   the frame count and signature before it builds.
+   the frame count and signature before it builds. Footage is **not** a scene:
+   it has no slug or folder, so it never appears in a scene listing and is
+   counted separately by `get_workspace`. `get_film` is where the whole play
+   order — scenes and clips in cut order — is readable.
 4. Put the continuous voice/music mix on the film's master `audio` timeline.
    Use `get_film` or `build_film { plan: true }` for the resolved offsets; do not
    accumulate scene durations by hand.

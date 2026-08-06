@@ -61,7 +61,7 @@ The first time this server starts against an existing data directory, it migrate
 | URI | Content |
 |---|---|
 | `motion-studio://reference/frame-api` | The Frame API authoring contract (markdown). Agents should read this before writing composition code. |
-| `motion-studio://workspace/manifest` | This workspace's films (each with its scene configs) and its shared-asset library, as structured JSON. |
+| `motion-studio://workspace/manifest` | This workspace's films (each with its scene configs) and its shared-asset library, as structured JSON. `sceneConfigs` lists **scenes**; footage segments are not scenes and do not appear (before v0.27 each one produced a `{ scene: "undefined", missing: true }` row, so a film with clips reported scenes that could not be opened, rendered or deleted). Read the film's play order from `get_film` when you need footage as well. |
 
 ## Tools
 
@@ -73,7 +73,7 @@ Every `film` / `scene` / `target` argument is a **workspace-local id**: a bare s
 
 | tool | arguments | returns / notes |
 |---|---|---|
-| `get_workspace` | — | Describes the workspace this server is bound to (`MOTION_STUDIO_WORKSPACE`): `{ workspace, name, path, films: [{ film, name, scenes, broken? }], library: { files, bytes } }`. Every other tool operates inside this one workspace. Error: `prereqs_missing`. |
+| `get_workspace` | — | Describes the workspace this server is bound to (`MOTION_STUDIO_WORKSPACE`): `{ workspace, name, path, films: [{ film, name, scenes, footage?, broken? }], library: { files, bytes } }`. **`scenes` counts scenes only** (v0.27); `footage` appears when the film's play order also holds supplied clips. They used to be one number, which meant a film of pure footage advertised a scene count that `list_scenes`/`get_film` could not produce. Every other tool operates inside this one workspace. Error: `prereqs_missing`. |
 
 ### Films
 

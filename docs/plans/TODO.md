@@ -77,11 +77,23 @@ Active plan documents:
        when it closes, which kills every document shortcut until you
        click. ~4½ days total, splittable; U-1/U-3/U-4/U-11 carry the value,
        U-13 is the first thing to cut.
-       **Progress 2026-08-06 — U-1…U-4 shipped** (tab strip, the drifted
-       helpers, background-document toasts, the tab-close flush), plus U-8's
-       engine half as BUG-2. U-4 accepted in headless Chromium with a control
-       run proving the fix load-bearing. **Remaining: U-5…U-7, U-9, and the
-       accessibility pass U-10…U-13 — about 3 days.**
+       **Progress 2026-08-06 — U-1…U-7, U-9, U-11, U-12 shipped**, U-8 partly,
+       plus U-8's engine half as BUG-2: the tab strip, the
+       drifted helpers, background-document toasts, the tab-close flush, the
+       working-set keyboard (Alt+W / Alt+PageUp-Down / Alt+1…9 / Ctrl+K W —
+       not Ctrl+W, which the browser owns), the film-delete dialog, the
+       palette's focus restore, the activity bar's state, and the version
+       chip, and — closing U-6 — the shared name/confirm dialogs that took the
+       last native `prompt()`/`confirm()` out of the film document and the
+       panels module. Each accepted in headless Chromium, U-4 and U-6 with
+       control runs against disk. **U-14 was added and shipped the same day
+       from use**: the Explorer now marks the active document against merely
+       open ones, gives every row a single glyph that says what it is and
+       how far along it is (built / edited-since-built / draft, rendered /
+       stale / not yet — and on a film it is the twisty too), refreshes
+       itself from `/api/events` (badging what an agent just created), and
+       fans that one stream out to every document instead of one socket each. **Remaining: U-10 (both trees) and U-13
+       (timeline blocks) — about 1 day.**
 6. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
        extraction first); C-2 desktop packaging (bundled Node, installer) —
@@ -156,18 +168,16 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       delivery" fails rarely under the full parallel run, passes standalone
       and on re-run. Worth one root-cause hour before it erodes trust in
       red suites.
-- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — two open,
-      neither blocking, both one line at the preferred fix. **BUG-1**: a
-      scene's vendored `frame-api.js` is frozen at creation, so every scene
-      made before a runtime bump lacks the helpers
-      [frame-api.md](../frame-api.md) documents (v1.6's `frameSize`/
-      `safeArea` today; v1.4 and v1.5 had the same hole unnoticed) — fix (2),
-      re-copying the runtime on *clone*, is worth taking on its own.
-      **BUG-2**: every film containing footage reports a phantom scene named
-      `undefined`; cosmetic in the Explorer, but it reaches the MCP workspace
-      manifest, so an agent is told a scene exists that cannot be opened,
-      rendered or deleted. Take BUG-2 first — it is the one that misleads a
-      reader rather than merely failing one.
+- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — three open,
+      none blocking (BUG-2 was fixed 2026-08-06). **BUG-1**: a scene's vendored
+      `frame-api.js` is frozen at creation, so every scene made before a runtime
+      bump lacks the helpers [frame-api.md](../frame-api.md) documents (v1.6's
+      `frameSize`/`safeArea` today; v1.4 and v1.5 had the same hole unnoticed) —
+      fix (2), re-copying the runtime on *clone*, is worth taking on its own,
+      and it is the one that misleads a reader rather than merely failing one.
+      **BUG-3**: the film page accepts edits before it has loaded, and drops
+      them. **BUG-4**: `computeFit` throws on a document being torn down — one
+      console line, one-line fix.
 
 ## Parked, with reasons
 

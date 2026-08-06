@@ -634,18 +634,28 @@
     }
 
     async function renameAsset(a) {
-      const to = prompt('New path (must stay under assets/):', a.path);
-      if (!to || to === a.path) return;
       // Moving a file out from under an audio track breaks it just as badly as
-      // deleting it, and here the repair is unambiguous.
-      let updateAudio = false;
-      if (a.audioRefs) {
-        updateAudio = confirm(
-          `${a.audioRefs} audio track${a.audioRefs === 1 ? '' : 's'} reference ${a.path}.\n\n`
-          + 'OK: point them at the new path.\n'
-          + 'Cancel: leave them pointing at the old (now missing) file.',
-        );
-      }
+      // deleting it, and here the repair is unambiguous — so the tracks are the
+      // same dialog's second question, ticked, rather than a chained confirm()
+      // whose OK and Cancel were the only words describing either outcome.
+      const answer = await StudioUtil.askForText({
+        title: 'rename asset',
+        label: 'new path',
+        note: 'Must stay under assets/.',
+        value: a.path,
+        ok: 'rename',
+        checkbox: a.audioRefs
+          ? {
+            label: `also repoint ${a.audioRefs} audio track${a.audioRefs === 1 ? '' : 's'} that reference ${a.path}`,
+            checked: true,
+            note: 'Left alone, those tracks point at a file that no longer exists and the next render fails when ffmpeg tries to mix them.',
+          }
+          : null,
+      });
+      if (!answer) return;
+      const to = a.audioRefs ? answer.value : answer;
+      const updateAudio = a.audioRefs ? answer.checked : false;
+      if (to === a.path) return;
       try {
         const res = await api(sceneUrl('/asset/rename'), { method: 'POST', body: { from: a.path, to, updateAudio } });
         await afterAssetMutation(res);

@@ -175,6 +175,51 @@ single function every edit funnels through is cheap insurance.
 
 ---
 
+## BUG-4 — `computeFit` throws on a film document that is closing
+
+**Found** 2026-08-06, in the control run for the Explorer-standing change (the
+same error appears on unmodified `master`, so it predates it). **Severity:**
+low — cosmetic, one console error per closing document. **Area:**
+`engine/src/studio/public/film.js`.
+
+### What is wrong
+
+`computeFit` reads `$('#tl-scroll').clientWidth` with no null guard
+(`film.js:2392`), and its `ResizeObserver` (`film.js:2462`) can fire while the
+film document's iframe is being torn down — the element is gone, the callback
+is not:
+
+```
+TypeError: Cannot read properties of null (reading 'clientWidth')
+    at computeFit (http://localhost:7345/film.js:2392)
+    at <anonymous> (http://localhost:7345/film.js:2462)
+```
+
+### Evidence
+
+Headless Chromium against the running Studio: open two films from the Explorer,
+then open a scene. One error per teardown, reproduced on both the working tree
+and a `git checkout --` control of `film.js` at HEAD (line 2377 there — the same
+function before later edits moved it).
+
+### Who is bitten
+
+Nobody functionally: the observer's next firing works, and the fit is
+recomputed when the document is shown. It costs a red line in the console that
+a real error then has to be found among.
+
+### Candidate fixes
+
+1. **Guard the read** — `const sc = $('#tl-scroll'); if (!sc) return;`. One
+   line, and correct: a document with no timeline has no fit to compute.
+2. **Disconnect the observer on teardown**, in the `closing()` hook the shell
+   already calls. Tidier in principle, but the shell removes the frame without
+   waiting on anything but the save flush, so (1) is still needed underneath.
+
+Take (1).
+
+---
+
 ## Fixed
 
 - **BUG-2 — every film with footage reported a phantom scene called

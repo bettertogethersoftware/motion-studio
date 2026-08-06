@@ -108,7 +108,9 @@ body {
   width: 12px; flex-shrink: 0; text-align: center;
   font-size: 9px; color: var(--dim);
 }
-.chev-btn { background: none; border: none; padding: 0; cursor: pointer; }
+/* `.chev` is the workspace header's twisty only. A film's disclosure control is
+   its own glyph (see `.tree-ico` below), which is why there is no button rule
+   here any more. */
 
 .tree-ws {
   padding: 9px 12px 6px;
@@ -120,21 +122,70 @@ body {
 .tree-add { visibility: hidden; font-size: 10px; padding: 1px 5px; }
 .tree-ws:hover .tree-add { visibility: visible; }
 
-.tree-film { padding: 7px 12px 7px 20px; }
+.tree-film { padding: 7px 12px 7px 14px; }
 .tree-film.missing .p-meta { color: var(--err); }
 .tree-scene {
-  padding: 5px 12px 5px 46px;
+  padding: 5px 12px 5px 30px;
   font-size: 12px; color: var(--muted);
 }
-.tree-scene.active { border-left-color: var(--accent); background: var(--ink-3); color: var(--text); }
-.tree-lib { padding: 6px 12px 8px 20px; font-size: 12px; }
+
+/* Open, and open-and-in-front, are different states and now look it: the tab
+   strip's language, said on the left as well. Background documents get the
+   quiet selection grey VS Code uses for "selected, not focused"; the one you
+   are actually looking at gets the amber record light. */
+.ws-tree li.open { background: var(--select); }
+.ws-tree li.open .p-name { color: var(--text); }
+.ws-tree li.active { border-left-color: var(--accent); background: var(--ink-3); }
+.ws-tree li.active .p-name { color: var(--accent); }
+.ws-tree li.open:hover, .ws-tree li.active:hover { background: var(--ink-3); }
+.tree-scene.open, .tree-scene.active { color: var(--text); }
+
+/* ONE mark per row: what it is by shape — the tab strip's ▶ and ◧, because the
+   same thing must not be drawn two ways in one window — and how far along it is
+   by colour. A state dot beside the glyph said the same thing twice; the words
+   are in the tooltip, because the rail is 264px wide and twenty rows of prose is
+   not a list. Deliberately NOT re-coloured on the active row: which row you are
+   on is already said three ways (bar, background, amber name), and the state is
+   the fact that would be lost. */
+.ws-tree .tree-ico {
+  width: 12px; flex-shrink: 0; text-align: center;
+  font-size: 10px; line-height: 1; color: var(--dim); opacity: 0.75;
+  /* A film's glyph is also its disclosure control, so it is a real button:
+     strip the chrome, keep the row's own cursor. */
+  background: none; border: none; padding: 0; cursor: inherit;
+  display: inline-block; transform-origin: 50% 50%;
+  transition: transform 0.12s ease;
+}
+button.tree-ico { cursor: pointer; }
+/* Pointing right it is closed, turned down it is open — the disclosure
+   triangle every tree has, which is why this row needs no separate chevron. */
+.tree-film.expanded > .tree-ico { transform: rotate(90deg); }
+.ws-tree li.open .tree-ico, .ws-tree li.active .tree-ico { opacity: 1; }
+
+.ws-tree .tree-ico.st-ok { color: var(--ok); opacity: 1; }
+.ws-tree .tree-ico.st-warn { color: var(--warn); opacity: 1; }
+.ws-tree .tree-ico.st-err { color: var(--err); opacity: 1; }
+.ws-tree .tree-ico.st-draft { color: var(--dim); opacity: 0.5; }
+.ws-tree .tree-ico.st-live {
+  color: var(--accent); opacity: 1;
+  animation: st-pulse 1.6s ease-in-out infinite;
+}
+@keyframes st-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .ws-tree .tree-ico.st-live { animation: none; } }
+
+.ws-tree .p-new {
+  font: 9px var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--accent);
+  padding: 1px 4px; border-radius: var(--radius); flex-shrink: 0;
+}
+.tree-lib { padding: 6px 12px 8px 14px; font-size: 12px; }
 .tree-lib.active { border-left-color: var(--accent); background: var(--ink-3); }
-.tree-note { padding: 3px 12px 3px 34px; font-size: 11px; cursor: default; }
+.tree-note { padding: 3px 12px 3px 14px; font-size: 11px; cursor: default; }
 .tree-note:hover { background: none; }
 .tree-first-film { cursor: pointer; padding-top: 5px; padding-bottom: 7px; }
 .tree-first-film:hover { background: var(--ink-3); }
 .tree-first-film:hover .p-name { color: var(--accent); }
-.tree-note-scene { padding-left: 46px; }
+.tree-note-scene { padding-left: 30px; }
 .scene-add .p-name { color: var(--dim); }
 .tree-actions { padding: 12px 12px 4px; }
 .tree-actions button { width: 100%; font-size: 11px; }
@@ -751,6 +802,9 @@ label.radio input { accent-color: var(--accent); }
 }
 .toast.error { border-left-color: var(--err); }
 .toast.info { border-left-color: var(--accent); }
+/* A toast that takes you somewhere — "new film — X", which opens it. */
+.toast.clickable { cursor: pointer; }
+.toast.clickable:hover { border-color: var(--dim); }
 .toast-code {
   flex: none;
   font-size: 10px; letter-spacing: 0.06em;

@@ -155,17 +155,40 @@
   let rows = [];        // the current candidate list
   let cursor = 0;
 
-  function close() {
+  /* Where the keyboard was before the palette took it. Closing used to remove
+   * the focused input and restore nothing, so focus fell to <body> — and every
+   * document shortcut (Space, the arrows, PageUp/PageDown, Ctrl+S) went dead
+   * until the human clicked back into the film, with nothing to say why.
+   * Measured: activeElement was the document iframe before Ctrl+P, and BODY
+   * after Esc. */
+  let returnFocusTo = null;
+
+  function restoreFocus() {
+    const el = returnFocusTo;
+    returnFocusTo = null;
+    // It may be gone — the chosen command can close the document it lived in —
+    // in which case the active document is the right place to land.
+    try {
+      if (el && el.isConnected) { el.focus(); return; }
+      document.querySelector('.editor-frame.on')?.focus();
+    } catch { /* nothing focusable: the shell keeps the keyboard */ }
+  }
+
+  function close({ restore = true } = {}) {
     if (!host) return;
     host.scrim.remove();
     host.box.remove();
     host = null;
     rows = [];
+    if (restore) restoreFocus();
   }
 
   function open(nextMode) {
     if (host && mode === nextMode) { host.input.select(); return; }
-    if (host) close();
+    // Swapping modes must not treat the palette's own input as the place to
+    // return to, so the remembered element survives a mode swap untouched.
+    if (host) close({ restore: false });
+    else returnFocusTo = document.activeElement;
     mode = nextMode;
 
     const scrim = document.createElement('div');
@@ -182,6 +205,15 @@
       : 'Type a command…';
     const list = document.createElement('ul');
     list.className = 'palette-list';
+    // The cursor row already exists and already scrolls itself into view; this
+    // only names for a screen reader what the code has always tracked.
+    list.id = 'palette-list';
+    list.setAttribute('role', 'listbox');
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-controls', 'palette-list');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-label', mode === 'files' ? 'Go to a film or scene' : 'Run a command');
     const hint = document.createElement('div');
     hint.className = 'palette-hint';
     hint.append(
@@ -273,6 +305,9 @@
       }
       const li = document.createElement('li');
       li.className = 'palette-row' + (i === cursor ? ' on' : '');
+      li.id = `palette-row-${i}`;
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === cursor ? 'true' : 'false');
       const ico = document.createElement('span');
       ico.className = 'pal-ico';
       ico.textContent = r.icon;
@@ -286,14 +321,22 @@
       li.addEventListener('pointerdown', (e) => { e.preventDefault(); choose(i); });
       host.list.appendChild(li);
     });
-    host.list.querySelector('.palette-row.on')?.scrollIntoView({ block: 'nearest' });
+    const on = host.list.querySelector('.palette-row.on');
+    on?.scrollIntoView({ block: 'nearest' });
+    // Focus stays in the input; this is what says which row it is pointing at.
+    if (on?.id) host.input.setAttribute('aria-activedescendant', on.id);
+    else host.input.removeAttribute('aria-activedescendant');
   }
 
   function choose(i) {
     const row = rows[i];
     if (!row) return;
-    close();
+    // Dismissing returns you where you were; CHOOSING should land you in what
+    // you picked. So no restore here — run first, then take the keyboard to
+    // whatever is now on screen, which for a film or scene is that document.
+    close({ restore: false });
     try { row.run(); } catch (err) { console.error(err); }
+    try { (document.querySelector('.editor-frame.on') ?? document.body).focus(); } catch { /* nothing to focus */ }
   }
 
   function onKey(e) {

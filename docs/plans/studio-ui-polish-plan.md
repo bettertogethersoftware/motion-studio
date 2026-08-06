@@ -10,13 +10,29 @@
 > Follows [studio-shell-plan.md](studio-shell-plan.md), which shipped the surfaces
 > this document repairs; supersedes nothing.
 >
-> **Progress 2026-08-06 — U-1…U-4 shipped**, plus U-8's engine half via
-> [bug-backlog.md](bug-backlog.md) BUG-2. U-4 was accepted in headless
-> Chromium against a throwaway film: dirty it, close the tab, the edit is on
-> disk — and the same run against a shell with `closing()` removed loses it.
-> Verifying it surfaced BUG-3 (the film page is editable before it has
-> loaded), which is pre-existing and filed rather than fixed here. Remaining:
-> U-5…U-7, U-9, and the accessibility pass U-10…U-13 (~3 d).
+> **Progress 2026-08-06 — U-1…U-7, U-9, U-11 and U-12 shipped**, U-8 partly,
+> plus U-8's engine half via [bug-backlog.md](bug-backlog.md)
+> BUG-2. Each was accepted in headless Chromium rather than by reading: U-4
+> with a control run that loses the edit once `closing()` is removed, U-6
+> against throwaway films checked on disk both ways. Verifying U-4 surfaced
+> BUG-3 (the film page is editable before it has loaded), pre-existing and
+> filed rather than fixed here.
+>
+> **U-14 (the Explorer's standing) was added and shipped 2026-08-06** from use
+> rather than from the audit — open-vs-active marks, one glyph per row carrying
+> both kind and standing (and, on a film, doubling as the twisty), a live tree,
+> and one shared production stream.
+>
+> **Remaining: U-10 (the two trees) and U-13 (timeline blocks) — about 1 day.**
+> U-6 closed 2026-08-06: the name dialog moved into `studio-util.js` and builds
+> itself per document, film.js's four `prompt()` calls, the withdraw-all
+> `confirm()` and scene-panels.js's asset rename all went through it, and
+> Studio now contains no native `prompt()` or `confirm()` at all. Accepted in
+> headless Chromium against a throwaway store: each dialog raised, cancelled,
+> and confirmed, with the result read back off disk — a scene created, a
+> cancelled one not created, a sequence in `film.json`, advice withdrawn only
+> on confirm, an asset renamed — and both pages armed to throw if any code path
+> reached a native dialog.
 >
 > **Revision 2026-08-06:** the accessibility work was first written here as
 > a deferred reminder and is now **approved and scheduled** (U-10…U-13,
@@ -202,7 +218,7 @@ against exactly that is defeated by the shell it now lives in.
 - `scene.js` needs no implementation. Its config form saves on submit, not
   on a debounce.
 
-### U-5 — the working set gets a keyboard  *(~½ d)*
+### U-5 — the working set gets a keyboard  *(~½ d)* — **SHIPPED 2026-08-06**
 
 `app.js` has **zero** `keydown` handlers. There is no way to close, cycle
 or reach a tab without the mouse, and
@@ -246,7 +262,7 @@ reaches either.
 Depends on **U-1** (switching to a tab you cannot see is not a fix) and on
 **U-4** (the close keys must honour the save hook).
 
-### U-6 — destructive actions get a real dialog  *(~1 d, splittable)*
+### U-6 — destructive actions get a real dialog  *(~1 d, splittable)* — **SHIPPED 2026-08-06**
 
 `deleteFilm` ([app.js:235](../../engine/src/studio/public/app.js:235))
 chains **two** native `confirm()`s, and the second encodes "delete the
@@ -289,7 +305,7 @@ machinery.**
   is the same illegible encoding: OK repoints the audio tracks, Cancel
   leaves them aimed at a file that no longer exists.
 
-### U-7 — the version chip tells the truth  *(~1 h)*
+### U-7 — the version chip tells the truth  *(~1 h)* — **SHIPPED 2026-08-06**
 
 [index.html:458](../../engine/src/studio/public/index.html:458) hard-codes
 the literal string `v0.25` in the global-settings header. Both
@@ -358,7 +374,7 @@ footage claimed a scene count that opened onto nothing. `listFilms` now
 reports `scenes` and `footage` separately and the row renders `2sc · 1
 clip`. Already done.
 
-### U-9 — favicon  *(~10 min)*
+### U-9 — favicon  *(~10 min)* — **SHIPPED 2026-08-06**
 
 [index.html:11](../../engine/src/studio/public/index.html:11) and
 [film.html:11](../../engine/src/studio/public/film.html:11) still paint the
@@ -426,7 +442,7 @@ One job, done twice, sharing one helper:
   that shape rather than inventing a second one. Combines with U-8's
   scroll restore, which is the same repaint.
 
-### U-11 — the palette gives focus back  *(~2 h)*
+### U-11 — the palette gives focus back  *(~2 h)* — **SHIPPED 2026-08-06**
 
 **Measured.** With focus on the film document, opening the palette and
 dismissing it with `Esc` leaves `document.activeElement` on **`BODY`** —
@@ -460,7 +476,7 @@ keyboard bug wearing an accessibility costume.
   it — `Enter` is already handled on the input, and the arrow keys are
   the keyboard path.
 
-### U-12 — the icon-only controls say what they are  *(~1 h)*
+### U-12 — the icon-only controls say what they are  *(~1 h)* — **SHIPPED 2026-08-06**
 
 The activity bar is seven buttons whose entire label is an emoji
 ([index.html:22-28](../../engine/src/studio/public/index.html:22)). They
@@ -520,6 +536,61 @@ first looks.
   solve it; the inspector is the keyboard path to the same values.
   **This is the most cuttable slice in the document** — if the pass has
   to shrink, cut this one and keep U-10 through U-12.
+
+### U-14 — the Explorer has standing  *(~½ d)* — **SHIPPED 2026-08-06**
+
+Added 2026-08-06 from use, not from the audit: with eighteen films and
+three tabs open, the rail could not say which document was in front,
+which were open behind it, which films were finished, or which one the
+agent was working on. Three separate holes with one answer — the row.
+
+- **One mark per row, in one column: shape is the kind, colour is the
+  standing, and on a film it is the disclosure control as well.** `▶`
+  film, `◧` scene, `⧉` library, `+` create — the tab strip's `▶`/`◧`
+  rather than a second vocabulary for the same two things. It took three
+  passes and both corrections were right: the glyph first (beside a
+  state dot), then the dot went when the user said the glyph was meant
+  to *replace* it — two marks saying one thing is one too many — then
+  the chevron went when they pointed out it was still a second column,
+  since a `▶` turned 90° is the disclosure triangle every tree already
+  uses. Names ended up starting 24px further left than they began. A
+  workspace keeps its chevron and takes no glyph: it is a section
+  header, and only `▶` rotates into something meaningful. A kind-only glyph is `aria-hidden` (the
+  name beside it is the label); one carrying state is `role="img"` with
+  that state as its label, since a colour cannot be read aloud. The
+  film page's tree took the same grammar — `◧` scene, `▦` footage,
+  coloured by readiness — replacing a bare dot that carried the colour
+  but named nothing.
+- **Open vs active.** `syncTreeSelection()` toggles `open` and `active`
+  on `[data-doc]` rows and runs on every open, close and switch. Before
+  this, a scene row went `active` merely by being *open*, film rows said
+  nothing, and nothing repainted the tree when the working set changed,
+  so even that was usually stale. Classes only, never a rebuild — this
+  runs on every tab switch and a rebuild costs the rail its scroll.
+  `revealActiveDoc()` scrolls the active row into view, expanding its
+  film when the active document is a scene.
+- **Standing per film**, server-side in `filmStanding()`: built /
+  edited-since-built / draft / broken from the delivery pointer and its
+  manifest, plus the workspace's heartbeats for "an agent is on this
+  one now". Cheap reads by design — `productionStatus` is the right
+  answer per film and far too expensive once per row per refresh. The
+  edited-since-built rule is copied from it so the two cannot disagree.
+- **Render state per scene** from the plan the Explorer already had:
+  `GET /api/films/:id` returns `detail` beside `sceneFolders`, and
+  `loadFilmScenes` was throwing it away.
+- **A live tree.** The shell subscribes to `/api/events`, so a film an
+  agent creates elsewhere appears by itself, badged `new` until opened,
+  with one clickable toast. It also *fans that stream out* to its
+  documents (`StudioUtil.subscribeProduction`): ten open films had meant
+  ten SSE sockets against HTTP/1.1's ~6 per origin, which starves the
+  later feeds and the shell's own fetches with them.
+
+Accepted in headless Chromium — against the real workspace for the marks
+and the dots (18 films: 11 built, 7 edited, 1 draft), against a
+throwaway store for the live half (a film created mid-session arrives,
+badges, toasts, clears on open; a heartbeat lights its film; three open
+documents, one stream). Verifying it surfaced **BUG-4** (`computeFit`
+throws on a closing document), pre-existing and filed rather than fixed.
 
 ## Verification
 

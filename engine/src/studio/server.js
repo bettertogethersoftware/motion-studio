@@ -37,6 +37,7 @@
  *   POST   /api/vendors/music/:id/preview    {program,drums} → audio/wav sample
  *   POST   /api/vendors/transcription/:id/preview?name=  raw media body → transcript JSON
  *   GET    /api/workspaces                   all workspaces, each with its films
+ *                                            (+ per-film state/builtAt/working — the Explorer's standing)
  *   POST   /api/workspaces                   {name}
  *   GET    /api/workspaces/:ws/library       shared-asset library listing
  *   GET    /api/workspaces/:ws/library/file?path=          stream/download
@@ -198,6 +199,18 @@ import { ProductionEvents, startWorkspaceWatcher, sseFrame } from '../core/event
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+/* The engine's one version lives in package.json. The Studio used to paint a
+ * hardcoded copy in the settings header and it drifted immediately — the chip
+ * said v0.25 while the engine was 0.26.0 — which is the same lesson
+ * mcp/server.js already learned and wrote down. Read it once at startup; a
+ * failure here must never stop the Studio serving, so it degrades to null and
+ * the header simply omits the version. */
+const ENGINE_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8')).version ?? null;
+  } catch { return null; }
+})();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -432,6 +445,47 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
   // truth, so double-emission for our own writes is harmless.
   const events = new ProductionEvents();
   let watcher = startWorkspaceWatcher({ root: store.workspacesRoot, events });
+
+  /**
+   * Where one film stands, for the Explorer row (v0.27.2).
+   *
+   * The rail listed eighteen films that all looked identical, so "which of
+   * these is finished, which is half-built, and which is the agent working on
+   * right now" could only be answered by opening them one at a time. These are
+   * the cheapest facts that answer it — a delivery pointer, its manifest, and
+   * the workspace's heartbeats, already read once per workspace — and not
+   * `productionStatus`, which plans the film and walks every scene's revisions:
+   * correct per film, far too expensive once per row on every tree refresh.
+   *
+   *   built  — a delivery exists and the document has not changed since
+   *   edited — built, then edited: what plays is behind production
+   *   draft  — segments but no delivery ever
+   *   empty  — a film with nothing in it yet
+   *
+   * "Edited since built" uses the same coarse rule `productionStatus` uses for
+   * `newerWorkThanDelivery`, so the rail and the film page cannot disagree.
+   */
+  const filmStanding = async (film, activity) => {
+    const agent = activity.find((a) => !a.stale
+      && (a.filmId === film.id || a.filmId === film.slug)) ?? null;
+    const working = agent
+      ? { agent: agent.agent, activity: agent.activity, ageSeconds: agent.ageSeconds }
+      : null;
+    if (film.broken) return { state: 'broken', working };
+
+    let builtAt = null;
+    try {
+      const filmPath = store.filmPath(film.id);
+      const deliveryId = await currentDeliveryId(filmPath);
+      if (deliveryId) builtAt = (await getDeliveryManifest(filmPath, deliveryId)).createdAt ?? null;
+    } catch { /* a pointer to a pruned delivery reads as never built */ }
+
+    const has = (film.scenes ?? 0) + (film.footage ?? 0) > 0;
+    const state = builtAt
+      ? ((film.updatedAt ?? '') > builtAt ? 'edited' : 'built')
+      : (has ? 'draft' : 'empty');
+    return { state, builtAt, working };
+  };
 
   /**
    * Best-effort before/after frame evidence for advice. Runs AFTER the advice
@@ -700,6 +754,7 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
         const prereqs = await checkPrerequisites({ ffmpegPath: effectivePath });
         return sendJson(res, 200, {
           ...prereqs,
+          engine: ENGINE_VERSION,
           minimums: { node: MIN_NODE.join('.'), ffmpeg: MIN_FFMPEG.join('.') },
           ffmpeg: { ...prereqs.ffmpeg, effectivePath, source },
         });
@@ -967,7 +1022,9 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             const workspaces = [];
             for (const ws of await store.listWorkspaces()) {
               const films = await store.listFilms(ws.id).catch(() => []);
+              const activity = await listActivity(ws.path).catch(() => []);
               const library = await store.listLibrary(ws.id).catch(() => []);
+              for (const f of films) Object.assign(f, await filmStanding(f, activity));
               workspaces.push({
                 id: ws.id, name: ws.name, path: ws.path,
                 films,

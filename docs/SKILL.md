@@ -347,6 +347,14 @@ rendering.
 
 #### Supplied footage on the film timeline
 
+Footage shares the play order with scenes but **is not a scene**: it has no
+slug, no folder and no config, so it never appears in a scene listing.
+`get_workspace` counts it separately (`scenes` and `footage`), and the workspace
+manifest resource lists scenes only. To see the whole play order — scenes and
+clips in cut order — read `get_film`. Before v0.27 the scene listings described
+footage anyway and produced one `<film>/undefined` row per clip; if you are
+holding a cached listing from an older engine, ignore rows with no name.
+
 For footage that should sit beside rendered scenes, conform it to the film's
 actual encode signature:
 

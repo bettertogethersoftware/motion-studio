@@ -1,4 +1,4 @@
-# Motion Studio — Architecture (v0.20)
+# Motion Studio — Architecture
 
 ## 1. System overview
 
@@ -1373,8 +1373,9 @@ The shell↔document contract is direct calls, not `postMessage` — same origin
 
 ```js
 window.StudioShell = { openDocument, closeDocument, documentReady,
-                       syncDocument, treeChanged, openPalette }
-window.StudioDoc   = { kind, id, title(), status(), suspend(), shown() }
+                       syncDocument, treeChanged, openPalette,
+                       docToast, shellCommand }
+window.StudioDoc   = { kind, id, title(), status(), suspend(), shown(), closing() }
 ```
 
 `shown()` exists because a `ResizeObserver` cannot cover the case it is for: a
@@ -1382,6 +1383,39 @@ document inside an iframe the **parent** has hidden is not rendered at all, so
 nothing in it observes anything. The shell therefore says when a document is on
 screen, and the document does what it could not do without a box — the film
 fits its timeline, the scene scales its preview. `suspend()` is the inverse.
+
+`closing()` exists for the same class of reason, on the way out. A document is
+removed from the DOM rather than unloaded, and **`beforeunload` does not run for
+a subframe being removed** — so the film page's guard against losing a debounced
+save was silently defeated the moment it became a tab. The document flushes;
+`closeDocument` awaits it before `frame.remove()`, with a 4 s ceiling so a
+wedged document cannot make its tab unclosable. `closeDocument(doc, { flush:
+false })` skips it for the one case where flushing is wrong — deleting a film,
+where the save would target something that no longer exists.
+
+`docToast()` is the inverse direction. A non-active document is
+`visibility: hidden`: it still has a layout, so a toast raised inside one
+rendered perfectly and was seen by nobody, and since error toasts have no TTL it
+stayed there forever. `StudioUtil.toast()` therefore checks for a shell first
+and hands the toast up, where it is shown over whatever *is* on screen with a
+chip naming the document it came from — clicking the chip activates that tab.
+The stack is capped at five, because routing a retrying render's failures into
+view is only an improvement if they cannot bury the view. Standalone (no shell
+in reach) the local path is unchanged, which is what keeps `/film.html` working
+on a second monitor.
+
+`shellCommand(id, arg)` is the working set's keyboard, routed through one place:
+`closeDoc`, `prevDoc`, `nextDoc`, `nthDoc`. The keys themselves are bound by
+`StudioUtil.bindShellKeys()`, which the shell **and** both documents call —
+focus normally sits inside an iframe, so a handler on the shell alone reaches
+nothing. That was already true of `Ctrl+P`, which is why film.js and scene.js
+had each grown their own copy of a forwarder; the binder is that forwarder once,
+for every shortcut. The bindings are `Alt`-based (`Alt+W`, `Alt+PageUp/PageDown`,
+`Alt+1…9`, `Alt+0`) plus VS Code's `Ctrl+K W` chord, because `Ctrl+W`,
+`Ctrl+Tab` and `Ctrl+PageUp/PageDown` are browser-reserved: `keydown` fires,
+`preventDefault()` is ignored, and `Ctrl+W` would take the browser tab with the
+document. Both documents' own keyboards return early on `altKey` so a document
+switch cannot also move a playhead.
 
 A document declares `StudioDoc` via `StudioUtil.registerDocument()`, which also
 marks `<html class="embedded">` so the stylesheets drop the chrome the shell
@@ -1396,7 +1430,7 @@ page's own, each an IIFE exporting exactly one global:
 
 | file | global | what it owns |
 |---|---|---|
-| `studio-util.js` | `StudioUtil` | `$`/`api`/`enc`, toasts, and the embed helpers (`registerDocument`, `syncDocument`, `openDocument`) |
+| `studio-util.js` | `StudioUtil` | `$`/`api`/`enc`, toasts (routed to the shell when embedded), the embed helpers (`registerDocument`, `syncDocument`, `openDocument`), `bindShellKeys()` — the one keyboard binder every surface calls — `subscribeProduction()` — the one production feed every surface shares — and the two asking helpers (`askForText`, `askToConfirm`) that replaced `prompt()`/`confirm()` |
 | `scene-panels.js` / `scene-panels.css` | `ScenePanels` | a scene's **config, audio, assets and outputs** panels |
 | `palette.js` | `StudioPalette` | quick open (`Ctrl+P`) and the command palette (`Ctrl+Shift+P`) |
 | `shell.css` / `tabs.css` | — | the activity bar, status bar, editor stack, tabs, palette chrome, and the shared list/scrollbar grammar |
@@ -1418,6 +1452,85 @@ its side bar (`#181818`), `#2b2b2b` hairlines, `#2a2d2e` list hover. The accent
 is deliberately not VS Code's `#007acc` — amber stays the record light, because
 a video tool that looks exactly like an IDE has lost the thing that says which
 app you are in.
+
+**The tab strip has a floor.** `.doc-tab` is `flex: 0 0 auto` with
+`min-width: 120px`; the strip scrolls. It originally carried `min-width: 0` and
+the default `flex-shrink: 1`, which meant ten open documents shared the strip's
+width rather than overflowing it — measured at 1100 px, every name rendered nine
+to thirty pixels wide, and the `overflow-x: auto` on the strip was unreachable.
+`renderDocTabs()` rebuilds the strip wholesale, so it saves and restores
+`scrollLeft` (emptying it collapses the scrollable width and the browser clamps
+the position to 0) and scrolls the active tab into view. The strip is a
+`role="tablist"` with a roving `tabindex`: one Tab stop, arrows along it,
+`Enter` to activate, `Delete` and middle-click to close.
+
+**Destructive actions are dialogs, not `confirm()`.** Deleting a film was two
+chained `confirm()`s whose second encoded "delete every file on disk" against
+"keep them" as OK-versus-Cancel. The shell now uses the same `<dialog>` shape
+`scene-panels.js` already had — a summary, an *also delete files on disk*
+checkbox that starts off, and a note stating what each choice leaves behind —
+plus one reusable name dialog in place of `prompt()`.
+
+That name dialog and a plain confirm dialog live in `studio-util.js`
+(`askForText`, `askToConfirm`) and build their own markup on first use in
+whichever document asks — so the film document's four name prompts (new and
+renamed sequences, new and duplicated scenes), the panels module's asset rename,
+and the shell's new-workspace prompt are one implementation rather than a copy
+of the markup per page. `askForText` takes an optional checkbox, which is how
+the asset rename asks its second question: renaming a file out from under an
+audio track used to be a chained `confirm()` where OK repointed the tracks and
+Cancel left them aimed at a file that no longer existed. **No native `prompt()`
+or `confirm()` remains anywhere in Studio.**
+
+**The Explorer says where you are and how far along everything is (v0.27.2).**
+It used to say neither. A scene row went `active` merely by being *open*, film
+rows said nothing at all, and no row was repainted when the working set changed
+— so with ten tabs the left-hand side of the app could not answer "which of
+these am I looking at?". `syncTreeSelection()` now toggles `open` (a background
+tab, VS Code's unfocused-selection grey) and `active` (the front document,
+amber plus `aria-current="page"`) on `[data-doc]` rows, by class and never by
+rebuild, because it runs on every tab switch and rebuilding would cost the rail
+its scroll position. `revealActiveDoc()` scrolls the active row into view and
+expands its film first when it is a scene.
+
+Every row carries **one mark** in a fixed 12px column: shape is the kind
+(`ROW_GLYPH` — `▶` film, `◧` scene, `⧉` library, `+` create), colour is where
+that row stands, and on a film row it is the disclosure control too — a
+`<button>` with `aria-expanded`, rotated 90° while the film is open. That last
+part removed a column: a separate chevron spent 18px of a 264px rail on every
+row saying what a turned `▶` says for free. A workspace keeps its chevron and
+takes no glyph, being a section header — a rotated `▶` is a disclosure
+triangle, a rotated anything-else is just askew. The glyphs are the tab strip's own `▶`/`◧`
+rather than a second vocabulary for the same two things; the indents shrank by
+the width the column took, so names kept their length. A kind-only glyph is
+`aria-hidden` (the name beside it is the label); one carrying state is
+`role="img"` with that state as its `aria-label`, because a colour cannot be
+read aloud. It is deliberately *not* re-coloured on the active row — which row
+you are on is already said three ways, and the state is what would be lost.
+
+The standing itself — built / edited-since-built / draft / broken, or a pulsing
+amber when an agent's heartbeat names that film — is computed server-side in
+`filmStanding()` (`studio/server.js`) from the delivery pointer, its manifest
+and `listActivity`, all cheap reads, and deliberately *not* from
+`productionStatus`, which plans the film and walks every scene's revisions:
+right per film, far too expensive once per row per refresh. The "edited since
+built" rule is `productionStatus`'s own, so the rail and the film page cannot
+disagree. Scene rows colour the same way from the plan the Explorer already
+fetched with the scene list — `GET /api/films/:id` returns `detail` beside
+`sceneFolders`, and it was being thrown away. The film page's own tree follows
+the same grammar (`.tree-kind`: `◧` scene, `▦` footage, coloured by readiness),
+replacing the bare `.tree-dot` that carried the colour but named nothing.
+
+**One production stream for the whole app.** The shell holds a single
+`EventSource('/api/events')` and fans it out through
+`StudioShell.subscribeEvents`; `StudioUtil.subscribeProduction()` uses it when
+embedded and opens its own connection only when a document is standalone. Ten
+open films used to mean ten streams against HTTP/1.1's ~6 sockets per origin,
+which starves the later documents' feeds *and* the shell's own fetches. The
+same stream keeps the rail live: an agent creating a film in another process
+now makes it appear, badged `new`, with one clickable toast — previously the
+tree was a snapshot taken at load and only a document's own `treeChanged()`
+refreshed it.
 
 `palette.js` indexes films from one `/api/workspaces` call and scenes per film
 from `/api/films/:id?detail=scenes` — the compact projection, no composition

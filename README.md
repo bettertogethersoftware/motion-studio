@@ -31,7 +31,17 @@ separate review screen and no mode switch.
   **document tabs** beside it (each keeping its own playhead, undo stack and
   scroll while another is in front), an activity bar, a status bar, and a
   command palette on `Ctrl/Cmd+P` that fuzzy-jumps to anything on the machine
-  (`Ctrl/Cmd+Shift+P` for commands). Inside it: live preview
+  (`Ctrl/Cmd+Shift+P` for commands). The working set has a keyboard —
+  `Alt+W` / `Ctrl+K W` to close, `Alt+PageUp/PageDown` to step, `Alt+1…9` to
+  jump — and a document that fails while you are looking at another one still
+  reports it, in the shell, labelled with where it came from. Each tree row
+  carries one mark whose **shape is what it is** (`▶` film — click it to show
+  its scenes, `◧` scene, `⧉` library) and whose **colour is how far along it
+  is** — green
+  built, yellow edited since built, faint still in production, and a live amber
+  pulse on whichever film an agent is working on right now (a film it creates
+  appears by itself, badged `new`). The front document is marked apart from the
+  ones merely open. Inside it: live preview
   that drives your *actual* composition, scrub/play transport, hot reload,
   render queue with progress + ETA, and full scene management — create,
   configure and delete scenes, manage `assets/` (upload, audition, rename,

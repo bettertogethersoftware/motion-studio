@@ -2,6 +2,107 @@
 
 ## Unreleased
 
+### The Explorer says where you are and how far along everything is
+
+The rail listed twenty films that looked identical. Which one is in front,
+which are merely open, which are finished, which are half-built, and which one
+an agent is working on right now were all questions you could only answer by
+opening films one at a time.
+
+**Open, and open-and-in-front, now look different** — the tab strip's language,
+said on the left as well: a background document gets VS Code's unfocused
+selection grey, the front one gets the amber record light and
+`aria-current="page"`. The marks move as you switch tabs (nothing repainted the
+tree before, so even the scene row's old highlight was usually stale), and
+opening a scene from anywhere scrolls its row into view, expanding its film to
+get there.
+
+**Every row carries one mark: shape says what it is, colour says how far along
+it is.** `▶` film, `◧` scene, `⧉` library, `+` create — the same `▶`/`◧` their document
+tabs already used, in one fixed column. On a film that glyph is also the
+show/hide control, turning down while the scenes are out, which let the
+separate chevron go: it had been spending 18px of a 264px rail per row to say
+what a rotated `▶` says for free. Names start 24px further left than before. Green is *built* — a delivery
+exists and nothing changed since; yellow is *edited since built*, so what plays
+is behind production; faint grey is *in production*; red is broken. A film an
+agent is working on right now pulses amber, naming the agent and its current
+step. Scene rows colour the same way for their own render: rendered, stale, or
+not yet. Words are in the tooltips; the rail is 264px wide. The facts are cheap
+ones — a delivery pointer, its manifest, the workspace's heartbeats — not
+`productionStatus`, which plans the film and walks every revision. The film
+page's own tree took the same grammar, replacing the bare dot in front of each
+segment with `◧` for a scene and `▦` for footage.
+
+**The tree is live.** A film an agent creates in another process now appears by
+itself, badged `new` until you open it, and says so once in a toast that opens
+it when clicked. Previously the tree was a snapshot taken at load.
+
+**One production stream for the whole app.** The shell holds the single
+`EventSource` and fans it out to its documents (`subscribeProduction`). Ten open
+films used to mean ten SSE connections against HTTP/1.1's ~6 per origin — the
+later ones starve, and so do the shell's own fetches.
+
+### The working set gets a keyboard, and destruction gets a dialog
+
+**Shortcuts for the documents you have open** (U-5). `Alt+W` closes the active
+one, `Ctrl+K W` does the same as VS Code's chord, `Alt+PageUp`/`Alt+PageDown`
+step through them (wrapping), and `Alt+1…9` / `Alt+0` go straight to the nth or
+the last. Deliberately not `Ctrl+W`, `Ctrl+Tab` or `Ctrl+PageUp/Down`: those are
+browser-reserved, `preventDefault` is ignored on them, and `Ctrl+W` would take
+the browser tab with the document. Focus normally sits inside a document's
+iframe, so all of it lives in one binder in `studio-util.js` that the shell and
+both documents call — subsuming the two hand-copied `Ctrl+P` forwarders that
+were the only shortcut before. The film and scene pages now ignore `Alt`, so
+`Alt+PageDown` no longer moves a playhead as it switches documents, and `Alt+←`
+no longer steps a frame while the browser navigates back.
+
+The tab strip is also a real `tablist`: `role="tab"`, `aria-selected`, a roving
+`tabindex` (one Tab stop, arrows to move, `Enter` to activate, `Delete` to
+close), named close buttons, and middle-click-to-close. That makes the
+`.doc-tab:focus-visible` rule in `tabs.css` — dead since the strip was written —
+finally able to fire.
+
+**The palette gives focus back** (U-11). Dismissing it left
+`document.activeElement` on `<body>`, so every document shortcut was dead until
+you clicked back in, with nothing to say why. It now returns the keyboard where
+it took it from — and when you *choose* a row it hands focus to the document
+that opened instead, because picking something should land you in it. The input
+is a `combobox` over a `listbox` with `aria-activedescendant` naming the cursor
+row the code already tracked.
+
+**Deleting a film is one legible decision** (U-6). It was two chained
+`confirm()`s where the second encoded "delete every file on disk" against "keep
+them all" as OK-versus-Cancel — the least legible control in the product on its
+most destructive action. It is now the dialog the scene delete already used: a
+summary, an *also delete the film folder on disk* checkbox that starts off, and
+a note saying what each choice leaves behind. Deleting a library file asks you
+to type its name, because it can be a plate a dozen scenes were built from. The
+`prompt()` for a new workspace became a reusable name dialog.
+
+That name dialog now lives in `studio-util.js` and builds itself on first use in
+whatever document asks for it, which finished the slice: **no native `prompt()`
+or `confirm()` remains anywhere in Studio.** The film document's four — new
+sequence, rename sequence, new scene, duplicate scene — and the panels module's
+asset rename are the same dialog, each with a heading and a sentence saying what
+the name will do. The asset rename's chained `confirm()` ("OK: point the audio
+tracks at the new path. Cancel: leave them aimed at a missing file.") became a
+ticked checkbox in that dialog, so the second question is answered in words
+beside the first. Withdrawing all advice on a film asks in a dialog whose button
+says *withdraw all* rather than *OK*.
+
+**The activity bar says what it is and what is open** (U-12). Which page was
+open had been carried by a 2px amber border and nothing else; the buttons now
+carry `aria-label`, the toggle carries `aria-pressed`, and the open stage page
+carries `aria-current="page"`.
+
+**The version chip stops lying** (U-7). It was the literal `v0.25` while the
+engine was `0.26.0`. `/api/prereqs` now reports the version read from
+`engine/package.json` — the same lesson `mcp/server.js` already wrote down — and
+the header prints what is actually installed, or omits it rather than guessing.
+
+Also: the favicon on the shell and film pages moved off a pre-theme `#0e0f12`
+onto `--ink` (U-9), which the scene page had already done.
+
 ### The shell under load: ten tabs, a failing render, and the edit that got away
 
 The v0.27 shell was verified with one or two documents, in the foreground, on a

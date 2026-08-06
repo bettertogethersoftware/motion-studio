@@ -244,6 +244,10 @@ $('#scrubber').addEventListener('input', (e) => { stopPlayback(); applyFrame(Num
 // End go to the ends. Two surfaces that scrub must not have two keyboards.
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea') || !state.config) return;
+  // Alt belongs to the shell, and to the browser: Alt+← is Back, and these
+  // branches test `code` alone, so without this the frame would step as the
+  // page navigated away from under it.
+  if (e.altKey) return;
   const last = state.config.durationInFrames - 1;
   const step = e.shiftKey ? 10 : 1;
   if (e.code === 'Space') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
@@ -445,13 +449,7 @@ if (wanted) {
   });
 }
 
-/* The shell owns Ctrl+P, but the keystroke lands wherever the focus is — and
- * the focus is usually inside a document. Hand it up rather than swallowing it. */
-window.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'p') return;
-  if (document.querySelector('dialog[open]')) return;
-  const s = StudioUtil.shell();
-  if (!s) return;
-  e.preventDefault();
-  s.openPalette(e.shiftKey ? 'commands' : 'files');
-});
+/* The shell's keys land wherever the focus is, and the focus is usually inside
+ * a document — so every document binds them and hands them up. One binder for
+ * all of them now; this used to be a per-file copy that only knew Ctrl+P. */
+StudioUtil.bindShellKeys();

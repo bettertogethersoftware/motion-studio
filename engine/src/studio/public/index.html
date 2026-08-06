@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/tabs.css">
 <link rel="stylesheet" href="/scene-panels.css">
 <link rel="stylesheet" href="/shell.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230e0f12'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231f1f1f'/><path d='M4 12V4l8 4z' fill='%23ffb454'/></svg>">
 </head>
 <body>
 <div class="vs-shell">
@@ -18,14 +18,17 @@
   <!-- The activity bar (v0.27). The vendor and settings buttons moved here from
        the rail footer keeping their ids and handlers: what changed is where
        they live and how they are marked active, not what they do. -->
+  <!-- Every button here is an emoji. `title` gives them a name; `aria-label`
+       makes that name independent of tooltip behaviour, and the pressed/current
+       state is what the amber border alone used to carry. -->
   <nav class="activity-bar" id="activity-bar" aria-label="activity bar">
-    <button id="btn-explorer" class="act-btn active" title="explorer (the workspace tree)">☰</button>
-    <button id="btn-palette" class="act-btn" title="go to a film or scene — Ctrl+P">⌕</button>
+    <button id="btn-explorer" class="act-btn active" title="explorer (the workspace tree)" aria-label="explorer (the workspace tree)" aria-pressed="true">☰</button>
+    <button id="btn-palette" class="act-btn" title="go to a film or scene — Ctrl+P" aria-label="go to a film or scene">⌕</button>
     <span class="act-spacer"></span>
-    <button id="btn-tts" class="act-btn" title="tts vendors"><span class="foot-ico">🗣</span><span class="foot-label">tts</span></button>
-    <button id="btn-music" class="act-btn" title="music vendors"><span class="foot-ico">♫</span><span class="foot-label">music</span></button>
-    <button id="btn-transcribe" class="act-btn" title="transcription vendors — reading speech out of a recording"><span class="foot-ico">✎</span><span class="foot-label">trans</span></button>
-    <button id="btn-settings" class="act-btn icon-only" title="global settings"><span class="foot-ico">⚙</span></button>
+    <button id="btn-tts" class="act-btn" title="tts vendors" aria-label="speech vendors"><span class="foot-ico">🗣</span><span class="foot-label">tts</span></button>
+    <button id="btn-music" class="act-btn" title="music vendors" aria-label="music vendors"><span class="foot-ico">♫</span><span class="foot-label">music</span></button>
+    <button id="btn-transcribe" class="act-btn" title="transcription vendors — reading speech out of a recording" aria-label="transcription vendors"><span class="foot-ico">✎</span><span class="foot-label">trans</span></button>
+    <button id="btn-settings" class="act-btn icon-only" title="global settings" aria-label="global settings"><span class="foot-ico">⚙</span></button>
   </nav>
 <div class="frame" id="frame">
   <aside class="rail">
@@ -60,7 +63,7 @@
     <!-- Open documents (v0.27), painted by the shell. A tab is a film or a
          scene mounted in the editor stack below; switching is not a navigation
          and never was one, which is the whole point of the restructure. -->
-    <nav id="doc-tabs" class="doc-tabs hidden"></nav>
+    <nav id="doc-tabs" class="doc-tabs hidden" role="tablist" aria-label="open documents"></nav>
 
     <div id="empty-state" class="empty">
       <p>◤ no scene selected</p>
@@ -455,7 +458,10 @@
         <h2>global settings</h2>
         <span class="dim">defaults and paths — for the Studio and every connected agent</span>
         <span class="spacer"></span>
-        <span class="engine-strip mono dim">v0.25 · deterministic renderer · <span id="engine-status">engine —</span></span>
+        <!-- The version is read from the engine's package.json via /api/prereqs.
+             It used to be a literal here and said v0.25 while the engine was
+             0.26.0 — a number nobody remembers to bump is a number that lies. -->
+        <span class="engine-strip mono dim"><span id="engine-version"></span>deterministic renderer · <span id="engine-status">engine —</span></span>
         <span id="settings-msg" class="dim"></span>
         <button id="btn-settings-save" type="submit" form="settings-form" class="primary">save</button>
         <button id="btn-settings-close" class="ghost">close</button>
@@ -623,6 +629,31 @@
     <button id="sb-goto" class="sb-item" title="go to a film or scene — Ctrl+P"><span class="sb-ico">⌕</span>go to…</button>
   </footer>
 </div>
+
+<!-- Deleting a film used to be two chained confirm()s, and the second encoded
+     "delete every file on disk" against "keep them all" as OK-versus-Cancel:
+     the least legible control in the product on its most destructive action.
+     This is the scene delete dialog's shape (scene-panels.js), which already
+     asks the same question properly. -->
+<dialog id="delete-film-dialog">
+  <form id="delete-film-form" method="dialog">
+    <h2>delete film</h2>
+    <p class="sp-dialog-summary" id="delete-film-summary"></p>
+    <label class="check"><input name="deleteFiles" type="checkbox"> also delete the film folder on disk</label>
+    <p class="dim sp-delete-note">Unchecked: only <span class="mono">film.json</span> goes — the scenes, assets
+    and rendered output stay on disk, and the film can be rebuilt around them. Checked: the whole film folder
+    is deleted, including every scene inside it. Neither can be undone from here.</p>
+    <div class="fieldrow right">
+      <button type="button" data-close="delete-film-dialog" class="ghost">cancel</button>
+      <button type="submit" class="ghost danger">delete</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- The name-entry dialog that replaces prompt() is built by studio-util.js on
+     first use, in whatever document asks for it — the shell, a film, a scene.
+     It began as static markup here and moved when film.js needed the same
+     thing: one implementation, not one copy per page. -->
 
 <dialog id="new-scene-dialog">
   <form id="new-scene-form" method="dialog">

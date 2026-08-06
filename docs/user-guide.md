@@ -1,4 +1,4 @@
-# Motion Studio — User Guide (v0.20)
+# Motion Studio — User Guide
 
 ## Installation and first run
 
@@ -68,6 +68,34 @@ active document adds: a film contributes build, advise, the
 add-narration/audio/caption/footage/overlay actions, undo/redo, fit-the-timeline
 and the five inspector tabs.
 
+Dismissing the palette puts the keyboard back where it took it from, so the
+transport keys keep working; *choosing* something puts you in the document that
+opened.
+
+### The keyboard
+
+Shortcuts for the documents you have open. They work wherever the focus is —
+in the tree, in the status bar, or inside a film or scene.
+
+| shortcut | what it does |
+|---|---|
+| **Alt + W**, or **Ctrl/Cmd + K** then **W** | close the active document |
+| **Alt + PageDown / PageUp** | next / previous document (wraps) |
+| **Alt + 1…9** | go to the *n*th document |
+| **Alt + 0** | go to the last one |
+| middle-click a tab | close it |
+
+The tab strip is reachable by `Tab` as one stop; `← →` move along it, `Enter`
+activates, `Delete` closes.
+
+**Why `Alt` and not `Ctrl+W`.** `Ctrl+W`, `Ctrl+Tab` and `Ctrl+PageUp/PageDown`
+belong to the browser and cannot be intercepted — `Ctrl+W` would close the
+browser tab along with the document. `Ctrl+K` is free, and the chord is the one
+VS Code uses.
+
+Inside a film or scene, `Alt` is reserved for the shortcuts above, so the
+transport keys below never fire at the same time as a document switch.
+
 ## Workspaces, films and scenes
 
 Motion Studio's storage mirrors what you're actually making. A **workspace**
@@ -86,7 +114,7 @@ film with one scene.
 The sidebar is **one tree** instead of the old projects/films tabs: each
 workspace row expands to its films (hovering reveals a **+ film** button;
 an empty workspace shows a clickable **+ first film** row instead), each
-film row — name, scene count, a ✕ to delete — expands to its scenes plus a
+film row — name, what it holds, a ✕ to delete — expands to its scenes plus a
 **+ scene** row, and a **⧉ library** row sits below a workspace's films (see
 [Shared library](#shared-library) below). **+ workspace** at the very bottom
 starts a new tree.
@@ -113,12 +141,53 @@ the ⚙ global-settings page, or override it for one process with `MOTION_STUDIO
 used Motion Studio before v0.22 your existing `~/.motion-studio` keeps being
 used, and the settings page shows it.
 
+**What each row tells you (v0.27.2).** The rail is where twenty films look
+alike, so every row carries **one mark**, in one column: its shape is what the
+row is, its colour is how far along that row is, and on a film it is also the
+control that shows and hides the scenes. Films and scenes wear the same glyphs
+their document tabs do.
+
+| the glyph | what the row is |
+|---|---|
+| `▶` | a film — click the glyph itself to show or hide its scenes; it turns down while they are showing |
+| `◧` | a scene |
+| `⧉` | the shared library |
+| `+` | a create row |
+
+| its colour | where that row stands |
+|---|---|
+| green | **built** — a delivery exists and nothing has changed since (a scene: rendered) |
+| yellow | **edited since built** — what plays is behind production (a scene: rendered at settings that have since changed) |
+| faint grey | **in production** — no finished build yet, or nothing in it (a scene: not rendered) |
+| red | broken, or a folder that has gone missing |
+| pulsing amber | an agent is working on this film *now* — hover for who and what |
+
+Hovering any glyph says it in words. Two more marks sit beside it: an amber
+bar and amber name for the document you are looking at right now, a grey
+highlight for the tabs open behind it, and a `new` badge on a film that
+appeared while you were working (opening it clears the badge).
+
+The film page's own tree speaks the same way: `◧` for a scene, `▦` for
+supplied footage, green when it is ready and red when it is not.
+
+The tree is live — a film an agent creates in another process appears on its
+own, says so once in a toast you can click to open it, and its dot follows the
+work as it renders, builds and gets edited. Switching tabs moves the amber
+mark, and opening a scene from anywhere (the palette, a film page) scrolls its
+row into view and expands its film to get there.
+
 Clicking a film's row opens its [film page](#watching-and-advising-the-film-page-v023)
 — player, tree, timeline and [editor](#the-film-editor) on one surface;
-clicking a scene opens the workbench below. The film row's ✕ deletes it — a confirm
-asks whether to also delete its scenes, assets and output, or just the film
-definition (the folder then stays on disk, listed as `broken` until cleaned
-up).
+clicking a scene opens the workbench below. The film row's ✕ deletes it,
+through a dialog with one checkbox: leave *also delete the film folder on disk*
+unchecked and only `film.json` goes — the scenes, assets and rendered output
+stay, and the folder is listed as `broken` until cleaned up; tick it and the
+whole folder goes, every scene included. Neither can be undone from here.
+
+The count beside a film name is what it actually holds. Scenes and supplied
+footage are counted apart — `12sc`, or `2sc · 1 clip`, or just `1 clip` —
+because only scenes expand into rows beneath, and a film of pure footage that
+claimed a scene count opened onto nothing.
 
 ### A scene, without leaving the film (v0.27)
 
@@ -129,7 +198,7 @@ Select a scene on the film page and its inspector opens on a row of tabs:
 | **scene** | the take itself — name, status, resolution, length, format, film offset — plus **re-render**, **move earlier / later**, **remove**, and the scene's **versions** and **advice** |
 | **config** | the scene's own `scene.json`: name, fps, width, height, frames, and every output setting (format, dir, filename, crf, preset, pix fmt, alpha, audio limiter), with the read-only facts, the raw JSON and the folder path underneath |
 | **audio** | audio tracks *inside* this scene — src, start frame, gain, audition — separate from the film's master audio timeline |
-| **assets** | the scene's `assets/` folder: upload or drop files, copy a scene-relative path, rename (repairing any audio track that pointed at it), delete |
+| **assets** | the scene's `assets/` folder: upload or drop files, copy a scene-relative path, rename — the dialog asks for the new path, and when audio tracks point at the file it offers, ticked, to repoint them — delete |
 | **outputs** | what this scene has rendered, with sizes and download links |
 
 These are the same four panels the scene workbench shows, not a summary of
@@ -219,7 +288,10 @@ since it belongs to the whole workspace, not to whichever scene happens to
 be open.
 
 The library page **uploads** (optionally into a subfolder you type, handy
-once it grows past a handful of files), **downloads**, and **deletes**.
+once it grows past a handful of files), **downloads**, and **deletes** —
+deleting asks you to type the filename back, because a library file can be the
+plate a dozen scenes were built from. Scenes that already pulled a file in keep
+their own copy; this removes the shared original.
 Unlike scene and film assets there's no 25 MB cap — the library exists
 specifically for the files too big for that channel (a licensed soundtrack,
 a folder of location photos, a multi-gigabyte video plate). An agent lists
@@ -380,6 +452,13 @@ already contains the fix and any available alternative vendors — stays until
 you dismiss it, and the page remains usable underneath. An unconfigured
 music vendor now reports "not configured" (503) on the vendors page the
 same way speech vendors always did, instead of a generic server error.
+
+**A tab you are not looking at can still tell you something went wrong**
+(v0.27). Start a render, switch to another document, and if it fails the toast
+appears in the Studio anyway, with a chip naming the document it came from —
+click the chip to go there. Before this, the toast was painted inside the
+hidden tab and simply never seen. Only the five most recent are kept, so a
+render that keeps retrying cannot bury the thing it is reporting on.
 
 ## Output formats (v0.5)
 

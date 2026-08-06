@@ -14,13 +14,14 @@
 
 'use strict';
 
-const { $, api, enc, toast, toastError } = StudioUtil;
+const { $, api, enc, toast, toastError, askForText } = StudioUtil;
 
 /* The shell's own state. Everything a *document* knows — the open scene, its
  * config, the playhead, the render job — now lives in that document. */
 const state = {
   tree: [],             // workspaces (each with films) from GET /api/workspaces
   filmScenes: {},       // filmId → scene list, fetched lazily when a film expands
+  sceneRender: {},      // filmId → sceneId → 'rendered'|'stale'|'unrendered'|'missing'
   libraryWs: null,      // workspace id whose library page is showing, or null
   settings: null,       // global settings (GET /api/settings)
   settingsOpen: false,
@@ -61,6 +62,9 @@ async function checkPrereqs() {
     const p = await api('/api/prereqs');
     const el = $('#engine-status');
     const banner = $('#prereq-banner');
+    // Whatever is actually installed. Absent (an unreadable package.json) the
+    // strip just omits it rather than guessing.
+    $('#engine-version').textContent = p.engine ? `v${p.engine} · ` : '';
     if (p.ok) {
       el.innerHTML = `engine <span class="ok">ready</span> · ffmpeg ${p.ffmpeg?.version ?? '?'}`;
       banner.classList.add('hidden');
@@ -102,6 +106,55 @@ const saveIdSet = (key, set) => localStorage.setItem(key, JSON.stringify([...set
 const collapsedWs = loadIdSet('ms.wsCollapsed');   // workspaces default OPEN
 const expandedFilms = loadIdSet('ms.filmsOpen');   // films default CLOSED
 
+/* Which films the rail has already shown this session, and which of them are
+ * still worth pointing at. A film created by an agent in another process
+ * appears in the middle of an alphabetical list of twenty, with nothing to say
+ * it is the one that just arrived — so the first sighting is remembered and the
+ * row carries a `new` badge until you open it. On the very first paint there is
+ * no "before" to compare against, so recency stands in for it. */
+const seenFilms = new Set();
+const newFilms = new Set();
+const NEW_FILM_MS = 30 * 60 * 1000;
+
+/**
+ * What each kind of row *is*, in one glyph — in ONE column, which on a film row
+ * is the column the disclosure chevron used to have to itself.
+ *
+ * Deliberately the tab strip's vocabulary rather than a new one: a film is `▶`
+ * and a scene is `◧` on its tab (`renderDocTabs`), so they are that in the tree
+ * too — the same thing must not be drawn two ways in one window. A workspace
+ * keeps its chevron and takes no glyph: it is a section header, and a rotated
+ * `▶` is a disclosure triangle where a rotated anything-else is just askew.
+ */
+const ROW_GLYPH = {
+  film: '▶',
+  scene: '◧',
+  library: '⧉',
+  add: '+',
+};
+
+/**
+ * @param {string}  kind     which glyph
+ * @param {?string} tone     standing → colour (`st-*`)
+ * @param {string}  title    what that colour means, in words
+ * @param {boolean} control  true when the glyph is also the expand/collapse
+ *                           control, so it must be a real focusable button and
+ *                           the caller owns its label and `aria-expanded`
+ */
+function glyph(kind, tone = null, title = '', control = false) {
+  const g = el(control ? 'button' : 'span',
+    `tree-ico${tone ? ` st-${tone}` : ''}`, ROW_GLYPH[kind] ?? '');
+  if (control) g.type = 'button';
+  if (title) g.title = title;
+  // Decorative when it is only a kind; when it carries state it is `img` with
+  // that state as its name, because a colour is not readable aloud. A control
+  // is neither — it is a button, and the caller names it.
+  if (control) { /* labelled by the caller */ }
+  else if (title) { g.setAttribute('role', 'img'); g.setAttribute('aria-label', title); }
+  else g.setAttribute('aria-hidden', 'true');
+  return g;
+}
+
 /** tiny element helper — the tree builds a lot of spans */
 function el(tag, className, text) {
   const e = document.createElement(tag);
@@ -113,6 +166,7 @@ function el(tag, className, text) {
 async function loadWorkspaces() {
   const { workspaces } = await api('/api/workspaces');
   state.tree = workspaces;
+  noteNewFilms(workspaces);
   // Scene lists are per-film fetches; refresh the ones that are showing.
   const showing = [...expandedFilms].filter((fid) =>
     workspaces.some((w) => w.films.some((f) => f.id === fid)));
@@ -120,10 +174,45 @@ async function loadWorkspaces() {
   renderTree();
 }
 
+/** Badge what just arrived, and say so once for a film that appeared live. */
+function noteNewFilms(workspaces) {
+  const first = seenFilms.size === 0;
+  const arrived = [];
+  for (const ws of workspaces) {
+    for (const f of ws.films) {
+      if (seenFilms.has(f.id)) continue;
+      seenFilms.add(f.id);
+      if (docs.has(docKey('film', f.id))) continue; // already open: you know where it is
+      if (first) {
+        const age = Date.now() - Date.parse(f.createdAt ?? '');
+        if (Number.isFinite(age) && age < NEW_FILM_MS) newFilms.add(f.id);
+      } else {
+        newFilms.add(f.id);
+        arrived.push(f);
+      }
+    }
+  }
+  // A film that appeared while you were working is worth one sentence: the
+  // badge only helps once you are looking at the rail, and the whole point is
+  // that you were looking somewhere else.
+  for (const f of arrived.slice(0, 3)) {
+    const t = toast(`New film — ${f.name}`, { kind: 'info', timeoutMs: 8000 });
+    if (!t) continue;
+    t.classList.add('clickable');
+    t.addEventListener('click', () => openDocument({ kind: 'film', id: f.id, name: f.name }));
+  }
+  if (arrived.length > 3) toast(`${arrived.length} new films in the Explorer`, { kind: 'info' });
+}
+
 async function loadFilmScenes(filmId) {
   StudioPalette.invalidate(); // the quick-open index just went stale
-  const { sceneFolders } = await api(`/api/films/${enc(filmId)}`);
+  const { sceneFolders, detail } = await api(`/api/films/${enc(filmId)}`);
   state.filmScenes[filmId] = sceneFolders;
+  // The same response already carries the resolved plan the film page renders,
+  // so a scene row can say whether it has been rendered without a second call.
+  state.sceneRender[filmId] = Object.fromEntries((detail?.scenes ?? [])
+    .filter((s) => s.kind === 'scene' && s.sceneId)
+    .map((s) => [s.sceneId, s.missing ? 'missing' : !s.rendered ? 'unrendered' : s.staleRender ? 'stale' : 'rendered']));
   return sceneFolders;
 }
 
@@ -157,7 +246,7 @@ function renderTree() {
       // The row's "+ film" only appears on hover, which would leave a fresh
       // workspace with no visible way forward — so the empty state IS the button.
       const first = el('li', 'tree-note tree-first-film');
-      first.append(el('span', 'p-name dim', '+ first film'));
+      first.append(glyph('add'), el('span', 'p-name dim', 'first film'));
       first.title = 'create this workspace\'s first film';
       first.addEventListener('click', () => openNewFilmDialog(ws.id));
       ul.appendChild(first);
@@ -167,14 +256,67 @@ function renderTree() {
     // the agent consumes via list_shared_assets / use_shared_asset).
     const lib = el('li', 'tree-lib' + (state.libraryWs === ws.id ? ' active' : ''));
     lib.append(
-      el('span', 'chev', ''),
-      el('span', 'p-name', '⧉ library'),
+      glyph('library'),
+      el('span', 'p-name', 'library'),
       el('span', 'p-meta', `${ws.library.files} file${ws.library.files === 1 ? '' : 's'}`),
     );
     lib.title = `shared assets for this workspace's agent (${fmtBytes(ws.library.bytes)})`;
     lib.addEventListener('click', () => openLibrary(ws.id));
     ul.appendChild(lib);
   }
+  syncTreeSelection();
+}
+
+/**
+ * The rail says which rows are open, and which one you are looking at.
+ *
+ * The tab strip knew both; the tree knew neither — a scene row went `active`
+ * merely by being *open*, film rows said nothing at all, and neither was
+ * repainted when the working set changed, so even that was usually wrong. With
+ * ten tabs the question "where am I?" had no answer on the left-hand side of
+ * the app at all.
+ *
+ * Classes only, no rebuild: this runs on every tab switch, and re-rendering the
+ * tree would drop the rail's scroll position each time.
+ */
+function syncTreeSelection() {
+  for (const row of $('#workspace-tree').querySelectorAll('[data-doc]')) {
+    const key = row.dataset.doc;
+    const open = docs.has(key);
+    const active = key === activeDocKey;
+    row.classList.toggle('open', open && !active);
+    row.classList.toggle('active', active);
+    if (active) row.setAttribute('aria-current', 'page');
+    else row.removeAttribute('aria-current');
+    // Opening it is how you stop needing to be told where it is. Dropped here
+    // rather than by a re-render, which would cost the rail its scroll.
+    if (open && key.startsWith('film:')) {
+      newFilms.delete(key.slice(5));
+      row.querySelector('.p-new')?.remove();
+    }
+  }
+}
+
+/**
+ * Bring the active document's row into view — expanding its film first when it
+ * is a scene, because a row inside a collapsed film is not somewhere you can be
+ * shown. Deliberately `block: 'nearest'`: a row already on screen must not make
+ * the rail jump.
+ */
+async function revealActiveDoc() {
+  const doc = activeDoc();
+  if (!doc) return;
+  if (doc.kind === 'scene') {
+    const filmId = filmIdOf(doc.id);
+    if (!expandedFilms.has(filmId)) {
+      expandedFilms.add(filmId);
+      saveIdSet('ms.filmsOpen', expandedFilms);
+      if (!state.filmScenes[filmId]) await loadFilmScenes(filmId).catch(() => {});
+      renderTree();
+    }
+  }
+  const row = $('#workspace-tree').querySelector(`[data-doc="${CSS.escape(docKey(doc.kind, doc.id))}"]`);
+  row?.scrollIntoView({ block: 'nearest' });
 }
 
 /**
@@ -189,21 +331,74 @@ function filmCount(f) {
   return f.scenes ? `${f.scenes}sc · ${c}` : c;
 }
 
+/**
+ * How far along a film is, as one dot. The words are in the tooltip because the
+ * rail is 264px wide and eighteen rows of prose is not a list.
+ */
+const FILM_STANDING = {
+  built: ['ok', 'built — a delivery exists and nothing has changed since'],
+  edited: ['warn', 'edited since it was built — what plays is behind production'],
+  draft: ['draft', 'in production — no finished build yet'],
+  empty: ['draft', 'empty — no scenes or footage yet'],
+  broken: ['err', 'broken — film.json is missing or unreadable'],
+};
+
+const SCENE_STANDING = {
+  rendered: ['ok', 'rendered'],
+  stale: ['warn', 'rendered at different settings — re-render it'],
+  unrendered: ['draft', 'not rendered yet'],
+  missing: ['err', 'the scene folder is missing'],
+};
+
+/** The glyph a row shows for its kind, coloured by where that row stands. */
+function standingGlyph(kind, map, key, control = false) {
+  const hit = map[key];
+  return glyph(kind, hit?.[0] ?? null, hit?.[1] ?? '', control);
+}
+
 /** One film row, plus its scene rows when expanded. */
 function appendFilmRows(ul, f) {
   const fOpen = expandedFilms.has(f.id);
 
-  const row = el('li', 'tree-film' + (f.broken ? ' missing' : ''));
-  const chev = el('button', 'chev chev-btn', fOpen ? '▾' : '▸');
-  chev.title = fOpen ? 'hide scenes' : 'show scenes';
-  chev.addEventListener('click', (e) => { e.stopPropagation(); toggleFilm(f.id); });
+  const row = el('li', 'tree-film' + (f.broken ? ' missing' : '') + (fOpen ? ' expanded' : ''));
+  row.dataset.doc = docKey('film', f.id);
   const name = el('span', 'p-name', f.name);
-  name.title = f.broken ? `${f.name} — film.json is broken or missing` : `${f.name} — watch, advise, and edit`;
+  name.title = f.broken
+    ? `${f.name} — film.json is broken or missing`
+    : `${f.name} — ${FILM_STANDING[f.state]?.[1] ?? 'watch, advise, and edit'}`;
   const meta = el('span', 'p-meta', f.broken ? 'broken' : filmCount(f));
   const del = el('button', 'film-del', '✕');
   del.title = 'delete this film…';
   del.addEventListener('click', (e) => { e.stopPropagation(); deleteFilm(f); });
-  row.append(chev, name, meta, del);
+  // The row's ONE mark: the kind glyph, coloured by where the film stands. A
+  // separate state dot beside it said the same thing twice.
+  //
+  // An agent's live heartbeat outranks the standing on that one mark: "being
+  // worked on right now" is the more perishable fact, and it is the question
+  // the rail could not answer at all.
+  //
+  // It is also the disclosure control. A separate chevron beside it spent a
+  // whole column — 18px of a 264px rail, on every row — saying what a rotated
+  // `▶` says for free: pointing right it is closed, turned down it is open,
+  // and it is the film's own glyph either way.
+  const mark = f.working
+    ? glyph('film', 'live', '', true)
+    : standingGlyph('film', FILM_STANDING, f.state, true);
+  const standing = f.working
+    ? `${f.working.agent} — ${f.working.activity} (${f.working.ageSeconds}s ago)`
+    : FILM_STANDING[f.state]?.[1] ?? '';
+  mark.setAttribute('aria-expanded', String(fOpen));
+  mark.setAttribute('aria-label', `${fOpen ? 'hide' : 'show'} scenes${standing ? ` — ${standing}` : ''}`);
+  mark.title = `${fOpen ? 'hide' : 'show'} scenes${standing ? `
+${standing}` : ''}`;
+  mark.addEventListener('click', (e) => { e.stopPropagation(); toggleFilm(f.id); });
+  row.append(mark, name);
+  if (newFilms.has(f.id)) {
+    const badge = el('span', 'p-new', 'new');
+    badge.title = 'appeared since you opened the Studio — opening it clears this';
+    row.append(badge);
+  }
+  row.append(meta, del);
   // One page per film (v0.23.1). It opens in watch & advise and carries the
   // production editor behind a toggle — there is no second surface to choose.
   row.addEventListener('click', () => openDocument({ kind: 'film', id: f.id, name: f.name }));
@@ -215,17 +410,19 @@ function appendFilmRows(ul, f) {
     ul.appendChild(el('li', 'dim tree-note tree-note-scene', 'loading…'));
     return;
   }
+  const rendered = state.sceneRender[f.id] ?? {};
   for (const s of scenes) {
-    const sRow = el('li',
-      'tree-scene' + (docs.has(docKey('scene', s.id)) ? ' active' : '') + (s.missing ? ' missing' : ''));
+    const sRow = el('li', 'tree-scene' + (s.missing ? ' missing' : ''));
+    sRow.dataset.doc = docKey('scene', s.id);
     const sName = el('span', 'p-name', s.name);
     sName.title = s.id;
-    sRow.append(sName, el('span', 'p-meta', s.missing ? 'missing' : s.unlisted ? 'unlisted' : ''));
+    sRow.append(standingGlyph('scene', SCENE_STANDING, s.missing ? 'missing' : rendered[s.id]), sName);
+    sRow.append(el('span', 'p-meta', s.missing ? 'missing' : s.unlisted ? 'unlisted' : ''));
     if (!s.missing) sRow.addEventListener('click', () => openDocument({ kind: 'scene', id: s.id, name: s.name }));
     ul.appendChild(sRow);
   }
   const addScene = el('li', 'tree-scene scene-add');
-  addScene.append(el('span', 'p-name dim', '+ scene'));
+  addScene.append(glyph('add'), el('span', 'p-name dim', 'scene'));
   addScene.title = 'scaffold a new scene into this film';
   addScene.addEventListener('click', () => openNewSceneDialog(f.id));
   ul.appendChild(addScene);
@@ -243,12 +440,33 @@ function toggleFilm(filmId) {
   renderTree();
 }
 
-/** Two plain confirms instead of a dialog: the second decides file deletion. */
-async function deleteFilm(f) {
-  if (!confirm(`Delete film "${f.name}"?`)) return;
-  const deleteFiles = confirm(
-    'Also delete the film folder on disk — its scenes, assets and rendered output?\n\n' +
-    'OK: delete everything.\nCancel: remove only the film definition (film.json); all files stay.');
+/* Every `[data-close]` button dismisses the dialog it names — the same wiring
+ * film.js uses, so a cancel button never needs its own handler. */
+for (const btn of document.querySelectorAll('[data-close]')) {
+  btn.addEventListener('click', () => $(`#${btn.dataset.close}`)?.close());
+}
+
+/* `askForText` moved to studio-util.js in v0.27 so film.js and the panels
+ * module could stop reaching for `prompt()` too. The static
+ * `#text-prompt-dialog` in index.html stays: the helper adopts it when the
+ * page already has one, and builds its own where it does not. */
+
+/** One dialog, one decision: the checkbox is what "and the files too" means. */
+let filmPendingDelete = null;
+function deleteFilm(f) {
+  filmPendingDelete = f;
+  $('#delete-film-summary').textContent = `Delete "${f.name}" (${f.scenes} scene${f.scenes === 1 ? '' : 's'})?`;
+  $('#delete-film-form').elements.deleteFiles.checked = false;
+  $('#delete-film-dialog').showModal();
+}
+
+$('#delete-film-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = filmPendingDelete;
+  const deleteFiles = $('#delete-film-form').elements.deleteFiles.checked;
+  $('#delete-film-dialog').close();
+  filmPendingDelete = null;
+  if (!f) return;
   try {
     await api(`/api/films/${enc(f.id)}${deleteFiles ? '?deleteFiles=1' : ''}`, { method: 'DELETE' });
     delete state.filmScenes[f.id];
@@ -259,13 +477,18 @@ async function deleteFilm(f) {
     }
     await loadWorkspaces();
   } catch (err) { toastError(err); }
-}
+});
 
 $('#btn-new-workspace').addEventListener('click', async () => {
-  const name = prompt('Workspace name:');
-  if (!name || !name.trim()) return;
+  const name = await askForText({
+    title: 'new workspace',
+    label: 'name',
+    note: 'A separate tree, usually one per connected agent.',
+    ok: 'create',
+  });
+  if (!name) return;
   try {
-    await api('/api/workspaces', { method: 'POST', body: { name: name.trim() } });
+    await api('/api/workspaces', { method: 'POST', body: { name } });
     await loadWorkspaces();
   } catch (err) { toastError(err); }
 });
@@ -279,7 +502,7 @@ $('#btn-new-workspace').addEventListener('click', async () => {
 function setRailCollapsed(collapsed) {
   $('#frame').classList.toggle('rail-collapsed', collapsed);
   localStorage.setItem('ms.railCollapsed', collapsed ? '1' : '');
-  syncExplorerIcon();
+  syncActivityBar();
   // The active document sized itself to a box that just changed width.
   try { activeWindow()?.dispatchEvent(new Event('resize')); } catch { /* still loading */ }
 }
@@ -376,6 +599,7 @@ function showSettingsPage(open) {
   $('#settings-page').classList.toggle('hidden', !open);
   $('#btn-settings').classList.toggle('active', open);
   state.settingsOpen = open;
+  syncActivityBar();
 }
 
 $('#btn-settings').addEventListener('click', async () => {
@@ -800,6 +1024,7 @@ function showVendorsPage(capability) {
   $('#btn-tts').classList.toggle('active', capability === 'speech');
   $('#btn-music').classList.toggle('active', capability === 'music');
   $('#btn-transcribe').classList.toggle('active', capability === 'transcription');
+  syncActivityBar();
   // Switching capability mid-clip would leave audio playing with its stop
   // button hidden; opening fresh makes this a no-op.
   stopVendorPreview();
@@ -1798,7 +2023,21 @@ async function refreshLibrary() {
     dl.href = `/api/workspaces/${enc(ws)}/library/file?path=${enc(f.path)}&download=1`;
     const del = el('button', 'ghost tiny danger', 'delete');
     del.addEventListener('click', async () => {
-      if (!confirm(`Delete "${f.path}" from the library?\n\nScenes that already pulled it in keep their copy.`)) return;
+      // Typing the name back is the confirmation: a library file can be a
+      // 300 MB plate a dozen scenes were built from, and an OK button is too
+      // cheap for that. Scenes that already pulled it in keep their copy.
+      const typed = await askForText({
+        title: 'delete from the library',
+        label: 'type the filename to confirm',
+        note: `"${f.path}" — ${fmtBytes(f.bytes)}. Scenes that already pulled it in keep their own copy; `
+          + 'this removes the shared original.',
+        ok: 'delete',
+      });
+      if (typed == null) return;
+      if (typed !== f.path.split('/').pop()) {
+        toast('Name did not match — nothing was deleted.', { kind: 'info' });
+        return;
+      }
       try {
         await api(`/api/workspaces/${enc(ws)}/library/file?path=${enc(f.path)}`, { method: 'DELETE' });
         await refreshLibrary();
@@ -1880,7 +2119,7 @@ function openDocument({ kind, id, name = null, activate = true }) {
     doc.name = name;
   }
   if (activate) showDocument(key);
-  else { renderDocTabs(); persistDocs(); }
+  else { renderDocTabs(); persistDocs(); syncTreeSelection(); }
 }
 
 function showDocument(key) {
@@ -1895,6 +2134,8 @@ function showDocument(key) {
   renderDocTabs();
   renderStatusBar();
   persistDocs();
+  syncTreeSelection();
+  revealActiveDoc().catch(() => {});
   const doc = docs.get(key);
   document.title = `${doc.name} - Motion Studio`;
 }
@@ -1944,6 +2185,7 @@ async function closeDocument({ kind, id }, { flush = true } = {}) {
   renderDocTabs();
   renderStatusBar();
   persistDocs();
+  syncTreeSelection();
 }
 
 /** Exactly one document is visible, and only when no full-stage page is up. */
@@ -1982,22 +2224,48 @@ function renderDocTabs() {
   strip.classList.toggle('hidden', !docs.size);
   let activeTab = null;
   for (const [key, d] of docs) {
-    const tab = el('div', 'doc-tab' + (key === activeDocKey ? ' active' : ''));
+    const on = key === activeDocKey;
+    const tab = el('div', 'doc-tab' + (on ? ' active' : ''));
     tab.title = `${d.name}\n${d.id}`;
+    // A roving tabindex: one Tab stop for the whole strip, which is what a
+    // tablist is. This is also what finally makes the `.doc-tab:focus-visible`
+    // rule in tabs.css — dead since the strip was written — able to fire.
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
     tab.append(
       el('span', 'doc-tab-mark', d.kind === 'film' ? '▶' : '◧'),
       el('span', 'doc-tab-name', d.name),
     );
     const close = el('button', 'doc-tab-close', '✕');
     close.title = 'close this document';
+    close.setAttribute('aria-label', `close ${d.name}`); // "close" is not the tab's name
+    close.tabIndex = -1;
     close.addEventListener('click', (ev) => { ev.stopPropagation(); closeDocument(d); });
     tab.appendChild(close);
     tab.addEventListener('click', () => showDocument(key));
+    // Middle-click closes, the way it does in every browser and editor.
+    tab.addEventListener('auxclick', (ev) => {
+      if (ev.button !== 1) return;
+      ev.preventDefault();
+      closeDocument(d);
+    });
+    tab.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); showDocument(key); }
+      else if (ev.key === 'ArrowRight') { ev.preventDefault(); shellCommand('nextDoc'); focusActiveTab(); }
+      else if (ev.key === 'ArrowLeft') { ev.preventDefault(); shellCommand('prevDoc'); focusActiveTab(); }
+      else if (ev.key === 'Delete') { ev.preventDefault(); closeDocument(d); }
+    });
     strip.appendChild(tab);
-    if (key === activeDocKey) activeTab = tab;
+    if (on) activeTab = tab;
   }
   strip.scrollLeft = scrollLeft;
   activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+/** Keep the keyboard on the strip while arrowing along it. */
+function focusActiveTab() {
+  $('#doc-tabs')?.querySelector('.doc-tab.active')?.focus();
 }
 
 /**
@@ -2023,6 +2291,31 @@ function docToast({ kind = 'error', code = null, message = '', timeoutMs, doc = 
 /** A closed document's failures are about something no longer open. */
 function dropDocToasts(key) {
   for (const t of document.querySelectorAll(`#toasts .toast[data-doc="${CSS.escape(key)}"]`)) t.remove();
+}
+
+/**
+ * The working set's keyboard. Every binding routes here, from the shell or
+ * from inside a document, through StudioUtil's one binder.
+ */
+function shellCommand(id, arg) {
+  const order = [...docs.keys()];
+  const at = order.indexOf(activeDocKey);
+  if (id === 'closeDoc') { if (activeDoc()) closeDocument(activeDoc()); return; }
+  if (!order.length) return;
+  if (id === 'nthDoc') {
+    // Alt+1…9 by position, Alt+0 for the last — the convention every browser
+    // and editor shares, so it needs no learning.
+    const key = arg === 0 ? order[order.length - 1] : order[arg - 1];
+    if (key) showDocument(key);
+    return;
+  }
+  if (id === 'prevDoc' || id === 'nextDoc') {
+    // Wrapping, because a strip you cannot walk off the end of is one fewer
+    // thing to think about.
+    const step = id === 'nextDoc' ? 1 : -1;
+    const next = order[(at + step + order.length) % order.length];
+    if (next) showDocument(next);
+  }
 }
 
 /** A document has loaded and named itself. */
@@ -2055,6 +2348,56 @@ function treeChanged() {
   StudioPalette.invalidate();
 }
 
+/* ---------------------------- production feed ---------------------------- */
+
+/**
+ * The shell's single connection to `/api/events`, fanned out to every document.
+ *
+ * Two things needed it. The rail was a snapshot taken at load: a film an agent
+ * created in another process did not appear until something else happened to
+ * refresh it, which is a poor way to find the film you were told to look at.
+ * And each open film had been opening its own stream — ten tabs, ten sockets,
+ * against HTTP/1.1's six per origin (see `subscribeProduction`).
+ */
+const eventSubs = new Set();
+
+function subscribeEvents(types, fn) {
+  const sub = { types: new Set(types), fn };
+  eventSubs.add(sub);
+  return () => eventSubs.delete(sub);
+}
+
+function startProductionStream() {
+  let src;
+  try { src = new EventSource('/api/events'); }
+  catch { return; }
+  for (const type of StudioUtil.PRODUCTION_EVENTS) {
+    src.addEventListener(type, (e) => {
+      let data = { type };
+      try { data = { ...JSON.parse(e.data), type }; } catch { /* keep the bare type */ }
+      scheduleTreeRefresh();
+      for (const sub of [...eventSubs]) {
+        if (!sub.types.has(type)) continue;
+        try { sub.fn(data); } catch { /* one bad document must not kill the feed */ }
+      }
+    });
+  }
+  src.onerror = () => { /* EventSource reconnects on its own */ };
+}
+
+/* Every event type touches the rail somehow — a name, a delivery, a rendered
+ * scene, a heartbeat — so the refresh is debounced rather than filtered: one
+ * refetch after the burst an agent's step actually produces. */
+let treeRefreshTimer = null;
+function scheduleTreeRefresh() {
+  if (treeRefreshTimer) return;
+  treeRefreshTimer = setTimeout(() => {
+    treeRefreshTimer = null;
+    loadWorkspaces().catch(() => {});
+    StudioPalette.invalidate();
+  }, 900);
+}
+
 function restoreDocs() {
   let saved;
   try { saved = JSON.parse(localStorage.getItem(DOCS_KEY) || 'null'); } catch { saved = null; }
@@ -2071,9 +2414,15 @@ window.StudioShell = {
   documentReady,
   syncDocument,
   treeChanged,
+  subscribeEvents,
   docToast,
+  shellCommand,
   openPalette: (mode) => StudioPalette.open(mode),
 };
+
+// The shell binds the same keys as its documents do, so a shortcut works with
+// focus on the tree or the status bar as well as inside a film.
+StudioUtil.bindShellKeys();
 
 /* ------------------------ activity bar + status bar ---------------------- */
 
@@ -2090,9 +2439,25 @@ function suspendActiveDocument() {
   try { activeWindow()?.StudioDoc?.suspend?.(); } catch { /* still loading */ }
 }
 
-/** The activity bar's explorer icon is lit whenever the side bar is showing. */
-function syncExplorerIcon() {
-  $('#btn-explorer').classList.toggle('active', !$('#frame').classList.contains('rail-collapsed'));
+/**
+ * The activity bar's state, in words as well as in colour.
+ *
+ * Which page is open was carried by a 2px amber left border and nothing else —
+ * unreadable to a screen reader, and to anyone who cannot pick the marker out.
+ * The explorer is a toggle, so `aria-pressed`; the four stage pages behave as a
+ * radio set, so `aria-current="page"` on the one that is up.
+ */
+function syncActivityBar() {
+  const railOpen = !$('#frame').classList.contains('rail-collapsed');
+  const explorer = $('#btn-explorer');
+  explorer.classList.toggle('active', railOpen);
+  explorer.setAttribute('aria-pressed', String(railOpen));
+  for (const id of ['#btn-tts', '#btn-music', '#btn-transcribe', '#btn-settings']) {
+    const btn = $(id);
+    if (!btn) continue;
+    if (btn.classList.contains('active')) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+  }
 }
 
 /* The status bar belongs to the shell, but what goes in it belongs to the
@@ -2144,8 +2509,9 @@ StudioPalette.register([
 
 checkPrereqs();
 loadSettings().catch(() => {});
-syncExplorerIcon();
+syncActivityBar();
 renderStatusBar();
+startProductionStream();
 loadWorkspaces()
   .then(async () => {
     const params = new URLSearchParams(location.search);

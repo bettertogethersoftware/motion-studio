@@ -41,7 +41,7 @@
  * the dismiss tooltip that studio-util.js sets. `el`, `uuid` and `clamp` stay
  * local: see the note at the top of studio-util.js on why `el` is deliberately
  * not shared. */
-const { $, api, toast, toastError } = StudioUtil;
+const { $, api, toast, toastError, askForText, askToConfirm } = StudioUtil;
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -1051,14 +1051,19 @@ function sequenceBlock(band) {
 }
 
 /** Group the selected segment and every following one into a named sequence. */
-function createSequenceFromSelection() {
+async function createSequenceFromSelection() {
   const sel = state.selection;
   const from = sel?.kind === 'scene' ? sel.index : 0;
   const seg = state.detail?.scenes?.[from];
   if (!seg) return toast('Add a scene or clip first.', { kind: 'error' });
-  const name = prompt('Name this sequence (it groups from the selected segment onward):');
-  if (!name || !name.trim()) return;
-  const label = name.trim().slice(0, 80);
+  const name = await askForText({
+    title: 'new sequence',
+    label: 'name',
+    note: 'It groups the selected segment and every segment after it.',
+    ok: 'group',
+  });
+  if (!name) return;
+  const label = name.slice(0, 80);
   mutate((film) => {
     for (let i = from; i < film.scenes.length; i++) film.scenes[i].sequence = label;
     film.sequences = { ...(film.sequences ?? {}), [label]: film.sequences?.[label] ?? {} };
@@ -1068,10 +1073,16 @@ function createSequenceFromSelection() {
   renderAll();
 }
 
-function renameSequence(oldLabel) {
-  const name = prompt(`Rename sequence “${oldLabel}” to:`, oldLabel);
-  if (!name || !name.trim() || name.trim() === oldLabel) return;
-  const label = name.trim().slice(0, 80);
+async function renameSequence(oldLabel) {
+  const name = await askForText({
+    title: 'rename sequence',
+    label: 'name',
+    note: `Currently “${oldLabel}”. Every segment in it follows the new name.`,
+    value: oldLabel,
+    ok: 'rename',
+  });
+  if (!name || name === oldLabel) return;
+  const label = name.slice(0, 80);
   mutate((film) => {
     for (const s of film.scenes) if (s.sequence === oldLabel) s.sequence = label;
     const meta = { ...(film.sequences ?? {}) };
@@ -1503,6 +1514,10 @@ function boundaryFrom(dir, sequencesOnly) {
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
   if ($('#advice-dialog')?.open) return; // the popup owns the keyboard while it is up
+  // Alt belongs to the shell (Alt+W, Alt+PageUp/Down, Alt+1…9). Without this,
+  // Alt+PageDown would move the playhead AND switch documents — these branches
+  // test `code` alone and call preventDefault, so they would both fire.
+  if (e.altKey) return;
   if (e.code === 'Space') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
   else if (e.code === 'ArrowLeft') { stopPlayback(); setPlayhead(Math.floor(state.playhead) - (e.shiftKey ? 10 : 1)); }
   else if (e.code === 'ArrowRight') { stopPlayback(); setPlayhead(Math.floor(state.playhead) + (e.shiftKey ? 10 : 1)); }
@@ -2604,11 +2619,16 @@ async function insertSceneAt(slug, index) {
 }
 
 async function createNewScene() {
-  const name = prompt('Name for the new scene:');
-  if (!name || !name.trim()) return;
+  const name = await askForText({
+    title: 'new scene',
+    label: 'name',
+    note: 'Resolution and fps come from the film, so every scene stays concat-compatible.',
+    ok: 'create',
+  });
+  if (!name) return;
   try {
     await waitForSaved(); // the server appends to the play order it reads from disk
-    await api(`/api/films/${fid}/scenes`, { method: 'POST', body: { name: name.trim() } });
+    await api(`/api/films/${fid}/scenes`, { method: 'POST', body: { name } });
     await refresh();
     toast('Scene created ✓ — appended to the play order', { kind: 'info' });
   } catch (err) { toastError(err); }
@@ -2627,12 +2647,18 @@ $('#btn-new-scene').addEventListener('click', createNewScene);
  * one of these" is the ask, and a film picker would be UI for a rarer case.
  */
 async function duplicateScene(slug, sourceName) {
-  const name = prompt('Name for the duplicate:', `${sourceName ?? slug} (copy)`);
-  if (name === null || !name.trim()) return;
+  const name = await askForText({
+    title: 'duplicate scene',
+    label: 'name',
+    note: `Copies “${sourceName ?? slug}” — composition, assets, vendored libraries and settings — and appends it to the play order.`,
+    value: `${sourceName ?? slug} (copy)`,
+    ok: 'duplicate',
+  });
+  if (!name) return;
   try {
     await waitForSaved(); // the server appends to the play order it reads from disk
     const clone = await api(`/api/films/${fid}/scenes/${encodeURIComponent(slug)}/clone`, {
-      method: 'POST', body: { name: name.trim() },
+      method: 'POST', body: { name },
     });
     await refresh();
     const n = clone.copied?.files ?? 0;
@@ -3403,7 +3429,15 @@ function renderTree() {
           setPlayhead(seg.filmOffset ?? 0);
         },
       },
-      el('span', { class: 'tree-dot' }),
+      // The Explorer's mark, said the same way here: shape is the kind (◧ a
+      // scene, ▦ supplied footage), colour is whether it is ready. It was a
+      // bare dot, which carried the colour but named nothing.
+      el('span', {
+        class: 'tree-kind', text: footage ? '▦' : '◧', role: 'img',
+        'aria-label': footage
+          ? (seg.missing ? 'footage, missing' : 'footage')
+          : (seg.rendered ? 'scene, rendered' : 'scene, not rendered yet'),
+      }),
       el('span', { class: 'tree-name', text: seg.missing ? `⚠ ${seg.slug ?? seg.footage}` : seg.name }),
       el('span', { class: 'tree-meta mono', text: `${seg.durationInFrames ?? 0}f` }));
       row.title = footage
@@ -3710,10 +3744,13 @@ async function withdrawOneAdvice(a, btn) {
 async function withdrawAllAdvice() {
   const open = (state.advice ?? []).filter((x) => x.status !== 'resolved').length;
   if (!open) return;
-  const ok = confirm(
-    `Withdraw all ${open} open piece${open === 1 ? '' : 's'} of advice on this film?\n\n`
-    + 'The next AI run will not pick them up. What you wrote stays on record.',
-  );
+  const ok = await askToConfirm({
+    title: 'withdraw all advice',
+    body: `Withdraw all ${open} open piece${open === 1 ? '' : 's'} of advice on this film? `
+      + 'The next AI run will not pick them up. What you wrote stays on record.',
+    ok: 'withdraw all',
+    danger: true,
+  });
   if (!ok) return;
   try {
     const r = await api(`/api/films/${fid}/advice/withdraw-all`, { method: 'POST', body: {} });
@@ -3965,11 +4002,7 @@ function setSource(src) {
  */
 let overviewRefetch = null;
 function connectEvents() {
-  const source = new EventSource('/api/events');
-  const mine = (e) => {
-    try { const d = JSON.parse(e.data); return d?.filmId === filmId || d?.type === 'activity'; }
-    catch { return false; }
-  };
+  const mine = (e) => e?.filmId === filmId || e?.type === 'activity' || e?.type === 'reset';
   const bump = () => {
     clearTimeout(overviewRefetch);
     overviewRefetch = setTimeout(async () => {
@@ -3982,11 +4015,12 @@ function connectEvents() {
       renderInspector();
     }, 400);
   };
-  for (const type of ['advice', 'revision', 'delivery', 'film-output', 'scene-output', 'activity']) {
-    source.addEventListener(type, (e) => { if (mine(e)) bump(); });
-  }
-  source.addEventListener('reset', bump);
-  source.onerror = () => { /* EventSource reconnects on its own */ };
+  // One stream for the whole app when embedded, our own when standalone —
+  // studio-util decides, because ten open films must not mean ten sockets.
+  StudioUtil.subscribeProduction(
+    ['advice', 'revision', 'delivery', 'film-output', 'scene-output', 'activity', 'reset'],
+    (e) => { if (mine(e)) bump(); },
+  );
   // Heartbeats go stale on a clock, not on a disk write.
   setInterval(async () => {
     if (!state.status) return;
@@ -4079,16 +4113,10 @@ const filmDoc = {
 
 StudioUtil.registerDocument(filmDoc);
 
-/* The shell owns Ctrl+P, but the keystroke lands wherever the focus is — and
- * the focus is usually inside a document. Hand it up rather than swallowing it. */
-window.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'p') return;
-  if (document.querySelector('dialog[open]')) return;
-  const shell = StudioUtil.shell();
-  if (!shell) return;
-  e.preventDefault();
-  shell.openPalette(e.shiftKey ? 'commands' : 'files');
-});
+/* The shell's keys land wherever the focus is, and the focus is usually inside
+ * a document — so every document binds them and hands them up. One binder for
+ * all of them now; this used to be a per-file copy that only knew Ctrl+P. */
+StudioUtil.bindShellKeys();
 
 /* ------------------------ activity bar + the palette --------------------- */
 
