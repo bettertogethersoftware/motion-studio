@@ -761,6 +761,17 @@ label.radio input { accent-color: var(--accent); }
 }
 .toast.info .toast-code { color: var(--accent); border-color: var(--accent); }
 .toast-body { flex: 1; min-width: 0; overflow-wrap: break-word; }
+/* Which document raised this. Only appears on a toast the shell is showing on
+   a document's behalf, and clicking it opens that tab — the failure names its
+   own source, because the tab it happened in may not be the one you are on. */
+.toast-src {
+  flex: none; align-self: center;
+  background: none; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 1px 6px; max-width: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dim); font: 11px var(--sans); cursor: pointer;
+}
+.toast-src:hover { color: var(--text); border-color: var(--dim); }
 .toast-close {
   flex: none;
   background: none; border: none; cursor: pointer;

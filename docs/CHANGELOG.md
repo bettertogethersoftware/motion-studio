@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### The shell under load: ten tabs, a failing render, and the edit that got away
+
+The v0.27 shell was verified with one or two documents, in the foreground, on a
+healthy film. Four fixes for what a real session does to it
+([studio-ui-polish-plan.md](plans/studio-ui-polish-plan.md) U-1…U-4).
+
+**The tab strip stops collapsing.** `.doc-tab` carried `min-width: 0` and the
+default `flex-shrink: 1`, so ten open documents shared the strip's width instead
+of overflowing it: measured at 1100px, every name rendered nine to thirty pixels
+wide — one character and an ellipsis — and the `overflow-x: auto` above was
+unreachable dead code. Tabs now hold a 120px floor and the strip really scrolls;
+the same names now render 82–182px. The strip also keeps its scroll position
+across a repaint (rebuilding it reset `scrollLeft` to 0, including on a film
+rename) and scrolls the active tab into view, so switching to a tab you cannot
+see stopped being possible.
+
+**A failing background document is heard.** A document that is not the active
+tab is `visibility: hidden` — it still has a layout, so a toast raised there
+rendered perfectly and was seen by nobody, and since errors have no TTL it
+stayed forever. Start a render, switch tabs, and a failure reported *nothing*.
+Toasts from an embedded document now go to the shell, labelled with a chip that
+opens the document they came from; the stack is capped at five, so a retrying
+render cannot bury the UI it is reporting on; and a closed document's toasts go
+with it. Standalone `/film.html` on a second monitor still shows its own.
+`#toasts` gained `role="status" aria-live="polite"` — the app's primary feedback
+channel announced nothing.
+
+**Closing a tab cannot eat an edit.** The film page saves on a 700ms debounce and
+guarded the window with `beforeunload`, which browsers do not run for a subframe
+being removed — so closing a film tab inside that window dropped the edit,
+silently, defeating the one protection written against exactly that. `StudioDoc`
+gains `closing()`; `closeDocument` awaits it (with a 4s ceiling, so a wedged
+document cannot make its tab unclosable) before removing the frame. Proven in
+headless Chromium: dirty a film, close the tab, and the edit is on disk —
+with the same run against a shell with `closing()` removed losing it. Closing
+the active tab now also activates its **neighbour** rather than the last tab in
+the strip, and deleting a film closes its documents without flushing, so the
+page no longer tries to save to a film that no longer exists.
+
+**One transport, one toast.** `film.js` carried its own `$`, `api`, `toast` and
+`toastError` despite loading `studio-util.js` first, and they had already
+drifted — its toast forgot the dismiss tooltip. Deleted; `el`, `uuid` and
+`clamp` stay local for the reasons already recorded.
+
 ### Footage stops pretending to be a scene
 
 `store.listScenes()` walked the whole play order and described every entry as a

@@ -10,6 +10,14 @@
 > Follows [studio-shell-plan.md](studio-shell-plan.md), which shipped the surfaces
 > this document repairs; supersedes nothing.
 >
+> **Progress 2026-08-06 — U-1…U-4 shipped**, plus U-8's engine half via
+> [bug-backlog.md](bug-backlog.md) BUG-2. U-4 was accepted in headless
+> Chromium against a throwaway film: dirty it, close the tab, the edit is on
+> disk — and the same run against a shell with `closing()` removed loses it.
+> Verifying it surfaced BUG-3 (the film page is editable before it has
+> loaded), which is pre-existing and filed rather than fixed here. Remaining:
+> U-5…U-7, U-9, and the accessibility pass U-10…U-13 (~3 d).
+>
 > **Revision 2026-08-06:** the accessibility work was first written here as
 > a deferred reminder and is now **approved and scheduled** (U-10…U-13,
 > plus the two items cheap enough to fold into U-3 and U-5). Investigating
@@ -74,7 +82,7 @@ accessibility pass**; two of its items were cheap enough to fold into
 slices that already open the same file, and are marked in place rather
 than duplicated.
 
-### U-1 — the tab strip stops collapsing  *(~2 h)*
+### U-1 — the tab strip stops collapsing  *(~2 h)* — **SHIPPED 2026-08-06**
 
 **Measured**, ten documents open at a 1100 px viewport: every tab name
 rendered between **9 px and 29 px wide**. `"Intro A — grid"` painted at
@@ -105,7 +113,7 @@ bound instead of the strip scrolling.
   [palette.js:289](../../engine/src/studio/public/palette.js:289) already
   uses — today it is the only `scrollIntoView` in the codebase.
 
-### U-2 — `film.js` drops its duplicate helpers  *(~1 h)*
+### U-2 — `film.js` drops its duplicate helpers  *(~1 h)* — **SHIPPED 2026-08-06**
 
 [film.js:39-85](../../engine/src/studio/public/film.js:39) defines its own
 `$`, `api`, `toast` and `toastError` even though
@@ -124,7 +132,7 @@ documents why `el` is deliberately *not* shared, and that reasoning stands.
 **This is a prerequisite for U-3**, not a tidy-up. With two copies live,
 the toast routing would be written twice and drift again immediately.
 
-### U-3 — a failing background document is heard  *(~3 h)*
+### U-3 — a failing background document is heard  *(~3 h)* — **SHIPPED 2026-08-06**
 
 **Verified live.** A non-active document is `visibility: hidden`
 ([shell.css:198](../../engine/src/studio/public/shell.css:198)), `toast()`
@@ -167,7 +175,7 @@ whenever you happen to come back.
   screen reader needs. Use `polite`, not `assertive`: a render failure is
   not worth interrupting a word mid-syllable.
 
-### U-4 — closing a tab cannot eat an edit  *(~2 h)*
+### U-4 — closing a tab cannot eat an edit  *(~2 h)* — **SHIPPED 2026-08-06**
 
 The film page saves on a 700 ms debounce
 ([film.js:194](../../engine/src/studio/public/film.js:194)) and guards the
@@ -306,7 +314,7 @@ The chip will read `v0.26.0` until the v0.27 release bumps the packages.
 That is correct: it reports what is installed, which is the only thing it
 can honestly report.
 
-### U-8 — the Explorer keeps its place and stops showing ghosts  *(~2 h)*
+### U-8 — the Explorer keeps its place and stops showing ghosts  *(~2 h)* — **PARTLY SHIPPED**
 
 Two unrelated defects in one file, cheap together.
 

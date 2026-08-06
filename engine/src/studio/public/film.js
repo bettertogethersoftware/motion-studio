@@ -36,53 +36,15 @@
 
 'use strict';
 
-const $ = (sel) => document.querySelector(sel);
-const api = async (path, opts = {}) => {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.message || res.statusText), { data });
-  return data;
-};
+/* One transport, one toast, for every Studio document. film.js carried its own
+ * copies of these until v0.27 and they had already drifted — its toast forgot
+ * the dismiss tooltip that studio-util.js sets. `el`, `uuid` and `clamp` stay
+ * local: see the note at the top of studio-util.js on why `el` is deliberately
+ * not shared. */
+const { $, api, toast, toastError } = StudioUtil;
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-/* ------------------------------- toasts -------------------------------- */
-
-function toast(input, { kind = 'error', timeoutMs = null } = {}) {
-  let el = $('#toasts');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'toasts';
-    document.body.appendChild(el);
-  }
-  const err = input instanceof Error ? input : null;
-  const t = document.createElement('div');
-  t.className = `toast ${kind}`;
-  const code = err?.data?.code;
-  if (code) {
-    const badge = document.createElement('span');
-    badge.className = 'toast-code mono';
-    badge.textContent = code;
-    t.appendChild(badge);
-  }
-  const body = document.createElement('span');
-  body.className = 'toast-body';
-  body.textContent = err ? err.message : String(input);
-  t.appendChild(body);
-  const close = document.createElement('button');
-  close.className = 'toast-close';
-  close.textContent = '✕';
-  close.addEventListener('click', () => t.remove());
-  t.appendChild(close);
-  el.appendChild(t);
-  const ttl = timeoutMs ?? (kind === 'error' ? null : 5000);
-  if (ttl) setTimeout(() => t.remove(), ttl);
-}
-const toastError = (e) => toast(e, { kind: 'error' });
 
 /* -------------------------------- state -------------------------------- */
 
@@ -4095,6 +4057,15 @@ const filmDoc = {
   },
   /* Going behind a full-stage page must not leave the film playing. */
   suspend: () => { try { stopPlayback(); } catch { /* not up yet */ } },
+  /* The tab is closing. `beforeunload` above guards the window, but browsers
+   * do not run it for a subframe being removed — so inside the shell it is
+   * this, or the last 700ms of edits go with the iframe. Flush now and let the
+   * shell wait for the save it already knows how to wait for. */
+  closing: async () => {
+    if (!state.dirty && !state.saving) return;
+    scheduleSave({ now: true });
+    await waitForSaved();
+  },
   /* On screen at last. A film that loaded behind a full-stage page had no
    * timeline width to fit against; this is where it gets one. */
   shown: () => {

@@ -21,7 +21,14 @@
 
 .doc-tab {
   display: flex; align-items: center; gap: 7px;
-  max-width: 240px; min-width: 0;
+  /* A tab has a floor. It used to carry `min-width: 0` and the default
+     `flex-shrink: 1`, so ten open documents shared the strip's width instead of
+     overflowing it — every name rendered nine to thirty pixels wide, one
+     character and an ellipsis, and the `overflow-x: auto` above was unreachable
+     dead code. Tabs now hold their size and the strip scrolls, which is what a
+     strip that declares `overflow-x` was always promising. */
+  flex: 0 0 auto;
+  min-width: 120px; max-width: 240px;
   padding: 0 8px 0 11px;
   border-right: 1px solid var(--line);
   border-top: 1px solid transparent;
@@ -41,7 +48,9 @@
   border-top-color: var(--accent);
 }
 .doc-tab-mark { font-size: 10px; flex-shrink: 0; color: var(--accent); opacity: 0.85; }
-.doc-tab-name { overflow: hidden; text-overflow: ellipsis; }
+/* The name is what ellipsises inside a floored tab, so the `min-width: 0` the
+   tab gave up lives here instead. */
+.doc-tab-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .doc-tab-close {
   background: none; border: 0; padding: 1px 3px; line-height: 1;
   border-radius: var(--radius);

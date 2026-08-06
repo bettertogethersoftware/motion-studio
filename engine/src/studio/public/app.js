@@ -252,9 +252,10 @@ async function deleteFilm(f) {
   try {
     await api(`/api/films/${enc(f.id)}${deleteFiles ? '?deleteFiles=1' : ''}`, { method: 'DELETE' });
     delete state.filmScenes[f.id];
-    // Its documents are about a thing that no longer exists.
+    // Its documents are about a thing that no longer exists — so close them
+    // without flushing, or the film page would try to save to a deleted film.
     for (const d of [...docs.values()]) {
-      if (d.kind === 'film' ? d.id === f.id : filmIdOf(d.id) === f.id) closeDocument(d);
+      if (d.kind === 'film' ? d.id === f.id : filmIdOf(d.id) === f.id) closeDocument(d, { flush: false });
     }
     await loadWorkspaces();
   } catch (err) { toastError(err); }
@@ -1898,14 +1899,44 @@ function showDocument(key) {
   document.title = `${doc.name} - Motion Studio`;
 }
 
-function closeDocument({ kind, id }) {
+/**
+ * A document's last chance to finish what it was doing.
+ *
+ * The film page saves on a 700ms debounce and guards the window with
+ * `beforeunload` — which browsers do not run for a subframe being removed. So
+ * closing a tab inside that window dropped the edit, silently, defeating the
+ * one protection written against exactly that. The document flushes; we wait,
+ * but not forever, because a wedged document must not make its tab unclosable.
+ */
+const CLOSE_FLUSH_MS = 4000;
+
+async function flushDocument(doc) {
+  let closing;
+  try { closing = doc.frame.contentWindow?.StudioDoc?.closing?.(); }
+  catch { return; } // still loading, or already gone: nothing staged to lose
+  if (!closing?.then) return;
+  await Promise.race([closing, new Promise((r) => setTimeout(r, CLOSE_FLUSH_MS))])
+    .catch((err) => toastError(err));
+}
+
+async function closeDocument({ kind, id }, { flush = true } = {}) {
   const key = docKey(kind, id);
   const doc = docs.get(key);
   if (!doc) return;
+  // `flush: false` when the thing being edited no longer exists — flushing
+  // would PATCH a deleted film and report a failure the human just caused.
+  if (flush) await flushDocument(doc);
+  // It may have been closed underneath us while the flush was in flight.
+  if (!docs.has(key)) return;
+  const order = [...docs.keys()];
+  const at = order.indexOf(key);
   doc.frame.remove();
   docs.delete(key);
+  dropDocToasts(key);
   if (activeDocKey === key) {
-    activeDocKey = [...docs.keys()].pop() ?? null;
+    // The neighbour, not the end of the strip: every editor activates what
+    // slid into the closed tab's place, else the tab before it.
+    activeDocKey = order[at + 1] ?? order[at - 1] ?? null;
     if (activeDocKey) { showDocument(activeDocKey); return; }
     document.title = 'Motion Studio';
   }
@@ -1940,8 +1971,16 @@ function notifyShown() {
 
 function renderDocTabs() {
   const strip = $('#doc-tabs');
+  // The strip is rebuilt wholesale on every repaint — including the one a film
+  // rename triggers through syncDocument — and emptying it collapses the
+  // scrollable width, so the browser clamps scrollLeft to 0 and refilling
+  // leaves it there. Put it back, then make sure the active tab is on screen:
+  // now that tabs hold their width (U-1), the strip really can scroll, and
+  // switching to a tab you cannot see is not an improvement.
+  const scrollLeft = strip.scrollLeft;
   strip.innerHTML = '';
   strip.classList.toggle('hidden', !docs.size);
+  let activeTab = null;
   for (const [key, d] of docs) {
     const tab = el('div', 'doc-tab' + (key === activeDocKey ? ' active' : ''));
     tab.title = `${d.name}\n${d.id}`;
@@ -1955,7 +1994,35 @@ function renderDocTabs() {
     tab.appendChild(close);
     tab.addEventListener('click', () => showDocument(key));
     strip.appendChild(tab);
+    if (key === activeDocKey) activeTab = tab;
   }
+  strip.scrollLeft = scrollLeft;
+  activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+/**
+ * A toast raised inside a document, shown by the shell.
+ *
+ * The document it came from is a chip on the toast, and clicking it activates
+ * that tab — a render that failed while you were looking at something else
+ * should both say so and take you there. Without this the toast landed inside
+ * a `visibility: hidden` iframe and was never seen at all.
+ */
+function docToast({ kind = 'error', code = null, message = '', timeoutMs, doc = null } = {}) {
+  const entry = doc?.kind && doc?.id ? docs.get(docKey(doc.kind, doc.id)) : null;
+  const err = code ? Object.assign(new Error(message), { data: { code } }) : message;
+  const node = toast(err, { kind, timeoutMs });
+  if (!entry || !node) return;
+  const chip = el('button', 'toast-src', entry.name);
+  chip.title = `from ${entry.id} — click to open it`;
+  chip.addEventListener('click', () => showDocument(docKey(entry.kind, entry.id)));
+  node.insertBefore(chip, node.querySelector('.toast-close'));
+  node.dataset.doc = docKey(entry.kind, entry.id);
+}
+
+/** A closed document's failures are about something no longer open. */
+function dropDocToasts(key) {
+  for (const t of document.querySelectorAll(`#toasts .toast[data-doc="${CSS.escape(key)}"]`)) t.remove();
 }
 
 /** A document has loaded and named itself. */
@@ -2004,6 +2071,7 @@ window.StudioShell = {
   documentReady,
   syncDocument,
   treeChanged,
+  docToast,
   openPalette: (mode) => StudioPalette.open(mode),
 };
 
@@ -2065,7 +2133,10 @@ StudioPalette.register([
   },
   {
     id: 'doc.closeAll', title: 'View: Close All Documents', group: 'commands',
-    when: () => docs.size > 0, run: () => { for (const d of [...docs.values()]) closeDocument(d); },
+    // Serially, and awaited: each document gets to flush before the next one
+    // closes, which a fire-and-forget loop would race.
+    when: () => docs.size > 0,
+    run: async () => { for (const d of [...docs.values()]) await closeDocument(d); },
   },
 ]);
 

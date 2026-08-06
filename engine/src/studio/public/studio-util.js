@@ -35,11 +35,21 @@
    * the available alternatives) down to one modal line. Toasts keep the page
    * usable, show the error code as a badge, and stay up long enough to read a
    * multi-sentence fix. Errors persist until dismissed; info fades. */
+  /* Errors have no TTL, so a retrying render can stack them without bound.
+   * Keep the newest few: a wall of identical failures buries the UI it is
+   * reporting on, and nobody reads the fifth copy. */
+  const MAX_TOASTS = 5;
+
   function toastContainer() {
     let el = $('#toasts');
     if (!el) {
       el = document.createElement('div');
       el.id = 'toasts';
+      // The app's primary feedback channel announced nothing. `polite` and not
+      // `assertive`: a failed render is worth saying, not worth interrupting a
+      // word mid-syllable.
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
       document.body.appendChild(el);
     }
     return el;
@@ -49,6 +59,21 @@
     const err = input instanceof Error ? input : null;
     const message = err ? err.message : String(input);
     const code = err?.data?.code ?? null;
+
+    /* A document that is not the active tab is `visibility: hidden` — it still
+     * has a layout, so a toast raised there renders perfectly and is seen by
+     * nobody, forever, since errors never expire. Start a render, switch tabs,
+     * and a failure reported nothing at all. So an embedded document hands its
+     * toasts up to the shell, which shows them over whatever IS on screen and
+     * labels them with the document they came from. Standalone on a second
+     * monitor there is no shell, and the local path below is still right. */
+    const s = shell();
+    if (s?.docToast) {
+      try {
+        s.docToast({ kind, code, message, timeoutMs, doc: window.StudioDoc ?? null });
+        return null;
+      } catch { /* shell mid-navigation: fall through and show it here */ }
+    }
 
     const el = document.createElement('div');
     el.className = `toast ${kind}`;
@@ -70,7 +95,9 @@
     close.addEventListener('click', () => el.remove());
     el.appendChild(close);
 
-    toastContainer().appendChild(el);
+    const host = toastContainer();
+    host.appendChild(el);
+    while (host.children.length > MAX_TOASTS) host.firstElementChild.remove();
     const ttl = timeoutMs ?? (kind === 'error' ? null : 5000);
     if (ttl) setTimeout(() => el.remove(), ttl);
     return el;

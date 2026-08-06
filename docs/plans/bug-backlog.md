@@ -110,6 +110,71 @@ dependency the scene chose.
 
 ---
 
+## BUG-3 — the film page is editable before it has loaded
+
+**Found** 2026-08-06, by a Puppeteer probe racing the film document's boot while
+verifying the tab-close flush (U-4). **Severity:** low — a narrow window, and
+the page recovers. **Area:** `engine/src/studio/public/film.js`.
+
+### What is wrong
+
+`StudioUtil.registerDocument(filmDoc)` runs at film.js top level. The async boot
+that actually loads the film — `await refresh()` — runs *after* it, in the IIFE
+at the foot of the file. Between those two moments the document is fully wired:
+`#film-name` is in the DOM, its `change` listener is attached, and `StudioDoc`
+answers to the shell. What is missing is `state.film`, which is still `null`.
+
+Anything that calls `mutate()` in that window throws in `snapshot()`:
+
+```js
+// engine/src/studio/public/film.js — snapshot()
+EDITABLE.map((k) => [k, state.film[k]])   // state.film is null
+```
+
+### Evidence
+
+Driving the real page in headless Chromium: open a film as a document, wait only
+until `StudioDoc` exists, set `#film-name` and dispatch `change`. Console:
+
+```
+[pageerror] Cannot read properties of null (reading 'name')  film.js:184:89
+```
+
+`#save-state` stays `saved`, the keystroke is discarded, and nothing tells the
+human. Reproduced identically on `f58f295` and on the working tree, so it is not
+a regression from the v0.27 shell — it has been there since the field was
+wired.
+
+### Who is bitten
+
+A human who types into the film name in the moment after the tab paints and
+before the film resolves. On a warm local film that window is tens of
+milliseconds and effectively unreachable; on a cold start, a large film, or a
+slow disk it is long enough to lose a keystroke — and the failure mode is a
+silent no-op plus a console error, not a message.
+
+### Workaround
+
+Retype it. The page is fine afterwards; only edits made during the window are
+lost.
+
+### Candidate fixes
+
+1. **Disable the controls until the film resolves (preferred).** The boot
+   already replaces the whole body on a load *failure*; the same gate can mark
+   the document busy until `refresh()` lands. Honest, and it also covers the
+   other inputs, not just the name.
+2. **Guard `mutate()`.** `if (!state.film) return;` — one line, stops the throw,
+   but keeps silently discarding the edit, which is the part that actually hurts.
+3. **Register the document after the boot.** Smallest-looking and wrong: the
+   shell wants `StudioDoc` early so a tab can show its title and status while
+   the film is still loading.
+
+Take (1). (2) is worth having underneath it regardless — a null-guard on the
+single function every edit funnels through is cheap insurance.
+
+---
+
 ## Fixed
 
 - **BUG-2 — every film with footage reported a phantom scene called

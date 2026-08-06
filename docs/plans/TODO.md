@@ -77,6 +77,11 @@ Active plan documents:
        when it closes, which kills every document shortcut until you
        click. ~4½ days total, splittable; U-1/U-3/U-4/U-11 carry the value,
        U-13 is the first thing to cut.
+       **Progress 2026-08-06 — U-1…U-4 shipped** (tab strip, the drifted
+       helpers, background-document toasts, the tab-close flush), plus U-8's
+       engine half as BUG-2. U-4 accepted in headless Chromium with a control
+       run proving the fix load-bearing. **Remaining: U-5…U-7, U-9, and the
+       accessibility pass U-10…U-13 — about 3 days.**
 6. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
        extraction first); C-2 desktop packaging (bundled Node, installer) —
