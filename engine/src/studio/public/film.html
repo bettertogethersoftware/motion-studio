@@ -77,7 +77,7 @@
            foot of the tree; + seq used to be marooned in the header. -->
       <div class="rail-foot">
         <button id="btn-new-scene" class="ghost" title="scaffold a new scene folder into this film">+ new scene</button>
-        <button id="btn-new-sequence" class="ghost" title="group the selected segment onward into a new sequence">+ seq</button>
+        <button id="btn-new-sequence" class="ghost" title="make a sequence at the selected segment — or drag across the sequences lane to draw one">+ seq</button>
       </div>
     </aside>
 
@@ -98,8 +98,8 @@
       </div>
       <div class="transport">
         <button id="btn-play" class="transport-btn" title="play/pause (space)">▶</button>
-        <button id="btn-step-back" class="transport-btn" title="step back (←)">‹</button>
-        <button id="btn-step-fwd" class="transport-btn" title="step forward (→)">›</button>
+        <button id="btn-step-back" class="transport-btn" title="step back (←) · PgUp jumps to the previous cut, shift+PgUp to the previous sequence">‹</button>
+        <button id="btn-step-fwd" class="transport-btn" title="step forward (→) · PgDn jumps to the next cut, shift+PgDn to the next sequence">›</button>
         <span class="mono frame-counter"><span id="frame-now">0</span><span class="dim">/</span><span id="frame-total">0</span></span>
         <span class="mono dim" id="timecode">00:00.00</span>
         <div class="source-switch" role="group" aria-label="what the player shows">
@@ -124,7 +124,9 @@
   <section class="fe-timeline-wrap">
     <div class="fe-tools">
       <div class="group">
-        <button id="btn-add-scene" class="ghost">+ scene</button>
+        <!-- No "+ scene" here. It only pulsed the scenes rail, which the rail's
+             own "+ new scene" and the scenes lane's "+" already do, from where
+             the scene folders actually are. -->
         <button id="btn-add-tts" class="ghost" title="synthesize narration into the film">+ narration</button>
         <button id="btn-add-audio" class="ghost" title="place an audio asset on the timeline">+ audio</button>
         <button id="btn-add-caption" class="ghost" title="add a caption at the playhead">+ caption</button>
@@ -140,9 +142,10 @@
         <button id="btn-snap" class="ghost toggle-btn on" title="snap to cuts, clips and the playhead">snap</button>
       </div>
       <span class="spacer"></span>
-      <!-- The movement gestures are invisible otherwise, and this slot has been
-           empty since the toolbar was built. -->
-      <span id="tl-hint" class="dim mono">dbl-click a sequence to zoom to it · PgDn/PgUp jump cut to cut (shift: sequence)</span>
+      <!-- The movement gestures used to be spelled out here, on a line of their
+           own. A permanent tooltip costs a whole row of a timeline that is
+           already fighting for height, so they live in the tooltips of the
+           controls they belong to: the transport buttons and the band itself. -->
     </div>
     <div class="tl-scroll" id="tl-scroll">
       <div class="tl-inner" id="tl-inner"></div>

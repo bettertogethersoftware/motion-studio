@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+### Sequences are drawn on the timeline, not described to a dialog
+
+Grouping was a one-way street with a form in front of it. `+ seq` opened a
+modal asking for a name, then labelled the selected segment **and every
+segment after it** — and with nothing selected it started from segment one, so
+pressing it in the sequences lane turned the entire film into a single
+sequence. Nothing could take a scene back out or move it next door: the only
+other actions were rename and ungroup, both of which apply to a whole band.
+Building `Act I / Act II / Act III` worked only if you did it strictly left to
+right and never made a mistake — and the dialog had to explain that in prose,
+before there was anything on screen to look at.
+
+The model was already right — consecutive segments sharing a `sequence` label
+*are* a band — so the whole CRUD was rebuilt on the one shape that keeps a
+band an unbroken run: **moving a boundary.**
+
+**Create by drawing.** An unnamed stretch of the sequences lane now says *drag
+to make a sequence*, and does exactly that: a marquee snapping to cuts, with
+the drag tooltip naming what it is taking as you go — `3 segments, "one" →
+"three" · takes 1 from "Act II"`. Release and the band exists, named
+`sequence 1`, selected, with the caret already in the inspector's name field
+and the placeholder text selected, so naming it is just typing. No dialog: the
+band's extent is on screen, both its edges drag, and Ctrl+Z takes the whole
+thing back in one step. Because the gesture starts on an unnamed run — which
+always sits *between* bands — it can grow into either neighbour without ever
+leaving one sequence in two pieces.
+
+**`+ seq` creates the same thing from the keyboard**, at the selected segment
+or the one under the playhead. On unnamed film it takes exactly that segment,
+because nothing else there has a name to lose; inside an existing sequence it
+takes the rest of that sequence, which splits it at the cut rather than
+stranding its name on two separated stretches. Those two cases are the entire
+rule and both are visible the moment the band appears.
+
+**Band edges drag.** Each named band grew left and right grips, the same
+grammar as a clip's trim handles one row down. Outward takes segments off the
+neighbouring band; inward hands them back, or — at the ends of the film — out
+of the sequences entirely. The edge only lands on a cut, and never crosses the
+band's far edge: a band with no segments is an *ungroup*, which is already its
+own, honestly named action. A band that a drag empties loses its intent text
+in the same undo step, so regrouping cannot leave behind the
+`unreferencedSequences` damage `planFilm` reports.
+
+**Every segment carries a `sequence` picker.** The scene and footage
+inspectors gained a row offering the band before, the band after, no sequence,
+or a new one. It applies to the selected segment *and the rest of its band*,
+and the note under it says how many that is. Those are deliberately the only
+choices: any other label in the film would put one sequence name on two
+stretches with somebody else's in between, which the engine's bands, the tree
+and advice targeting would each read differently. Moving a segment somewhere
+else in the film is what *move earlier / move later* is for.
+
+**Renaming is a field, not a dialog.** The sequence inspector's read-only
+title and its `rename…` button — which opened a modal to edit one string —
+became a plain **name** input. A name already used by another band is refused
+with a toast rather than silently merging two sequences into one ambiguous
+label.
+
+### Two controls the timeline was better off without
+
+**`+ scene` is gone from the toolbar.** It only pulsed the scenes rail, which
+the rail's own **+ new scene** and the scenes lane's **+** already do, from
+where the scene folders actually are.
+
+**So is the hint line.** `dbl-click a sequence to zoom to it · PgDn/PgUp jump
+cut to cut` wrapped onto its own row of a toolbar that is already fighting the
+stage for height — a permanent tooltip costing a permanent row. The gestures
+moved into the tooltips of the controls they belong to: the transport buttons
+carry the PgUp/PgDn behaviour, and a sequence band carries both zoom-to-it and
+its new draggable edges.
+
 ### The timeline's lanes are yours, and clips trim from both ends
 
 Four things the film editor made harder than they are, reported from real use.

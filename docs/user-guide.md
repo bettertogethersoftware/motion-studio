@@ -770,12 +770,15 @@ timeline, one set of rules.
 
 ### The production controls
 
-They are always available: the add row (`+
-scene`, `+ narration`, `+ audio`, `+ caption`, `+ footage`, `+ overlay`),
-snap, drag-to-reorder and edge-trim, the full property inspector, undo/redo,
-per-scene render and **build film**. Sequences gain `+ seq` (group the
-selected segment onward), plus rename, ungroup, and an **intent** note the AI
-reads. The advice and version sections stay visible in this mode too, so the
+They are always available: the add row (`+ narration`, `+ audio`, `+ caption`,
+`+ footage`, `+ overlay`), snap, drag-to-reorder and edge-trim, the full
+property inspector, undo/redo, per-scene render and **build film**. Scenes are
+added from where the scene folders actually are — the rail's **+ new scene**,
+or the scenes lane's **+** — rather than from a toolbar button that only
+pulsed the rail. Sequences are drawn straight onto their lane, resized by
+dragging a band's edges, reassigned per segment from the inspector, and named,
+ungrouped and annotated there too; `+ seq` is the keyboard route to the same
+create. The advice and version sections stay visible in this mode too, so the
 conversation is never a mode away.
 
 In watch mode none of that can fire: dragging a block only selects it, and
@@ -812,13 +815,47 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
 
 - **sequences** — the narrative band above the cut. Consecutive segments
   sharing a label are one sequence; there is nothing else to it, which is why
-  regrouping never moves a file or invalidates a render. **+ seq** groups the
-  selected segment and everything after it; the inspector renames, ungroups,
-  and holds an **intent** note the AI reads. A scene dropped inside a
-  sequence joins it rather than splitting the band in three.
-  **Double-click a sequence** — its band on the timeline or its row in the
-  tree — to zoom the timeline to exactly that stretch of film (v0.26);
-  double-click the empty timeline background to fit the whole film again.
+  regrouping never moves a file or invalidates a render. Because a sequence
+  *is* a run of segments, every way of changing one is a way of moving a
+  boundary (v0.28):
+  - **Make one by drawing it.** An unnamed stretch of the lane reads *drag to
+    make a sequence*. Drag across it: a marquee snaps to cuts and the tooltip
+    names what it is taking — `3 segments, "one" → "three" · takes 1 from
+    "Act II"` — so you can pull past the end of the unnamed run to take scenes
+    off the sequence next door. Let go and the band is there, named
+    `sequence 1`, with the caret already in the inspector's **name** field and
+    the placeholder selected: type the real name and press Enter. Nothing is
+    asked up front, because the band itself is the answer — and Ctrl+Z undoes
+    the whole thing in one step.
+  - **Drag either edge of a band** across a cut to change what is in it.
+    Outward takes segments off the neighbouring band; inward hands them back,
+    or — at the ends of the film — out of the sequences entirely. The edge only
+    lands on a cut, and never crosses the band's far edge, because a band with
+    no segments is an *ungroup*, which is its own action.
+  - **The segment inspector's `sequence` picker** does the same edit from the
+    keyboard: the band before, the band after, no sequence, or a new one. It
+    applies to the selected segment **and the rest of its band**, and the note
+    under it says how many that is. Those are the only choices on offer,
+    because any other label would put one sequence name on two stretches of
+    film with somebody else's in between. To move a segment somewhere else
+    entirely, use **move earlier / move later**.
+  - **+ seq** — in the rail or on the sequences lane — is the keyboard route to
+    the same create, at the selected segment or the one under the playhead. On
+    unnamed film it takes exactly that segment; aimed inside an existing
+    sequence it takes the rest of that sequence, splitting it at the cut. (It
+    used to label everything from the selection to the end of the film, and to
+    start from segment one whenever the selection was empty — which is how
+    pressing it swallowed a whole film into a single sequence.)
+
+  The inspector holds the **name** (a field — a name another band already uses
+  is refused rather than merged), an **intent** note the AI reads, and
+  **ungroup**, which returns those segments to unnamed film ready to be drawn
+  over again. `Delete` on a selected band ungroups it too; it never deletes
+  scenes. A scene dropped inside a sequence joins it rather than splitting the
+  band in three. **Double-click a sequence** — its band on the timeline or its
+  row in the tree — to zoom the timeline to exactly that stretch of film
+  (v0.26); double-click the empty timeline background to fit the whole film
+  again.
 - **scenes and footage** — **drag a scene from the unused list onto the
   timeline** to place it (an insert marker shows where it lands), or hit the
   row's **+** to append it; drag blocks to reorder. **+ new scene** at the
@@ -911,7 +948,9 @@ autosave behave the way you'd expect from an NLE; Space plays, arrows step
 (shift for ten), Home/End go to the ends, and Del removes the selected block.
 **PgDn/PgUp move the playhead cut to cut** — the next and previous scene
 boundary — and **shift+PgDn/PgUp** move it sequence to sequence (v0.26), which
-is the granularity a film is actually reviewed at.
+is the granularity a film is actually reviewed at. They are spelled out in the
+transport buttons' own tooltips; the toolbar line that used to list them cost
+a whole row of a timeline already short of height (v0.28).
 
 **You and the AI share this document, so the page watches for its edits.**
 When the AI changes the film while you have the page open, a page with nothing

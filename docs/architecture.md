@@ -1681,6 +1681,36 @@ the plan, the film timeline, and advice targets. Sequences render nothing
 and own no files — the deliberate contrast with the scene, which is exactly
 the atomic render unit.
 
+Every Studio gesture that regroups is therefore a **boundary move**, because
+that is the only edit a run of segments can take without becoming two runs
+sharing a name (v0.28). One client helper, `assignSequence(from, to, label)`,
+writes a label across a contiguous range in both copies of the document —
+`film.scenes`, which saves, and `state.detail.scenes`, which the timeline is
+drawn from until the server answers — and drops intent metadata for any label
+that range was the last carrier of, so a regrouping cannot itself create the
+`unreferencedSequences` damage described below. Everything above it only picks
+a range:
+
+| gesture | range |
+|---|---|
+| `drawSequence` — drag on an unnamed stretch of the lane | the cuts the marquee spans |
+| `bandGrip` — drag a band's left/right edge | the boundary's new cut |
+| segment inspector's `sequence` picker | this segment to the end of its band |
+| `+ seq` (`newSequenceRange`) | one segment on unnamed film; anchor to band end inside a sequence |
+
+Contiguity is a property of those operations rather than something validated
+afterwards. The draw gesture can only *start* on an unnamed run — which always
+sits between bands — so growing it consumes a neighbour from the end nearest
+the pointer and never from its middle; the picker offers no label that is not
+an immediate neighbour; and `+ seq`'s two cases are exactly the two that
+cannot split a name in half. `nameNewSequence` is the shared create: it
+commits with a generated `sequence N` name, selects the band, and sets
+`state.namingSequence` so the inspector focuses and selects its name field.
+That flag is consumed in a microtask rather than during the render, because
+creating renders the inspector twice — once from `select`, once from
+`renderAll` — and the first pass's field is detached before the caret could
+land in it.
+
 Because a `scenes` patch replaces the play order *and each entry replaces its
 segment*, an omitted `sequence` clears that segment's label — which is how the
 Studio's ungroup works and therefore stays. The cost is that a play order

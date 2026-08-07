@@ -101,6 +101,7 @@ const state = {
   adviceCtx: null,          // what the open popup is aimed at
   collapsedSequences: new Set(),
   openAdviceId: null,
+  namingSequence: null,     // a just-created band, waiting for the inspector to focus its name
 };
 
 let reviewRequestId = 0;
@@ -1112,7 +1113,8 @@ function renderTimeline() {
     const { row: r, lane, btns } = row('row-sequences', 'sequences', laneW);
     btns.append(
       laneBtn('', '', null),
-      laneBtn('+', 'group the selected segment onward into a new sequence', createSequenceFromSelection),
+      laneBtn('+', 'make a sequence at the selected segment — or just drag across the lane to draw one',
+        createSequenceFromSelection),
       laneBtn('', '', null),
     );
     for (const band of sequenceBands()) lane.appendChild(sequenceBlock(band));
@@ -1244,9 +1246,14 @@ function sequenceBlock(band) {
   el.className = `seq-band${band.label ? '' : ' anon'}${selected ? ' selected' : ''}`;
   el.style.left = `${band.offset * state.pxf}px`;
   el.style.width = `${Math.max(6, band.frames * state.pxf)}px`;
+  const width = band.frames * state.pxf;
   const name = document.createElement('span');
   name.className = 'seq-name';
-  name.textContent = band.label ?? '—';
+  // An unnamed stretch is where a sequence gets *made*, so when there is room
+  // for it the band says so itself. The gesture was previously discoverable
+  // only from a tooltip, which is how "+ seq" ended up being the only route
+  // anyone found.
+  name.textContent = band.label ?? (width > 150 ? 'drag to make a sequence' : '—');
   el.appendChild(name);
   // Double-click zooms the band to the viewport — movement-to-movement is the
   // granularity a film is reviewed at, and an anonymous run is still a stretch
@@ -1256,53 +1263,284 @@ function sequenceBlock(band) {
     const n = unresolvedCount((a) => a.target?.type === 'sequence' && a.target.sequence === band.label);
     if (n) el.appendChild(adviceBadge(n));
     el.title = `sequence “${band.label}” — ${band.segments.length} segment${band.segments.length === 1 ? '' : 's'}`
-      + ' (double-click to zoom to it)'
+      + '\ndouble-click to zoom to it · drag either edge across a cut to change which segments are in it'
       + `${state.film?.sequences?.[band.label]?.intent ? `\n${state.film.sequences[band.label].intent}` : ''}`;
     el.addEventListener('pointerdown', (ev) => {
+      if (ev.target.classList.contains('grip')) return;
       ev.stopPropagation();
       select({ kind: 'sequence', sequence: band.label });
       stopPlayback();
       setPlayhead(band.offset);
     });
+    el.append(bandGrip(el, band, 'left'), bandGrip(el, band, 'right'));
   } else {
-    el.title = 'not in a sequence yet — select a segment and use “+ seq”';
+    el.title = 'not in a sequence yet — drag across this to make one '
+      + '(pull past the end to take scenes off the sequence next door)';
+    el.addEventListener('pointerdown', (ev) => {
+      ev.stopPropagation();
+      drawSequence(ev, el.parentElement);
+    });
   }
   return el;
 }
 
-/** Group the selected segment and every following one into a named sequence. */
-async function createSequenceFromSelection() {
-  const sel = state.selection;
-  const from = sel?.kind === 'scene' ? sel.index : 0;
-  const seg = state.detail?.scenes?.[from];
-  if (!seg) return toast('Add a scene or clip first.', { kind: 'error' });
-  const name = await askForText({
-    title: 'new sequence',
-    label: 'name',
-    note: 'It groups the selected segment and every segment after it.',
-    ok: 'group',
+/**
+ * Draw a new sequence straight onto the lane (v0.28) — the create gesture the
+ * timeline never had. It starts on an unnamed stretch, snaps to cuts, and the
+ * tooltip names what it is taking as you drag; releasing without moving just
+ * parks the playhead there, so the lane stays safe to click.
+ *
+ * Because it begins on a boundary — an unnamed run always sits between bands —
+ * it can grow into either neighbour without ever leaving one sequence in two
+ * pieces: the neighbour loses segments off the end nearest you and keeps the
+ * rest in one run. That is the whole reason this is the primary way to create,
+ * and why it needs no dialog explaining what it is about to do.
+ */
+function drawSequence(ev, lane) {
+  const scenes = state.detail?.scenes ?? [];
+  if (!scenes.length || !lane) return;
+  const anchor = segmentIndexAt(frameOfEvent(ev));
+  let lo = anchor, hi = anchor;
+  const marquee = document.createElement('div');
+  marquee.className = 'seq-marquee';
+  const paint = () => {
+    const from = scenes[lo].filmOffset ?? 0;
+    const to = (scenes[hi].filmOffset ?? 0) + (scenes[hi].durationInFrames ?? 0);
+    marquee.style.left = `${from * state.pxf}px`;
+    marquee.style.width = `${Math.max(4, (to - from) * state.pxf)}px`;
+  };
+  pointerDrag(ev, {
+    onMove: (_d, e2) => {
+      if (!marquee.isConnected) lane.appendChild(marquee);
+      const at = segmentIndexAt(frameOfEvent(e2));
+      lo = Math.min(anchor, at);
+      hi = Math.max(anchor, at);
+      paint();
+      // Name the neighbours it is eating into, because that is the only part
+      // of this gesture that is not already on screen.
+      const taken = new Map();
+      for (let i = lo; i <= hi; i++) {
+        if (scenes[i].sequence) taken.set(scenes[i].sequence, (taken.get(scenes[i].sequence) ?? 0) + 1);
+      }
+      const from = [...taken].map(([l, n]) => `${n} from “${l}”`).join(', ');
+      dragTip(`${segmentRangeText(lo, hi)}${from ? ` · takes ${from}` : ''}`, e2);
+    },
+    onDone: (moved) => {
+      marquee.remove();
+      // A click, not a draw: go to the cut like every other block does.
+      if (!moved) { stopPlayback(); setPlayhead(scenes[anchor].filmOffset ?? 0); return select({ kind: 'scene', index: anchor }); }
+      nameNewSequence(lo, hi);
+    },
   });
-  if (!name) return;
-  const label = name.slice(0, 80);
+}
+
+/**
+ * A band edge you can drag (v0.28). A sequence *is* a run of segments, so the
+ * only regrouping that keeps that true is moving a boundary — which makes the
+ * edge itself the control. Dragging outward takes segments off whichever band
+ * is next to it; dragging inward hands them back to that neighbour (or to no
+ * sequence at all, at the ends of the film). The edge can only land on a cut,
+ * because that is the only place a band can begin or end, and it can never
+ * cross the band's far edge: a band with no segments is an *ungroup*, which is
+ * a separate, honestly named action.
+ */
+function bandGrip(el, band, side) {
+  const g = document.createElement('div');
+  g.className = `grip ${side}`;
+  g.title = side === 'left'
+    ? `drag across a cut to move where “${band.label}” starts`
+    : `drag across a cut to move where “${band.label}” ends`;
+  g.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation();
+    const scenes = state.detail?.scenes ?? [];
+    if (!scenes.length) return;
+    // Every cut this edge could sit on, as {index, frame}: for the left edge,
+    // the segment the band would start at; for the right, the one it would end
+    // at. The range is what stops the band eating itself.
+    const marks = [];
+    if (side === 'left') {
+      for (let i = 0; i <= band.to; i++) marks.push({ index: i, frame: scenes[i].filmOffset ?? 0 });
+    } else {
+      for (let i = band.from; i < scenes.length; i++) {
+        marks.push({ index: i, frame: (scenes[i].filmOffset ?? 0) + (scenes[i].durationInFrames ?? 0) });
+      }
+    }
+    const origIndex = side === 'left' ? band.from : band.to;
+    const origFrame = side === 'left' ? band.offset : band.offset + band.frames;
+    let pick = marks.find((m) => m.index === origIndex) ?? marks[0];
+    pointerDrag(ev, {
+      onMove: (d, e2) => {
+        const want = origFrame + d;
+        pick = marks.reduce((best, m) => (Math.abs(m.frame - want) < Math.abs(best.frame - want) ? m : best), marks[0]);
+        const from = side === 'left' ? pick.frame : band.offset;
+        const to = side === 'left' ? band.offset + band.frames : pick.frame;
+        el.style.left = `${from * state.pxf}px`;
+        el.style.width = `${Math.max(6, (to - from) * state.pxf)}px`;
+        showSnapline(pick.frame);
+        const n = side === 'left' ? band.to - pick.index + 1 : pick.index - band.from + 1;
+        dragTip(`${n} segment${n === 1 ? '' : 's'}`, e2);
+      },
+      onDone: (moved) => {
+        if (!moved || pick.index === origIndex) return renderTimeline();
+        if (side === 'left') {
+          // Grow: the segments in front join us, whatever they were labelled.
+          // Shrink: the head we let go joins the band before it — or leaves the
+          // sequences entirely, when there is nothing in front of it.
+          if (pick.index < band.from) assignSequence(pick.index, band.from - 1, band.label);
+          else assignSequence(band.from, pick.index - 1, scenes[band.from - 1]?.sequence ?? null);
+        } else if (pick.index > band.to) {
+          assignSequence(band.to + 1, pick.index, band.label);
+        } else {
+          assignSequence(pick.index + 1, band.to, scenes[band.to + 1]?.sequence ?? null);
+        }
+        renderAll();
+      },
+    });
+  });
+  return g;
+}
+
+/**
+ * Write one label across a contiguous run of segments — the only shape a
+ * regrouping can take, because a band is a run. A null label unlabels them.
+ * Both copies move in one step: `film.scenes` is what saves, `detail.scenes`
+ * is what the timeline is drawn from until the server answers.
+ */
+function assignSequence(from, to, label) {
+  const scenes = state.detail?.scenes ?? [];
+  const lo = Math.max(0, Math.min(from, to));
+  const hi = Math.min(scenes.length - 1, Math.max(from, to));
+  if (hi < lo) return;
+  // Whatever this run used to be called might not exist anywhere else once we
+  // are done, and intent text for a label no segment carries is exactly what
+  // planFilm reports as `unreferencedSequences`. Only labels this call could
+  // have emptied are considered — damage that arrived with the film is not
+  // ours to quietly tidy away.
+  const displaced = new Set();
+  for (let i = lo; i <= hi; i++) if (scenes[i].sequence) displaced.add(scenes[i].sequence);
+  displaced.delete(label);
   mutate((film) => {
-    for (let i = from; i < film.scenes.length; i++) film.scenes[i].sequence = label;
-    film.sequences = { ...(film.sequences ?? {}), [label]: film.sequences?.[label] ?? {} };
+    for (let i = lo; i <= hi; i++) {
+      if (label) film.scenes[i].sequence = label;
+      else delete film.scenes[i].sequence;
+    }
+    const meta = { ...(film.sequences ?? {}) };
+    if (label) meta[label] ??= {};
+    if (displaced.size) {
+      const inUse = new Set(film.scenes.map((s) => s.sequence).filter(Boolean));
+      for (const gone of displaced) if (!inUse.has(gone)) delete meta[gone];
+    }
+    film.sequences = meta;
   }, { structural: true, silent: true });
-  for (let i = from; i < state.detail.scenes.length; i++) state.detail.scenes[i].sequence = label;
+  for (let i = lo; i <= hi; i++) {
+    if (label) scenes[i].sequence = label;
+    else delete scenes[i].sequence;
+  }
+}
+
+/** The segment a film frame lands in. */
+function segmentIndexAt(frame) {
+  const scenes = state.detail?.scenes ?? [];
+  const i = scenes.findIndex((s) => frame < (s.filmOffset ?? 0) + (s.durationInFrames ?? 0));
+  return i < 0 ? Math.max(0, scenes.length - 1) : i;
+}
+
+/**
+ * Where “+ seq” starts from: the selected segment, the start of the selected
+ * band, or — with nothing selected — the segment under the playhead. It used
+ * to fall back to index 0, which is why pressing it without a selection
+ * swallowed the entire film into one sequence.
+ */
+function sequenceAnchor() {
+  const sel = state.selection;
+  if (sel?.kind === 'scene') return sel.index;
+  if (sel?.kind === 'sequence') {
+    const band = sequenceBands().find((b) => b.label === sel.sequence);
+    if (band) return band.from;
+  }
+  return segmentIndexAt(Math.floor(state.playhead));
+}
+
+/** The last segment of the run `index` shares a label with. */
+function bandEnd(index) {
+  const scenes = state.detail?.scenes ?? [];
+  const label = scenes[index]?.sequence ?? null;
+  let i = index;
+  while (i + 1 < scenes.length && (scenes[i + 1].sequence ?? null) === label) i++;
+  return i;
+}
+
+/**
+ * What a *new* sequence anchored here covers. On unnamed film it is exactly
+ * the segment you pointed at — nothing else has a name to lose, so there is no
+ * reason to take more. Inside an existing sequence it runs to that sequence's
+ * end, which splits it at the cut rather than leaving its name on two
+ * separated stretches of film.
+ *
+ * Those two cases are the whole rule, and both are visible the instant the
+ * band appears — which is why creating no longer opens a dialog to explain
+ * itself first.
+ */
+function newSequenceRange(index) {
+  const scenes = state.detail?.scenes ?? [];
+  return scenes[index]?.sequence ? [index, bandEnd(index)] : [index, index];
+}
+
+const segmentLabel = (s, i) => s?.name ?? s?.label ?? s?.footage ?? `segment ${i + 1}`;
+
+/** "3 segments, “The Truth” → “The Handoff”" — what a drag is taking, live. */
+function segmentRangeText(from, to) {
+  const scenes = state.detail?.scenes ?? [];
+  return from === to
+    ? `“${segmentLabel(scenes[from], from)}”`
+    : `${to - from + 1} segments, “${segmentLabel(scenes[from], from)}” → “${segmentLabel(scenes[to], to)}”`;
+}
+
+/** `sequence 3` — the first number nothing is using. A new band always has a
+ *  real name, so there is no half-made state to get stuck in if the naming is
+ *  abandoned, and nothing to validate. */
+function nextSequenceName() {
+  const used = new Set((state.detail?.scenes ?? []).map((s) => s.sequence).filter(Boolean));
+  for (const key of Object.keys(state.film?.sequences ?? {})) used.add(key);
+  for (let n = 1; ; n++) if (!used.has(`sequence ${n}`)) return `sequence ${n}`;
+}
+
+/**
+ * Make the sequence and hand the human the name field — the create half of the
+ * CRUD, shared by the lane drag, “+ seq” and the segment inspector's picker.
+ *
+ * It commits first and asks nothing: the band is on screen, its extent is
+ * visible, both its edges drag, and Ctrl+Z undoes the whole thing in one step.
+ * A modal that asked for a name up front had to explain in prose what the
+ * picture now simply shows.
+ */
+function nameNewSequence(from, to) {
+  const label = nextSequenceName();
+  assignSequence(from, to, label);
+  state.namingSequence = label;   // the inspector focuses and selects it
   select({ kind: 'sequence', sequence: label });
   renderAll();
 }
 
-async function renameSequence(oldLabel) {
-  const name = await askForText({
-    title: 'rename sequence',
-    label: 'name',
-    note: `Currently “${oldLabel}”. Every segment in it follows the new name.`,
-    value: oldLabel,
-    ok: 'rename',
-  });
-  if (!name || name === oldLabel) return;
-  const label = name.slice(0, 80);
+/** “+ seq” — the keyboard route to the same create the lane drag performs. */
+function createSequenceFromSelection() {
+  const scenes = state.detail?.scenes ?? [];
+  if (!scenes.length) return toast('Add a scene or clip first.', { kind: 'error' });
+  const [from, to] = newSequenceRange(sequenceAnchor());
+  nameNewSequence(from, to);
+}
+
+/** Rename in place. Every segment carrying the old label follows it, and the
+ *  intent text moves with the name rather than being stranded under it. */
+function renameSequence(oldLabel, next) {
+  const label = String(next ?? '').trim().slice(0, 80);
+  if (!label || label === oldLabel) return false;
+  // Two bands may not share a name — that is what keeps rename, ungroup and
+  // advice targeting unambiguous — so a collision is refused, not merged.
+  if ((state.detail?.scenes ?? []).some((s) => s.sequence === label)) {
+    toast(`“${label}” is already a sequence in this film.`, { kind: 'error' });
+    return false;
+  }
   mutate((film) => {
     for (const s of film.scenes) if (s.sequence === oldLabel) s.sequence = label;
     const meta = { ...(film.sequences ?? {}) };
@@ -1315,6 +1553,56 @@ async function renameSequence(oldLabel) {
     state.selection = { kind: 'sequence', sequence: label };
   }
   renderAll();
+  return true;
+}
+
+/**
+ * Which sequence a segment is in, from the segment's own inspector (v0.28) —
+ * the keyboard-reachable twin of dragging a band edge, and the thing whose
+ * absence meant a segment could only ever be regrouped by relabelling every
+ * segment after it.
+ *
+ * Picking here moves this segment **and the rest of its band**, because that
+ * is what keeps a sequence one unbroken run. For the same reason the choices
+ * are only the band before, the band after, no sequence, or a new one: any
+ * other label in the film would put one name on two stretches with someone
+ * else's in between, which the engine's bands, the tree and advice targeting
+ * would each read differently. Moving a segment somewhere else in the film is
+ * what *move earlier/later* is for.
+ */
+function sequenceInspectorRow(box, index) {
+  const scenes = state.detail?.scenes ?? [];
+  const s = scenes[index];
+  if (!s) return;
+  const to = bandEnd(index);
+  const current = s.sequence ?? null;
+  const before = index > 0 ? (scenes[index - 1].sequence ?? null) : null;
+  const after = to + 1 < scenes.length ? (scenes[to + 1].sequence ?? null) : null;
+
+  // Values are prefixed so a sequence a human named "new" cannot collide with
+  // the "new sequence…" sentinel.
+  const pick = el('select');
+  if (current) pick.appendChild(el('option', { value: `=${current}`, text: current }));
+  pick.appendChild(el('option', { value: '=', text: '— no sequence —' }));
+  if (before && before !== current) pick.appendChild(el('option', { value: `=${before}`, text: `${before} — join the one before` }));
+  if (after && after !== current) pick.appendChild(el('option', { value: `=${after}`, text: `${after} — join the one after` }));
+  pick.appendChild(el('option', { value: 'new', text: 'a new sequence' }));
+  pick.value = current ? `=${current}` : '=';
+  pick.addEventListener('change', () => {
+    // "A new one" is the same create the lane drag makes, so it takes the same
+    // range and lands in the same place: named, selected, name field focused.
+    if (pick.value === 'new') { const [f, t] = newSequenceRange(index); return nameNewSequence(f, t); }
+    assignSequence(index, to, pick.value.slice(1) || null);
+    renderAll();
+  });
+  box.appendChild(el('div', { class: 'insp-row' }, labelled('sequence', pick)));
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: to > index
+      ? `Moving this segment moves the ${to - index} after it too — a sequence is one unbroken run, `
+        + 'so the rest of its band comes along. Drag a band’s edges on the timeline for the same edit by hand.'
+      : 'Drag a band’s edges on the timeline for the same edit by hand.',
+  }));
 }
 
 /** Drop the grouping. The segments stay exactly where they are. */
@@ -2331,6 +2619,7 @@ function renderSceneInspector(box, index) {
     fact('film offset', `${s.filmOffset}f · ${timecode(s.filmOffset)}`);
   }
   box.appendChild(dl);
+  sequenceInspectorRow(box, index);
 
   const row1 = el('div', { class: 'insp-row' });
   if (!s.missing) {
@@ -2414,6 +2703,7 @@ function renderFootageInspector(box, index, s) {
   }
   fact('film offset', `${s.filmOffset}f · ${timecode(s.filmOffset)}`);
   box.appendChild(dl);
+  sequenceInspectorRow(box, index);
 
   const row = el('div', { class: 'insp-row' });
   row.appendChild(el('button', { class: 'ghost', text: '◀ move earlier', onclick: () => moveScene(index, index - 1) }));
@@ -3323,8 +3613,6 @@ $('#tts-form').addEventListener('submit', async (e) => {
   }
 });
 
-$('#btn-add-scene').addEventListener('click', revealScenesRail);
-
 /* --------------------------------- build -------------------------------- */
 
 /* The build panel lives in the right-side inspector column, not a modal —
@@ -3901,7 +4189,37 @@ const itemLabel = (kind, item) => {
 function renderSequenceInspector(box, label) {
   const band = sequenceBands().find((b) => b.label === label);
   box.appendChild(el('h3', { text: 'sequence' }));
-  box.appendChild(el('div', { class: 'insp-title', text: label }));
+
+  // The name is a field, not a heading with a "rename…" button beside it that
+  // opened a dialog to edit one string. It is also where a just-created
+  // sequence puts the caret, which is what replaces the dialog that used to
+  // ask for the name before the band existed.
+  const nameInput = el('input', { id: 'insp-seq-name', spellcheck: 'false', maxlength: '80' });
+  nameInput.value = label;
+  const commit = () => {
+    if (nameInput.value.trim() === label) { nameInput.value = label; return; }
+    if (!renameSequence(label, nameInput.value)) nameInput.value = label;
+  };
+  nameInput.addEventListener('change', commit);
+  nameInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); nameInput.blur(); }
+    else if (ev.key === 'Escape') { nameInput.value = label; nameInput.blur(); }
+    ev.stopPropagation();   // Delete/Backspace here edit text, they do not ungroup
+  });
+  box.appendChild(el('div', { class: 'insp-row' }, labelled('name', nameInput)));
+  if (state.namingSequence === label) {
+    // Deferred, because creating renders the inspector twice — once from
+    // `select`, once from `renderAll` — and focusing the first pass's field
+    // would put the caret in a node the second pass throws away. The flag is
+    // cleared by whichever pass is still attached when the microtasks run.
+    queueMicrotask(() => {
+      if (!nameInput.isConnected || state.namingSequence !== label) return;
+      state.namingSequence = null;
+      nameInput.focus();
+      nameInput.select();
+    });
+  }
+
   if (!band) {
     box.appendChild(el('p', { class: 'dim note', text: 'This sequence no longer has any segments.' }));
     return;
@@ -3926,9 +4244,13 @@ function renderSequenceInspector(box, label) {
   }, { silent: true }));
   box.appendChild(labelled('intent', ta));
   const row = el('div', { class: 'insp-row' });
-  row.appendChild(el('button', { class: 'ghost', text: 'rename…', onclick: () => renameSequence(label) }));
   row.appendChild(el('button', { class: 'ghost danger', text: 'ungroup', onclick: () => ungroupSequence(label) }));
   box.appendChild(row);
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: 'Drag this band’s edges on the timeline to change which segments are in it. '
+      + 'Ungroup returns them to unnamed film — ready to be drawn over again — and removes nothing else.',
+  }));
 }
 
 /* ---------------------------- versions section --------------------------- */
