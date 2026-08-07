@@ -81,6 +81,7 @@ import { readFileSync } from 'node:fs';
 import fsp from 'node:fs/promises';
 
 import { WorkspaceStore } from '../core/store.js';
+import { sceneFromFootage } from '../core/footage-scene.js';
 import { JobManager } from '../core/jobs.js';
 import {
   captureSingleFrame, captureFrames, renderComposition, renderParallel, renderStill,
@@ -1201,6 +1202,84 @@ server.registerTool(
       config: res.config,
       copied: res.copied,
       warnings: res.warnings,
+    });
+  }),
+);
+
+server.registerTool(
+  'make_scene_from_footage',
+  {
+    title: 'Turn a footage clip into a scene',
+    description:
+      'Convert one FOOTAGE segment into a SCENE that plays it, so the clip becomes something you can direct ' +
+      'with code. Footage joins as-is and cannot be changed by a pixel; a composition can be. ' +
+      'USE IT when the human wants the PICTURE changed — masked, reframed, re-timed, graded, transitioned. ' +
+      'NOT for trimming (transcode_asset), reordering (update_film), or putting captions/graphics over a clip ' +
+      '(the film\'s caption/overlay tracks) — all of which already work on footage without a render. ' +
+      'The new scene is a visual no-op (same geometry, frames and in-point) and is UNRENDERED: render it ' +
+      'before build_film. It costs a VP9 re-encode plus a full frame-by-frame render; the original file stays ' +
+      'in assets/. ' +
+      'REFUSES when the clip cannot fill its place — a segment\'s frame count is read at the film\'s rate, so a ' +
+      '60fps clip is half the video its count implies on a 30fps film; the error carries ' +
+      '`durationInFramesThatFits` to pass back as `durationInFrames` (which shortens the film), or conform the ' +
+      'clip with transcode_asset { matchFilm } first to keep the cut. ' +
+      'For a long recording convert ONCE, then clone short scenes that seek their own ranges of the same .webm ' +
+      '(change IN_POINT and durationInFrames) — no further transcode, and one scene over ~90s is the shape ' +
+      'create_scene warns about. Full detail in docs/mcp-setup.md.',
+    inputSchema: {
+      film: z.string().describe('The film the clip is on'),
+      segmentId: z.string().describe('The footage segment\'s stable `id` — get_film lists one per clip'),
+      name: z.string().min(1).optional().describe('Scene display name (default: the clip\'s label, else its filename)'),
+      slug: z.string().optional().describe('Explicit scene slug; errors if taken. Omit to derive + auto-dedupe.'),
+      durationInFrames: z.number().int().positive().optional()
+        .describe('Scene length, in FILM frames. Defaults to the segment\'s own count, which keeps the cut exactly '
+          + 'as it is. Set it when the call refuses because the clip cannot fill that many frames — the error names '
+          + 'the value that fits, and using it shortens the film by the difference.'),
+      keepFootage: z.boolean().default(false)
+        .describe('Leave the play order alone and just build the scene beside it — for comparing before committing'),
+      waitMs: z.number().int().min(0).max(600_000).default(120_000)
+        .describe('How long to block. The transcode runs in the transcode lane, never behind a render.'),
+    },
+  },
+  wrap(async ({ film, segmentId, name, slug, durationInFrames, keepFootage, waitMs }) => {
+    await requirePrereqs();
+    const doc = await store.getFilm(qualifyFilm(film));
+    const ffmpegPath = await ffmpegPathOnly();
+    const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
+    const submitted = jobs.startTask({
+      kind: 'transcode',
+      targetId: `${doc.slug}:${segmentId}`,
+      run: ({ signal, onPhase, onChildPid }) => sceneFromFootage({
+        store, filmId: doc.id, segmentId, name, slug, durationInFrames, keepFootage,
+        ffmpegPath, ffprobePath, signal, onPhase, onSpawn: onChildPid,
+      }),
+    });
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 200 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.TRANSCODE_FAILED,
+        status.error?.message ?? 'converting the clip failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, state: status.state, phase: status.phase, stillRunning: true,
+        hint: `Still converting (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — `
+          + 'the scene appears in the play order only when it finishes.',
+      });
+    }
+    const r = status.result;
+    return ok({
+      scene: localId(r.scene),
+      name: r.name,
+      config: r.config,
+      clip: r.clip,
+      replacedFootage: r.replaced,
+      warnings: r.warnings,
+      note: r.replaced
+        ? `The clip is now scene "${localId(r.scene)}" and looks exactly as it did. It is UNRENDERED — render it `
+          + 'before build_film. Edit composition.js to change it; IN_POINT selects which part of the clip it shows.'
+        : `Scene "${localId(r.scene)}" is built beside the clip; the play order still shows the footage. `
+          + 'Render the scene to compare, then swap it in with update_film.',
     });
   }),
 );
@@ -4142,7 +4221,7 @@ server.registerTool(
         hierarchy: 'workspace → film → scene',
         atomicRenderUnit: 'scene — one composition folder, rendered and revised independently',
         narrativeGrouping: 'sequence — a label on film segments (film.scenes[i].sequence) plus optional film.sequences metadata; groups scenes for human navigation and advice, renders nothing',
-        segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list; a scene is addressed by slug, a footage clip by its stable id',
+        segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list; a scene is addressed by slug, a footage clip by its stable id. Footage joins as-is and cannot be altered; make_scene_from_footage converts one into a scene that plays it when it needs frame-driven work',
         adviceTargets: 'film, lane (a whole timeline row: family + lane index), sequence, scene, footage, audio, caption, overlay — the human clicks, Studio fills the ids',
       },
       formats: ['mp4', 'webm', 'gif', 'prores', 'png-sequence'],

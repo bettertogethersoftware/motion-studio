@@ -3010,6 +3010,16 @@ function renderFootageInspector(box, index, s) {
       + 'audio (put its sound on the master audio timeline instead). Removing it only drops it from the play order; '
       + 'the file stays in the film’s assets/.',
   }));
+  // The capability a human would otherwise never learn exists, said instead of
+  // offered. Converting a clip into a composition costs a re-encode and a full
+  // render — an operator's decision, and the operator here is the AI. So this
+  // teaches the sentence to say rather than putting a button on the spend.
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: 'Nothing can change what this clip LOOKS like while it is footage. If you need it masked, reframed, '
+      + 're-timed, graded or transitioned, advise the AI on it — the AI can turn a clip into a scene that plays '
+      + 'it and then direct that with code.',
+  }));
 }
 
 function moveScene(from, to) {

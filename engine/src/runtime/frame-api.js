@@ -32,6 +32,12 @@
  * the one that matters most — never awaiting `seeked` on an element that
  * failed to load — hangs the whole render when omitted.
  *
+ * v1.7: seekVideo clamps to the MIDDLE of the last frame rather than its
+ * start. Container timestamps are rounded (WebM's are milliseconds), so the
+ * start computed in exact arithmetic can fall a fraction before the frame it
+ * names — which silently made the last frame of every seeked clip a duplicate
+ * of the one before it.
+ *
  * v1.6: MotionStudio.frameSize() and MotionStudio.safeArea(kind) — the frame's
  * own geometry, read from the `--ms-width`/`--ms-height`/`--ms-safe-*` custom
  * properties the engine sets on every page it opens. A composition that sizes
@@ -435,7 +441,16 @@
       var usable = typeof duration === 'number' && isFinite(duration) && duration > 0 && video.readyState >= 1;
       if (!usable) { resolve(false); return; }
 
-      var last = options.fps > 0 ? duration - 1 / options.fps : duration - 1e-3;
+      // The MIDDLE of the last frame, not its start (v1.7). `duration - 1/fps`
+      // is where the last frame begins in exact arithmetic — but a container
+      // does not store exact arithmetic. WebM timestamps are milliseconds, so
+      // frame 29 of a 30fps clip is written at 0.967 while `duration - 1/fps`
+      // is 0.96667: a third of a millisecond EARLIER, which puts the seek on
+      // the previous frame and makes the tail of every seeked clip a duplicate.
+      // Half a frame in is inside the last frame whichever way the container
+      // rounded, and is still short of `duration`, which is what stops a seek
+      // past the end from never completing.
+      var last = options.fps > 0 ? duration - 0.5 / options.fps : duration - 1e-3;
       var t = Math.min(Math.max(0, Number(seconds) || 0), Math.max(0, last));
       if (Math.abs(video.currentTime - t) < 1e-4) { resolve(true); return; }
 

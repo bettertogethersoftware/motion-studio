@@ -188,7 +188,7 @@ So a composition **seeks** instead: one frame of footage per frame of output.
 const host = document.getElementById('host');   // <video src="assets/host.webm" muted preload="auto">
 
 MotionStudio.registerComposition(async (frame) => {
-  await seekVideo(host, 2.0 + frame / 30, { fps: 30 });   // 2.0 = in-point in the clip
+  await seekVideo(host, 2.0 + (frame + 0.5) / 30, { fps: 30 });  // 2.0 = in-point; +0.5 = mid-frame (see below)
   host.style.opacity = interpolate(frame, [0, 12], [0, 1]);
 });
 ```
@@ -196,8 +196,14 @@ MotionStudio.registerComposition(async (frame) => {
 `seekVideo` resolves once the element is displaying that time, and returns `false` if the element is unusable. It exists because the obvious hand-rolled version has three defects, and the first is severe:
 
 1. **Never await `seeked` on an element that failed to load.** A `<video>` whose `src` is missing or undecodable never fires `seeked`, so `currentTime = t; await seeked` **deadlocks the frame** — the render stalls until the frame timeout, and every subsequent frame does the same. `seekVideo` checks `duration > 0 && readyState >= 1` first and bails, turning a hang into a missing picture. (The engine also names failed asset loads in the error message; see §12.)
-2. **Clamp to the last real frame.** Pass `fps` and the target is clamped to `duration - 1/fps`. Seeking past the end may never complete, and a scene longer than its footage otherwise freezes or stalls at the tail — check the clip is long enough for the range you are using: `from + sceneDuration/fps <= clipDuration`.
+2. **Clamp INSIDE the last real frame.** Pass `fps` and the target is clamped to `duration - 0.5/fps` — half a frame in, not the frame's start. Seeking past the end may never complete, and a scene longer than its footage otherwise freezes or stalls at the tail — check the clip is long enough for the range you are using: `from + sceneDuration/fps <= clipDuration`. *Half* a frame because a container rounds its timestamps: WebM's are milliseconds, so frame 29 of a 30fps clip is written at `0.967` while `duration - 1/fps` computes `0.96667` — a third of a millisecond **earlier**, which lands on frame 28 and silently makes the last frame of every seeked clip a duplicate (fixed in v1.7).
 3. **Skip a seek that is already satisfied**, or a re-render of the same frame pays a pointless round trip.
+
+**Seek to the middle of a frame, not its edge.** The same rounding applies to every frame, not only the last: frame `n` occupies `[n/fps, (n+1)/fps)`, and asking for the edge can land a fraction on the wrong side of it. `(frame + 0.5) / fps` is unambiguous whichever way the container rounded, and costs nothing:
+
+```js
+await seekVideo(host, IN_POINT + (frame + 0.5) / fps, { fps });
+```
 
 `videoReady(video)` awaits `loadeddata` for setup, and resolves on `error` too, so a missing file cannot deadlock there either.
 

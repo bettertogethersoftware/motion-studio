@@ -38,6 +38,7 @@ Motion Studio is three thin entry points around one shared render engine.
           transcode.js — preparing media: named fields only, no shell (§9.4)
           film.js      — scene assembly primitives (lossless concat, §13)
           films.js     — film documents: validation, planning, build (§13)
+          footage-scene.js — a supplied clip becomes a scene that plays it (§14)
           revisions.js — immutable scene-revision archive + pointers (§14)
           deliveries.js— immutable film deliveries + frozen manifests (§14)
           advice.js    — durable human advice, leases, evidence (§14)
@@ -1799,6 +1800,62 @@ editing, toggled in the header — and it was removed for the same reason the
 review page was (v0.23.2). It only hid buttons, so it bought no safety a
 reader could rely on, while still making them establish which mode they were
 in before trusting the screen. The page is always the full editor.
+
+It is reached **only over MCP**, and that is a product decision rather than an
+omission. A prototype put a button on the clip's inspector; it was the one
+control on that page where a human press spent minutes of compute and
+re-encoded their media, which is an operator's act, and the operator here is
+the AI. The inspector states the capability instead — footage cannot be
+changed, advise if you need it to be — and the AI decides whether the render is
+worth it, knowing what was asked for. Same rule as `prefer`, which records
+advice rather than repointing a take.
+
+**Footage → scene** (`core/footage-scene.js`, v0.28) is the one bridge between
+the two kinds of segment, and it is a conversion rather than a flag. A clip
+that joins as-is cannot be changed by a pixel; a composition can be changed by
+code. So the operation transcodes the clip to VP9 `.webm` with a short GOP
+(the render browser cannot decode H.264, and a long keyframe interval makes
+per-frame seeking crawl), scaffolds a scene at the *film's* geometry with the
+segment's exact frame count, writes a composition that `seekVideo`s it
+full-bleed, and swaps the play-order entry **last** — so a failed transcode
+leaves an unused scene folder rather than a film that no longer plays. The
+segment's `sequence` label crosses with it, or converting a clip would silently
+drop it out of its narrative band.
+
+Two things it must get right, and both are about *which* number means what.
+The scene is built at the film's **established** signature — the geometry and
+rate its first resolved segment sets, which is what every segment has to concat
+with — not at `sceneDefaults`, which is only the film's declared preference for
+blank scenes. They differ exactly where it matters: on a film whose first
+segment *is* an odd clip, the timeline already runs at that clip's rate, and
+building from `sceneDefaults` would make the one segment that does not fit.
+And a footage segment states its length as a frame **count**, which `planFilm`
+verifies against the file while the timeline reads it at the film's rate — the
+same number meaning two lengths the moment the rates differ. A 60fps clip of
+2924 frames is 48.7s of file and 97.5s of a 30fps film, so a scene built to the
+declared count would freeze for the difference. That is refused **before** the
+transcode, because the plan already knows it, and the error carries the length
+that would fit so the caller can act on it rather than redo the arithmetic.
+
+The invariant that makes it offerable is that the scene is a **visual no-op**:
+same geometry, same frame count, same in-point, so it looks like the clip until
+somebody edits it. That is verified end to end rather than asserted — a
+converted scene is rendered and compared frame-for-frame against its source.
+What it buys past the one scene is that the `.webm` is now seekable material:
+further scenes can take their own ranges of it at no further transcode cost,
+which is the answer for a recording longer than the ~90 seconds `create_scene`
+warns about.
+
+Proving that no-op is what surfaced a latent defect in `seekVideo`. It clamped
+to `duration - 1/fps` — the last frame's start *in exact arithmetic*. Containers
+do not store exact arithmetic: WebM timestamps are milliseconds, so frame 29 of
+a 30fps clip is written at `0.967` while the clamp computes `0.96667`, a third
+of a millisecond earlier and therefore on frame 28. Every seeked clip ended on
+a duplicate of its penultimate frame. The clamp is now half a frame in
+(`duration - 0.5/fps`), which is inside the last frame whichever way the
+container rounded and still short of `duration`; and generated compositions
+seek frame *centres* (`(frame + 0.5)/fps`) so the same rounding cannot bite at
+any other frame either.
 
 The preview player stitches **segments**, not scenes: a footage segment is
 served from the film's own Range-capable asset route (`sceneSrc`), because it

@@ -270,10 +270,16 @@ test('seekVideo: a zero-duration element resolves false', async () => {
   assert.equal(await seekVideo(empty, 1, { fps: 30 }), false);
 });
 
-test('seekVideo: clamps past-the-end seeks to the last real frame', async () => {
+test('seekVideo: clamps past-the-end seeks INSIDE the last real frame', async () => {
   const v = fakeVideo({ duration: 10 });
   await seekAndSettle(v, 999, { fps: 25 });
-  assert.equal(v.currentTime, 10 - 1 / 25);
+  // Half a frame in, not the frame's start: a container rounds its timestamps
+  // (WebM to a millisecond), so the start computed exactly can fall a fraction
+  // BEFORE the frame it names — which made the tail of every seeked clip a
+  // duplicate of the frame before it. Still short of `duration`, so a seek
+  // past the end still completes.
+  assert.equal(v.currentTime, 10 - 0.5 / 25);
+  assert.ok(v.currentTime > 10 - 1 / 25 && v.currentTime < 10);
 });
 
 test('seekVideo: clamps negative times to zero', async () => {

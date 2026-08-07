@@ -80,7 +80,9 @@ export const FILM_SCHEMA_VERSION = 1;
 /** Reserved names that cannot be scene/film/workspace slugs. */
 const RESERVED = new Set(['assets', 'out', 'scenes', 'films', 'library', 'node_modules']);
 
-function checkSlug(part, what) {
+/** Exported because anything that MINTS an id has to enforce the same rule —
+ *  a second copy of it is how the two drift apart. */
+export function checkSlug(part, what) {
   if (!SLUG_RE.test(part) || RESERVED.has(part)) {
     throw new EngineError(ErrorCodes.INVALID_ID,
       `Invalid ${what} "${part}" — ids are lowercase slugs (a-z, 0-9, "-", "_")`, { [what]: part });

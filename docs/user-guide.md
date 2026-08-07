@@ -711,6 +711,17 @@ supplied rather than animation it wrote:
   to type it. Footage joins without re-encoding, so it has to match the film's
   resolution/fps/format and must be silent — its sound belongs on the master audio
   timeline.
+- **Nothing can change what a clip looks like while it is footage.** That is
+  the price of joining as-is, and it is why the clip inspector says so. If you
+  need one masked, reframed, re-timed, graded or transitioned, **advise the AI
+  on it** — the AI can turn a clip into a scene that plays it (identical
+  picture, same length, same place in the cut) and then direct that with code.
+  You do **not** need any of that to trim, reorder, or put captions and
+  overlays over a clip; those already work on footage as it is. There is
+  deliberately no button for the conversion: it costs a re-encode and a full
+  render, and deciding to spend those is the AI's half of the loop, not yours —
+  the same reason "ask AI to use this version" sends advice instead of
+  switching a take.
 - **Watch it before you cut it in, and after.** In **+ footage** each clip shows
   a frame from itself, its length, and its frame size — with the size in red
   when it does not match the film, which is the thing that would stop the build

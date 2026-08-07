@@ -362,6 +362,19 @@ clips in cut order — read `get_film`. Before v0.27 the scene listings describe
 footage anyway and produced one `<film>/undefined` row per clip; if you are
 holding a cached listing from an older engine, ignore rows with no name.
 
+**Footage cannot be altered.** It joins as-is, which is what makes it lossless
+and what makes its picture untouchable — no mask, transform, speed ramp, grade
+or transition can be applied to it. When the human asks for one of those on
+their own clip, `make_scene_from_footage { film, segmentId }` converts that
+segment into a scene that plays it: identical picture, same frame count, same
+place in the cut, and a composition you can then edit like any other. It costs
+a VP9 conversion plus a full render, so it is not the answer to trimming
+(`transcode_asset`), reordering (the play order), or putting a title over a
+clip (`overlays[]` / `captions[]`) — all of which already work on footage. For
+a long recording, convert once and clone short scenes that seek their own
+ranges of the same `.webm`; further scenes cost no further transcode. The new
+scene is unrendered — render it before `build_film`.
+
 For footage that should sit beside rendered scenes, conform it to the film's
 actual encode signature:
 

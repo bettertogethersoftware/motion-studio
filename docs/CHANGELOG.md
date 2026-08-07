@@ -2,6 +2,87 @@
 
 ## Unreleased
 
+### A supplied clip can become a scene that plays it
+
+Footage joins the timeline **as-is**, which is what makes it lossless — and
+also means nothing can change a single pixel of it. Everything creative in
+this product happens inside a composition: masks, transforms, speed, colour,
+transitions, anything that is a function of the frame. So a human who drafts a
+cut by dropping their own video in had no way to hand the AI something it
+could actually direct.
+
+`make_scene_from_footage` closes that. In order: the clip is transcoded to
+VP9 `.webm` with a short GOP into the new scene's `assets/` — the render
+browser **cannot decode H.264**, and a long keyframe interval makes per-frame
+seeking crawl; a scene is scaffolded at the *film's* geometry with the
+segment's exact frame count; a composition is written that `seekVideo`s it
+full-bleed; and only then does the play order change, so a failed transcode
+leaves an unused scene folder rather than a film that no longer plays. The
+segment's `sequence` label crosses with it.
+
+**It is an AI tool, with no button in the Studio** — deliberately. A prototype
+had one on the clip's inspector, and it was the only control on that page where
+a human press spent minutes of compute and re-encoded their media. That is an
+operator's decision, and in this product the operator is the AI: the human
+advises. So the clip inspector *says* the capability exists — "nothing can
+change what this clip looks like while it is footage; advise the AI if you need
+it masked, reframed, re-timed, graded or transitioned" — and the AI decides
+whether the render is worth it, knowing what was actually asked for. Same
+reasoning as "ask AI to use this version", which sends advice rather than
+repointing a take.
+
+**It is a visual no-op.** Same geometry, same frames, same in-point — it looks
+like the clip until somebody edits it. That is verified rather than asserted:
+a converted scene is rendered through real Chromium and compared frame for
+frame against its source.
+
+It costs a conversion and a full render, and the original file stays in the
+film's `assets/`. It is **not** needed to trim, reorder, or put captions and
+overlays over a clip — those already work on footage, without a render, and
+the tool's own description says so. For a long recording,
+convert once: further scenes can seek their own ranges of the same `.webm` for
+free, which is the shape the engine wants anyway.
+
+**It refuses before spending anything when the clip cannot fill its place.** A
+footage segment states a frame **count**, and the timeline reads that count at
+the *film's* rate — the same number meaning two lengths the moment the clip's
+rate differs. A 60fps clip of 2924 frames is 48.7s of file and 97.5s of a 30fps
+film, so a scene built to the declared count would freeze for the difference.
+That segment was already a `footage_signature_mismatch` and would not have
+built either. The refusal carries `durationInFramesThatFits`, and the tool
+takes it back as `durationInFrames`, so "conform it" is advice the caller can
+act on rather than arithmetic it has to redo. Converting at that length
+shortens the film by the difference, which is why it is refused-with-a-number
+rather than silently done.
+
+The scene is built at the film's **established** signature (what its first
+resolved segment sets — what everything has to concat with), not at
+`sceneDefaults`, which is only the declared preference for blank scenes. On a
+film whose first segment *is* the odd clip, the timeline already runs at that
+clip's rate and nothing is wrong; reading `sceneDefaults` there would invent a
+clash and refuse a good conversion.
+
+### The last frame of every seeked clip was a duplicate
+
+Proving that no-op found a real defect in `seekVideo`. It clamped to
+`duration - 1/fps` — where the last frame begins *in exact arithmetic*.
+Containers do not store exact arithmetic: WebM timestamps are milliseconds, so
+frame 29 of a 30fps clip is written at `0.967` while the clamp computes
+`0.96667` — a third of a millisecond earlier, and therefore on frame 28.
+
+Measured on a converted clip: frames 0–28 matched the source at ~35 dB PSNR
+and frame 29 at 20 dB, because it was frame 28 again.
+
+The clamp is now half a frame in (`duration - 0.5/fps`) — inside the last frame
+whichever way the container rounded, and still short of `duration`, which is
+what stops a seek past the end from never completing. Generated compositions
+also seek frame **centres** (`(frame + 0.5)/fps`) so the same rounding cannot
+bite at any other frame. All 30 frames now match, worst case 34.95 dB.
+
+This affected any composition seeking footage to its tail, not only converted
+clips. `frame-api.js` is copied into each scene at scaffold time, so new scenes
+get the fix immediately and existing ones on their next `sync_shared_files`.
+
 ### Footage is a video, so you can watch it
 
 Asked of the **+ footage** picker — *it is already a video, can we play it?* —

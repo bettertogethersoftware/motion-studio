@@ -231,6 +231,34 @@ valid with no migration**.
   `null` when ffprobe could not say, which is **not** "matches".
 - **Footage may repeat**; a scene may not. A scene plays once because it has one
   rendered output; the same plate can be a recurring cutaway.
+- **Nothing can change a footage segment's picture.** That is the price of
+  joining as-is, and it is the right default. When a clip needs more than
+  trimming and layers over it, `make_scene_from_footage` converts that segment
+  into a scene that plays it — identical picture, same frame count, same place
+  in the cut — and from then on it is a composition like any other. See the
+  tool's row in [mcp-setup.md](mcp-setup.md) for what that costs.
+
+### When to convert a clip into a scene (v0.28)
+
+`make_scene_from_footage { film, segmentId }` is the bridge, and the decision
+is narrow enough to state as a rule:
+
+| you want to | use |
+|---|---|
+| trim, crop, scale, conform it | `transcode_asset` — no render, no scene |
+| reorder it, or cut between it and rendered scenes | the play order itself |
+| put a title, caption or graphic over it | the film's `overlays[]` / `captions[]` |
+| mask, transform, speed-ramp, grade, or transition it | **convert it to a scene** |
+
+Converting costs one extra encode (to VP9 `.webm`, because the render browser
+cannot decode H.264) plus a full frame-by-frame render, so it is not the
+default answer. The original file is left in `assets/`, and the new scene is
+unrendered until you render it.
+
+For a recording longer than the ~90 seconds `create_scene` warns about,
+convert **once** and then clone short scenes that each `seekVideo` their own
+range of the same `.webm` — change `IN_POINT` and `durationInFrames`. Further
+scenes cost no further transcode.
 
 ### Source provenance for prepared footage
 
