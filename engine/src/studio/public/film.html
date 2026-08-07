@@ -81,11 +81,12 @@
         <span class="dim drag-hint">drag onto the timeline →</span>
       </div>
       <ul id="fe-scene-list" class="scene-rail-list"></ul>
-      <!-- Both "make something new in this film" actions sit together at the
-           foot of the tree; + seq used to be marooned in the header. -->
+      <!-- Making a scene is the one thing here that needs a button: a scene is
+           a FOLDER, and there is nowhere on the timeline to draw one. A
+           sequence is a label over segments and is drawn on its lane, so it
+           has no button — the palette still carries it for the keyboard. -->
       <div class="rail-foot">
         <button id="btn-new-scene" class="ghost" title="scaffold a new scene folder into this film">+ new scene</button>
-        <button id="btn-new-sequence" class="ghost" title="make a sequence at the selected segment — or drag across the sequences lane to draw one">+ seq</button>
       </div>
     </aside>
 

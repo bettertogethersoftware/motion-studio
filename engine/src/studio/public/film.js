@@ -1322,12 +1322,10 @@ function renderTimeline() {
   /* sequences — the narrative band above the cut (v0.23) */
   {
     const { row: r, lane, btns } = row('row-sequences', 'sequences', laneW, { family: 'sequences' });
-    btns.append(
-      laneBtn('', '', null),
-      laneBtn('+', 'make a sequence at the selected segment — or just drag across the lane to draw one',
-        createSequenceFromSelection),
-      laneBtn('', '', null),
-    );
+    // Three empty slots, not none: the mute · add · lane columns line up down
+    // the whole timeline, and a row that skipped them would pull the rows
+    // below it out of true. A sequence is made by dragging across this lane.
+    btns.append(laneBtn('', '', null), laneBtn('', '', null), laneBtn('', '', null));
     for (const band of sequenceBands()) lane.appendChild(sequenceBlock(band));
     inner.appendChild(r);
   }
@@ -1335,11 +1333,10 @@ function renderTimeline() {
   /* scenes */
   {
     const { row: r, lane, btns } = row('row-scenes', 'scenes', laneW, { family: 'scenes' });
-    btns.append(
-      laneBtn('', '', null),
-      laneBtn('+', 'add scenes — drag one from the left rail, or create a new one there', revealScenesRail),
-      laneBtn('', '', null),
-    );
+    // As above. This row's `+` only ever revealed the rail and pulsed it —
+    // a signpost to `+ new scene`, not an action — so the rail is the one
+    // place scenes are made, and the timeline is where they are arranged.
+    btns.append(laneBtn('', '', null), laneBtn('', '', null), laneBtn('', '', null));
     addCutlines(lane);
     (state.detail?.scenes ?? []).forEach((s, i) => lane.appendChild(sceneBlock(s, i)));
     inner.appendChild(r);
@@ -3605,13 +3602,6 @@ async function duplicateScene(slug, sourceName) {
   } catch (err) { toastError(err); }
 }
 
-function revealScenesRail() {
-  document.querySelector('.fe-frame').classList.remove('rail-collapsed');
-  const rail = $('#fe-scenes');
-  rail.classList.remove('pulse');
-  void rail.offsetWidth; // restart the animation
-  rail.classList.add('pulse');
-}
 $('#btn-scenes-collapse').addEventListener('click', () => {
   document.querySelector('.fe-frame').classList.toggle('rail-collapsed');
   syncExplorerIcon();
@@ -5400,7 +5390,6 @@ function wireProductionLoop() {
   $('#advice-board').addEventListener('close', renderAdviseButton);
   $('#btn-src-preview').addEventListener('click', () => setSource('preview'));
   $('#btn-src-delivery').addEventListener('click', () => setSource('delivery'));
-  $('#btn-new-sequence').addEventListener('click', createSequenceFromSelection);
   $('#btn-dismiss-updated').addEventListener('click', () => { state.updatedDismissed = true; renderUpdatedBanner(); });
   $('#btn-watch-latest').addEventListener('click', async () => {
     state.pinnedDelivery = state.latestDeliveryId;
@@ -5502,7 +5491,10 @@ StudioPalette.register([
   { id: 'film.advise', title: 'Film: Advise the AI on the Selection', group: 'commands', run: () => startAdvice() },
   { id: 'film.adviceBoard', title: 'Film: All Advice on This Film', group: 'commands', run: () => toggleAdviceBoard() },
   { id: 'film.newScene', title: 'Film: New Scene…', group: 'commands', run: () => $('#btn-new-scene').click() },
-  { id: 'film.newSeq', title: 'Film: New Sequence from Selection', group: 'commands', run: () => $('#btn-new-sequence').click() },
+  // The keyboard route to a gesture that is otherwise made by dragging across
+  // the sequences lane. It calls the function directly: there is no longer a
+  // button on the page for it to press.
+  { id: 'film.newSeq', title: 'Film: New Sequence from Selection', group: 'commands', run: () => createSequenceFromSelection() },
   { id: 'film.narration', title: 'Film: Add Narration…', group: 'commands', run: () => $('#btn-add-tts').click() },
   { id: 'film.audio', title: 'Film: Add Audio…', group: 'commands', run: () => $('#btn-add-audio').click() },
   { id: 'film.caption', title: 'Film: Add Caption at Playhead', group: 'commands', run: () => $('#btn-add-caption').click() },

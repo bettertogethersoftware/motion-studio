@@ -1713,14 +1713,14 @@ a range:
 | `drawSequence` — drag on an unnamed stretch of the lane | the cuts the marquee spans |
 | `bandGrip` — drag a band's left/right edge | the boundary's new cut |
 | segment inspector's `sequence` picker | this segment to the end of its band |
-| `+ seq` (`newSequenceRange`) | one segment on unnamed film; anchor to band end inside a sequence |
+| *New Sequence from Selection* in the palette (`newSequenceRange`) | one segment on unnamed film; anchor to band end inside a sequence |
 
 Contiguity is a property of those operations rather than something validated
 afterwards. The draw gesture can only *start* on an unnamed run — which always
 sits between bands — so growing it consumes a neighbour from the end nearest
 the pointer and never from its middle; the picker offers no label that is not
-an immediate neighbour; and `+ seq`'s two cases are exactly the two that
-cannot split a name in half. `nameNewSequence` is the shared create: it
+an immediate neighbour; and `newSequenceRange`'s two cases are exactly the two
+that cannot split a name in half. `nameNewSequence` is the shared create: it
 commits with a generated `sequence N` name, selects the band, and sets
 `state.namingSequence` so the inspector focuses and selects its name field.
 That flag is consumed in a microtask rather than during the render, because
@@ -1778,7 +1778,7 @@ behaviour folded in:
 
 | Region | What it holds |
 |---|---|
-| Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` / `+ seq` |
+| Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` |
 | Timeline | toolbar (add, zoom, **✎ advise** + the advice board), sequences band row, scenes row, track lanes — every row's head selects that lane — and the advice marker row, which does not |
 | Player | scene-stitched preview, or a pinned **built film** delivery |
 | Inspector | a tab strip per selection kind — `advice` first and landed on, properties beside it, the mounted panels after |

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Three buttons that were extra routes to one thing
+
+`+ seq` in the rail, `+` on the **sequences** lane head, and `+` on the
+**scenes** lane head are gone.
+
+The two sequence buttons did the same thing as each other, and both did what
+dragging across the sequences lane already does — the gesture the lane
+advertises on itself (*drag to make a sequence*). The scenes lane's `+` was
+not even an action: it revealed the rail and pulsed it, a signpost to
+`+ new scene` one panel away.
+
+Nothing became unreachable. A sequence is drawn on its lane, resized by its
+grips, reassigned from a segment's inspector, and created from the keyboard by
+*Film: New Sequence from Selection* in the command palette — which now calls
+the function directly rather than clicking a button that no longer exists. A
+scene is made by `+ new scene` at the foot of the rail and placed by dragging
+it onto the timeline.
+
+The two heads keep three empty button slots so the mute · add · lane columns
+still line up down the whole timeline, and with nothing in the way the whole
+head is what you click to select the row.
+
 ### Advice is the first tab, on everything
 
 Advice was a **section at the foot of the inspector**. On a scene that put it

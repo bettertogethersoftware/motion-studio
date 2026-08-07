@@ -812,12 +812,12 @@ They are always available: the add row (`+ narration`, `+ audio`, `+ caption`,
 `+ footage`, `+ overlay`), snap, drag-to-reorder and edge-trim, the full
 property inspector, undo/redo, per-scene render and **build film**. Scenes are
 added from where the scene folders actually are — the rail's **+ new scene**,
-or the scenes lane's **+** — rather than from a toolbar button that only
-pulsed the rail. Sequences are drawn straight onto their lane, resized by
-dragging a band's edges, reassigned per segment from the inspector, and named,
-ungrouped and annotated there too; `+ seq` is the keyboard route to the same
-create. The advice and version sections stay visible in this mode too, so the
-conversation is never a mode away.
+or by dragging one from the rail onto the timeline. Sequences are drawn
+straight onto their lane, resized by dragging a band's edges, reassigned per
+segment from the inspector, and named, ungrouped and annotated there too;
+*Film: New Sequence from Selection* in the command palette is the keyboard
+route to the same create. The advice tab stays a click away in this mode too,
+so the conversation is never a mode away.
 
 In watch mode none of that can fire: dragging a block only selects it, and
 Delete does nothing.
@@ -877,13 +877,16 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
     because any other label would put one sequence name on two stretches of
     film with somebody else's in between. To move a segment somewhere else
     entirely, use **move earlier / move later**.
-  - **+ seq** — in the rail or on the sequences lane — is the keyboard route to
-    the same create, at the selected segment or the one under the playhead. On
-    unnamed film it takes exactly that segment; aimed inside an existing
-    sequence it takes the rest of that sequence, splitting it at the cut. (It
-    used to label everything from the selection to the end of the film, and to
-    start from segment one whenever the selection was empty — which is how
-    pressing it swallowed a whole film into a single sequence.)
+  - **Make one from the keyboard.** *Film: New Sequence from Selection* in the
+    command palette (`Ctrl+P`) does the same create at the selected segment or
+    the one under the playhead. On unnamed film it takes exactly that segment;
+    aimed inside an existing sequence it takes the rest of that sequence,
+    splitting it at the cut. (It used to label everything from the selection to
+    the end of the film, and to start from segment one whenever the selection
+    was empty — which is how pressing it swallowed a whole film into a single
+    sequence.) It had a **+ seq** button in the rail and a **+** on the
+    sequences lane head; both are gone, because drawing on the lane is the
+    gesture and two extra buttons for it were three routes to one thing.
 
   The inspector holds the **name** (a field — a name another band already uses
   is refused rather than merged), an **intent** note the AI reads, and
@@ -895,8 +898,8 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
   (v0.26); double-click the empty timeline background to fit the whole film
   again.
 - **scenes and footage** — **drag a scene from the unused list onto the
-  timeline** to place it (an insert marker shows where it lands), or hit the
-  row's **+** to append it; drag blocks to reorder. **+ new scene** at the
+  timeline** to place it (an insert marker shows where it lands); drag blocks
+  to reorder. **+ new scene** at the
   foot of the rail scaffolds a fresh scene folder directly into the film, and
   the **⧉** on a scene row duplicates an existing one instead — the whole
   scene, composition files, assets, vendored 3D libraries and settings alike.
