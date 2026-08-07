@@ -101,6 +101,7 @@ const state = {
   adviceCtx: null,          // what the open popup is aimed at
   collapsedSequences: new Set(),
   openAdviceId: null,
+  boardFilter: 'open',      // the advice board's filter: open | answered | all
   namingSequence: null,     // a just-created band, waiting for the inspector to focus its name
 };
 
@@ -239,6 +240,16 @@ async function waitForSaved() {
   while (state.dirty || state.saving) await new Promise((r) => setTimeout(r, 80));
 }
 
+/** The same wait with a deadline, for callers that must not hang on a save
+ *  that keeps failing — `doSave` re-queues one, so "clean" may never come. */
+async function saveSettled(ms) {
+  const until = Date.now() + ms;
+  while ((state.dirty || state.saving) && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  return !state.dirty && !state.saving;
+}
+
 /**
  * Throw away the rendered preview mix when anything that changes the SOUND
  * changes — and, mid-playback, replace it there and then.
@@ -330,6 +341,63 @@ async function refresh() {
   await loadAssets();
   await loadOverview();
   renderAll();
+  // After the draw, never before it: the repair reads the same packed layout
+  // the timeline just drew, and that layout is only true once the waveforms
+  // have decoded. Not awaited — a film opens now, and the repair (if there is
+  // one to make) lands a moment later with a sentence saying what it did.
+  repairPackedLaneMute().catch(toastError);
+}
+
+/**
+ * Reload this film — the header's ↻.
+ *
+ * A browser reload would take the whole shell with it: every open document goes
+ * back to the Studio home, and the film you were looking at is a navigation
+ * away. This reloads the *film*, and reloads all of it, because "the page and
+ * the disk disagree" never has one cause: unsaved edits are flushed first (so
+ * the reload cannot eat them), then the document, its plan, its assets and the
+ * production loop are re-read, and the rendered mix — a cache of the document
+ * we are about to replace — is thrown away so the next play is made from what
+ * is on disk now.
+ *
+ * Not a workaround for a stale editor. It is the honest answer to a page that
+ * has been open for hours while an agent worked underneath it, and the one
+ * gesture that re-syncs everything at once when something has gone strange.
+ */
+async function reloadFilm() {
+  const btn = $('#btn-reload');
+  if (btn?.disabled) return;
+  if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+  try {
+    // Flush first, and refuse to reload if the flush will not land. `doSave`
+    // retries a failed save on its own, so waiting for it unconditionally is a
+    // button that never comes back — and reloading anyway would throw away the
+    // very edit it could not write down.
+    if (state.dirty || state.saving) {
+      scheduleSave({ now: true });
+      if (!await saveSettled(10_000)) {
+        toast('Not reloaded: the change you have not saved yet could not be written, and reloading would '
+          + 'discard it. The page still holds it — fix what the save is complaining about, then reload.',
+        { kind: 'error' });
+        return;
+      }
+    }
+    stopPlayback();
+    // Pause before dropping: revoking an object URL does not stop an element
+    // that has already loaded it (the same trap as invalidateMixIfAudioChanged).
+    try { state.mix.el?.pause(); } catch { /* already detached */ }
+    if (state.mix.url) URL.revokeObjectURL(state.mix.url);
+    Object.assign(state.mix, { el: null, url: null, dirty: true, active: false });
+    state.undo.length = 0;
+    state.redo.length = 0;
+    syncUndoButtons();
+    await refresh();
+    toast('Reloaded from disk.', { kind: 'info', timeoutMs: 2500 });
+  } catch (err) {
+    toastError(err);
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
+  }
 }
 
 /**
@@ -408,6 +476,7 @@ function renderHeader() {
     ul.appendChild(li);
   }
   if (!problems.length) $('#problems-panel').classList.add('hidden');
+  renderAdviseButton();
   renderProductionLine();
   renderUpdatedBanner();
 }
@@ -840,6 +909,29 @@ function packLanes(items) {
  * migration for films authored before this. */
 
 const LANE_FAMILIES = ['audio', 'captions', 'overlays'];
+
+/* Every row of the timeline the human can select and advise on — the two
+ * single-row families above the cut, then the three stacking ones. The advice
+ * row is deliberately absent: it is the record of the conversation, not a part
+ * of the film, and "advise on the advice" is not a thing anyone means. */
+const ADVISABLE_FAMILIES = ['sequences', 'scenes', ...LANE_FAMILIES];
+const SINGLE_ROW_FAMILIES = ['sequences', 'scenes'];
+const laneFamilyRows = (family) => (SINGLE_ROW_FAMILIES.includes(family) ? 1 : laneRows(family).length);
+/** The head text of one row — the same words the human clicked on. */
+function laneLabel(family, li = 0) {
+  const word = { sequences: 'sequences', scenes: 'scenes', audio: 'audio', captions: 'captions', overlays: 'overlay' }[family];
+  return laneFamilyRows(family) > 1 ? `${word} ${li + 1}` : word;
+}
+/** Identity of a row, for matching a selection to the head that drew it. */
+const laneKey = (family, li = 0) => `${family}:${SINGLE_ROW_FAMILIES.includes(family) ? 0 : li}`;
+const laneSelKey = (sel) => (sel?.kind === 'lane' ? laneKey(sel.family, sel.lane) : null);
+/** How many things are in one row right now — what the lane's advice is about. */
+function laneContents(family, li = 0) {
+  if (family === 'sequences') return sequenceBands().filter((b) => b.label).length;
+  if (family === 'scenes') return (state.detail?.scenes ?? []).length;
+  return (laneRows(family)[li] ?? []).length;
+}
+
 /* Which lane the next item of each family goes into — set by the `+` you
  * clicked, cleared as soon as it is used, so "add audio" from the toolbar or
  * the palette still means lane 1. */
@@ -939,14 +1031,105 @@ const mutedLanes = () => state.film?.mutedLanes?.audio ?? [];
 const isLaneMuted = (lane) => mutedLanes().includes(lane);
 const isTrackAudible = (t) => !t.mute && !isLaneMuted(t.lane ?? 0);
 
+/**
+ * Do the rows this page DRAWS disagree with the lane the mixer READS?
+ *
+ * They can, and on exactly the films that matter. `audibleTracks` in
+ * core/films.js decides a track's lane with `t.lane ?? 0`, but a film authored
+ * before lanes existed carries no `lane` at all — and every film an agent
+ * builds is such a film, because `update_film` writes the tracks the caller
+ * sent and nothing stamps a lane on them. The timeline draws those by *packing*
+ * them into rows, so four tracks appear on three lanes here while the mix sees
+ * four tracks on lane 0. That gap is invisible until someone mutes: silencing
+ * the row labelled `audio 1` silences the whole film.
+ */
+function audioLanesDiverge() {
+  return [...laneAssignment('audio')].some(([it, li]) => li !== (it.lane ?? 0));
+}
+
+/**
+ * Resolve once every audio clip's length is a measurement rather than a guess.
+ *
+ * `clipFrames` falls back to a fixed width until the file has been fetched and
+ * decoded, so anything that reasons about which clips overlap has to wait. A
+ * decode that failed counts as settled: its fallback width is what the timeline
+ * draws too, so a layout built on it still matches what is on screen. Returns
+ * false if a decode is still outstanding after ~10s, and the caller does
+ * nothing rather than act on a guess.
+ */
+async function audioDurationsSettled() {
+  const srcs = [...new Set((state.film?.audio ?? []).map((t) => t.src))];
+  for (const src of srcs) loadWave(src);
+  const pending = () => srcs.some((s) => state.waves.get(s)?.loading);
+  for (let i = 0; i < 200 && pending(); i++) await new Promise((r) => setTimeout(r, 50));
+  return !pending();
+}
+
 function toggleLaneMute(lane) {
   const next = isLaneMuted(lane)
     ? mutedLanes().filter((n) => n !== lane)
     : [...mutedLanes(), lane].sort((a, b) => a - b);
-  // Always STATE the list, never delete the key: a patch that omits a field
-  // keeps the field's saved value, so `delete` would leave the lane muted on
-  // disk while the editor showed it live.
-  mutate((film) => { film.mutedLanes = { ...(film.mutedLanes ?? {}), audio: next }; });
+  // Write the drawn rows down BEFORE recording the mute, exactly as every other
+  // lane edit does (addLane, removeLane, moveToLane). Muting is the one lane
+  // action whose meaning leaves this page, so it is the one that cannot afford
+  // to leave the packing implicit: after this, the lane the mixer reads is the
+  // row you clicked on.
+  const rows = laneRows('audio');
+  mutate((film) => {
+    persistLanes(film, 'audio', rows);
+    // Always STATE the list, never delete the key: a patch that omits a field
+    // keeps the field's saved value, so `delete` would leave the lane muted on
+    // disk while the editor showed it live.
+    film.mutedLanes = { ...(film.mutedLanes ?? {}), audio: next };
+  });
+}
+
+/**
+ * Repair a film that was muted while its lanes were still implicit.
+ *
+ * A film saved before the fix above holds a mute that means one row on screen
+ * and every track in the mix — it opens with the timeline showing one amber
+ * lane head and every clip dimmed, and `preview_audio` refusing with "every
+ * track on this film is muted". Writing the drawn rows down once resolves it
+ * the way the human meant it: the row they muted stays muted, the rest come
+ * back.
+ *
+ * Deliberately narrow. It fires only when a mute is actually in force AND the
+ * lanes diverge, so simply opening a film never bumps its revision under an
+ * agent that is mid-production with an `expectedRevision` in hand.
+ */
+let repairingLanes = false;
+async function repairPackedLaneMute() {
+  // One at a time. Loading a film runs `refresh()` more than once — the boot
+  // call, then the catch-up when the overview notices a newer revision — and
+  // two repairs waiting on the same decodes would both wake to the same
+  // divergence, save it twice and say so twice.
+  if (repairingLanes || !state.film || !mutedLanes().length) return;
+  repairingLanes = true;
+  try { await runLaneMuteRepair(); } finally { repairingLanes = false; }
+}
+
+async function runLaneMuteRepair() {
+  // The packing is done by DURATION, and a clip's duration arrives with its
+  // decoded waveform — several fetches and decodes after the page loads. Repair
+  // before they land and the rows written down are not the rows the packing
+  // will settle on, let alone the ones anybody saw: an undecoded clip is a
+  // fallback width, so two clips that do overlap look like they do not and
+  // share a lane. Wait for the picture to be true, then write it down.
+  if (!await audioDurationsSettled()) return;
+  if (!audioLanesDiverge()) return;
+  const silenced = (state.film.audio ?? []).filter((t) => !isTrackAudible(t)).length;
+  persistLanes(state.film, 'audio', laneRows('audio'));
+  const nowSilenced = (state.film.audio ?? []).filter((t) => !isTrackAudible(t)).length;
+  scheduleSave({ now: true });
+  invalidateMixIfAudioChanged(); // tracks just came back — a cached mix without them is a lie
+  renderTimeline();
+  if (nowSilenced < silenced) {
+    toast(`Muting on this film silenced all ${silenced} tracks, not the lane it was aimed at: the tracks were `
+      + 'written before lanes were, so the mix read every one of them as lane 1. The lanes you see are now the '
+      + `lanes the mix reads — ${nowSilenced} track${nowSilenced === 1 ? '' : 's'} muted, the rest are back.`,
+    { kind: 'info', timeoutMs: 15000 });
+  }
 }
 
 /** Move one item to another lane (the vertical half of a drag). */
@@ -1019,8 +1202,12 @@ function tlWidth() { return HEAD_W + Math.max(1, totalFrames()) * state.pxf + TA
  * put. Before this each button was appended in turn with `margin-left: auto`
  * on the first, so a row with one button put it where the row below put its
  * second, and no two columns lined up down the timeline.
+ *
+ * `family` makes the head itself a target: clicking it selects the whole row,
+ * which is what "the captions are all late" is about. The ruler and the advice
+ * row pass nothing and stay inert.
  */
-function row(cls, headText, laneWidth) {
+function row(cls, headText, laneWidth, { family = null, laneIndex = 0 } = {}) {
   const r = document.createElement('div');
   r.className = `tl-row ${cls}`;
   const head = document.createElement('div');
@@ -1032,6 +1219,22 @@ function row(cls, headText, laneWidth) {
   const btns = document.createElement('div');
   btns.className = 'lane-btns';
   head.append(label, btns);
+  if (family) {
+    const li = SINGLE_ROW_FAMILIES.includes(family) ? 0 : laneIndex;
+    head.dataset.laneKey = laneKey(family, li);
+    head.classList.add('selectable');
+    head.classList.toggle('selected', laneSelKey(state.selection) === head.dataset.laneKey);
+    // Between the name and the buttons, so it reads with the row's name rather
+    // than sitting past the controls where it looks like a fourth one.
+    const n = unresolvedCount(laneAdviceMatcher(family, li));
+    if (n) head.insertBefore(adviceBadge(n), btns);
+    head.title = `${headText} — the whole row.\nClick to select it, then ✎ advise to tell the AI about it.`;
+    head.addEventListener('pointerdown', (ev) => {
+      // The head's own buttons act on the lane; they are not a way of picking it.
+      if (ev.target.closest('.lane-add')) return;
+      select({ kind: 'lane', family, lane: li });
+    });
+  }
   const lane = document.createElement('div');
   lane.className = 'lane';
   lane.style.width = `${laneWidth}px`;
@@ -1110,7 +1313,7 @@ function renderTimeline() {
 
   /* sequences — the narrative band above the cut (v0.23) */
   {
-    const { row: r, lane, btns } = row('row-sequences', 'sequences', laneW);
+    const { row: r, lane, btns } = row('row-sequences', 'sequences', laneW, { family: 'sequences' });
     btns.append(
       laneBtn('', '', null),
       laneBtn('+', 'make a sequence at the selected segment — or just drag across the lane to draw one',
@@ -1123,7 +1326,7 @@ function renderTimeline() {
 
   /* scenes */
   {
-    const { row: r, lane, btns } = row('row-scenes', 'scenes', laneW);
+    const { row: r, lane, btns } = row('row-scenes', 'scenes', laneW, { family: 'scenes' });
     btns.append(
       laneBtn('', '', null),
       laneBtn('+', 'add scenes — drag one from the left rail, or create a new one there', revealScenesRail),
@@ -1145,7 +1348,7 @@ function renderTimeline() {
     }[family];
     const rows = laneRows(family);
     rows.forEach((items, li) => {
-      const { row: r, lane, btns } = row(spec.cls, rows.length > 1 ? `${spec.label} ${li + 1}` : spec.label, laneW);
+      const { row: r, lane, btns } = row(spec.cls, laneLabel(family, li), laneW, { family, laneIndex: li });
       r.dataset.family = family;
       r.dataset.lane = String(li);
 
@@ -2058,6 +2261,15 @@ function renderSelectionAffected(kind, id) {
 
 /* ------------------------------ selection ------------------------------- */
 
+/**
+ * The film is what the inspector shows when nothing narrower is picked, so
+ * `null` and an explicit film selection look the same everywhere except in one
+ * place: pressing advise. With nothing selected that arms a targeting click;
+ * with the film picked it advises on the film. That is the whole difference,
+ * and it is why clicking the Explorer's root row is not the same as Escape.
+ */
+const filmIsSelected = () => !state.selection || state.selection.kind === 'film';
+
 /** Selection updates classes in place — a re-render here would detach the
  *  very block a pointer-drag is about to move. */
 function select(sel) {
@@ -2072,8 +2284,15 @@ function select(sel) {
   for (const b of document.querySelectorAll('.seq-band')) {
     b.classList.toggle('selected', sel?.kind === 'sequence' && b.querySelector('.seq-name')?.textContent === sel.sequence);
   }
+  const laneWanted = laneSelKey(sel);
+  for (const h of document.querySelectorAll('.tl-head[data-lane-key]')) {
+    h.classList.toggle('selected', h.dataset.laneKey === laneWanted);
+  }
   renderTree();
   renderInspector();
+  // The header button names what it will advise on, so it has to follow the
+  // selection the same way the inspector does.
+  renderAdviseButton();
   // "Advise AI" with nothing selected arms one click: whatever the human picks
   // next becomes the target, and the popup opens on it immediately.
   if (state.aiming) { disarmAim(); openAdviceDialog(); }
@@ -2099,6 +2318,7 @@ function boundaryFrom(dir, sequencesOnly) {
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
   if ($('#advice-dialog')?.open) return; // the popup owns the keyboard while it is up
+  if ($('#advice-board')?.open) return; // as does the board — Escape closes it natively
   // Alt belongs to the shell (Alt+W, Alt+PageUp/Down, Alt+1…9). Without this,
   // Alt+PageDown would move the playhead AND switch documents — these branches
   // test `code` alone and call preventDefault, so they would both fire.
@@ -2116,8 +2336,10 @@ document.addEventListener('keydown', (e) => {
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); scheduleSave({ now: true }); }
-  else if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); startAdvice(); }
-  else if (e.code === 'Escape') { if (state.aiming) disarmAim(); else select(null); }
+  else if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    if (e.shiftKey) toggleAdviceBoard(); else startAdvice();
+  } else if (e.code === 'Escape') { if (state.aiming) disarmAim(); else select(null); }
 });
 document.addEventListener('keydown', (e) => {
   // Ctrl+Z/S must work while typing in inspector fields too.
@@ -2140,6 +2362,10 @@ function reflowLocalScenes() {
 function deleteSelection() {
   const sel = state.selection;
   if (!sel) return;
+  // The film and a lane are places, not things: Del on either would have to
+  // mean "delete everything in it", which no one presses Del expecting. A lane
+  // still empties from its own ✕, one item at a time.
+  if (sel.kind === 'film' || sel.kind === 'lane') return;
   // Deleting a sequence would read as "delete these scenes". It only ever
   // means "stop grouping them", which has its own, honestly named action.
   if (sel.kind === 'sequence') return ungroupSequence(sel.sequence);
@@ -2197,7 +2423,7 @@ function isDeepSceneTab() {
 /** The film's own deep panels, on the same rule: focused work stands the
  *  versions and advice sections down until you come back to the first tab. */
 function isDeepFilmTab() {
-  return state.inspectorMode !== 'build' && !state.selection && state.filmTab !== 'film';
+  return state.inspectorMode !== 'build' && filmIsSelected() && state.filmTab !== 'film';
 }
 
 const isDeepInspectorTab = () => isDeepSceneTab() || isDeepFilmTab();
@@ -2240,7 +2466,8 @@ function renderInspector() {
   // takes of it exist, and what the human has already said. Advising is
   // driven from here because the inspector already knows the selection —
   // that is why there is no separate advise button in the header.
-  if (!sel) renderFilmInspector(box);
+  if (filmIsSelected()) renderFilmInspector(box);
+  else if (sel.kind === 'lane') renderLaneInspector(box, sel);
   else if (sel.kind === 'sequence') renderSequenceInspector(box, sel.sequence);
   else if (sel.kind === 'scene') renderSceneInspector(box, sel.index);
   else if (sel.kind === 'audio') renderAudioInspector(box, sel.id);
@@ -3994,6 +4221,12 @@ function segmentAdviceMatcher(seg) {
   return (a) => a.target?.type === 'scene' && a.target.scene === seg.slug;
 }
 
+/** Which advice belongs to one timeline row — family plus its index. */
+function laneAdviceMatcher(family, li = 0) {
+  const lane = SINGLE_ROW_FAMILIES.includes(family) ? 0 : li;
+  return (a) => a.target?.type === 'lane' && a.target.family === family && (a.target.lane ?? 0) === lane;
+}
+
 function adviceBadge(n) {
   const b = document.createElement('span');
   b.className = 'adv-badge';
@@ -4077,9 +4310,18 @@ function renderTree() {
   box.innerHTML = '';
   const sel = state.selection;
 
+  // The film itself is a target, not just the absence of one: "the whole thing
+  // is too slow" is advice, and before this the only way to say it was to press
+  // advise with nothing selected — which armed a targeting click instead.
+  //
+  // Highlighted only when it was actually picked. The inspector still shows the
+  // film when nothing is selected (there is nothing narrower to show), but that
+  // state is *not* the film selected: pressing advise in it arms a targeting
+  // click, and a row lit the same way in both would make that a coin toss.
   const rootRow = el('div', {
-    class: `tree-row tree-film${sel ? '' : ' selected'}`,
-    onpointerdown: () => select(null),
+    class: `tree-row tree-film${sel?.kind === 'film' ? ' selected' : ''}`,
+    title: 'the whole film — click to select it, then ✎ advise to tell the AI about it',
+    onpointerdown: () => select({ kind: 'film' }),
   },
   el('span', { class: 'tree-twist', text: '▾' }),
   el('span', { class: 'tree-name', text: state.film?.name ?? 'film' }),
@@ -4253,6 +4495,46 @@ function renderSequenceInspector(box, label) {
   }));
 }
 
+/* ------------------------------ lane inspector --------------------------- */
+
+/**
+ * A whole row of the timeline. It has no properties of its own — a lane is a
+ * place, not a stored object — so this panel is what the row currently holds
+ * and the two things you can do to it, above the advice section that is the
+ * reason a lane is selectable at all: "every caption is a beat late" is one
+ * sentence about a row, not one sentence per clip.
+ */
+function renderLaneInspector(box, sel) {
+  const { family } = sel;
+  const li = SINGLE_ROW_FAMILIES.includes(family) ? 0 : sel.lane;
+  const label = laneLabel(family, li);
+  box.appendChild(el('h3', { text: 'lane' }));
+
+  const dl = el('dl', { class: 'insp-facts' });
+  const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
+  fact('row', label);
+  fact(family === 'sequences' ? 'sequences' : family === 'scenes' ? 'segments' : 'items', String(laneContents(family, li)));
+  if (family === 'audio') fact('sound', isLaneMuted(li) ? 'muted' : 'in the mix');
+  if (!SINGLE_ROW_FAMILIES.includes(family)) fact('of', `${laneRows(family).length} ${family} lane${laneRows(family).length === 1 ? '' : 's'}`);
+  box.appendChild(dl);
+
+  if (family === 'audio') {
+    box.appendChild(el('div', { class: 'insp-row' }, el('button', {
+      class: 'ghost',
+      text: isLaneMuted(li) ? 'unmute this lane' : 'mute this lane',
+      title: 'muting takes every clip in this row out of the mix, the build and the preview',
+      onclick: () => toggleLaneMute(li),
+    })));
+  }
+  box.appendChild(el('p', {
+    class: 'dim note',
+    text: SINGLE_ROW_FAMILIES.includes(family)
+      ? 'Advice on this row is about the whole stack of them, not one block — “the cuts are all a beat late”.'
+      : 'Advice on this row is about everything in it, and stays with the row as its clips change. '
+        + 'The head’s buttons add to it, mute it, or remove it when it is empty.',
+  }));
+}
+
 /* ---------------------------- versions section --------------------------- */
 
 /**
@@ -4359,7 +4641,21 @@ async function askForRevision(slug, rev, btn) {
 /** Which advice belongs to the current selection. */
 function adviceScope() {
   const sel = state.selection;
-  if (!sel) return { name: 'this film', pred: () => true };
+  if (filmIsSelected()) return { name: 'this film', pred: () => true };
+  if (sel.kind === 'lane') {
+    // The row, plus what is standing in it: advice on a clip IS advice about
+    // that lane as far as reading the conversation goes, and splitting the two
+    // would hide the caption note from the caption lane that carries it.
+    const li = SINGLE_ROW_FAMILIES.includes(sel.family) ? 0 : sel.lane;
+    const onRow = laneAdviceMatcher(sel.family, li);
+    const members = new Set(SINGLE_ROW_FAMILIES.includes(sel.family)
+      ? []
+      : (laneRows(sel.family)[li] ?? []).map((it) => it.id));
+    return {
+      name: `the ${laneLabel(sel.family, li)} lane`,
+      pred: (a) => onRow(a) || (a.target?.itemId ? members.has(a.target.itemId) : false),
+    };
+  }
   if (sel.kind === 'sequence') {
     const members = new Set(sequenceBands().find((b) => b.label === sel.sequence)?.segments.map((s) => s.slug ?? s.id) ?? []);
     return {
@@ -4384,10 +4680,25 @@ function renderAdviceSection(box) {
   box.appendChild(el('hr', { class: 'sep' }));
   box.appendChild(el('div', { class: 'adv-head-row' },
     el('h3', { text: open.length ? `advice · ${open.length} open` : 'advice' }),
-    // The only "advise" button on the page. With nothing selected it arms one
-    // targeting click instead of guessing what you meant.
+    // The same action as the header control, in the place you are already
+    // reading. With nothing selected it arms one targeting click instead of
+    // guessing what you meant.
     el('button', { class: 'primary tiny-btn', text: '✎ advise', onclick: startAdvice })));
-  box.appendChild(el('div', { class: 'mono dim adv-scope', text: `on ${scope.name}` }));
+  const scopeRow = el('div', { class: 'adv-scope-row' },
+    el('span', { class: 'mono dim adv-scope', text: `on ${scope.name}` }));
+  // This panel is one target's share of the conversation. The way out to the
+  // whole of it belongs here, next to the words that say how narrow it is —
+  // and in the same place whether or not this selection happens to hold all of
+  // it, so it is somewhere the eye can learn.
+  if ((state.advice ?? []).length) {
+    scopeRow.appendChild(el('button', {
+      class: 'linkish adv-see-all',
+      text: `all advice (${state.advice.length}) →`,
+      title: 'open the advice board — every piece of advice on this film, grouped by what it is about (Shift+A)',
+      onclick: openAdviceBoard,
+    }));
+  }
+  box.appendChild(scopeRow);
 
   if (scoped.length) {
     const ul = el('ul', { class: 'adv-list' });
@@ -4413,9 +4724,16 @@ function renderAdviceSection(box) {
   }
 }
 
-function adviceCard(a) {
+/**
+ * One entry, used by both readers of the same conversation: the inspector's
+ * scoped section and the board. `onOpen` is what re-draws whichever list the
+ * entry is in — sharing `state.openAdviceId` is deliberate, so expanding an
+ * entry on the board expands the same one in the inspector.
+ */
+function adviceCard(a, { onOpen = rerenderAdvice } = {}) {
   const st = humanAdviceStatus(a);
   const li = el('li', { class: `adv${state.openAdviceId === a.id ? ' open' : ''}` });
+  li.dataset.adviceId = a.id;
   li.appendChild(el('div', { class: 'adv-top' },
     el('span', { class: `adv-status ${st.cls}`, text: st.label }),
     el('span', { class: 'adv-when mono', text: fmtWhen(a.createdAt) })));
@@ -4439,7 +4757,7 @@ function adviceCard(a) {
             body: { message: text, target: a.target, followUpOf: a.id, observation: { source: 'none' } },
           });
           await loadOverview();
-          renderInspector();
+          rerenderAdvice();
         } catch (err) { toastError(err); }
       },
     }));
@@ -4461,9 +4779,16 @@ function adviceCard(a) {
     li.appendChild(undo);
   }
 
-  if (state.openAdviceId === a.id) hydrateAdviceDetail(li, a);
-  else li.addEventListener('click', () => { state.openAdviceId = a.id; renderInspector(); });
+  if (state.openAdviceId === a.id) hydrateAdviceDetail(li, a, onOpen);
+  else li.addEventListener('click', () => { state.openAdviceId = a.id; onOpen(); });
   return li;
+}
+
+/** Both readers of the advice, redrawn together so they cannot disagree. */
+function rerenderAdvice() {
+  renderInspector();
+  renderAdviceBoard();
+  renderAdviseButton();
 }
 
 /** Withdraw one item. The request text and evidence are never deleted. */
@@ -4475,7 +4800,7 @@ async function withdrawOneAdvice(a, btn) {
     await loadOverview();
     renderTree();
     renderTimeline();
-    renderInspector();
+    rerenderAdvice();
     renderProductionLine();
   } catch (err) {
     btn.disabled = false;
@@ -4501,15 +4826,15 @@ async function withdrawAllAdvice() {
     await loadOverview();
     renderTree();
     renderTimeline();
-    renderInspector();
+    rerenderAdvice();
     renderProductionLine();
     toast(`Withdrew ${r.count} piece${r.count === 1 ? '' : 's'} of advice.`, { kind: 'info' });
   } catch (err) { toastError(err); }
 }
 
 /** The AI's answer plus the before/after frames, fetched only when opened. */
-async function hydrateAdviceDetail(li, a) {
-  li.appendChild(el('div', { class: 'adv-when adv-close mono', text: 'close ×', onclick: (ev) => { ev.stopPropagation(); state.openAdviceId = null; renderInspector(); } }));
+async function hydrateAdviceDetail(li, a, onOpen = rerenderAdvice) {
+  li.appendChild(el('div', { class: 'adv-when adv-close mono', text: 'close ×', onclick: (ev) => { ev.stopPropagation(); state.openAdviceId = null; onOpen(); } }));
   let full;
   try { full = await api(`/api/films/${fid}/advice/${encodeURIComponent(a.id)}`); }
   catch { return; }
@@ -4534,18 +4859,234 @@ function focusAdvice(a) {
   const t = a.target ?? {};
   const segs = state.detail?.scenes ?? [];
   if (t.type === 'sequence') select({ kind: 'sequence', sequence: t.sequence });
-  else if (t.type === 'scene') {
+  else if (t.type === 'lane') {
+    // A row that has since been removed no longer exists to select; the film
+    // is the honest fallback, and the entry still says which lane it was.
+    select(ADVISABLE_FAMILIES.includes(t.family) && (t.lane ?? 0) < laneFamilyRows(t.family)
+      ? { kind: 'lane', family: t.family, lane: t.lane ?? 0 }
+      : { kind: 'film' });
+  } else if (t.type === 'scene') {
     const i = segs.findIndex((s) => s.slug === t.scene);
-    select(i >= 0 ? { kind: 'scene', index: i } : null);
+    select(i >= 0 ? { kind: 'scene', index: i } : { kind: 'film' });
   } else if (t.type === 'footage') {
     const i = segs.findIndex((s) => s.id === t.itemId);
-    select(i >= 0 ? { kind: 'scene', index: i } : null);
+    select(i >= 0 ? { kind: 'scene', index: i } : { kind: 'film' });
   } else if (t.itemId) select({ kind: t.type, id: t.itemId });
-  else select(null);
+  else select({ kind: 'film' });
   const frame = adviceFilmFrame(a);
   if (frame != null) { stopPlayback(); setPlayhead(frame); }
   state.openAdviceId = a.id;
-  renderInspector();
+  rerenderAdvice();
+}
+
+/* -------------------------- the toolbar control -------------------------- */
+
+/**
+ * Advising used to be reachable only from the foot of the inspector — which
+ * meant scrolling past a scene's whole property sheet to say one sentence, and
+ * on the config/audio/assets/outputs tabs meant no advise button at all. It is
+ * the human half of the loop and it is always about a moment in the cut, so it
+ * lives on the timeline toolbar, where it cannot move.
+ *
+ * The button names its target rather than just doing something: pressing an
+ * "advise" that had drifted onto the wrong scene is the one mistake a shortcut
+ * like this could introduce, and a label costs nothing.
+ */
+function renderAdviseButton() {
+  const btn = $('#btn-advise');
+  if (!btn) return;
+  const chip = $('#advise-target');
+  const sel = state.selection;
+  const label = sel ? adviceScope().name : '';
+  chip.textContent = label;
+  chip.classList.toggle('hidden', !label);
+  btn.title = sel
+    ? `advise the AI on ${label} — at the playhead, with what you are watching (A)`
+    : 'advise the AI — click the film, a lane, a sequence, a scene, a clip, audio, a caption or an overlay (A)';
+
+  const all = state.advice ?? [];
+  const open = all.filter((a) => a.status !== 'resolved').length;
+  const boardBtn = $('#btn-advice-board');
+  const count = $('#advice-board-count');
+  count.textContent = open ? String(open) : '';
+  count.classList.toggle('hidden', !open);
+  boardBtn.classList.toggle('has-open', open > 0);
+  boardBtn.classList.toggle('on', $('#advice-board')?.open === true);
+  boardBtn.title = all.length
+    ? `all advice on this film — ${open} open, ${all.length - open} answered (Shift+A)`
+    : 'all advice on this film — nothing said yet (Shift+A)';
+}
+
+/* ------------------------------ advice board ----------------------------- */
+
+/**
+ * The whole conversation in one place. Grouped by what each piece is about and
+ * ordered down the cut, because "what has been said about this film" is read
+ * as a pass over the film, not as a mailbox.
+ */
+const BOARD_FILTERS = {
+  open: (a) => a.status !== 'resolved',
+  answered: (a) => a.status === 'resolved',
+  all: () => true,
+};
+
+function adviceTargetLabel(a) {
+  const t = a.target ?? {};
+  const segs = state.detail?.scenes ?? [];
+  if (t.type === 'sequence') return { kind: 'sequence', label: t.sequence };
+  if (t.type === 'scene') {
+    return { kind: 'scene', label: segs.find((s) => s.slug === t.scene)?.name ?? t.scene };
+  }
+  if (t.type === 'footage') {
+    return { kind: 'footage', label: segs.find((s) => s.id === t.itemId)?.name ?? t.label ?? t.itemId };
+  }
+  if (t.type === 'film' || !t.type) return { kind: 'film', label: 'the whole film' };
+  if (t.type === 'lane') {
+    // The row as it reads now, so renumbering after a lane is removed does not
+    // leave the board naming a row that is no longer there.
+    return { kind: 'lane', label: `the ${t.family && ADVISABLE_FAMILIES.includes(t.family) ? laneLabel(t.family, t.lane ?? 0) : (t.label ?? 'lane')} lane` };
+  }
+  // The live item where it still exists, so a renamed clip reads as itself;
+  // the label recorded with the advice where it has since been deleted.
+  const key = { audio: 'audio', caption: 'captions', overlay: 'overlays' }[t.type];
+  const item = key ? (state.film?.[key] ?? []).find((x) => x.id === t.itemId) : null;
+  return { kind: t.type, label: item ? itemLabel(t.type, item) : (t.label ?? t.itemId ?? 'item') };
+}
+
+/** Stable identity for "the same thing", so a thread is not split in two. */
+function adviceGroupKey(a) {
+  const t = a.target ?? {};
+  if (t.type === 'lane') return `lane:${t.family}:${t.lane ?? 0}`;
+  return `${t.type ?? 'film'}:${t.sequence ?? t.scene ?? t.itemId ?? ''}`;
+}
+
+function adviceGroups(items) {
+  const groups = new Map();
+  for (const a of items) {
+    const key = adviceGroupKey(a);
+    if (!groups.has(key)) {
+      const { kind, label } = adviceTargetLabel(a);
+      groups.set(key, { key, kind, label, frame: adviceFilmFrame(a), items: [] });
+    }
+    const g = groups.get(key);
+    g.items.push(a);
+    // The earliest point in the film anything in this thread was said about.
+    const f = adviceFilmFrame(a);
+    if (f != null && (g.frame == null || f < g.frame)) g.frame = f;
+  }
+  // Down the cut. Anything that cannot be placed sorts last rather than at 0,
+  // where it would look like a note on the first frame.
+  return [...groups.values()].sort((x, y) => (x.frame ?? Infinity) - (y.frame ?? Infinity));
+}
+
+function openAdviceBoard() {
+  const dlg = $('#advice-board');
+  if (!dlg || dlg.open) { renderAdviceBoard(); return; }
+  stopPlayback(); // reading the report is its own act; nothing runs on unseen
+  dlg.showModal();
+  renderAdviceBoard();
+  renderAdviseButton();
+}
+
+function closeAdviceBoard() {
+  const dlg = $('#advice-board');
+  if (!dlg?.open) return;
+  dlg.close();
+  renderAdviseButton();
+}
+
+/** Leave the report for the moment in the film it is about. */
+function goToAdvice(a) {
+  closeAdviceBoard();
+  focusAdvice(a);
+}
+
+function toggleAdviceBoard() {
+  if ($('#advice-board')?.open) closeAdviceBoard(); else openAdviceBoard();
+}
+
+function renderAdviceBoard() {
+  const dlg = $('#advice-board');
+  if (!dlg?.open) return;
+  const all = state.advice ?? [];
+  const open = all.filter((a) => a.status !== 'resolved');
+  $('#board-counts').textContent = all.length
+    ? `${open.length} open · ${all.length - open.length} answered`
+    : 'nothing said yet';
+
+  for (const b of dlg.querySelectorAll('[data-board-filter]')) {
+    b.classList.toggle('on', b.dataset.boardFilter === state.boardFilter);
+  }
+
+  const list = $('#board-list');
+  // The board is meant to be left open while the AI works, and every event from
+  // it rebuilds this list — an answer half-typed into a clarification must not
+  // be retyped out from under the human. Restored by advice id, because the
+  // input itself is a different node afterwards.
+  const active = document.activeElement;
+  const typing = active?.matches?.('.adv-reply input') && list.contains(active)
+    ? { id: active.closest('.adv')?.dataset.adviceId, value: active.value, at: active.selectionStart }
+    : null;
+  list.innerHTML = '';
+  const shown = all.filter(BOARD_FILTERS[state.boardFilter] ?? BOARD_FILTERS.all);
+  if (!shown.length) {
+    list.appendChild(el('li', {
+      class: 'board-empty dim',
+      text: !all.length
+        ? 'Nothing said about this film yet. Select a sequence, scene or clip and press ✎ advise.'
+        : state.boardFilter === 'open'
+          ? 'Nothing open — the AI has answered everything on this film.'
+          : 'Nothing answered yet.',
+    }));
+  }
+
+  for (const g of adviceGroups(shown)) {
+    const groupOpen = g.items.filter((a) => a.status !== 'resolved').length;
+    const head = el('li', { class: 'board-group' },
+      el('button', {
+        class: 'board-target',
+        title: 'go to it — closes the board and takes the film there',
+        onclick: () => goToAdvice(g.items[0]),
+      },
+      el('span', { class: `board-kind k-${g.kind}`, text: g.kind }),
+      el('span', { class: 'board-label', text: g.label }),
+      el('span', { class: 'board-at mono dim', text: g.frame == null ? '—' : timecode(g.frame) }),
+      groupOpen ? adviceBadge(groupOpen) : el('span', { class: 'board-done mono', text: '✓' })));
+    list.appendChild(head);
+    // Oldest first inside a thread: it is a conversation, and an answer that
+    // came second must not print above the thing it answers.
+    const thread = [...g.items].sort((x, y) => (x.createdAt < y.createdAt ? -1 : 1));
+    for (const a of thread) {
+      const card = adviceCard(a, { onOpen: rerenderAdvice });
+      card.classList.add('board-adv');
+      // Per entry, not just per target: two notes on the same scene were left
+      // at different moments, and "go to it" means the one you are reading.
+      const go = el('button', {
+        class: 'ghost tiny-btn adv-goto',
+        text: 'go to it ↗',
+        title: 'closes the board, seeks to this moment and selects what it is about',
+        onclick: (ev) => { ev.stopPropagation(); goToAdvice(a); },
+      });
+      go.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+      card.appendChild(go);
+      list.appendChild(card);
+    }
+  }
+
+  if (typing?.id) {
+    const back = list.querySelector(`.adv[data-advice-id="${CSS.escape(typing.id)}"] .adv-reply input`);
+    if (back) {
+      back.value = typing.value;
+      back.focus();
+      try { back.setSelectionRange(typing.at, typing.at); } catch { /* not a text field */ }
+    }
+  }
+
+  const wipe = $('#btn-board-withdraw-all');
+  wipe.classList.toggle('hidden', !open.length);
+  wipe.textContent = `withdraw all ${open.length} open`;
+  wipe.title = 'Closes every open item so the next AI run does not pick them up. '
+    + 'The wording and evidence stay on record.';
 }
 
 /* ------------------------------ advice popup ----------------------------- */
@@ -4578,6 +5119,19 @@ function currentAdviceTarget() {
     ? { source: 'delivery', deliveryId: state.pinnedDelivery, filmFrame: frame, timeSeconds: Number((frame / fps()).toFixed(3)) }
     : { source: 'scene-preview', filmFrame: frame, timeSeconds: Number((frame / fps()).toFixed(3)) };
 
+  if (sel?.kind === 'lane') {
+    const li = SINGLE_ROW_FAMILIES.includes(sel.family) ? 0 : sel.lane;
+    const label = laneLabel(sel.family, li);
+    const n = laneContents(sel.family, li);
+    return {
+      // The label is recorded so a row that later goes away still reads as the
+      // one the human clicked, exactly as a deleted clip's does.
+      target: { type: 'lane', family: sel.family, lane: li, label, filmFrame: frame },
+      observation: observedFrom,
+      title: `The ${label} lane`,
+      detail: `${n} item${n === 1 ? '' : 's'} in this row · at ${timecode(frame)}`,
+    };
+  }
   if (sel?.kind === 'sequence') {
     const band = sequenceBands().find((b) => b.label === sel.sequence);
     return {
@@ -4707,7 +5261,7 @@ async function sendAdvice() {
     await loadOverview();
     renderTree();
     renderTimeline();
-    renderInspector();
+    rerenderAdvice();
     renderProductionLine();
   } catch (err) {
     stateEl.textContent = `failed: ${err.message}`;
@@ -4756,7 +5310,7 @@ function connectEvents() {
       renderUpdatedBanner();
       renderTree();
       renderTimeline();
-      renderInspector();
+      rerenderAdvice(); // the board is open often and must not go stale behind you
     }, 400);
   };
   // One stream for the whole app when embedded, our own when standalone —
@@ -4775,6 +5329,16 @@ function connectEvents() {
 function wireProductionLoop() {
   $('#btn-aim-cancel').addEventListener('click', disarmAim);
   $('#btn-send-advice').addEventListener('click', sendAdvice);
+  $('#btn-advise').addEventListener('click', startAdvice);
+  $('#btn-advice-board').addEventListener('click', toggleAdviceBoard);
+  $('#btn-board-close').addEventListener('click', closeAdviceBoard);
+  $('#btn-board-withdraw-all').addEventListener('click', withdrawAllAdvice);
+  for (const b of document.querySelectorAll('[data-board-filter]')) {
+    b.addEventListener('click', () => { state.boardFilter = b.dataset.boardFilter; renderAdviceBoard(); });
+  }
+  // Escape dismisses a modal dialog without going through close(), so the
+  // toolbar button has to learn about it from the dialog itself.
+  $('#advice-board').addEventListener('close', renderAdviseButton);
   $('#btn-src-preview').addEventListener('click', () => setSource('preview'));
   $('#btn-src-delivery').addEventListener('click', () => setSource('delivery'));
   $('#btn-new-sequence').addEventListener('click', createSequenceFromSelection);
@@ -4794,7 +5358,7 @@ function wireProductionLoop() {
     if (!state.aiming) return; // a plain viewport click is not a selection gesture
     stopPlayback();
     const { index } = sceneAt(Math.floor(state.playhead));
-    select(index >= 0 ? { kind: 'scene', index } : null);
+    select(index >= 0 ? { kind: 'scene', index } : { kind: 'film' });
   });
 }
 
@@ -4877,6 +5441,7 @@ syncExplorerIcon();
 StudioPalette.register([
   { id: 'film.build', title: 'Film: Build', group: 'commands', run: () => $('#btn-build').click() },
   { id: 'film.advise', title: 'Film: Advise the AI on the Selection', group: 'commands', run: () => startAdvice() },
+  { id: 'film.adviceBoard', title: 'Film: All Advice on This Film', group: 'commands', run: () => toggleAdviceBoard() },
   { id: 'film.newScene', title: 'Film: New Scene…', group: 'commands', run: () => $('#btn-new-scene').click() },
   { id: 'film.newSeq', title: 'Film: New Sequence from Selection', group: 'commands', run: () => $('#btn-new-sequence').click() },
   { id: 'film.narration', title: 'Film: Add Narration…', group: 'commands', run: () => $('#btn-add-tts').click() },
@@ -4910,6 +5475,7 @@ $('#film-name').addEventListener('change', () => {
 });
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
+$('#btn-reload').addEventListener('click', reloadFilm);
 
 /* --------------------------------- boot --------------------------------- */
 

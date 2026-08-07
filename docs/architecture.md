@@ -482,6 +482,22 @@ means the film is silent, not that per-scene audio comes back. Lane mute lives
 on the film rather than on the tracks so that a clip dragged into a muted lane
 is silent too — which is what muting a track means in any editor.
 
+**One rule needs one lane number.** `audibleTracks` resolves a track's lane with
+`t.lane ?? 0`, and *nothing on the engine side stamps a lane*: `update_film`
+writes the tracks it was sent, and no MCP tool has ever required one. The film
+page draws such a film by **packing** its clips into the fewest non-overlapping
+rows — the migration lanes shipped with — so the page and the mixer could hold
+different opinions about which lane a clip is in, and a film written by an agent
+always did. Muting `audio 1` on one of those muted every track, because to
+`audibleTracks` every unlaned track *is* lane 0. The gap is closed on the
+editor's side, where the packing is invented: `toggleLaneMute` persists the
+drawn rows before recording the mute (`persistLanes`, the same call every other
+lane edit makes), and opening a film that was already muted that way repairs it
+once, after the waveforms decode — the packing is done by duration, so repairing
+before the decodes land would record a layout that was never on screen. The
+alternative, teaching the mixer to pack, would put a *presentation* rule inside
+the one function the build depends on.
+
 **Both trims index the source file**, and both name a point rather than a
 length: the clip plays `[trimStartInFrames, trimEndInFrames)`. That keeps
 `trimEndInFrames` alone meaning exactly what it meant in v0.19 — the clip's
@@ -1648,7 +1664,8 @@ the Studio and every MCP server without coordination:
   newest master build takes the `current.json` pointer; platform variants
   archive but never steal it.
 - **Human advice** (`core/advice.js`). Per-film folders holding an immutable
-  `request.json` (wording + structural target + the observed
+  `request.json` (wording + structural target — `film`, `lane`, `sequence`,
+  `scene`, `footage`, `audio`, `caption`, `overlay` — plus the observed
   delivery/revision/frame), an append-only `events.ndjson` (appended before
   every state write, so a crash loses a cached view, never history), a
   replaceable `state.json` projection, a terminal immutable
@@ -1762,10 +1779,20 @@ behaviour folded in:
 | Region | What it holds |
 |---|---|
 | Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` / `+ seq` |
-| Timeline | sequences band row, scenes row, track lanes, advice marker row |
+| Timeline | toolbar (add, zoom, **✎ advise** + the advice board), sequences band row, scenes row, track lanes — every row's head selects that lane — and the advice marker row, which does not |
 | Player | scene-stitched preview, or a pinned **built film** delivery |
 | Inspector | property panel, versions, and the advice for the selection |
-| Header | film name, production line, save state, undo/redo, build |
+| Header | film name, production line, save state, undo/redo, **↻ reload**, build |
+
+**↻ reloads the document, not the shell.** A browser reload here unmounts every
+open document and lands on the Studio home, so the film page carries its own:
+flush the pending save (a reload that ate an unsaved edit would be worse than a
+stale page), drop the rendered mix — pausing the element before revoking its
+object URL, the same trap `invalidateMixIfAudioChanged` documents — then
+`refresh()`, which re-reads the film, the plan, the assets and the overview. The
+undo stack is cleared with it, for the reason `handleSaveConflict` clears it:
+its snapshots are whole-list statements about a document that may have moved
+underneath, and replaying one would revert whatever arrived in between.
 
 A first cut of this shipped a *second* split — watch & advise versus advanced
 editing, toggled in the header — and it was removed for the same reason the
@@ -1773,11 +1800,53 @@ review page was (v0.23.2). It only hid buttons, so it bought no safety a
 reader could rely on, while still making them establish which mode they were
 in before trusting the screen. The page is always the full editor.
 
-Advising is therefore driven from the **inspector**, not a header button: that
-panel already resolves the selection, so the advice control sits beside the
-thing it is about instead of guessing. With nothing selected it arms one
-targeting click (`A`, `Esc` to cancel), which is the only piece of modal
-behaviour left and is announced by a banner while it is live.
+Advising is aimed by the **selection** — the page already resolves what is in
+front of you, so the control never asks the human to name a target. With
+nothing selected it arms one targeting click (`A`, `Esc` to cancel), which is
+the only piece of modal behaviour left and is announced by a banner while it
+is live.
+
+**Everything on the page that is a thing is selectable, including the two that
+are not blocks** (v0.28): the Explorer's root row selects the whole film, and
+every timeline row's *head* selects that lane. Both were previously sayable
+only by accident or not at all — "the film drags in the middle" had to be sent
+from the nothing-selected state, which armed a targeting click instead, and
+"every caption is a beat late" had to be said once per caption. A lane target
+is `{ type: 'lane', family, lane }`: family names the stack (`sequences`,
+`scenes`, `audio`, `captions`, `overlays`) and lane the row within it, because
+a lane is not a stored object with an id — it is where a clip's `lane` number
+points. The **advice row is deliberately not selectable**: it is the record of
+this conversation, not a part of the film.
+
+The film selected and nothing selected render the same inspector — there is
+nothing narrower to show — but they are not the same state, and the Explorer
+lights the root row only for the first. Pressing advise in the second arms a
+targeting click, and one row lit identically in both would make which of the
+two you get a coin toss.
+
+For a while the only trigger for it was in the inspector, at the foot of the
+panel. That is the right *place* — beside the thing it is about — but it was
+the wrong *only* place: it is below a scene's whole property sheet, and the
+config, audio, assets and outputs tabs stand the advice section down entirely,
+so the button was sometimes several scrolls away and sometimes absent. Since
+v0.28 the primary trigger is a fixed control on the **timeline toolbar**,
+where the human is already working and where advice's subject — a moment in
+the cut — lives. It names its target rather than only acting on it, so a
+shortcut that always sits in the same place cannot quietly advise on the wrong
+scene. The inspector's button stays; both call the same code path.
+
+Its right half opens the **advice board** (`Shift+A`): every piece of advice on
+the film in one popup, grouped by target and ordered down the cut, filtered by
+*open / answered / all*. It is a full-width modal dialog like every other one
+on the page, and the width is the point — the AI's before/after evidence is
+what a report is read for, and in the inspector's 300px column it is two
+thumbnails. Its head and foot are pinned so the counts, the filters and
+*withdraw all* cannot walk off the top of a long conversation. An entry expands
+in place; **go to it ↗** closes the board, seeks the playhead and selects what
+that entry was about. Both readers of the advice share `state.openAdviceId` and
+re-render together (`rerenderAdvice()`), so the panel and the board can never
+disagree about the same item, and a half-typed answer to a clarification is
+carried across the rebuild an AI event triggers underneath it.
 
 `GET /api/films/:fid/overview` is the one call the page opens on: document,
 plan, deliveries, advice, per-scene revision counts, and production status.

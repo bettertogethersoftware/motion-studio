@@ -19,8 +19,10 @@
 
   There is no review page, no review route, and (since v0.23.2) no mode switch:
   a "watch" mode that only hid buttons was a decision the reader had to make
-  before they could trust what they were looking at, for no gain. Advising is
-  driven from the inspector, which already knows what is selected.
+  before they could trust what they were looking at, for no gain. Advice is
+  reachable from three places that never move: the timeline toolbar (advise on
+  the selection, and the board of everything said), the inspector's advice
+  section for the thing in front of you, and the advice lane on the timeline.
 -->
 <div class="vs-shell">
 <div class="vs-body">
@@ -45,13 +47,19 @@
     <span class="spacer"></span>
     <button id="btn-undo" class="ghost" title="undo (Ctrl+Z)" disabled>↶</button>
     <button id="btn-redo" class="ghost" title="redo (Ctrl+Y)" disabled>↷</button>
+    <!-- A browser reload here would take the whole shell — every open document —
+         back to the Studio home. This reloads the FILM: it flushes what is
+         unsaved, re-reads the document, its plan, its assets and the production
+         loop, and throws away the rendered mix so the next play is made from
+         what is on disk now. -->
+    <button id="btn-reload" class="ghost" title="reload this film from disk — flushes unsaved edits, re-reads the document, the plan and the assets, throws away the rendered audio mix, and clears the undo history">↻</button>
     <button id="btn-build" class="primary">build film →</button>
   </header>
 
   <div id="problems-panel" class="problems hidden"><ul id="problems-list"></ul></div>
 
   <div id="aim-banner" class="fe-banner hidden">
-    <span>Click the sequence, scene, clip, audio, caption or overlay you want to advise on.</span>
+    <span>Click what you want to advise on — the film, a timeline lane’s head, a sequence, a scene, a clip, audio, a caption or an overlay.</span>
     <button id="btn-aim-cancel" class="ghost">cancel (Esc)</button>
   </div>
 
@@ -141,6 +149,18 @@
         <button id="btn-zoom-fit" class="ghost" title="fit the whole film">fit</button>
         <button id="btn-snap" class="ghost toggle-btn on" title="snap to cuts, clips and the playhead">snap</button>
       </div>
+      <div class="divider"></div>
+      <!-- Advising is the human half of an AI-directed production, and it is
+           about a moment in the cut — so it sits on the timeline's own toolbar,
+           beside the film, rather than only at the foot of an inspector you have
+           to scroll (and which drops the button entirely on the config, audio,
+           assets and outputs tabs). The left half advises on whatever is
+           selected and names it, so a click is never a guess; the right half
+           opens the board with every piece of advice on the film. -->
+      <div class="group advise-group" id="advise-group">
+        <button id="btn-advise" class="ghost advise-btn">✎ advise<span id="advise-target" class="advise-target"></span></button>
+        <button id="btn-advice-board" class="ghost board-btn">≡<span id="advice-board-count" class="board-count"></span></button>
+      </div>
       <span class="spacer"></span>
       <!-- The movement gestures used to be spelled out here, on a line of their
            own. A permanent tooltip costs a whole row of a timeline that is
@@ -193,6 +213,35 @@
   </div>
   <p class="dim note">Advice never pauses the AI and needs no approval. Close this page whenever you like —
   it is on disk and the next AI run finds it.</p>
+</dialog>
+
+<!--
+  The advice board: every piece of advice on this film in one place, grouped by
+  what it is about and ordered down the cut, so the whole conversation reads as
+  one report instead of one inspector panel at a time.
+
+  A full-size popup over the page, like every other dialog here — wide enough
+  that the AI's before/after evidence is worth looking at, which it never is in
+  a 300px inspector column. Reading the report is its own act: an entry expands
+  in place to show what the AI did about it, and "go to it ↗" leaves the report
+  for the moment in the film it is about.
+-->
+<dialog id="advice-board" class="fe-dialog advice-board" aria-label="advice on this film">
+  <header class="board-head">
+    <h2>advice on this film</h2>
+    <span id="board-counts" class="mono dim"></span>
+    <div class="board-filters" role="group" aria-label="which advice to show">
+      <button class="mode-btn on" data-board-filter="open">open</button>
+      <button class="mode-btn" data-board-filter="answered">answered</button>
+      <button class="mode-btn" data-board-filter="all">all</button>
+    </div>
+    <button id="btn-board-close" class="ghost tiny-btn" title="close (Esc)">×</button>
+  </header>
+  <div class="board-body"><ul id="board-list" class="board-list"></ul></div>
+  <footer class="board-foot">
+    <span class="dim note">An entry opens in place. <strong>go to it ↗</strong> closes this and takes the film there.</span>
+    <button id="btn-board-withdraw-all" class="ghost danger tiny-btn hidden"></button>
+  </footer>
 </dialog>
 
 <dialog id="audio-dialog" class="fe-dialog">

@@ -47,7 +47,16 @@ export const ADVICE_DIR = 'advice';
 // `footage` is a supplied clip on the play order (v0.23.1). It is addressed by
 // its stable segment id, not its path: the same plate may be cut in twice, and
 // advice on the second one must not re-aim at the first.
-export const ADVICE_TARGET_TYPES = ['film', 'sequence', 'scene', 'footage', 'audio', 'caption', 'overlay'];
+//
+// `lane` is a whole row of the timeline rather than one item on it — "the
+// captions are all too late", "this bed lane is fighting the narration". The
+// human clicks the lane's head; the Studio fills in which row that is. It is
+// addressed by family + row index because that is what the row IS: a lane is
+// not a stored object with an id, it is where a clip's `lane` number points.
+export const ADVICE_TARGET_TYPES = ['film', 'lane', 'sequence', 'scene', 'footage', 'audio', 'caption', 'overlay'];
+// Every row of the timeline a human can advise on. The advice row itself is
+// not one: it is the record of this conversation, not a part of the film.
+export const ADVICE_LANE_FAMILIES = ['sequences', 'scenes', 'audio', 'captions', 'overlays'];
 export const ADVICE_STATUSES = ['open', 'acknowledged', 'working', 'needs-clarification', 'resolved'];
 export const ADVICE_OUTCOMES = ['applied', 'partially-applied', 'not-applied', 'superseded', 'needs-clarification'];
 export const SUGGESTED_ACTIONS = ['rework', 'prefer-revision', 'question', 'praise'];
@@ -114,6 +123,18 @@ function validateTarget(target) {
     throw new EngineError(ErrorCodes.INVALID_ADVICE,
       `a ${t.type} target needs target.itemId (the timeline item's id)`, { target: t });
   }
+  if (t.type === 'lane') {
+    if (!ADVICE_LANE_FAMILIES.includes(t.family)) {
+      throw new EngineError(ErrorCodes.INVALID_ADVICE,
+        `a lane target needs target.family, one of: ${ADVICE_LANE_FAMILIES.join(', ')}`, { target: t });
+    }
+    // The row index, from the top of that family. `sequences` and `scenes`
+    // have exactly one row, so theirs is always 0 and may be left out.
+    if (t.lane !== undefined && !(Number.isInteger(t.lane) && t.lane >= 0)) {
+      throw new EngineError(ErrorCodes.INVALID_ADVICE,
+        'target.lane must be a non-negative integer (the row index within the family)', { target: t });
+    }
+  }
   for (const k of ['filmFrame', 'sceneFrame']) {
     if (t[k] !== undefined && !(Number.isInteger(t[k]) && t[k] >= 0)) {
       throw new EngineError(ErrorCodes.INVALID_ADVICE, `target.${k} must be a non-negative integer`, { target: t });
@@ -124,6 +145,7 @@ function validateTarget(target) {
     ...(t.scene !== undefined ? { scene: t.scene } : {}),
     ...(t.sequence !== undefined ? { sequence: String(t.sequence) } : {}),
     ...(t.itemId !== undefined ? { itemId: String(t.itemId) } : {}),
+    ...(t.type === 'lane' ? { family: t.family, lane: t.lane ?? 0 } : {}),
     ...(t.filmFrame !== undefined ? { filmFrame: t.filmFrame } : {}),
     ...(t.sceneFrame !== undefined ? { sceneFrame: t.sceneFrame } : {}),
     ...(typeof t.label === 'string' && t.label.trim() ? { label: t.label.trim().slice(0, 200) } : {}),
@@ -296,7 +318,9 @@ export async function getAdvice({ filmPath, adviceId }) {
  * @param {'unresolved'|'resolved'|'all'} [opts.status='all']
  * @param {'oldest'|'newest'} [opts.order]  default: oldest for unresolved (the
  *   reconciliation order), newest otherwise (the history order)
- * @param {object} [opts.target]  filter: { type?, scene?, sequence?, itemId? }
+ * @param {object} [opts.target]  filter: { type?, scene?, sequence?, itemId?,
+ *   family?, lane? } — `lane` only narrows within a `family`, because row 2 of
+ *   the captions and row 2 of the audio are different rows.
  * @param {number} [opts.limit]
  */
 export async function listAdvice({ filmPath, status = 'all', order = null, target = null, limit = 0 }) {
@@ -319,6 +343,12 @@ export async function listAdvice({ filmPath, status = 'all', order = null, targe
       if (target.scene && request.target?.scene !== target.scene) continue;
       if (target.sequence && request.target?.sequence !== target.sequence) continue;
       if (target.itemId && request.target?.itemId !== target.itemId) continue;
+      if (target.family && request.target?.family !== target.family) continue;
+      // A row index means nothing on its own — "row 2" of what? — so it only
+      // narrows a filter that already names the family (or lane targets).
+      if (target.lane !== undefined && target.lane !== null
+        && (target.family || target.type === 'lane')
+        && (request.target?.lane ?? 0) !== Number(target.lane)) continue;
     }
     const resolution = st === 'resolved' ? await readJson(path.join(dir, 'resolution.json')) : null;
     out.push({

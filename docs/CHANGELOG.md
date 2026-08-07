@@ -2,6 +2,131 @@
 
 ## Unreleased
 
+### The film and every lane can be advised on
+
+Two of the things a human most wants to say about a film were the two things
+the page had no way to aim at.
+
+**"The whole thing drags"** had no target. Advising with nothing selected did
+not mean "the film" — it armed a targeting *click*, so the one gesture that
+looked like film-level advice was the gesture that refused to give it. The
+Explorer's root row now selects the film, and pressing **✎ advise** on it sends
+advice about the film. Its unresolved count sits on that row, where the film's
+count already lived.
+
+**"Every caption lands a beat late"** had to be said once per caption. A
+timeline row's **head** now selects the whole lane — `sequences`, `scenes`,
+`audio`, `captions`, `overlay`, and each numbered row when a family has
+several. The row lights up, carries its own unresolved badge, and its
+inspector says what is standing in it. The new advice target is
+`{ type: 'lane', family, lane }`, so it means the *row*, not a snapshot of its
+contents: a note about the caption layer still applies to the caption added
+after it. `check_human_advice` reports it, `list_human_advice` filters on
+`family` (+ `lane`), and the advice board groups by it.
+
+The **advice row is not a target**, deliberately: it is the record of this
+conversation, not a part of the film.
+
+Selecting the film and selecting nothing render the same inspector — there is
+nothing narrower to show — but the Explorer lights the root row only for the
+first. They behave differently under advise, and a row lit identically in both
+would make which of the two you get a coin toss.
+
+### Muting one lane muted the whole film
+
+Reported from the timeline: pressing **♪** on `audio 1` silenced every track,
+and the mix came back with *every track on this film is muted*. It was not a
+mute bug. It was **two different answers to "which lane is this clip in."**
+
+`audibleTracks` — the one rule the build, `preview_audio` and the balance
+warnings all read — decides a track's lane with `t.lane ?? 0`. But nothing
+stamps a lane on a track an agent adds: `update_film` writes the tracks it was
+sent, and the MCP schema has never required one. The timeline draws those films
+by *packing* the clips into the fewest non-overlapping rows, which is the
+migration path lanes shipped with. So a film could show four clips across three
+lanes while the mix saw four clips on lane 0 — and muting the row labelled
+`audio 1` muted all four. Every agent-authored film in a workspace is such a
+film, which is why this was reproducible on the first one tried.
+
+**Muting now writes the drawn rows down first**, exactly as adding, removing
+and dragging between lanes already did. Mute is the one lane action whose
+meaning leaves the page, so it is the one that cannot afford to leave the
+packing implicit: after the click, the lane the mixer reads *is* the row that
+was clicked.
+
+**A film already saved that way repairs itself when it is opened.** The row
+that was muted stays muted and the rest come back, with a sentence saying what
+happened and how many tracks it affected — an editor that silently changed what
+a film sounds like would be worse than the bug. The repair waits for the
+waveforms to decode first, because the packing is done by *duration*: run it
+against undecoded clips and it writes down a layout nobody ever saw. It fires
+only when a mute is actually in force and the two views actually disagree, so
+merely opening a film never bumps its revision under an agent holding an
+`expectedRevision`.
+
+### ↻ reloads the film, not the shell
+
+A browser reload from the film page takes the **whole shell** with it: every
+open document goes back to the Studio home and the film you were reading is a
+navigation away. The header now has its own **↻**, beside undo/redo. It flushes
+whatever is unsaved (so the reload cannot eat it), re-reads the document, its
+plan, its assets and the production loop, and throws away the rendered audio
+mix — a cache of the document it is about to replace — so the next play is made
+from what is on disk now. The undo history goes too: those snapshots are
+whole-list statements about a document that may have moved, and replaying one
+over an agent's work is the clobber `expectedRevision` exists to prevent.
+
+For a page that has been open for hours while an agent worked underneath it,
+that is the one gesture that re-syncs everything at once.
+
+### Advising has a button that never moves, and a board that holds all of it
+
+Motion Studio is AI-directed and human-advised, and for five versions the
+human's half of that had exactly one trigger: a button at the **foot of the
+inspector**, under the property sheet and the versions strip. Aiming it was
+right — the panel already knows what is selected — but being *only* there was
+not. Saying one sentence about a scene meant scrolling past its whole
+property sheet, and the config, audio, assets and outputs tabs stand the
+advice section down entirely, so on four of a scene's five tabs there was no
+advise button at all. Reported from a day of actually working this way.
+
+**✎ advise is on the timeline toolbar**, past `snap`, in one fixed place —
+the surface the human is already working on, and where advice's subject, a
+moment in the cut, lives. It **names what it is aimed at** (`✎ advise ·
+test3`) rather than only acting: a shortcut that is always in the same place
+is exactly the one that could quietly advise on the wrong scene, and a label
+costs nothing. With nothing selected it still arms one targeting click. The
+inspector's button stays where it was, beside the conversation about the
+thing in front of you; both are the same code path.
+
+**Its other half opens the advice board** (`≡`, or `Shift+A`): every piece of
+advice on the film in one popup — grouped by what it is about, ordered down
+the cut, filtered by *open / answered / all*, with a running `N open · M
+answered` and each entry's status, the AI's explanation, its before/after
+frames and its own **withdraw**. Until now the only way to read the whole
+conversation was to click every scene in turn and read five panels.
+
+It is a full-size dialog over the page, like the rest of them, and the width
+is the point: the AI's before/after evidence is what a report is read *for*,
+and in the inspector's 300px column it is a pair of thumbnails. The head and
+foot are pinned, so the counts, the filters and *withdraw all* cannot walk off
+the top of a long conversation. An entry opens in place; **go to it ↗** — on
+each entry, and on each target heading — closes the board, seeks the playhead
+and selects what that entry was about. A half-typed answer to *AI needs more
+information* survives the live rebuild that an AI event triggers underneath
+you.
+
+The panel and the board are two readers of one conversation, so they share
+the open entry and redraw together — neither can show a state the other
+disagrees with.
+
+**A fit pass on the timeline toolbar.** It now carries twelve controls, so it
+buys the room honestly: tighter tool-strip padding than a page of actions
+needs, a zoom slider that gives way before anything else, and below 1200px
+the advise target label steps aside (the tooltip and the popup both still
+name it). Everything holds one row down to ~900px, and wraps rather than
+clipping a label below that.
+
 ### Sequences are drawn on the timeline, not described to a dialog
 
 Grouping was a one-way street with a form in front of it. `+ seq` opened a

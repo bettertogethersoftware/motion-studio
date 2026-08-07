@@ -192,7 +192,7 @@ import { ensureStableDataDir } from '../core/paths.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
 import {
   createAdvice, listAdvice, getAdvice, acknowledgeAdvice, beginAdviceWork, resolveAdvice,
-  ADVICE_OUTCOMES, writeAdviceEvidence, recordEvidenceFailure, adviceSummary,
+  ADVICE_OUTCOMES, ADVICE_LANE_FAMILIES, writeAdviceEvidence, recordEvidenceFailure, adviceSummary,
 } from '../core/advice.js';
 import { listRevisions, useRevision, currentRevisionId } from '../core/revisions.js';
 import { listDeliveries, getDeliveryManifest, currentDeliveryId } from '../core/deliveries.js';
@@ -4092,7 +4092,7 @@ async function captureAfterEvidence(filmDoc, adviceId) {
   try {
     const full = await getAdvice({ filmPath: filmDoc.path, adviceId });
     const slug = full.request.target?.scene;
-    if (!slug) return; // film/sequence/track advice has no single after-frame
+    if (!slug) return; // film/lane/sequence/track advice has no single after-frame
     const sceneId = `${filmDoc.id}/${slug}`;
     const scene = await store.getScene(sceneId);
     const config = await store.readConfig(sceneId);
@@ -4143,7 +4143,7 @@ server.registerTool(
         atomicRenderUnit: 'scene — one composition folder, rendered and revised independently',
         narrativeGrouping: 'sequence — a label on film segments (film.scenes[i].sequence) plus optional film.sequences metadata; groups scenes for human navigation and advice, renders nothing',
         segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list; a scene is addressed by slug, a footage clip by its stable id',
-        adviceTargets: 'film, sequence, scene, footage, audio, caption, overlay — the human clicks, Studio fills the ids',
+        adviceTargets: 'film, lane (a whole timeline row: family + lane index), sequence, scene, footage, audio, caption, overlay — the human clicks, Studio fills the ids',
       },
       formats: ['mp4', 'webm', 'gif', 'prores', 'png-sequence'],
       vendors: {
@@ -4320,21 +4320,29 @@ server.registerTool(
     title: 'List advice history',
     description:
       'A film\'s advice at any scope — unresolved, resolved, or all; optionally filtered to one scene, ' +
-      'sequence, or timeline item. History order (newest first) unless status is "unresolved". Use it to ' +
-      'review past direction before reworking an area the human has already commented on.',
+      'sequence, timeline item, or timeline lane. History order (newest first) unless status is ' +
+      '"unresolved". Use it to review past direction before reworking an area the human has already ' +
+      'commented on.',
     inputSchema: {
       film: z.string(),
       status: z.enum(['unresolved', 'resolved', 'all']).optional(),
       scene: z.string().optional().describe('Filter: advice targeting this scene slug'),
       sequence: z.string().optional().describe('Filter: advice targeting this sequence'),
       itemId: z.string().optional().describe('Filter: advice targeting this footage/audio/caption/overlay item id'),
+      family: z.enum(ADVICE_LANE_FAMILIES).optional()
+        .describe('Filter: advice targeting a whole timeline row of this family'),
+      lane: z.number().int().min(0).optional()
+        .describe('Filter: the row index within `family` (0-based). Only narrows when `family` is given too'),
       limit: z.number().int().min(1).max(200).optional(),
     },
   },
-  wrap(async ({ film, status, scene, sequence, itemId, limit }) => {
+  wrap(async ({ film, status, scene, sequence, itemId, family, lane, limit }) => {
     const doc = await filmForAdvice(film);
-    const target = (scene || sequence || itemId)
-      ? { ...(scene ? { scene } : {}), ...(sequence ? { sequence } : {}), ...(itemId ? { itemId } : {}) }
+    const target = (scene || sequence || itemId || family)
+      ? {
+        ...(scene ? { scene } : {}), ...(sequence ? { sequence } : {}), ...(itemId ? { itemId } : {}),
+        ...(family ? { family } : {}), ...(lane !== undefined ? { lane } : {}),
+      }
       : null;
     const items = await listAdvice({ filmPath: doc.path, status: status ?? 'all', target, limit: limit ?? 50 });
     return ok({ film: doc.slug, count: items.length, advice: items.map((a) => localAdvice(a, doc)) });

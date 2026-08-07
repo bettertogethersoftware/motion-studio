@@ -15,9 +15,14 @@ build as an **immutable delivery** with a frozen frame→revision manifest.
 Both halves live on **one page per film** — a `Film → Sequence →
 Scene/Footage` tree, the player, a sequence band above the timeline, and the
 full editor, with no modes to choose between. Click the thing that looks
-wrong — a sequence, a scene, a supplied clip, a caption, an audio item, an
-overlay — and the inspector beside it offers **advise**. Write a sentence and
-send; take it back with **withdraw** if you change your mind. Advice is durable evidence (your words
+wrong — the whole film, a whole timeline lane, a sequence, a scene, a supplied
+clip, a caption, an audio item, an
+overlay — and press **✎ advise**, which sits in one fixed place on the timeline
+toolbar and names what it is aimed at (the inspector offers the same button
+beside the thing itself). Write a sentence and send; take it back with
+**withdraw** if you change your mind, and read everything that has ever been
+said about the film — grouped by target, down the cut, with the AI's answers
+and its before/after frames — on the **advice board** beside it. Advice is durable evidence (your words
 + what you were watching + a frame grab); the AI finds it at its next
 checkpoint, acts or explains, and the history reads *what I saw → what I said
 → what the AI changed*. "Ask AI to use this version" on any archived take is

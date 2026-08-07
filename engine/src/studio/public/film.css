@@ -40,6 +40,16 @@
 #save-state { font-size: 11px; }
 #save-state.dirty { color: var(--accent); }
 #save-state.err { color: var(--err); }
+
+/* ↻ reload — the glyph turns while the round trip is out, because flushing,
+   re-reading and re-planning a long film is not instant and a dead button is
+   indistinguishable from a click that missed. */
+#btn-reload { flex-shrink: 0; }
+#btn-reload.spinning { animation: fe-spin 900ms linear infinite; color: var(--accent); }
+@keyframes fe-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  #btn-reload.spinning { animation: st-pulse 900ms ease-in-out infinite; }
+}
 button.warn { color: var(--accent); border-color: var(--accent); }
 
 .problems {
@@ -253,10 +263,52 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
-.fe-tools .group { display: inline-flex; gap: 6px; align-items: center; }
+.fe-tools .group { display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
 .fe-tools .divider { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
-#zoom-slider { width: 130px; accent-color: var(--accent); }
+/* Twelve controls on one row. Tighter than the page's default button padding —
+   this is a tool strip, not a page of actions — and the slider gives way first,
+   so the buttons keep their labels at the widths the film page is actually used
+   at. Wrapping is still the fallback; clipping a label never is. */
+.fe-tools button { padding: 5px 10px; }
+#zoom-slider { flex: 0 1 130px; min-width: 54px; accent-color: var(--accent); }
 .toggle-btn.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+
+/* The advice control: say something about the selection, or open everything
+   that has been said. One subject, so the two halves are joined rather than
+   two loose buttons that happen to sit together. */
+.advise-group { gap: 0; flex-shrink: 0; }
+.advise-btn { color: var(--accent); border-color: rgba(255, 180, 84, 0.42); white-space: nowrap; }
+.advise-btn:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.advise-group .advise-btn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.advise-group .board-btn { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+/* What it will advise on, so pressing it is never a guess — and never wide
+   enough to push the rest of the strip off the row. */
+.advise-target {
+  display: inline-block; vertical-align: bottom; max-width: 13ch;
+  margin-left: 7px; padding-left: 7px; border-left: 1px solid rgba(255, 180, 84, 0.35);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85;
+}
+.advise-btn:hover .advise-target { border-left-color: rgba(26, 18, 4, 0.35); }
+.advise-target.hidden { display: none; }
+.board-btn { display: inline-flex; align-items: center; gap: 6px; }
+.board-btn.has-open { color: var(--accent); border-color: rgba(255, 180, 84, 0.42); }
+.board-btn.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.board-count {
+  min-width: 14px; text-align: center; border-radius: 7px; padding: 0 4px;
+  background: var(--accent); color: var(--accent-ink); font: 9px/14px var(--mono);
+}
+.board-btn.on .board-count { background: var(--accent-ink); color: var(--accent); }
+.board-count.hidden { display: none; }
+/* Below a comfortable editing width the strip gives up its two decorations
+   before it gives up a whole row: the target label — the tooltip and the popup
+   both still name what is about to be advised on — and half the zoom slider. */
+@media (max-width: 1200px) { .advise-target { display: none; } }
+@media (max-width: 1050px) {
+  #zoom-slider { flex-basis: 82px; }
+  .fe-tools { gap: 6px; }
+  .fe-tools .divider { margin: 0 2px; }
+  .fe-tools button { padding: 5px 8px; }
+}
 
 .tl-scroll { flex: 1; overflow: auto; position: relative; min-height: 0; }
 .tl-inner { position: relative; min-width: 100%; }
@@ -273,6 +325,18 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
   overflow: hidden; white-space: nowrap;
 }
 .tl-head-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* A row's head is the row itself: click it to select the whole lane, which is
+   what advice like "the captions are all a beat late" is about. The advice row
+   has no head handler and stays inert. */
+.tl-head.selectable { cursor: pointer; }
+.tl-head.selectable:hover { color: var(--text); }
+.tl-head.selected {
+  color: var(--accent);
+  background: var(--ink-3);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tl-head .adv-badge { flex-shrink: 0; }
 
 /* Three fixed columns — mute · add · lane — on EVERY row, empty where a row has
    nothing to put there. They used to be appended in turn with margin-left:auto
@@ -722,6 +786,77 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .adv-prev-head { display: block; font: 9px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px; }
 .adv-prev-body { display: flex; gap: 8px; align-items: flex-start; }
 .adv-prev-body .rev-thumb { width: 96px; }
+
+/* ------------------------------ advice board ---------------------------- */
+
+/* A full popup over the page, like every other dialog here. Wide on purpose:
+   the AI's before/after evidence is the point of reading the report, and in the
+   inspector's 300px column it is two thumbnails. The head and foot are pinned
+   and only the list scrolls, so the counts, the filters and "withdraw all" do
+   not walk off the top of a long conversation. */
+.advice-board {
+  padding: 0;
+  width: min(880px, calc(100vw - 64px)); min-width: 0; max-width: none;
+  max-height: calc(100vh - 96px);
+  overflow: hidden; flex-direction: column;
+}
+.advice-board[open] { display: flex; }
+.board-head {
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+  padding: 15px 20px 13px; border-bottom: 1px solid var(--line);
+}
+.board-head h2 { margin: 0; flex-shrink: 0; }
+.board-head .mono { font-size: 10px; flex-shrink: 0; }
+#btn-board-close { margin-left: auto; font-size: 13px; line-height: 1; padding: 1px 7px; }
+.board-filters { display: inline-flex; margin-left: 4px; }
+.board-filters .mode-btn { padding: 3px 11px; font-size: 9px; border: 1px solid var(--line); }
+.board-filters .mode-btn + .mode-btn { border-left: none; }
+.board-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 20px 14px; }
+.board-list { list-style: none; margin: 0; padding: 0; }
+.board-empty { padding: 22px 2px; font: 11px/1.6 var(--sans); }
+
+/* One heading per thing advised on, in cut order — the report reads as a pass
+   down the film rather than as a mailbox. */
+.board-group { margin: 14px 0 5px; }
+.board-group:first-child { margin-top: 6px; }
+.board-target {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  background: none; border: 0; border-bottom: 1px solid var(--line);
+  padding: 0 0 5px; cursor: pointer; text-align: left; color: var(--text);
+}
+.board-target:hover { border-bottom-color: var(--accent); }
+.board-target:hover .board-label { color: var(--accent); }
+.board-kind {
+  flex-shrink: 0; font: 8px var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--dim); border: 1px solid var(--line); padding: 1px 4px;
+}
+.board-kind.k-sequence, .board-kind.k-footage { color: var(--accent); border-color: rgba(255, 180, 84, 0.4); }
+.board-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px var(--sans); }
+.board-at { flex-shrink: 0; font-size: 10px; }
+.board-done { flex-shrink: 0; color: var(--ok); font-size: 10px; }
+/* At dialog width the two actions sit on one line rather than stacking, and
+   the evidence is finally big enough to judge. */
+.board-adv .adv-withdraw, .board-adv .adv-goto { display: inline-block; margin: 8px 6px 0 0; font-size: 10px; padding: 1px 6px; }
+.board-adv .adv-evidence { grid-template-columns: 1fr 1fr; gap: 10px; max-width: 660px; }
+.board-adv .adv-msg { font-size: 12.5px; }
+.board-foot {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  padding: 11px 20px; border-top: 1px solid var(--line);
+}
+.board-foot .note { margin: 0; flex: 1; max-width: none; font-size: 10px; line-height: 1.4; }
+.board-foot .note strong { color: var(--text); font-weight: 400; }
+#btn-board-withdraw-all { flex-shrink: 0; font-size: 10px; }
+#btn-board-withdraw-all.hidden { display: none; }
+
+/* The way out of one target's share of the conversation into all of it. A link,
+   not a button: it navigates the reader, it does not change the film. */
+.adv-scope-row { display: flex; align-items: baseline; gap: 8px; margin: 3px 0 8px; }
+.adv-scope-row .adv-scope { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.linkish {
+  background: none; border: 0; padding: 0; cursor: pointer; flex-shrink: 0;
+  color: var(--dim); font: 10px var(--mono); border-bottom: 1px dotted var(--line);
+}
+.linkish:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* Taking advice back. Deliberately quiet — withdrawing is a correction, not a
    primary action, and it must never be easier to hit than sending. */

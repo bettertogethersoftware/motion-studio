@@ -395,10 +395,14 @@ requirements.
   `update_film { film, audio: [{ src, startInFrames?, gainDb?, trimStartInFrames?, trimEndInFrames?, fadeInFrames?, fadeOutFrames?, duck?, lane? }, …] }`
   — the two trims are offsets into the SOURCE file (the clip plays
   `[trimStartInFrames, trimEndInFrames)`), `lane` is which timeline row the
-  Studio draws the track in (presentation only; the mixer never sees it), and
-  `mute: true` leaves that one track out of the mix. Whole lanes are muted with
-  the film's `mutedLanes: { audio: [1] }` — a track is audible only when
-  neither it nor its lane is muted
+  track sits in, and `mute: true` leaves that one track out of the mix. Whole
+  lanes are muted with the film's `mutedLanes: { audio: [1] }` — a track is
+  audible only when neither it nor its lane is muted. **`lane` is not
+  decoration: a track without one is lane 0**, so on a film whose tracks were
+  all written without it, muting *any* lane silences *every* track. Number the
+  lanes you write (bed `0`, narration `1`, stingers `2`) whenever a human might
+  reasonably want to hear the film without one of them — which is every film
+  with more than one track
   — or let `synthesize_speech` / `synthesize_music` / `synthesize_sfx` append to
   it automatically by passing the **film id** as `target`. `src` is relative to
   the **film's own** `assets/`. This lays **one** music-bed-plus-narration

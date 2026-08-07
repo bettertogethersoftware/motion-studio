@@ -1227,12 +1227,15 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             return sendJson(res, 201, receipt);
           }
           if (req.method === 'GET' && parts.length === 4) {
-            const target = ['scene', 'sequence', 'itemId', 'type'].some((k) => url.searchParams.get(k))
+            const target = ['scene', 'sequence', 'itemId', 'type', 'family', 'lane'].some((k) => url.searchParams.get(k))
               ? {
                 ...(url.searchParams.get('type') ? { type: url.searchParams.get('type') } : {}),
                 ...(url.searchParams.get('scene') ? { scene: url.searchParams.get('scene') } : {}),
                 ...(url.searchParams.get('sequence') ? { sequence: url.searchParams.get('sequence') } : {}),
                 ...(url.searchParams.get('itemId') ? { itemId: url.searchParams.get('itemId') } : {}),
+                // A timeline row: family names which stack, lane which row of it.
+                ...(url.searchParams.get('family') ? { family: url.searchParams.get('family') } : {}),
+                ...(url.searchParams.get('lane') ? { lane: Number(url.searchParams.get('lane')) } : {}),
               }
               : null;
             const items = await listAdvice({

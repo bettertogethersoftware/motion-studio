@@ -71,6 +71,20 @@ test('advice: structural nonsense is refused; the human message is required', as
     () => createAdvice({ ...base, message: 'x', target: { type: 'footage' } }),
     (e) => e.code === 'invalid_advice',
   );
+  // A lane is a row of the timeline: it needs to say which stack, and "row -1"
+  // is not a row.
+  await assert.rejects(
+    () => createAdvice({ ...base, message: 'x', target: { type: 'lane' } }),
+    (e) => e.code === 'invalid_advice',
+  );
+  await assert.rejects(
+    () => createAdvice({ ...base, message: 'x', target: { type: 'lane', family: 'advice' } }),
+    (e) => e.code === 'invalid_advice',
+  );
+  await assert.rejects(
+    () => createAdvice({ ...base, message: 'x', target: { type: 'lane', family: 'audio', lane: -1 } }),
+    (e) => e.code === 'invalid_advice',
+  );
   await assert.rejects(
     () => createAdvice({ ...base, message: 'x'.repeat(4001) }),
     (e) => e.code === 'invalid_advice',
@@ -93,6 +107,41 @@ test('advice: a footage clip is a first-class target, addressed by segment id', 
   const found = await listAdvice({ filmPath: film.path, target: { itemId: 'seg-abc123' } });
   assert.equal(found.length, 1);
   assert.equal(found[0].id, receipt.id);
+});
+
+test('advice: a timeline lane is a target, and row 2 is not row 1', async () => {
+  const { film } = await filmFixture();
+  const base = { filmPath: film.path, filmId: film.id };
+  const bed = await createAdvice({
+    ...base,
+    message: 'This music bed is fighting the narration all the way through.',
+    target: { type: 'lane', family: 'audio', lane: 1, label: 'audio 2', filmFrame: 300 },
+  });
+  await createAdvice({
+    ...base,
+    message: 'Every caption lands a beat after the line it belongs to.',
+    target: { type: 'lane', family: 'captions', lane: 0 },
+  });
+  // The single-row families do not have to say which row they mean.
+  await createAdvice({ ...base, message: 'The cuts are too even.', target: { type: 'lane', family: 'scenes' } });
+
+  const full = await getAdvice({ filmPath: film.path, adviceId: bed.id });
+  assert.equal(full.request.target.type, 'lane');
+  assert.equal(full.request.target.family, 'audio');
+  assert.equal(full.request.target.lane, 1);
+  assert.equal(full.request.target.label, 'audio 2');
+
+  // A lane omitting its index is row 0, so the Studio's badge on the first row
+  // and the AI's filter agree without either of them guessing.
+  const scenes = await listAdvice({ filmPath: film.path, target: { family: 'scenes' } });
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].target.lane, 0);
+
+  // Family narrows to the stack; lane narrows to the row within it.
+  assert.equal((await listAdvice({ filmPath: film.path, target: { type: 'lane' } })).length, 3);
+  assert.equal((await listAdvice({ filmPath: film.path, target: { family: 'audio' } })).length, 1);
+  assert.equal((await listAdvice({ filmPath: film.path, target: { family: 'audio', lane: 0 } })).length, 0);
+  assert.equal((await listAdvice({ filmPath: film.path, target: { family: 'audio', lane: 1 } })).length, 1);
 });
 
 test('advice: the human can withdraw one, and it stops being served', async () => {

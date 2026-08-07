@@ -208,7 +208,9 @@ moves the cut (a new frame count) reflows the film immediately.
 
 The **versions** and **advice** sections stay on the **scene** tab. The other
 four are focused editing surfaces, and the tab that carries the conversation
-about a take is one click away.
+about a take is one click away. Advising itself is never more than one click
+away either, whichever tab you are on: **✎ advise** and the advice board sit
+on the timeline toolbar.
 
 Selecting the **film** itself — its row at the top of the tree — gives the same
 treatment: **film · assets · outputs**, where `assets` is the film's own folder
@@ -726,11 +728,35 @@ timeline, one set of rules.
   scenes**. The timeline gains a **sequences** band above the scenes row and
   an **advice** row of markers below the tracks.
 - **Click to aim, then say it.** Select anything — a sequence, a scene, a
-  supplied clip, an audio item, a caption, an overlay, or just the film at
-  this moment — and press **✎ advise AI** (or `A`). A small popup opens on
-  exactly that thing, showing what it is and where you are in the film, with
-  one comment box. Press advise with nothing selected and the next click on
-  the tree, timeline or picture becomes the target; `Esc` cancels.
+  supplied clip, an audio item, a caption, an overlay — and press **✎ advise**
+  (or `A`). A small popup opens on exactly that thing, showing what it is and
+  where you are in the film, with one comment box. Press advise with nothing
+  selected and the next click on the tree, timeline or picture becomes the
+  target; `Esc` cancels.
+- **The film and a whole lane are things too.** Click the **top row of the
+  tree** — the film's own name — to aim at the entire film: *"it drags in the
+  middle"*, *"the whole thing is one energy level"*. Click a timeline row's
+  **head** (`sequences`, `scenes`, `audio`, `captions`, `overlay`) to aim at
+  that lane: *"every caption lands a beat late"*, *"this bed is fighting the
+  narration all the way through"*. Both light up when selected, both carry
+  their own unresolved count, and both are one sentence instead of the same
+  sentence repeated per block. The **advice** row at the bottom is the record
+  of this conversation rather than a part of the film, so it is not a target.
+- **The advise button never moves.** It sits on the **timeline toolbar**, past
+  `snap`, and it names what it is aimed at — `✎ advise · test3` — so pressing
+  it is never a guess. The same button is repeated at the foot of the
+  inspector's **advice** section, beside the conversation about the selected
+  thing; both do exactly the same thing, so use whichever is closer.
+- **The whole conversation, in one popup.** The `≡` button beside advise (or
+  `Shift+A`) opens the **advice board**: every piece of advice on this film,
+  grouped by what it is about and ordered down the cut, with *open*,
+  *answered* and *all* filters and a running `N open · M answered`. It fills
+  the screen the way the other dialogs do, which is what makes the AI's
+  before/after frames worth looking at — in the inspector they are thumbnails.
+  Click an entry to open it in place and read what the AI did about it; click
+  **go to it ↗** (or a target heading) to close the board and take the film to
+  that exact moment. `Esc` or `×` closes it. Each entry carries its own
+  **withdraw**, and the foot has **withdraw all N open**.
 - **Nothing to fill in.** The target, the frame, and what you were watching
   are captured from your selection, and a frame grab of that exact moment is
   stored with your words. Close the browser whenever — advice is on disk and
@@ -896,6 +922,13 @@ stays through a drag, a reload and an agent's edit), **✕** on an empty lane
 takes it back. Drag a block **up or down** to move it between lanes; the target
 lights up as you cross it, and the lane you drop it in is remembered.
 
+**A lane head is also the lane itself.** Click its name — anywhere but those
+three buttons — to select the whole row, on the `sequences` and `scenes` rows
+as well as the three that stack. The inspector then says what is standing in
+it, and **✎ advise** aims at the row rather than at one block: *"every caption
+lands a beat late"* is one sentence, not one per caption. A row with
+unresolved advice on it carries the count beside its name.
+
 **Muting is real.** A muted lane's clips leave the mix — the preview you play,
 `preview_audio`, and the built film alike — rather than just going quiet in the
 editor. The head lights amber and its label is struck through; the clips in it
@@ -903,6 +936,16 @@ dim. Mute belongs to the **lane**, so a clip you drag in afterwards is silent
 too, which is what muting a track means in any editor. A single clip can also be
 silenced on its own with **mute this track** in the inspector. Nothing is
 deleted either way: unmute and it all comes back.
+
+**Muting says which lane a clip is in, out loud.** A film the AI wrote does not
+record a lane per clip — the MCP tools never asked for one — so the timeline
+draws it by packing the clips into the fewest rows that fit. That picture is
+only this page's; the mix reads the clips' own lanes, and with none written
+down every clip is lane 1 to it. Muting therefore **writes the rows you can see
+down first**, the way dragging a clip between lanes always has, so the lane
+silenced is the row you pressed. Open a film that was muted before this and it
+repairs itself: the lane you muted stays muted, the tracks that should never
+have gone with it come back, and a note says how many did.
 
 **The timeline has its own edge.** Drag the line above the toolbar to trade
 height between the player and the tracks — four audio lanes plus captions and
@@ -946,6 +989,7 @@ mix through **the exact ffmpeg graph the final film uses** (gains, fades,
 ducking, limiter) — what you hear is what ships. Snap, zoom, undo/redo and
 autosave behave the way you'd expect from an NLE; Space plays, arrows step
 (shift for ten), Home/End go to the ends, and Del removes the selected block.
+`A` advises on the selection and `Shift+A` opens the advice board.
 **PgDn/PgUp move the playhead cut to cut** — the next and previous scene
 boundary — and **shift+PgDn/PgUp** move it sequence to sequence (v0.26), which
 is the granularity a film is actually reviewed at. They are spelled out in the
@@ -961,6 +1005,17 @@ statement about the *whole* scene order, so letting it through would wipe out
 whatever the AI just did. The page then reloads and tells you that last change
 was not saved — make it again on top of the new version. Losing one edit is
 the point; the alternative is silently losing the AI's.
+
+**↻ reloads the film** (in the header, beside undo/redo). A browser reload from
+here takes the whole shell with it — every open document goes back to the
+Studio home — so the page has its own. It saves anything outstanding first, so
+the reload cannot eat it, then re-reads the film, its plan, its assets and the
+production loop, and throws the rendered audio mix away so the next play is
+made from what is on disk now. It clears the undo history, because those
+snapshots describe the document as it was before the reload and replaying one
+over the AI's work is exactly the clobber above. Reach for it when a page has
+been open for hours, or when something looks stale and you would rather re-sync
+everything at once than work out which part.
 
 The empty right-side inspector also contains **platform versions**. It shows the
 versions the AI or new-film dialog chose, lets you add/remove a saved preset,

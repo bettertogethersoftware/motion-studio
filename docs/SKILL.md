@@ -91,16 +91,23 @@ Get explicit user confirmation before deleting material.
 
 Motion Studio's production model (v0.23) makes **you the director**. The
 human watches the evolving film on its one Studio page and leaves
-plain-language advice on whatever they can see — the film, a sequence, a
-scene, a supplied footage clip, an audio item, a caption, an overlay, an
-exact moment. Advice is durable: it survives restarts and waits for you.
-There is **no approval gate**; never wait or poll for a human response.
+plain-language advice on whatever they can see — the film, a whole timeline
+lane, a sequence, a scene, a supplied footage clip, an audio item, a caption,
+an overlay, an exact moment. Advice is durable: it survives restarts and waits
+for you. There is **no approval gate**; never wait or poll for a human
+response.
 
 Advice arrives with the structural target already resolved (`type` +
-`scene` slug, `sequence` label, or `itemId` for a footage/audio/caption/
-overlay item), so you never have to guess what they meant by "the outro" —
-and a `footage` target names a specific clip by its stable segment id, which
-survives reordering the play order.
+`scene` slug, `sequence` label, `itemId` for a footage/audio/caption/
+overlay item, or `family` + `lane` for a timeline row), so you never have to
+guess what they meant by "the outro" — and a `footage` target names a specific
+clip by its stable segment id, which survives reordering the play order.
+
+A `lane` target is the row, not its current contents: `{ family: 'captions',
+lane: 0 }` means *every* caption in that row, including ones added after the
+advice was written. Treat it as a note about the whole layer — pacing,
+placement, level, style — rather than a note about one clip you then have to
+guess at.
 
 **Checkpoints.** Call `check_human_advice` (read-only, oldest first) at:
 
