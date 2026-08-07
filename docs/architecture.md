@@ -1781,7 +1781,7 @@ behaviour folded in:
 | Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` / `+ seq` |
 | Timeline | toolbar (add, zoom, **✎ advise** + the advice board), sequences band row, scenes row, track lanes — every row's head selects that lane — and the advice marker row, which does not |
 | Player | scene-stitched preview, or a pinned **built film** delivery |
-| Inspector | property panel, versions, and the advice for the selection |
+| Inspector | a tab strip per selection kind — `advice` first and landed on, properties beside it, the mounted panels after |
 | Header | film name, production line, save state, undo/redo, **↻ reload**, build |
 
 **↻ reloads the document, not the shell.** A browser reload here unmounts every
@@ -1827,13 +1827,31 @@ two you get a coin toss.
 For a while the only trigger for it was in the inspector, at the foot of the
 panel. That is the right *place* — beside the thing it is about — but it was
 the wrong *only* place: it is below a scene's whole property sheet, and the
-config, audio, assets and outputs tabs stand the advice section down entirely,
+config, audio, assets and outputs tabs stood the advice section down entirely,
 so the button was sometimes several scrolls away and sometimes absent. Since
 v0.28 the primary trigger is a fixed control on the **timeline toolbar**,
 where the human is already working and where advice's subject — a moment in
 the cut — lives. It names its target rather than only acting on it, so a
 shortcut that always sits in the same place cannot quietly advise on the wrong
 scene. The inspector's button stays; both call the same code path.
+
+The panel-foot section is gone, and **advice is a tab** — the first one on
+every kind of selection (`film`, `scene`, `footage`, `sequence`, `lane`,
+`audio`, `caption`, `overlay`), and the one a fresh selection lands on. One
+`INSPECTOR_TABS` table declares every strip and one `state.tab` map remembers
+the choice per kind, replacing the two hand-rolled strips that only the film
+and the scene had. The tab carries the selection's unresolved count, so a
+thing says it has something waiting before you open it, and `renderAdviceTab`
+puts a scene's **versions** above the conversation — takes and words are the
+same subject, and neither is a property of the cut.
+
+Landing on advice rather than on properties is the product's premise made
+literal: the AI directs and the human advises, so the panel opens on the
+human's half. Editing is protected by the strip being **sticky per kind** —
+pick `scene` once and later scenes open there too — which the film and scene
+strips already did for their own tabs. `isDeepSceneTab` / `isDeepFilmTab`
+survive with a narrower job: they now answer only "is a scene-panels surface
+mounted", which is what stops its audition when you leave.
 
 Its right half opens the **advice board** (`Shift+A`): every piece of advice on
 the film in one popup, grouped by target and ordered down the cut, filtered by

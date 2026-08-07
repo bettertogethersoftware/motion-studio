@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Advice is the first tab, on everything
+
+Advice was a **section at the foot of the inspector**. On a scene that put it
+under the whole property sheet, and the config/audio/assets/outputs tabs stood
+it down entirely — so on four of a scene's five tabs the human's half of this
+page was not merely below the fold, it was absent. Reading what had been said
+about the thing you were looking at meant scrolling, every time.
+
+It is now a **tab, first on every kind of selection** — film, scene, supplied
+clip, sequence, lane, audio track, caption, overlay — and the one a fresh
+selection lands on. The sequence, lane and item panels had no tab strip at all
+before this; they have one now, `advice` and the thing itself.
+
+The tab carries that selection's **unresolved count**, which is the point of
+putting it first: a scene can say it has something waiting before you open it.
+A scene's **versions** moved onto it too — takes and the words about them are
+the same subject, and neither is a property of the cut.
+
+Landing on advice rather than on properties is the product's premise made
+literal: the AI directs, the human advises, so the panel opens on the human's
+half. Editing is protected by the strip being **sticky per kind** — pick
+`scene` once and later scenes open on `scene` too, with the count still visible
+on the strip beside it. Nothing moved on the timeline toolbar: **✎ advise** and
+the advice board are where they were.
+
 ### The film and every lane can be advised on
 
 Two of the things a human most wants to say about a film were the two things

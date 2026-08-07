@@ -79,8 +79,16 @@ const state = {
   buildPoll: null,
   lastBuild: null,       // {status, logs} — refills the build panel on re-open
   inspectorMode: null,   // null = selection properties | 'build'
-  sceneTab: 'scene',     // inspector tab for a selected scene: scene|config|audio|assets|outputs
-  filmTab: 'film',       // inspector tab for the film itself: film|assets|outputs
+  /* Which tab each kind of selection is showing. `advice` is first on every
+   * one of them and is where a fresh selection lands: the human's half of this
+   * page is advising, and the conversation used to sit at the FOOT of the
+   * property sheet — under a scene's whole summary, and absent entirely on the
+   * config/audio/assets/outputs tabs, which stood it down. Sticky per kind, so
+   * an editing pass that picks `scene` once keeps landing there. */
+  tab: {
+    film: 'advice', scene: 'advice', footage: 'advice', sequence: 'advice',
+    lane: 'advice', audio: 'advice', caption: 'advice', overlay: 'advice',
+  },
   sceneFolders: [],      // scenes rail: the film's scene folders (incl. unlisted)
   overlayEls: new Map(), // overlay id -> preview element
 
@@ -2409,24 +2417,21 @@ function numInput(value, { min = 0, step = 1, onCommit, width }) {
 }
 
 /**
- * True while the inspector is showing one of the shared scene panels rather
- * than the scene's own summary. Those panels are focused editing surfaces, so
- * the versions and advice sections stand down for them — the `scene` tab that
- * carries both is one click away.
+ * True while the inspector is showing one of the shared panels mounted from
+ * scene-panels.js. They own an audition that has to be stopped when you leave
+ * them — which is now the only thing this answers, since advice moved out of
+ * the panel foot and onto a tab of its own.
  */
 function isDeepSceneTab() {
   if (state.inspectorMode === 'build') return false;
-  if (state.selection?.kind !== 'scene' || state.sceneTab === 'scene') return false;
+  if (state.selection?.kind !== 'scene' || !SHARED_PANEL_TABS.includes(state.tab.scene)) return false;
   return state.detail?.scenes?.[state.selection.index]?.kind !== 'footage';
 }
 
-/** The film's own deep panels, on the same rule: focused work stands the
- *  versions and advice sections down until you come back to the first tab. */
+/** The film's own mounted panels, on the same rule. */
 function isDeepFilmTab() {
-  return state.inspectorMode !== 'build' && filmIsSelected() && state.filmTab !== 'film';
+  return state.inspectorMode !== 'build' && filmIsSelected() && SHARED_PANEL_TABS.includes(state.tab.film);
 }
-
-const isDeepInspectorTab = () => isDeepSceneTab() || isDeepFilmTab();
 
 /* The inspector is rebuilt from scratch on selection, mutation, save, SSE and
  * the once-a-second scene-job poll. That was survivable when everything in it
@@ -2473,10 +2478,6 @@ function renderInspector() {
   else if (sel.kind === 'audio') renderAudioInspector(box, sel.id);
   else if (sel.kind === 'caption') renderCaptionInspector(box, sel.id);
   else if (sel.kind === 'overlay') renderOverlayInspector(box, sel.id);
-  if (!isDeepInspectorTab()) {
-    renderVersionsSection(box);
-    renderAdviceSection(box);
-  }
   restoreFocus(at);
 }
 
@@ -2700,30 +2701,84 @@ function ensureFilmPanels() {
   return filmPanels;
 }
 
-const FILM_TABS = [
-  ['film', 'this film: its facts, caption style and platform versions'],
-  ['assets', 'files in the film’s own assets/ folder — master audio, overlays, footage'],
-  ['outputs', 'what this film has built'],
-];
+/**
+ * Every kind of selection has a tab strip, and `advice` is the first tab on
+ * all of them.
+ *
+ * It used to be a section at the foot of whatever panel you were on, which
+ * made the human's half of the loop the one thing on this page you had to
+ * scroll to find — past a scene's whole property sheet, and not present at all
+ * on its four deep tabs. A tab is one click from anywhere, always in the same
+ * place, and can carry the unresolved count so a selection says it has
+ * something waiting before you open it.
+ */
+const INSPECTOR_TABS = {
+  film: [
+    ['advice', 'what has been said about this film, and where you say the next thing'],
+    ['film', 'this film: its facts, caption style and platform versions'],
+    ['assets', 'files in the film’s own assets/ folder — master audio, overlays, footage'],
+    ['outputs', 'what this film has built'],
+  ],
+  scene: [
+    ['advice', 'this take’s versions and the advice on it — and where you advise'],
+    ['scene', 'this take: its facts and what to do with it'],
+    ['config', 'composition and output settings — the scene’s own scene.json'],
+    ['audio', 'audio tracks inside this scene (the film’s master audio is on the timeline)'],
+    ['assets', 'files in this scene’s assets/ folder'],
+    ['outputs', 'what this scene has rendered'],
+  ],
+  footage: [
+    ['advice', 'the advice on this clip — and where you advise'],
+    ['clip', 'this supplied clip: its file, its trim and its place in the cut'],
+  ],
+  sequence: [
+    ['advice', 'the advice on this sequence and everything in it'],
+    ['sequence', 'this sequence: its name, its intent and its span'],
+  ],
+  lane: [
+    ['advice', 'the advice on this whole row — and on what is standing in it'],
+    ['lane', 'this row: what it holds and what you can do to it'],
+  ],
+  audio: [['advice', 'the advice on this track'], ['audio', 'this track: level, trim, fades and ducking']],
+  caption: [['advice', 'the advice on this caption'], ['caption', 'this caption: its words and its timing']],
+  overlay: [['advice', 'the advice on this overlay'], ['overlay', 'this overlay: its source, its box and its timing']],
+};
 
-function filmTabStrip() {
+/** The panels mounted from scene-panels.js, which own an audition to stop. */
+const SHARED_PANEL_TABS = ['config', 'audio', 'assets', 'outputs'];
+
+function inspectorTabStrip(kind) {
   const nav = el('nav', { class: 'tabs insp-tabs' });
-  for (const [name, title] of FILM_TABS) {
-    nav.appendChild(el('button', {
-      class: 'tab' + (state.filmTab === name ? ' active' : ''),
+  for (const [name, title] of INSPECTOR_TABS[kind]) {
+    const btn = el('button', {
+      class: 'tab' + (state.tab[kind] === name ? ' active' : ''),
       text: name,
       title,
-      onclick: () => { state.filmTab = name; renderInspector(); },
-    }));
+      onclick: () => { state.tab[kind] = name; renderInspector(); },
+    });
+    // The count belongs on the tab, not behind it: the whole point of putting
+    // advice first is that you can see there is something to read.
+    if (name === 'advice') {
+      const n = (state.advice ?? []).filter((a) => a.status !== 'resolved').filter(adviceScope().pred).length;
+      if (n) btn.appendChild(adviceBadge(n));
+    }
+    nav.appendChild(btn);
   }
   return nav;
 }
 
+/** The advice tab: this thing's takes, then the conversation about it. */
+function renderAdviceTab(box) {
+  renderVersionsSection(box, { lead: true });
+  renderAdviceSection(box, { lead: box.children.length === 1 });
+}
+
 function renderFilmInspector(box) {
-  box.appendChild(filmTabStrip());
-  if (state.filmTab !== 'film') {
+  box.appendChild(inspectorTabStrip('film'));
+  if (state.tab.film === 'advice') return renderAdviceTab(box);
+  if (state.tab.film !== 'film') {
     const panels = ensureFilmPanels();
-    panels.show(state.filmTab);
+    panels.show(state.tab.film);
     box.appendChild(panels.root);
     return;
   }
@@ -2786,33 +2841,12 @@ function ensureScenePanels() {
     },
     async onSceneDeleted() {
       state.selection = null;
-      state.sceneTab = 'scene';
+      state.tab.scene = 'advice';
       scenePanelsSceneId = null;
       try { await refresh(); } catch (err) { toastError(err); }
     },
   });
   return scenePanels;
-}
-
-const SCENE_TABS = [
-  ['scene', 'this take: its facts, its versions, and the advice on it'],
-  ['config', 'composition and output settings — the scene’s own scene.json'],
-  ['audio', 'audio tracks inside this scene (the film’s master audio is on the timeline)'],
-  ['assets', 'files in this scene’s assets/ folder'],
-  ['outputs', 'what this scene has rendered'],
-];
-
-function sceneTabStrip() {
-  const nav = el('nav', { class: 'tabs insp-tabs' });
-  for (const [name, title] of SCENE_TABS) {
-    nav.appendChild(el('button', {
-      class: 'tab' + (state.sceneTab === name ? ' active' : ''),
-      text: name,
-      title,
-      onclick: () => { state.sceneTab = name; renderInspector(); },
-    }));
-  }
-  return nav;
 }
 
 function mountScenePanels(box, s) {
@@ -2821,10 +2855,10 @@ function mountScenePanels(box, s) {
   if (scenePanelsSceneId !== sceneId) {
     scenePanelsSceneId = sceneId;
     panels.setTarget({ kind: 'scene', id: sceneId })
-      .then(() => panels.show(state.sceneTab))
+      .then(() => panels.show(state.tab.scene))
       .catch((err) => { scenePanelsSceneId = null; toastError(err); });
   }
-  panels.show(state.sceneTab);
+  panels.show(state.tab.scene);
   box.appendChild(panels.root);
 }
 
@@ -2832,8 +2866,9 @@ function renderSceneInspector(box, index) {
   const s = state.detail.scenes[index];
   if (!s) return renderFilmInspector(box);
   if (s.kind === 'footage') return renderFootageInspector(box, index, s);
-  box.appendChild(sceneTabStrip());
-  if (state.sceneTab !== 'scene') return mountScenePanels(box, s);
+  box.appendChild(inspectorTabStrip('scene'));
+  if (state.tab.scene === 'advice') return renderAdviceTab(box);
+  if (state.tab.scene !== 'scene') return mountScenePanels(box, s);
   box.appendChild(el('h3', { text: `scene ${index + 1}` }));
   const dl = el('dl', { class: 'insp-facts' });
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
@@ -2900,6 +2935,8 @@ function renderSceneInspector(box, index) {
  * a scene panel with half its rows blank or wrong.
  */
 function renderFootageInspector(box, index, s) {
+  box.appendChild(inspectorTabStrip('footage'));
+  if (state.tab.footage === 'advice') return renderAdviceTab(box);
   box.appendChild(el('h3', { text: `footage ${index + 1}` }));
   const dl = el('dl', { class: 'insp-facts' });
   const fact = (k, v) => dl.append(el('dt', { text: k }), el('dd', { text: v }));
@@ -2998,6 +3035,8 @@ function pollSceneJobs() {
 function renderAudioInspector(box, id) {
   const t = state.film.audio.find((x) => x.id === id);
   if (!t) return renderFilmInspector(box);
+  box.appendChild(inspectorTabStrip('audio'));
+  if (state.tab.audio === 'advice') return renderAdviceTab(box);
   box.appendChild(el('h3', { text: 'audio track' }));
 
   const name = el('input', { placeholder: '(label)' });
@@ -3085,6 +3124,8 @@ function renderAudioInspector(box, id) {
 function renderCaptionInspector(box, id) {
   const c = state.film.captions.find((x) => x.id === id);
   if (!c) return renderFilmInspector(box);
+  box.appendChild(inspectorTabStrip('caption'));
+  if (state.tab.caption === 'advice') return renderAdviceTab(box);
   box.appendChild(el('h3', { text: 'caption' }));
   const text = el('textarea', { id: 'insp-caption-text' });
   text.value = c.text;
@@ -3110,6 +3151,8 @@ function renderCaptionInspector(box, id) {
 function renderOverlayInspector(box, id) {
   const o = state.film.overlays.find((x) => x.id === id);
   if (!o) return renderFilmInspector(box);
+  box.appendChild(inspectorTabStrip('overlay'));
+  if (state.tab.overlay === 'advice') return renderAdviceTab(box);
   box.appendChild(el('h3', { text: 'overlay' }));
 
   const srcSel = el('select', {
@@ -4430,6 +4473,8 @@ const itemLabel = (kind, item) => {
 
 function renderSequenceInspector(box, label) {
   const band = sequenceBands().find((b) => b.label === label);
+  box.appendChild(inspectorTabStrip('sequence'));
+  if (state.tab.sequence === 'advice') return renderAdviceTab(box);
   box.appendChild(el('h3', { text: 'sequence' }));
 
   // The name is a field, not a heading with a "rename…" button beside it that
@@ -4505,6 +4550,8 @@ function renderSequenceInspector(box, label) {
  * sentence about a row, not one sentence per clip.
  */
 function renderLaneInspector(box, sel) {
+  box.appendChild(inspectorTabStrip('lane'));
+  if (state.tab.lane === 'advice') return renderAdviceTab(box);
   const { family } = sel;
   const li = SINGLE_ROW_FAMILIES.includes(family) ? 0 : sel.lane;
   const label = laneLabel(family, li);
@@ -4542,7 +4589,7 @@ function renderLaneInspector(box, sel) {
  * changes nothing; asking for one back is ADVICE — Studio never repoints
  * production, because that decision is the director's.
  */
-function renderVersionsSection(box) {
+function renderVersionsSection(box, { lead = false } = {}) {
   const sel = state.selection;
   if (sel?.kind !== 'scene') return;
   const seg = state.detail?.scenes?.[sel.index];
@@ -4550,7 +4597,9 @@ function renderVersionsSection(box) {
   const summary = state.revisions[seg.slug];
   if (!summary?.count) return;
 
-  box.appendChild(el('hr', { class: 'sep' }));
+  // The rule separates this from what came before it. At the top of its own
+  // tab there is nothing before it to separate from.
+  if (!lead) box.appendChild(el('hr', { class: 'sep' }));
   box.appendChild(el('h3', { text: `versions · ${summary.count}` }));
   const list = state.sceneRevisions.get(seg.slug);
   if (!list) {
@@ -4669,15 +4718,25 @@ function adviceScope() {
     if (!seg) return { name: 'this film', pred: () => true };
     return { name: seg.name ?? seg.slug, pred: segmentAdviceMatcher(seg) };
   }
-  return { name: 'this item', pred: (a) => a.target?.itemId === sel.id };
+  // Named, not "this item": the scope line is the first thing the advice tab
+  // says, and it has to be checkable against what you think you clicked.
+  const key = { audio: 'audio', caption: 'captions', overlay: 'overlays' }[sel.kind];
+  const item = key ? (state.film?.[key] ?? []).find((x) => x.id === sel.id) : null;
+  // A caption's label already carries its own quotes — it IS the words.
+  const label = item ? itemLabel(sel.kind, item) : null;
+  const named = label && sel.kind !== 'caption' ? `“${label}”` : label;
+  return {
+    name: named ? `${sel.kind} ${named}` : 'this item',
+    pred: (a) => a.target?.itemId === sel.id,
+  };
 }
 
-function renderAdviceSection(box) {
+function renderAdviceSection(box, { lead = false } = {}) {
   const scope = adviceScope();
   const scoped = (state.advice ?? []).filter(scope.pred);
   const open = scoped.filter((a) => a.status !== 'resolved');
   const openAnywhere = (state.advice ?? []).filter((a) => a.status !== 'resolved');
-  box.appendChild(el('hr', { class: 'sep' }));
+  if (!lead) box.appendChild(el('hr', { class: 'sep' }));
   box.appendChild(el('div', { class: 'adv-head-row' },
     el('h3', { text: open.length ? `advice · ${open.length} open` : 'advice' }),
     // The same action as the header control, in the place you are already
@@ -5455,12 +5514,12 @@ StudioPalette.register([
   { id: 'edit.redo', title: 'Edit: Redo', group: 'commands', run: () => redo() },
   { id: 'src.preview', title: 'Player: Watch the Scenes as They Stand', group: 'commands', run: () => setSource('preview') },
   { id: 'src.delivery', title: 'Player: Watch the Last Built Film', group: 'commands', run: () => setSource('delivery') },
-  ...['scene', 'config', 'audio', 'assets', 'outputs'].map((t) => ({
+  ...['advice', 'scene', 'config', 'audio', 'assets', 'outputs'].map((t) => ({
     id: `insp.${t}`,
     title: `Inspector: ${t[0].toUpperCase()}${t.slice(1)}`,
     group: 'commands',
     when: () => state.selection?.kind === 'scene',
-    run: () => { state.sceneTab = t; renderInspector(); },
+    run: () => { state.tab.scene = t; renderInspector(); },
   })),
 ]);
 

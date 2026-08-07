@@ -222,10 +222,21 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
   margin: -14px -16px 12px; padding: 0 6px;
   background: var(--ink); position: sticky; top: -14px; z-index: 2;
 }
+/* Sized by their words, not into equal columns. With six tabs on a scene,
+   equal columns gave every one of them the width of the shortest — `outputs`
+   and the badged `advice` both ellipsised while `audio` sat in white space.
+   `flex-basis: auto` starts each tab at its own text and shares the slack out
+   from there; the ellipsis stays as the safety net for a narrow inspector. */
 .insp-tabs .tab {
-  flex: 1; min-width: 0;
-  padding: 9px 2px; font-size: 10px; letter-spacing: 0.06em;
+  flex: 1 1 auto; min-width: 0;
+  padding: 9px 2px; font-size: 10px; letter-spacing: 0.04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Advice is the first tab on every selection, and it carries its own
+   unresolved count — the point of putting it first is that you can see there
+   is something to read without opening it. */
+.insp-tabs .tab .adv-badge { display: inline-block; margin-left: 4px; vertical-align: 1px; }
+.insp-tabs .tab:not(.active) .adv-badge { background: var(--accent); }
 /* The escape hatch to the full-screen editor — a note, not an action. */
 .insp-escape { margin-top: 10px; }
 .insp-escape a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted var(--line); }

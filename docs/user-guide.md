@@ -66,7 +66,7 @@ is a convenience, not the only route. The commands on offer are the shell's
 (new workspace, the vendor pages, settings, close a document) plus whatever the
 active document adds: a film contributes build, advise, the
 add-narration/audio/caption/footage/overlay actions, undo/redo, fit-the-timeline
-and the five inspector tabs.
+and the six inspector tabs.
 
 Dismissing the palette puts the keyboard back where it took it from, so the
 transport keys keep working; *choosing* something puts you in the document that
@@ -195,7 +195,8 @@ Select a scene on the film page and its inspector opens on a row of tabs:
 
 | tab | what is on it |
 |---|---|
-| **scene** | the take itself — name, status, resolution, length, format, film offset — plus **re-render**, **move earlier / later**, **remove**, and the scene's **versions** and **advice** |
+| **advice** | *the first tab, and where a selection lands* — the take's **versions** and the **advice** on it, with **✎ advise** at the top |
+| **scene** | the take itself — name, status, resolution, length, format, film offset — plus **re-render**, **move earlier / later**, **remove** |
 | **config** | the scene's own `scene.json`: name, fps, width, height, frames, and every output setting (format, dir, filename, crf, preset, pix fmt, alpha, audio limiter), with the read-only facts, the raw JSON and the folder path underneath |
 | **audio** | audio tracks *inside* this scene — src, start frame, gain, audition — separate from the film's master audio timeline |
 | **assets** | the scene's `assets/` folder: upload or drop files, copy a scene-relative path, rename — the dialog asks for the new path, and when audio tracks point at the file it offers, ticked, to repoint them — delete |
@@ -206,17 +207,27 @@ them: reviewing a film no longer means leaving the timeline to read a format
 or check what an asset is called. Settings apply with **apply**; a change that
 moves the cut (a new frame count) reflows the film immediately.
 
-The **versions** and **advice** sections stay on the **scene** tab. The other
-four are focused editing surfaces, and the tab that carries the conversation
-about a take is one click away. Advising itself is never more than one click
-away either, whichever tab you are on: **✎ advise** and the advice board sit
-on the timeline toolbar.
+**Advice is the first tab on every selection, and it is where a selection
+lands.** Not only a scene: the film, a sequence, a timeline lane, a supplied
+clip, an audio track, a caption and an overlay all open on `advice`, with the
+thing's own properties on the tab beside it. It used to be a *section at the
+foot* of the property sheet — below a scene's whole summary, and stood down
+entirely on the four deep tabs — so the human's half of this page was the one
+thing you had to scroll to find. The tab also carries the **unresolved count**
+for that selection, so you can see there is something waiting before you open
+it.
+
+The choice sticks per kind. Click `scene` once and later scenes open on `scene`
+too, which is what an editing pass wants; the advice tab is still one click
+away, and its count is still on the strip. Advising itself is never more than
+one click away whichever tab you are on: **✎ advise** and the advice board also
+sit on the timeline toolbar.
 
 Selecting the **film** itself — its row at the top of the tree — gives the same
-treatment: **film · assets · outputs**, where `assets` is the film's own folder
-(master audio, overlays, footage) and `outputs` is what it has built. There is
-deliberately no film-level `config` or `audio` tab: a film's settings are the
-film tab, and its audio is the timeline.
+treatment: **advice · film · assets · outputs**, where `assets` is the film's
+own folder (master audio, overlays, footage) and `outputs` is what it has
+built. There is deliberately no film-level `config` or `audio` tab: a film's
+settings are the film tab, and its audio is the timeline.
 
 **open scene ↗** is still there, at the foot of the scene tab — it opens that
 scene as its own document tab, for when you want the composition preview, frame
@@ -744,9 +755,10 @@ timeline, one set of rules.
   of this conversation rather than a part of the film, so it is not a target.
 - **The advise button never moves.** It sits on the **timeline toolbar**, past
   `snap`, and it names what it is aimed at — `✎ advise · test3` — so pressing
-  it is never a guess. The same button is repeated at the foot of the
-  inspector's **advice** section, beside the conversation about the selected
-  thing; both do exactly the same thing, so use whichever is closer.
+  it is never a guess. The same button heads the inspector's **advice** tab —
+  the first tab on every selection, and the one a selection lands on — beside
+  the conversation about that exact thing; both do exactly the same thing, so
+  use whichever is closer.
 - **The whole conversation, in one popup.** The `≡` button beside advise (or
   `Shift+A`) opens the **advice board**: every piece of advice on this film,
   grouped by what it is about and ordered down the cut, with *open*,
@@ -772,7 +784,7 @@ timeline, one set of rules.
   your wording, the event log and the evidence stay on record, the timeline
   marker turns resolved instead of vanishing, and the card reads *you withdrew
   this* rather than crediting the AI with a decision it never made.
-- **Every version is kept.** Select a scene and the inspector lists its
+- **Every version is kept.** Select a scene and its **advice** tab lists the
   **versions** — each completed render, archived with its date, author and
   the AI's one-line note. Click a take to watch it *in place* in the film;
   previewing changes nothing. If an older one was better, **ask AI to use
