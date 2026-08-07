@@ -1780,7 +1780,7 @@ behaviour folded in:
 |---|---|
 | Left rail | `Film → Sequence → Scene/Footage` tree, unused scenes, `+ new scene` |
 | Timeline | toolbar (add, zoom, **✎ advise** + the advice board), sequences band row, scenes row, track lanes — every row's head selects that lane — and the advice marker row, which does not |
-| Player | scene-stitched preview, or a pinned **built film** delivery |
+| Player | segment-stitched preview — rendered scene outputs and supplied footage alike — or a pinned **built film** delivery |
 | Inspector | a tab strip per selection kind — `advice` first and landed on, properties beside it, the mounted panels after |
 | Header | film name, production line, save state, undo/redo, **↻ reload**, build |
 
@@ -1799,6 +1799,20 @@ editing, toggled in the header — and it was removed for the same reason the
 review page was (v0.23.2). It only hid buttons, so it bought no safety a
 reader could rely on, while still making them establish which mode they were
 in before trusting the screen. The page is always the full editor.
+
+The preview player stitches **segments**, not scenes: a footage segment is
+served from the film's own Range-capable asset route (`sceneSrc`), because it
+was never rendered and has no scene folder. Two traps live in that path and
+both were live until v0.28. `watchingRevision?.slug === scene.slug` compared
+`undefined` to `undefined` for a slugless footage segment and took the
+audition branch, dereferencing the null it had just tested for — the throw
+landed before any `src` was assigned, so supplied footage played as a black
+rectangle and said nothing about why. And a just-assigned element is at
+`readyState 0`, so the seek that follows was skipped and the picture sat on
+frame 0 until the playhead moved *again*: scrub into a clip and you were shown
+the wrong frame of it. Both players now re-run themselves once on
+`loadedmetadata`, which cannot recurse — by then the element matches the `src`
+and is not re-assigned.
 
 Advising is aimed by the **selection** — the page already resolves what is in
 front of you, so the control never asks the human to name a target. With

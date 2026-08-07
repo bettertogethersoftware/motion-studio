@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Footage is a video, so you can watch it
+
+Asked of the **+ footage** picker — *it is already a video, can we play it?* —
+and the answer turned out to be that you could not play it anywhere, including
+after it was in the film.
+
+**Supplied footage played as a black rectangle.** `syncVideo` chose between an
+audited revision and the segment's own file with
+`watchingRevision?.slug === scene.slug`. A footage segment has no `slug`, so
+with nothing being auditioned that read `undefined === undefined` — true — and
+then dereferenced the null it had just tested for. The throw landed *before*
+any source was assigned, on every playhead move inside the clip, and was
+invisible without a console open: the placeholder had already been hidden, so
+the player just showed black. Footage now plays in the film's own player, at
+its place in the cut.
+
+**And it played the wrong frame.** A just-assigned video element is at
+`readyState 0`, so the seek that follows was skipped and the picture sat on
+frame 0 until the playhead moved *again* — scrub into a clip and you were shown
+the wrong moment of it. Both the preview and the built-film player now re-run
+themselves once when the metadata lands. This affected rendered scenes too,
+whenever one was loaded for the first time.
+
+**The picker shows the clip, not a filename.** A video row was the only kind
+with nothing to look at: images had a thumbnail, audio had an audition, video
+had a name and a byte count — for the one decision that has to be right first
+time, since footage joins the cut unre-encoded and its frame count moves every
+scene after it. A row now shows a real frame from the clip (half a second in;
+frame 0 is usually black), its length, and its frame size — **in red when it
+does not match the film**, which is the mismatch the plan would otherwise
+report after the fact. **▶** watches it in place: the picture grows while it
+plays and shrinks back when it stops. Neither watching it nor clicking the
+picture adds it — only the row does.
+
+A footage segment's inspector also gained **▶ watch this clip**, which jumps
+the playhead to its first frame and rolls. It plays in the cut it sits in,
+which is the only place its length, its neighbours and its overlays mean
+anything.
+
 ### Three buttons that were extra routes to one thing
 
 `+ seq` in the rail, `+` on the **sequences** lane head, and `+` on the

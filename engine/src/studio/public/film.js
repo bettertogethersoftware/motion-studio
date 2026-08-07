@@ -539,7 +539,12 @@ function syncDeliveryVideo(frame) {
   ph.classList.add('hidden');
   v.classList.add('active');
   const src = `/api/films/${fid}/deliveries/${encodeURIComponent(state.pinnedDelivery)}/file`;
-  if (v.dataset.src !== src) { v.dataset.src = src; v.src = src; }
+  if (v.dataset.src !== src) {
+    v.dataset.src = src;
+    v.src = src;
+    // Same as syncVideo: the first pass cannot seek a file with no metadata yet.
+    v.addEventListener('loadedmetadata', () => syncDeliveryVideo(state.playhead), { once: true });
+  }
   v.muted = false;
   const t = frame / (state.manifest.fps || fps());
   const drift = Math.abs(v.currentTime - t);
@@ -574,14 +579,30 @@ function syncVideo(frame) {
   // Auditioning an older take substitutes ONLY that scene's picture, in place,
   // so the human compares it against the cut it actually sits in. Nothing is
   // written — asking for it back is advice, made from the inspector.
-  const src = state.watchingRevision?.slug === scene.slug
-    ? `${sceneApi(scene.slug)}/revisions/${encodeURIComponent(state.watchingRevision.revision.id)}/file`
+  // `watchingRevision?.slug === scene.slug` is NOT enough, and the difference
+  // was why supplied footage played as a black rectangle for two versions: a
+  // footage segment has no `slug`, so with nothing being auditioned this read
+  // `undefined === undefined` — true — and then dereferenced the null it had
+  // just tested for. The throw happened before any src was assigned, on every
+  // playhead move inside the clip, and was invisible without a console open.
+  const watched = state.watchingRevision && state.watchingRevision.slug
+    && state.watchingRevision.slug === scene.slug
+    ? state.watchingRevision.revision
+    : null;
+  const src = watched
+    ? `${sceneApi(scene.slug)}/revisions/${encodeURIComponent(watched.id)}/file`
     : sceneSrc(scene);
   let el = videoEls.find((v) => v.dataset.src === src);
   if (!el) {
     el = videoEls.find((v) => v !== activeVideo) ?? videoEls[0];
     el.dataset.src = src;
     el.src = src;
+    // A just-assigned element is at readyState 0, so the seek below is skipped
+    // and the picture sits on frame 0 until the playhead moves AGAIN — scrub
+    // into a clip and you are shown the wrong frame of it. Re-run the moment
+    // the metadata lands, against wherever the playhead is by then. It cannot
+    // recurse: by that point this element matches `src` and is not re-assigned.
+    el.addEventListener('loadedmetadata', () => syncVideo(state.playhead), { once: true });
   }
   if (el !== activeVideo) {
     if (activeVideo) { activeVideo.classList.remove('active'); activeVideo.pause(); }
@@ -2966,6 +2987,18 @@ function renderFootageInspector(box, index, s) {
   box.appendChild(dl);
   sequenceInspectorRow(box, index);
 
+  // A clip is already a video, and the player is already showing this film at
+  // this offset — so "watch it" is just: go to its first frame and roll. It
+  // plays in the cut it sits in, which is the only place its length, its
+  // neighbours and its overlays mean anything.
+  if (!s.missing) {
+    box.appendChild(el('div', { class: 'insp-row' }, el('button', {
+      class: 'ghost', text: '▶ watch this clip',
+      title: 'plays the clip from its first frame, in the film',
+      onclick: () => { stopPlayback(); setPlayhead(s.filmOffset ?? 0); startPlayback(); },
+    })));
+  }
+
   const row = el('div', { class: 'insp-row' });
   row.appendChild(el('button', { class: 'ghost', text: '◀ move earlier', onclick: () => moveScene(index, index - 1) }));
   row.appendChild(el('button', { class: 'ghost', text: 'move later ▶', onclick: () => moveScene(index, index + 1) }));
@@ -3619,7 +3652,15 @@ function stopPickAudition() {
   pickAudition.el.pause();
   pickAudition.btn?.classList.remove('playing');
   if (pickAudition.btn) pickAudition.btn.textContent = '▶';
+  // A video row grew to be watchable; it shrinks back to its poster.
+  pickAudition.li?.classList.remove('auditioning');
   pickAudition = null;
+}
+
+/** m:ss, for a picker row that has just read its own metadata. */
+function clockOf(seconds) {
+  if (!Number.isFinite(seconds)) return '';
+  return `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
 }
 for (const id of ['audio-dialog', 'overlay-dialog', 'footage-dialog']) {
   $(`#${id}`)?.addEventListener('close', stopPickAudition);
@@ -3636,10 +3677,7 @@ function auditionButton(a, li) {
     if (mine) return;                     // second click = stop
     const audio = new Audio(assetUrl(a.path));
     audio.addEventListener('loadedmetadata', () => {
-      if (!Number.isFinite(audio.duration)) return;
-      const m = Math.floor(audio.duration / 60);
-      const sec = Math.round(audio.duration % 60);
-      li.querySelector('.pk-dur').textContent = `${m}:${String(sec).padStart(2, '0')}`;
+      li.querySelector('.pk-dur').textContent = clockOf(audio.duration);
     });
     audio.addEventListener('ended', stopPickAudition);
     audio.addEventListener('error', () => { toast(`Could not play ${a.path}`, { kind: 'error' }); stopPickAudition(); });
@@ -3649,6 +3687,65 @@ function auditionButton(a, li) {
       pickAudition = { el: audio, btn };
     }).catch(() => { /* autoplay policy: the click IS the gesture, so this is a real failure */ });
   });
+  return btn;
+}
+
+/**
+ * The picture a video row is about, and a way to watch it.
+ *
+ * A clip is the one asset kind that had neither: images showed a thumbnail and
+ * audio auditioned, while a video offered a filename and a byte count — for
+ * the one decision that has to be right first time, since footage joins the
+ * cut unre-encoded and its frame count moves every scene after it. The poster
+ * is a real frame (half a second in, because an export's frame 0 is usually
+ * black), and the row reports the size and length it just read from the file.
+ */
+function videoPreviewRow(a, li) {
+  const v = el('video', { class: 'pk-thumb pk-video', preload: 'metadata', playsinline: '' });
+  v.muted = true;                 // a poster makes no noise; the ▶ unmutes it
+  v.src = assetUrl(a.path);
+  v.addEventListener('loadedmetadata', () => {
+    // Seeking paints a frame; without it Chrome shows an empty box.
+    try { v.currentTime = Math.min(0.5, (v.duration || 1) / 2); } catch { /* unseekable */ }
+    li.querySelector('.pk-dur').textContent = clockOf(v.duration);
+    if (!v.videoWidth) return;
+    const size = `${v.videoWidth}×${v.videoHeight}`;
+    // The dialog says footage must already match the film — so say whether
+    // this one does, here, rather than after it is in the play order and the
+    // plan reports a signature mismatch.
+    const first = (state.detail?.scenes ?? []).find((s) => !s.missing && s.width);
+    const fits = !first || (first.width === v.videoWidth && first.height === v.videoHeight);
+    li.insertBefore(el('span', {
+      class: `pk-badge${fits ? '' : ' err'}`,
+      text: size,
+      title: fits ? 'matches the film’s frame size' : `the film is ${first.width}×${first.height} — this would not join it as-is`,
+    }), li.querySelector('.pk-meta'));
+  });
+  v.addEventListener('error', () => { li.querySelector('.pk-dur').textContent = '—'; });
+  return v;
+}
+
+/** Watch a picker's clip in its own row, under the same one-at-a-time rule. */
+function watchButton(a, li, video) {
+  const btn = el('button', { class: 'pk-play', text: '▶', title: `watch ${a.path.replace(/^assets\//, '')}` });
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();                 // the row itself picks the file
+    const mine = pickAudition?.btn === btn;
+    stopPickAudition();
+    if (mine) return;                     // second click = stop
+    li.classList.add('auditioning');      // the poster grows into something watchable
+    video.currentTime = 0;
+    video.muted = false;
+    video.play().then(() => {
+      btn.textContent = '■';
+      btn.classList.add('playing');
+      pickAudition = { el: video, btn, li };
+    }).catch(() => {
+      li.classList.remove('auditioning');
+      toast(`Could not play ${a.path}`, { kind: 'error' });
+    });
+  });
+  video.addEventListener('ended', stopPickAudition);
   return btn;
 }
 
@@ -3665,12 +3762,22 @@ function pickListForAssets(ulSel, kinds, onPick) {
     const li = document.createElement('li');
     if (a.kind === 'image') li.appendChild(el('img', { class: 'pk-thumb', src: assetUrl(a.path) }));
     if (a.kind === 'audio') li.appendChild(auditionButton(a, li));
+    let video = null;
+    if (a.kind === 'video') {
+      video = videoPreviewRow(a, li);
+      li.append(video, watchButton(a, li, video));
+    }
     li.append(
       el('span', { class: 'pk-name mono', text: a.path.replace(/^assets\//, '') }),
       el('span', { class: 'pk-dur mono dim', text: '' }),
       el('span', { class: 'pk-meta', text: a.bytes > 1e6 ? `${(a.bytes / 1e6).toFixed(1)} MB` : `${Math.round(a.bytes / 1e3)} kB` }),
     );
-    li.addEventListener('click', () => onPick(a));
+    // Clicking the row commits the file; while it is being watched that would
+    // be a surprise, so the picture and its button only ever play it.
+    li.addEventListener('click', (ev) => {
+      if (ev.target === video || ev.target.closest('.pk-play')) return;
+      onPick(a);
+    });
     ul.appendChild(li);
   }
 }
@@ -5204,7 +5311,10 @@ function currentAdviceTarget() {
     }
     if (seg) {
       const sceneFrame = Math.max(0, frame - (seg.filmOffset ?? 0));
-      const watching = state.watchingRevision?.slug === seg.slug ? state.watchingRevision.revision : null;
+      // Slug-compared the safe way — see syncVideo: a null audition and a
+      // slugless segment both read `undefined`, and matching them is a crash.
+      const watching = state.watchingRevision?.slug && state.watchingRevision.slug === seg.slug
+        ? state.watchingRevision.revision : null;
       return {
         target: { type: 'scene', scene: seg.slug, sceneFrame, filmFrame: frame },
         observation: watching

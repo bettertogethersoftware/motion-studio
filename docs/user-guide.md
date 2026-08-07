@@ -711,6 +711,15 @@ supplied rather than animation it wrote:
   to type it. Footage joins without re-encoding, so it has to match the film's
   resolution/fps/format and must be silent — its sound belongs on the master audio
   timeline.
+- **Watch it before you cut it in, and after.** In **+ footage** each clip shows
+  a frame from itself, its length, and its frame size — with the size in red
+  when it does not match the film, which is the thing that would stop the build
+  later. Press **▶** on a row to watch the clip in place; the picture grows
+  while it plays and shrinks back when it stops, and neither watching it nor
+  clicking the picture adds it — only the row does. Once it is on the timeline
+  it plays in the film's own player like everything else, at its place in the
+  cut; its inspector's **▶ watch this clip** jumps the playhead to its first
+  frame and rolls.
 - **Conform a clip so it can.** `transcode_asset` trims to an exact frame count,
   crops, scales, and re-encodes to the film's own settings; it also extracts and
   joins spans of audio into a single WAV. It has no ffmpeg-argument passthrough by

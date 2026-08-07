@@ -480,6 +480,15 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .pick-list .pk-badge.ok { color: var(--ok); border-color: var(--ok); }
 .pick-list .pk-badge.err { color: var(--err); border-color: var(--err); }
 .pick-list img.pk-thumb { width: 42px; height: 26px; object-fit: cover; background: var(--ink); flex-shrink: 0; }
+/* A clip shows a real frame, and grows into something watchable while it
+   plays — 42px is enough to recognise a shot, not enough to judge one. The
+   row keeps its height in the list until then. */
+.pick-list video.pk-video {
+  width: 42px; height: 26px; object-fit: cover; background: var(--ink); flex-shrink: 0;
+  cursor: pointer; transition: width 140ms ease, height 140ms ease;
+}
+.pick-list li.auditioning { align-items: flex-start; }
+.pick-list li.auditioning video.pk-video { width: 208px; height: 117px; }
 /* Audition, so picking a bed is not a guess from the filename. */
 .pick-list .pk-play {
   background: none; border: 1px solid var(--line); color: var(--dim);
