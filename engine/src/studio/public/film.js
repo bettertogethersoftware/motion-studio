@@ -2078,6 +2078,9 @@ function sceneBlock(s, index) {
  */
 const keyframeGrids = new Map();
 
+/** Segments already told that they re-encode on every trim. Advice, said once. */
+const coarseHinted = new Set();
+
 /**
  * Start fetching a segment's grid. Deliberately fire-and-forget: a pointerdown
  * handler must call `pointerDrag` SYNCHRONOUSLY or the pointer capture is set
@@ -2157,9 +2160,30 @@ function attachFootageGrips(el, s) {
       });
       keyframeGrids.delete(segmentId);
       await refresh();
+
+      /* ONE line for what happened. `trimFootage` throws when a trim fails, so
+       * everything it returns in `warnings` is a note about a SUCCESS — none of
+       * it is an error, and none of it should be red or permanent. Reporting a
+       * finished cut as two sticky red boxes is how this first shipped, and it
+       * read as a failure over a clip that had been cut correctly. */
+      const asked = body.durationInFrames;
+      const short = Number.isInteger(asked) && r.durationInFrames !== asked
+        ? ` (kept ${r.durationInFrames} of ${asked} — the file's container over-counts its own tail)`
+        : '';
       toast(`${describe} ✓ — ${r.durationInFrames}f by ${r.method === 'copy' ? 'copy' : 're-encode'} `
-        + `in ${(r.elapsedMs / 1000).toFixed(1)}s. ${r.keptOnDisk} is still in assets/.`, { kind: 'info' });
-      for (const w of r.warnings ?? []) toast(w, { kind: 'error' });
+        + `in ${(r.elapsedMs / 1000).toFixed(1)}s${short}. ${r.keptOnDisk} is still in assets/.`,
+      { kind: 'info', timeoutMs: 9000 });
+
+      /* The one piece of advice worth interrupting for, and only ONCE per clip:
+       * this one re-encodes on every trim, and a single prepare fixes it for
+       * good. Repeating it on each drag would train the reader to dismiss it. */
+      if (r.method === 'reencode' && r.keyframes?.coarse && !coarseHinted.has(segmentId)) {
+        coarseHinted.add(segmentId);
+        toast(`This clip re-encodes on every trim — its cut points are `
+          + `${r.keyframes.intervalFrames ? `~${r.keyframes.intervalFrames} frames` : 'too far'} apart. `
+          + 'Preparing it once (transcode_asset with gop 10) makes every later trim on it instant.',
+        { kind: 'info', timeoutMs: 14000 });
+      }
     } catch (err) {
       toastError(err);
       renderTimeline();

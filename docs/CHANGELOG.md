@@ -44,6 +44,15 @@ The reasoning behind the cage was the real mistake: it applied a rule measured
 on a 152-second segment to a half-second one. Re-encoding costs by the frames
 it **keeps**, so on a clip already trimmed down it is well under a second.
 
+**A finished trim stops reporting itself as two errors.** `trimFootage`
+*throws* when a trim fails, so everything it returns in `warnings` is a note
+about a success — but the timeline rendered them with the error style, which is
+red and never expires. A correctly cut clip came back as a green tick buried
+under two permanent red boxes, which reads as a failure. They are now one
+`info` line that expires, the frame-count correction is folded into it rather
+than raised separately, and the "this clip re-encodes every time, prepare it
+once" advice appears **once per clip** instead of on every drag.
+
 **A container that over-counts its own tail** — also corrected from use. A real
 screen recording declares 623 frames in `nb_frames` *and* reports 623 packets,
 while a full decode yields 622: its last packets are out of order. Both cheap
