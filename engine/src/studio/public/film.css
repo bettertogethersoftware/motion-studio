@@ -518,6 +518,8 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .blk-scene { background: #1d2430; border-color: #2c3a4e; }
 .blk-scene .sc-status { width: 7px; height: 7px; border-radius: 50%; margin-left: 6px; flex-shrink: 0; background: var(--ok); position: relative; z-index: 2; }
 .blk-scene.unrendered .sc-status { background: var(--err); }
+.blk-scene.stale { border-color: var(--warn); border-style: dashed; }
+.blk-scene.stale .sc-status { background: var(--warn); }
 .blk-scene.mismatch { border-color: var(--err); }
 .blk-scene .sc-dur { margin-left: auto; padding-right: 6px; color: var(--dim); font-size: 10px; position: relative; z-index: 2; }
 .blk-scene .thumb { position: absolute; inset: 0; opacity: 0.35; background-size: cover; background-position: center; }

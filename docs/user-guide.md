@@ -929,7 +929,12 @@ timeline, one set of rules.
 
 They are always available: the add row (`+ narration`, `+ audio`, `+ caption`,
 `+ footage`, `+ image`, `+ overlay`), snap, drag-to-reorder and edge-trim, the full
-property inspector, undo/redo, per-scene render and **build film**. Scenes are
+property inspector, undo/redo, per-scene render and **build film**. Drag a scene's
+**right edge** to change its configured frame count. This marks an existing render
+stale and requires a re-render; it does not rewrite `composition.js`, so animation
+timing authored against the old duration remains authored against that duration.
+The gesture is one undo step, and audio, captions and overlays keep their absolute
+film-frame positions. Scenes are
 added from where the scene folders actually are — the rail's **+ new scene**,
 or by dragging one from the rail onto the timeline. Sequences are drawn
 straight onto their lane, resized by dragging a band's edges, reassigned per

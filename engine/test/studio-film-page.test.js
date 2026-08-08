@@ -84,6 +84,15 @@ test('film page: the static shell serves ONE film surface', async () => {
   const shell = await (await fetch(base + '/film.html')).text();
   assert.match(shell, /id="scene-live"/, 'the live-preview iframe is in the stage');
   assert.match(shell, /id="live-tag"/, 'and it is labelled, because it is not the delivery');
+
+  // Scene length is a scene-config edit, not a film trim. The static contract
+  // keeps the gesture, stale state and typed history together.
+  const filmJs = await (await fetch(base + '/film.js')).text();
+  const filmCss = await (await fetch(base + '/film.css')).text();
+  assert.match(filmJs, /attachSceneDurationGrip/, 'rendered scenes have a duration handle');
+  assert.match(filmJs, /kind:\s*'sceneDuration'/, 'the handle records a typed scene-config undo step');
+  assert.match(filmJs, /composition\.js was not rewritten/, 'authored scenes receive the no-retime warning');
+  assert.match(filmCss, /\.blk-scene\.stale/, 'stale renders have a distinct timeline state');
 });
 
 test('film page: film with no delivery reports advisable-but-unbuilt state', async () => {
@@ -157,6 +166,26 @@ test('film page: advice submission returns a durable receipt and captures eviden
   const listed = await j(`/api/films/${enc(filmId)}/advice?status=unresolved`);
   assert.equal(listed.data.advice.length, 1);
   assert.equal(listed.data.summary.unresolved, 1);
+});
+
+test('film page: changing scene duration makes its existing render verifiably stale', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const changed = await j(`/api/scenes/${enc(sceneId)}/config`, {
+    method: 'PATCH', body: { patch: { durationInFrames: 12 } },
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal(changed.data.config.durationInFrames, 12);
+
+  const film = await j(`/api/films/${enc(filmId)}`);
+  const planned = film.data.detail.scenes.find((s) => s.sceneId === sceneId);
+  assert.equal(planned.rendered, true, 'the old file still exists');
+  assert.equal(planned.renderVerified, false, 'but it no longer matches scene.json');
+  assert.ok(film.data.detail.problems.some((p) => p.code === 'stale_render' && p.sceneId === sceneId));
+
+  // Restore the shared acceptance film for the later version/build tests. The
+  // route remains stale until the next render, which is exactly the UI promise.
+  await j(`/api/scenes/${enc(sceneId)}/config`, {
+    method: 'PATCH', body: { patch: { durationInFrames: 8 } },
+  });
 });
 
 test('film page: revision history + Ask AI to use this version creates advice, never repoints', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {

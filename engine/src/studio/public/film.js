@@ -68,6 +68,8 @@ const state = {
   // {kind:'scene',index} | {kind:'sequence',sequence} | {kind:'audio'|'caption'|'overlay', id} | null
   selection: null,
   undo: [], redo: [],
+  historyBusy: false, // a scene-config undo/redo is an async PATCH, not a local snapshot swap
+  sceneDurationBusy: new Set(), // slug(s) whose scene.json PATCH is in flight
   saveTimer: null,
   saving: false,
   dirty: false,
@@ -230,6 +232,13 @@ async function handleSaveConflict() {
     + 'the change you had not seen. Please make that edit again.');
 }
 
+function pushHistory(entry) {
+  state.undo.push(entry);
+  if (state.undo.length > 100) state.undo.shift();
+  state.redo.length = 0;
+  syncUndoButtons();
+}
+
 /** One mutation = one undo step = one (debounced) save. */
 function mutate(fn, { structural = false, silent = false } = {}) {
   // BUG-3: the document is wired before it is loaded. `registerDocument` runs
@@ -244,11 +253,8 @@ function mutate(fn, { structural = false, silent = false } = {}) {
   // told the human. The boot gate below is the real fix; this is the guard
   // underneath it, and it speaks.
   if (!filmReady()) return false;
-  state.undo.push(snapshot());
-  if (state.undo.length > 100) state.undo.shift();
-  state.redo.length = 0;
+  pushHistory({ kind: 'film', snapshot: snapshot() });
   fn(state.film);
-  syncUndoButtons();
   scheduleSave({ now: structural });
   if (!silent) renderTimeline();
   invalidateMixIfAudioChanged();
@@ -331,21 +337,49 @@ function applySnapshot(snap) {
   state.selection = null;
   renderAll();
 }
-function undo() {
-  if (!state.undo.length) return;
-  state.redo.push(snapshot());
-  applySnapshot(state.undo.pop());
+/**
+ * Travel one step through a mixed history. Film edits are still local snapshots;
+ * a scene duration lives in scene.json, so its step must replay the scene PATCH.
+ */
+async function travelHistory(from, to, direction) {
+  if (state.historyBusy || !from.length) return;
+  const entry = from.pop();
+  state.historyBusy = true;
   syncUndoButtons();
+  try {
+    if (entry?.kind === 'sceneDuration') {
+      const duration = direction === 'undo' ? entry.before : entry.after;
+      const expected = direction === 'undo' ? entry.after : entry.before;
+      await patchSceneDuration(entry.slug, expected, duration);
+      to.push(entry);
+      toastSceneDuration(entry, duration, { history: direction });
+    } else {
+      // Accept bare snapshots left by a page loaded before this history became
+      // typed; useful during hot reload, and harmless on a fresh page.
+      const snap = entry?.kind === 'film' ? entry.snapshot : entry;
+      to.push({ kind: 'film', snapshot: snapshot() });
+      applySnapshot(snap);
+    }
+  } catch (err) {
+    from.push(entry);
+    toastError(err);
+    // A scene changed outside this history (another tab, the AI, or its CONFIG
+    // panel). Keeping steps based on the old duration would invite a clobber.
+    if (err?.historyConflict) {
+      state.undo.length = 0;
+      state.redo.length = 0;
+      await refresh().catch(() => {});
+    }
+  } finally {
+    state.historyBusy = false;
+    syncUndoButtons();
+  }
 }
-function redo() {
-  if (!state.redo.length) return;
-  state.undo.push(snapshot());
-  applySnapshot(state.redo.pop());
-  syncUndoButtons();
-}
+const undo = () => travelHistory(state.undo, state.redo, 'undo');
+const redo = () => travelHistory(state.redo, state.undo, 'redo');
 function syncUndoButtons() {
-  $('#btn-undo').disabled = !state.undo.length;
-  $('#btn-redo').disabled = !state.redo.length;
+  $('#btn-undo').disabled = state.historyBusy || !state.undo.length;
+  $('#btn-redo').disabled = state.historyBusy || !state.redo.length;
 }
 
 window.addEventListener('beforeunload', (e) => {
@@ -2252,6 +2286,7 @@ function sceneBlock(s, index) {
     if (bad || s.missing) el.classList.add('mismatch');
   } else {
     if (!s.rendered) el.classList.add('unrendered');
+    if (s.rendered && s.renderVerified === false) el.classList.add('stale');
     const mismatch = (state.detail.problems ?? []).some((p) => p.code === 'signature_mismatch' && p.sceneId === s.sceneId);
     if (mismatch) el.classList.add('mismatch');
   }
@@ -2264,7 +2299,9 @@ function sceneBlock(s, index) {
         : s.framesVerified === null ? 'frame count unverified (ffprobe unavailable)'
           : 'footage, verified';
   } else {
-    dot.title = s.missing ? 'scene folder missing' : s.rendered ? 'rendered' : 'not rendered yet';
+    dot.title = s.missing ? 'scene folder missing'
+      : s.rendered && s.renderVerified === false ? 'render is stale — re-render this scene'
+        : s.rendered ? 'rendered' : 'not rendered yet';
   }
   const label = document.createElement('span');
   label.className = 'blk-label';
@@ -2287,9 +2324,12 @@ function sceneBlock(s, index) {
   // Frames along the block, when it is wide enough to show any (v0.28).
   attachStrip(el, s, w);
 
-  // Footage can be TRIMMED at its edges (v0.28); a scene cannot, because a
-  // scene's length is its config and its render. See attachFootageGrips.
+  // Footage edges re-cut a file. A scene's right edge changes scene.json and
+  // deliberately makes any existing render stale; it never rewrites animation
+  // timing in composition.js. The two gestures look alike but promise different
+  // operations, so each has its own commit path and wording.
   if (footage && !s.missing) attachFootageGrips(el, s);
+  else if (!s.missing) attachSceneDurationGrip(el, s);
 
   // Drag to reorder: scenes are butt-joined, so the only degree of freedom is order.
   el.addEventListener('pointerdown', (ev) => {
@@ -2333,6 +2373,146 @@ function sceneBlock(s, index) {
     });
   });
   return el;
+}
+
+/* ---- changing a scene's configured duration (v0.28) ------------------- */
+
+/**
+ * Identify the unmodified still scaffold for the one useful wording split.
+ * This is intentionally conservative: once active code uses DURATION, the
+ * scene is authored and receives the animation warning. Unknown/unreadable
+ * compositions are authored too; calling them a still would be the unsafe lie.
+ */
+async function sceneDurationKind(slug) {
+  try {
+    const sceneId = `${filmId}/${slug}`;
+    const r = await fetch(`/preview/${encodeURIComponent(sceneId)}/composition.js`, { cache: 'no-store' });
+    if (!r.ok) return 'authored';
+    const source = await r.text();
+    const active = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\bconst\s+DURATION\s*=\s*[^;]+;/, '');
+    return /getElementById\(\s*['"]still['"]\s*\)/.test(active) && !/\bDURATION\b/.test(active)
+      ? 'still' : 'authored';
+  } catch { return 'authored'; }
+}
+
+function toastSceneDuration(entry, duration, { history = null } = {}) {
+  const action = history === 'undo' ? 'restored' : history === 'redo' ? 'reapplied' : 'changed';
+  const current = state.detail?.scenes?.find((s) => s.slug === entry.slug);
+  const renderNote = !current?.rendered
+    ? 'Render to update.'
+    : current.renderVerified === false ? 'Re-render to update.'
+      : current.renderVerified === true ? 'The existing render matches.'
+        : 'Re-render to verify the output.';
+  const retime = entry.sceneKind === 'still' || duration === entry.before
+    ? ''
+    : ' Its composition still animates to its old length; composition.js was not rewritten.';
+  toast(`“${entry.name}” ${action} to ${duration}f. ${renderNote}${retime} `
+    + 'Audio, captions and overlays keep their absolute film-frame positions.',
+  { kind: 'info', timeoutMs: 12000 });
+}
+
+/**
+ * Patch scene.json without overwriting a duration that changed elsewhere.
+ * Scene configs do not yet carry revisions, so the read/compare is the narrow
+ * conflict guard available to a typed undo record.
+ */
+async function patchSceneDuration(slug, expected, duration) {
+  if (state.sceneDurationBusy.has(slug)) throw new Error(`Scene “${slug}” already has a length change in progress.`);
+  state.sceneDurationBusy.add(slug);
+  renderTimeline();
+  try {
+    if (state.dirty || state.saving) {
+      scheduleSave({ now: true });
+      if (!await saveSettled(10_000)) {
+        throw new Error('The scene length was not changed because the film still has an unsaved edit that could not be written.');
+      }
+    }
+    const current = await api(sceneApi(slug));
+    if (current.config?.durationInFrames !== expected) {
+      const err = new Error(`Scene “${current.config?.name ?? slug}” is now ${current.config?.durationInFrames ?? '?'}f, `
+        + `not the ${expected}f this edit was based on. Reloaded instead of overwriting the newer change.`);
+      err.historyConflict = true;
+      throw err;
+    }
+    await api(`${sceneApi(slug)}/config`, {
+      method: 'PATCH', body: { patch: { durationInFrames: duration } },
+    });
+    await refresh();
+    StudioUtil.shell()?.treeChanged();
+  } finally {
+    state.sceneDurationBusy.delete(slug);
+    renderTimeline();
+  }
+}
+
+/** The one honest scene-length handle: the tail changes frame count. */
+function attachSceneDurationGrip(el, s) {
+  if (state.sceneDurationBusy.has(s.slug)) {
+    el.classList.add('busy');
+    return;
+  }
+  const tail = el.appendChild(document.createElement('div'));
+  tail.className = 'grip right scene-duration-grip';
+  tail.title = 'change scene length — updates its config and requires a re-render';
+  tail.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation();
+    stopPlayback();
+    const before = s.durationInFrames;
+    let after = before;
+    pointerDrag(ev, {
+      onMove: (d, e2) => {
+        after = Math.round(Math.max(1, before + d));
+        el.style.width = `${Math.max(6, after * state.pxf)}px`;
+        dragTip(`${before}f → ${after}f · ${(after / fps()).toFixed(2)}s · re-render required`, e2);
+      },
+      onDone: (moved) => {
+        el.style.width = '';
+        if (!moved || after === before) { renderTimeline(); return; }
+
+        const entry = {
+          kind: 'sceneDuration', slug: s.slug, name: s.name,
+          before, after, sceneKind: 'authored',
+        };
+        const kind = sceneDurationKind(s.slug);
+
+        // The block tells the truth immediately, before disk I/O returns. The
+        // planner's refresh below replaces this provisional stale problem with
+        // its measured one (or restores the prior state if the PATCH fails).
+        s.durationInFrames = after;
+        if (s.rendered) {
+          s.renderVerified = false;
+          state.detail.problems ??= [];
+          if (!(state.detail.problems ?? []).some((p) => p.code === 'stale_render' && p.sceneId === s.sceneId)) {
+            state.detail.problems.push({
+              code: 'stale_render', sceneId: s.sceneId, changed: ['durationInFrames'],
+              message: `Scene “${s.name}” length changed — re-render it`,
+            });
+          }
+        }
+        reflowLocalScenes();
+        renderHeader();
+        renderTimeline();
+        renderTree();
+        renderInspector();
+        setPlayhead(state.playhead);
+
+        (async () => {
+          try {
+            await patchSceneDuration(s.slug, before, after);
+            entry.sceneKind = await kind;
+            pushHistory(entry);
+            toastSceneDuration(entry, after);
+          } catch (err) {
+            await refresh().catch(() => {});
+            toastError(err);
+          }
+        })();
+      },
+    });
+  });
 }
 
 /* ---- filmstrips on timeline blocks (v0.28) ---------------------------- */
@@ -5411,7 +5591,8 @@ function renderTree() {
       const seg = state.detail.scenes[i];
       if (!seg) continue;
       const footage = seg.kind === 'footage';
-      const ready = footage ? !seg.missing : seg.rendered;
+      const stale = !footage && seg.rendered && seg.renderVerified === false;
+      const ready = footage ? !seg.missing : (seg.rendered && !stale);
       const row = el('div', {
         class: `tree-row tree-seg${footage ? ' footage' : ''}${ready ? '' : ' unready'}`
           + `${sel?.kind === 'scene' && sel.index === i ? ' selected' : ''}`,
@@ -5428,14 +5609,14 @@ function renderTree() {
         class: 'tree-kind', text: footage ? '▦' : '◧', role: 'img',
         'aria-label': footage
           ? (seg.missing ? 'footage, missing' : 'footage')
-          : (seg.rendered ? 'scene, rendered' : 'scene, not rendered yet'),
+          : (stale ? 'scene, render stale' : seg.rendered ? 'scene, rendered' : 'scene, not rendered yet'),
       }),
       el('span', { class: 'tree-name', text: seg.missing ? `⚠ ${seg.slug ?? seg.footage}` : seg.name }),
       el('span', { class: 'tree-meta mono', text: `${seg.durationInFrames ?? 0}f` }));
       row.dataset.key = `seg:${i}`;
       row.title = footage
         ? `footage — ${seg.footage}`
-        : `${seg.slug}${seg.rendered ? '' : ' — not rendered yet'}`;
+        : `${seg.slug}${stale ? ' — render stale; re-render required' : seg.rendered ? '' : ' — not rendered yet'}`;
       const n = unresolvedCount(segmentAdviceMatcher(seg));
       if (n) row.appendChild(adviceBadge(n));
       const revs = footage ? null : state.revisions[seg.slug];

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A scene's right edge changes its length — without rewriting its animation
+
+Scene duration no longer requires opening CONFIG and typing a frame count. Drag
+the scene block's right edge and the film page writes `durationInFrames` once, on
+release. Any existing render is immediately shown as **stale** (amber dashed edge
+and status dot), matching the planner's `renderVerified: false`; this also fixes
+the older CONFIG-tab path, which could leave a stale render looking healthy.
+
+The edit is a typed scene-config history record, so Ctrl+Z/Ctrl+Y replay the
+scene PATCH instead of undoing an unrelated film edit. A current-duration check
+refuses to overwrite a newer change made by another tab or agent.
+
+The gesture never edits `composition.js`. An unmodified still scaffold is told
+only to re-render; an authored scene is additionally warned that its composition
+still animates to its old length. Master audio, captions and overlays retain their
+absolute film-frame positions, which the reflowed timeline makes visible.
+
 ### An overlay is placed by dragging it, and lands bottom-right
 
 An overlay's box lived only in the inspector's **x % / y % / width %** sliders,
