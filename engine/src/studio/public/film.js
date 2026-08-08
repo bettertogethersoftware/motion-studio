@@ -232,6 +232,18 @@ async function handleSaveConflict() {
 
 /** One mutation = one undo step = one (debounced) save. */
 function mutate(fn, { structural = false, silent = false } = {}) {
+  // BUG-3: the document is wired before it is loaded. `registerDocument` runs
+  // at top level so the shell can draw a tab while the film is still fetching,
+  // which means `#film-name` is in the DOM with its listener attached while
+  // `state.film` is still null — and snapshot() below then throws on it.
+  //
+  // The window is tens of milliseconds on a warm local film and effectively
+  // unreachable; on a cold start, a large film or a slow disk it is long enough
+  // to lose a keystroke. What made it worth fixing is not the throw but the
+  // SILENCE: `#save-state` stayed "saved", the edit was discarded, and nothing
+  // told the human. The boot gate below is the real fix; this is the guard
+  // underneath it, and it speaks.
+  if (!filmReady()) return false;
   state.undo.push(snapshot());
   if (state.undo.length > 100) state.undo.shift();
   state.redo.length = 0;
@@ -240,6 +252,21 @@ function mutate(fn, { structural = false, silent = false } = {}) {
   scheduleSave({ now: structural });
   if (!silent) renderTimeline();
   invalidateMixIfAudioChanged();
+  return true;
+}
+
+/**
+ * True when there is a film to edit; otherwise says so and returns false.
+ *
+ * A caller that reads `state.film` BEFORE calling mutate() — the name field
+ * does, to restore the old value when the box is cleared — has to ask this
+ * first, because mutate()'s own guard is too late to save it.
+ */
+function filmReady() {
+  if (state.film) return true;
+  toast('The film is still loading, so that change was not applied — make it again in a moment.',
+    { kind: 'error' });
+  return false;
 }
 
 /** Resolve once the pending save has landed (structural edits need the
@@ -5749,9 +5776,15 @@ StudioPalette.register([
 /* --------------------------------- name --------------------------------- */
 
 $('#film-name').addEventListener('change', () => {
+  // Asked before anything else: the empty-value branch below READS
+  // `state.film.name`, so it throws in the boot window that mutate()'s own
+  // guard would have caught (BUG-3). And the title must not be rewritten from
+  // an edit that was refused — that is how the tab came to claim a name the
+  // film never had.
+  if (!filmReady()) return;
   const v = $('#film-name').value.trim();
   if (!v) { $('#film-name').value = state.film.name; return; }
-  mutate((film) => { film.name = v; }, { silent: true });
+  if (!mutate((film) => { film.name = v; }, { silent: true })) return;
   document.title = `${v} — Motion Studio`;
   StudioUtil.syncDocument();
 });
@@ -5782,6 +5815,15 @@ function renderAll() {
     document.body.innerHTML = '<p style="padding:40px" class="dim">No film id — open a film from the Studio (<a href="/">back</a>).</p>';
     return;
   }
+  // BUG-3: until `refresh()` lands there is no film to edit, but every control
+  // is already in the DOM with its listener attached. Say so and mean it — the
+  // body is inert while `booting` is set (see film.css), so a keystroke cannot
+  // be silently swallowed by a document that only LOOKS ready. The boot already
+  // replaces the whole body on a load failure; this is the same gate for the
+  // moments before that verdict exists.
+  const frame = $('.fe-frame');
+  frame?.setAttribute('inert', '');   // blocks focus AND pointer — see film.css
+  setSaveState('loading…');
   wireProductionLoop();
   try {
     await refresh();
@@ -5789,7 +5831,13 @@ function renderAll() {
     toastError(err);
     document.body.innerHTML = `<p style="padding:40px" class="dim">Could not load film: ${err.message} (<a href="/">back to the Studio</a>)</p>`;
     return;
+  } finally {
+    // Cleared on the failure path too: that path replaces the body outright, so
+    // this is belt-and-braces against a future edit that stops doing so and
+    // leaves the whole editor unclickable.
+    frame?.removeAttribute('inert');
   }
+  setSaveState('saved');
   connectEvents();
   // A deep link from anywhere else in the Studio lands on the exact thing.
   const qs = new URLSearchParams(location.search);

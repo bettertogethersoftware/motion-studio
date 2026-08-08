@@ -13,8 +13,10 @@ measurement, never a suspicion), who is bitten and how badly, the workaround if
 one exists, and the candidate fixes with their costs. If an entry cannot carry
 evidence it is not a bug report yet — reproduce it first.
 
-**Open: BUG-3.** BUG-1 and BUG-4 were fixed 2026-08-08, BUG-2 on 2026-08-06;
-all are kept below with the fix noted, because the evidence is the useful part.
+**Open: none.** BUG-1, BUG-3 and BUG-4 were fixed 2026-08-08, BUG-2 on
+2026-08-06; all are kept below with the fix noted, because the evidence is the
+useful part — and because a fixed entry is the cheapest way to stop the same
+defect being re-derived from scratch.
 
 ---
 
@@ -130,7 +132,23 @@ dependency the scene chose.
 
 ---
 
-## BUG-3 — the film page is editable before it has loaded
+## BUG-3 — the film page is editable before it has loaded — **FIXED 2026-08-08**
+
+> Fix (1) with (2) underneath, as the report recommended. The boot sets the
+> `inert` **attribute** on `.fe-frame` until `refresh()` lands — not
+> `pointer-events: none`, which stops a click and does nothing about a
+> keystroke, and losing a keystroke is the whole defect; `inert` blocks focus,
+> pointer and the accessibility tree together. `#save-state` says `loading…`
+> while it holds. Underneath, `mutate()` returns false instead of throwing and
+> tells the human the edit was not applied.
+>
+> **Verifying it found a third hole the report did not name.** The `#film-name`
+> handler reads `state.film.name` directly on its empty-value branch — before
+> `mutate()` is reached, so mutate's guard could not save it — and it set
+> `document.title` *after* mutate bailed, so the tab claimed a name the film
+> never had. Both now go through `filmReady()`, and `mutate()`'s return value
+> gates the title. Measured after: typing and clearing the name during the boot
+> window each produce no error, no title change, and a message.
 
 **Found** 2026-08-06, by a Puppeteer probe racing the film document's boot while
 verifying the tab-close flush (U-4). **Severity:** low — a narrow window, and

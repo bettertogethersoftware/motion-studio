@@ -9,6 +9,21 @@
    One surface, no modes (v0.23.2). The page is always the full editor and the
    advice controls live in the inspector beside whatever is selected. */
 
+/* The moments between "the document exists" and "the film has loaded" (BUG-3).
+   `registerDocument` runs at top level so the shell can draw a tab immediately,
+   which leaves every control in the DOM, wired, and describing a film that is
+   still null.
+
+   The frame carries the `inert` ATTRIBUTE while booting (set in film.js), which
+   is the part that matters: `pointer-events: none` would stop a click and do
+   nothing about a keystroke, and losing a keystroke is the whole defect. `inert`
+   blocks focus, pointer and the accessibility tree together. This rule is only
+   the visible half of it.
+
+   Deliberately not a spinner: the window is tens of milliseconds on a warm
+   film, and a flash of overlay would be worse than the wait. */
+.fe-frame[inert] { opacity: 0.6; }
+
 /* ------------------------------- layout ------------------------------- */
 
 /* A flex column, not a grid (v0.26): the banners and the document tab strip

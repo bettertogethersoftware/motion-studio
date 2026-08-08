@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### The film page stops accepting edits it is going to throw away
+
+The shell wants a document's tab and status bar immediately, so `film.js`
+registers itself at top level and loads the film afterwards. Between those two
+moments the page was **fully wired and completely empty**: `#film-name` in the
+DOM, its `change` listener attached, and `state.film` still `null`. A keystroke
+landing there threw, `#save-state` went on saying `saved`, and the edit was
+discarded without a word.
+
+On a warm local film that window is tens of milliseconds and effectively
+unreachable. On a cold start, a large film, or a slow disk it is long enough to
+lose a keystroke — and the failure mode, a silent no-op plus a console error,
+is the worst available.
+
+The editor is now `inert` until the film resolves, and the status bar says
+`loading…` while it holds. `inert` rather than `pointer-events: none`: that
+stops a click and does nothing about a keystroke, which is the thing actually
+being lost. Underneath it, a mutation attempted with no film returns false and
+**says so** instead of throwing.
+
+Verifying it turned up a third hole. The name field reads `state.film.name`
+directly when you clear the box — before any guarded call, so the guard could
+not help — and it rewrote `document.title` *after* the mutation had been
+refused, leaving the tab claiming a name the film never had. Both are fixed;
+typing and clearing during the boot window now each produce no error, no title
+change, and a message.
+
+With this, **no known defects remain open**.
+
 ### Both trees have a keyboard, and the film tree stops lying about itself
 
 The Explorer is the app's primary navigation and it was pointer-only: no role,

@@ -293,10 +293,10 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       delivery" fails rarely under the full parallel run, passes standalone
       and on re-run. Worth one root-cause hour before it erodes trust in
       red suites.
-- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — **one open**,
-      not blocking (BUG-1 and BUG-4 fixed 2026-08-08, BUG-2 2026-08-06).
-      **BUG-3**: the film page accepts edits before it has loaded, and drops
-      them.
+- [x] **Known defects** in [bug-backlog.md](bug-backlog.md) — **none open** as
+      of 2026-08-08: BUG-1 (frozen vendored runtime), BUG-3 (edits accepted
+      before the film loads) and BUG-4 (`computeFit` on teardown) all fixed
+      that day; BUG-2 on 2026-08-06. The entries stay with their fixes noted.
 
 ## Parked, with reasons
 
