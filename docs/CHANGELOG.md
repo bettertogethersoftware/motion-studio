@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### The film explorer has an edge you can drag
+
+The rail was a fixed 216px with a `«` button that folded it to an icon strip —
+two states, neither of them the one you wanted when a scene called
+"The Convergence of Ten Thousand Signals" rendered as `The Conv…`. It now has a
+grip on its right edge, the inspector's mirrored: drag it anywhere between 150
+and 480px, and the width is remembered.
+
+The `«` went with it. A rail you can size is that control with more of it, and
+the activity bar's Explorer button still folds the rail away — that button used
+to work by *clicking the rail's own button by proxy*, and now toggles directly.
+A collapsed rail hides its grip, since 30px of icon strip has no width to drag
+and the activity bar is what brings it back.
+
+Both grips are one implementation now. They are the same gesture mirrored — the
+inspector grows as the pointer moves left, the rail as it moves right — so that
+direction is the only thing that differs between them.
+
 ### The film page stops accepting edits it is going to throw away
 
 The shell wants a document's tab and status bar immediately, so `film.js`

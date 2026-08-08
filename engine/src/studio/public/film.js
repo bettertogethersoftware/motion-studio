@@ -3324,32 +3324,75 @@ function setInspectorWidth(px) {
   return w;
 }
 
-{
-  const stored = Number(localStorage.getItem(INSP_KEY));
-  if (Number.isFinite(stored) && stored > 0) setInspectorWidth(stored);
+const RAIL_KEY = 'ms.railWidth';
+const RAIL_MIN = 150;
+const RAIL_MAX = 480;
 
-  $('#insp-grip')?.addEventListener('pointerdown', (ev) => {
+/** The film explorer's width, clamped the way the inspector's is. */
+function setRailWidth(px) {
+  const w = clamp(Math.round(px), RAIL_MIN, Math.max(RAIL_MIN, Math.min(RAIL_MAX, Math.round(window.innerWidth * 0.4))));
+  document.documentElement.style.setProperty('--rail-w', `${w}px`);
+  return w;
+}
+
+/**
+ * Drag either edge of the stage. Written once for both grips because they are
+ * the same gesture mirrored: the inspector grows as the pointer moves LEFT, the
+ * rail as it moves right, which is the whole difference and is the `sign`.
+ */
+function bindGrip({ grip, panel, sign, apply, storageKey, busyClass }) {
+  grip?.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
     const startX = ev.clientX;
-    const startW = $('#inspector').getBoundingClientRect().width;
-    document.body.classList.add('resizing-insp');
-    const move = (e2) => { setInspectorWidth(startW - (e2.clientX - startX)); fitPlayerBox(); };
+    const startW = panel().getBoundingClientRect().width;
+    document.body.classList.add(busyClass);
+    const move = (e2) => { apply(startW + sign * (e2.clientX - startX)); fitPlayerBox(); };
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      document.body.classList.remove('resizing-insp');
-      const w = setInspectorWidth($('#inspector').getBoundingClientRect().width);
-      try { localStorage.setItem(INSP_KEY, String(w)); }
+      document.body.classList.remove(busyClass);
+      const w = apply(panel().getBoundingClientRect().width);
+      try { localStorage.setItem(storageKey, String(w)); }
       catch { /* private mode / quota: the width is a convenience, never a blocker */ }
       fitPlayerBox();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   });
+}
 
-  // The clamp is a fraction of the window, so a shrunk window must re-clamp or
-  // the inspector eats the stage.
-  window.addEventListener('resize', () => setInspectorWidth($('#inspector').getBoundingClientRect().width));
+{
+  const stored = Number(localStorage.getItem(INSP_KEY));
+  if (Number.isFinite(stored) && stored > 0) setInspectorWidth(stored);
+
+  const storedRail = Number(localStorage.getItem(RAIL_KEY));
+  if (Number.isFinite(storedRail) && storedRail > 0) setRailWidth(storedRail);
+
+  bindGrip({
+    grip: $('#insp-grip'),
+    panel: () => $('#inspector'),
+    sign: -1,                    // the inspector grows as the pointer goes left
+    apply: setInspectorWidth,
+    storageKey: INSP_KEY,
+    busyClass: 'resizing-insp',
+  });
+  bindGrip({
+    grip: $('#rail-grip'),
+    panel: () => $('#fe-scenes'),
+    sign: 1,                     // the rail grows as the pointer goes right
+    apply: setRailWidth,
+    storageKey: RAIL_KEY,
+    busyClass: 'resizing-rail',
+  });
+
+  // Both clamps are a fraction of the window, so a shrunk window must re-clamp
+  // or a panel eats the stage.
+  window.addEventListener('resize', () => {
+    setInspectorWidth($('#inspector').getBoundingClientRect().width);
+    if (!document.querySelector('.fe-frame')?.classList.contains('rail-collapsed')) {
+      setRailWidth($('#fe-scenes').getBoundingClientRect().width);
+    }
+  });
 }
 
 /* The timeline's height, traded against the stage's (v0.27). The wrapper
@@ -3751,10 +3794,17 @@ async function duplicateScene(slug, sourceName) {
   } catch (err) { toastError(err); }
 }
 
-$('#btn-scenes-collapse').addEventListener('click', () => {
+/**
+ * Collapse the film explorer. The rail's own `«` button is gone — a rail you
+ * can drag to any width is that control with more of it — so the activity bar
+ * is the one way to fold it away, which is also where the Explorer toggle lives
+ * in the shell. This used to be a button the activity bar clicked by proxy.
+ */
+function toggleRail() {
   document.querySelector('.fe-frame').classList.toggle('rail-collapsed');
   syncExplorerIcon();
-});
+  fitPlayerBox();
+}
 
 /* ---- audio ---- */
 
@@ -5734,7 +5784,7 @@ StudioUtil.bindShellKeys();
 
 /* ------------------------ activity bar + the palette --------------------- */
 
-$('#btn-explorer').addEventListener('click', () => $('#btn-scenes-collapse').click());
+$('#btn-explorer').addEventListener('click', toggleRail);
 $('#btn-palette').addEventListener('click', () => StudioPalette.open('files'));
 $('#sb-goto').addEventListener('click', () => StudioPalette.open('files'));
 

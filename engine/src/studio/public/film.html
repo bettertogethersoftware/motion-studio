@@ -73,7 +73,6 @@
     <aside class="fe-scenes" id="fe-scenes">
       <div class="fe-rail-head">
         <span class="rail-head-label">film</span>
-        <button id="btn-scenes-collapse" class="ghost tiny-btn" title="collapse">«</button>
       </div>
       <div id="fe-tree" class="fe-tree" role="tree" aria-label="film structure"></div>
       <div class="fe-rail-split">
@@ -122,6 +121,11 @@
         <span class="spacer"></span>
       </div>
     </section>
+
+    <!-- The film explorer's own edge, the inspector's grip mirrored. It
+         replaced a collapse button: a rail you can size is the same control
+         with more of it, and the activity bar still collapses the rail. -->
+    <div id="rail-grip" class="rail-grip" title="drag to resize the film explorer"></div>
 
     <!-- Absolutely positioned, so it rides the inspector's left edge without
          becoming a fourth grid track. -->

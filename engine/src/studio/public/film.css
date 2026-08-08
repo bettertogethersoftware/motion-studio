@@ -79,22 +79,30 @@ button.warn { color: var(--accent); border-color: var(--accent); }
 
 /* scenes rail + stage + inspector */
 .fe-main {
-  display: grid; grid-template-columns: 216px minmax(0, 1fr) var(--insp-w, 300px);
+  display: grid; grid-template-columns: var(--rail-w, 216px) minmax(0, 1fr) var(--insp-w, 300px);
   flex: 1; min-height: 0;
-  position: relative; /* the resize grip is absolute against this */
+  position: relative; /* the resize grips are absolute against this */
 }
 .rail-collapsed .fe-main { grid-template-columns: 30px minmax(0, 1fr) var(--insp-w, 300px); }
 
-/* Out of flow, so it never becomes a fourth grid track. */
-.insp-grip {
+/* Out of flow, so they never become extra grid tracks. Both edges of the stage
+   work the same way — one rides the rail's right edge, one the inspector's
+   left — so a rule that applies to both says so once. */
+.insp-grip, .rail-grip {
   position: absolute; top: 0; bottom: 0;
-  right: var(--insp-w, 300px);
-  width: 7px; margin-right: -3px;
+  width: 7px;
   cursor: col-resize; z-index: 6;
 }
-.insp-grip:hover { background: var(--accent); opacity: 0.5; }
-body.resizing-insp { cursor: col-resize; user-select: none; }
-body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
+.insp-grip { right: var(--insp-w, 300px); margin-right: -3px; }
+.rail-grip { left: var(--rail-w, 216px); margin-left: -3px; }
+/* A collapsed rail is 30px of icon and has no width to drag; the activity bar
+   is what brings it back, so a grip sitting on the seam would only confuse. */
+.rail-collapsed .rail-grip { display: none; }
+
+.insp-grip:hover, .rail-grip:hover { background: var(--accent); opacity: 0.5; }
+body.resizing-insp, body.resizing-rail { cursor: col-resize; user-select: none; }
+body.resizing-insp .insp-grip,
+body.resizing-rail .rail-grip { background: var(--accent); opacity: 0.7; }
 
 .fe-scenes {
   border-right: 1px solid var(--line);
@@ -111,9 +119,6 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
 }
 .fe-rail-head .drag-hint { text-transform: none; letter-spacing: 0.02em; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
 .tiny-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
-/* The collapse control belongs on the edge it collapses toward, not tucked
-   against the label — same side as the Explorer's, one rail further in. */
-#btn-scenes-collapse { margin-left: auto; }
 .rail-collapsed .fe-rail-head { border-bottom: none; padding: 8px 4px; justify-content: center; }
 .rail-collapsed .rail-head-label,
 .rail-collapsed .drag-hint,
