@@ -756,6 +756,60 @@ export function summarizeMedia(raw) {
  * like probeFrameCount(): ffprobe is not a declared prerequisite (see
  * core/prereqs.js), so "cannot tell" is a normal answer, never a failure.
  */
+/** Ceiling on a captured stdout buffer, so a bad filter cannot eat the heap. */
+export const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Run ffmpeg and capture its stdout as a Buffer, with a hard byte ceiling and
+ * cancellation. Extracted from render-review.js in v0.27 when `core/picture.js`
+ * needed the same thing: it is a generic spawn-and-capture, not a fact about
+ * reviewing a delivered render, and it belongs beside the other ffmpeg process
+ * helpers. render-review.js imports it from here; behaviour is unchanged.
+ */
+export function ffmpegCapture({ args, ffmpegPath = 'ffmpeg', what, signal, onSpawn, maxBytes = MAX_CAPTURE_BYTES }) {
+  if (signal?.aborted) return Promise.reject(new EngineError(ErrorCodes.CANCELLED, `${what}: cancelled before start`));
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let bytes = 0;
+    const stderr = [];
+    const abort = () => { try { proc.kill('SIGKILL'); } catch { /* already exited */ } };
+    if (onSpawn && proc.pid) onSpawn(proc.pid);
+    signal?.addEventListener('abort', abort, { once: true });
+    proc.stdout.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        abort();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    proc.stderr.on('data', (chunk) => {
+      stderr.push(chunk.toString('utf8'));
+      if (stderr.length > 20) stderr.shift();
+    });
+    proc.on('error', (error) => {
+      signal?.removeEventListener('abort', abort);
+      reject(new EngineError(ErrorCodes.FFMPEG_FAILED, `${what}: failed to start ffmpeg: ${error.message}`));
+    });
+    proc.on('close', (code, killedBy) => {
+      signal?.removeEventListener('abort', abort);
+      if (signal?.aborted) return reject(new EngineError(ErrorCodes.CANCELLED, `${what}: cancelled`));
+      if (bytes > maxBytes) {
+        return reject(new EngineError(ErrorCodes.FFMPEG_FAILED, `${what}: output exceeded ${maxBytes} bytes`));
+      }
+      if (code !== 0) {
+        return reject(new EngineError(
+          ErrorCodes.FFMPEG_FAILED,
+          `${what}: ffmpeg exited with code ${code}${killedBy ? ` (${killedBy})` : ''}`,
+          { stderrTail: stderr.join('').trim().split('\n').slice(-20) },
+        ));
+      }
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
 export async function probeMedia({ filePath, ffprobePath = 'ffprobe', onSpawn, signal }) {
   if (signal?.aborted) return null;
   let proc;

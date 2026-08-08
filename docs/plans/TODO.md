@@ -251,10 +251,16 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       required-check branch protection (the workflow itself shipped
       2026-08-04). Add the docker-build job here when the Docker plan runs.
 - [ ] **Coverage reporting + a small cross-platform media fixture set.**
-- [ ] **Still-image facts on `probe_asset`** — `width`, `height`, `hasAlpha`,
-      `contentBox`, `meanLuminance`, `isBlank` for a still input. The one
-      surviving half of the retired `prepare_image` plan
-      ([retired.md](retired.md)). **Env A-only, and kept because it is cheap**
+- [x] **Still-image facts on `probe_asset` — shipped 2026-08-08**
+      (`core/picture.js`, 11 tests): `contentBox`, `meanLuminance`,
+      `isTransparent`/`hasAlpha`, `isBlank`, `sampledAt`. Came in at the
+      predicted price — one bounded decode plus arithmetic, no new dependency —
+      and `ffmpegCapture` moved from `render-review.js` to `encoder.js` on the
+      way past, since two callers now need it.
+      **Why it was kept, preserved as the worked example of the cost rule
+      above:** it is the one surviving half of the retired `prepare_image` plan
+      ([retired.md](retired.md)), and it is **Env A-only, kept because it is
+      cheap**
       (the rule above): Env B answers all six with one `magick identify
       -format` call — measured 2026-08-08 — so this buys the demo tier
       something a production agent already has. It earns its place on price.
@@ -264,9 +270,9 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       arithmetic on a Buffer in Node — ffmpeg reads a PNG the same way it reads
       an mp4. So it is that decode at a higher resolution plus sums over a
       `Uint8Array`: **no Python, no ImageMagick, no new dependency** — which is
-      precisely what killed the ops half of the parent plan. ~½ day. Do not let
-      it grow: the moment it wants to *change* a picture it is the retired plan
-      again.
+      precisely what killed the ops half of the parent plan. Estimated ~½ day
+      and it held. The standing guard: the moment it wants to *change* a
+      picture it is the retired plan again.
 - [ ] **Asset-duration staleness** — a scene whose configured duration no
       longer matches the asset it plays, reported in the `stale_render` /
       `plan.problems` family. The measurement-shaped remainder of the

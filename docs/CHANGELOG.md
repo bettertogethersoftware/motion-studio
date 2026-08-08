@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### A composition can style an image; now something can ask a question about one
+
+`probe_asset` returns a `picture` block for a still. Four facts, all of them
+things you could previously only learn by rendering and squinting:
+
+- **`contentBox`** — where the content actually sits. Supplier photos arrive on
+  white with a wide, *uneven* margin, so placing one by its canvas renders the
+  product small and off-centre and every layout has to be hand-tuned per photo.
+- **`meanLuminance`** — how dark the region under a caption is, before the
+  caption is on it.
+- **`isTransparent`** and **`hasAlpha`** — whether an overlay really carries a
+  cutout. The first is measured from the pixels, the second is what the pixel
+  format declares, and where they disagree the measurement is right: a `pal8`
+  PNG keeps its transparency in the palette.
+- **`isBlank`**, plus `sampledAt`, which states the grid the box was found on so
+  the answer's precision is visible rather than implied.
+
+This is the surviving half of the retired `prepare_image` plan, and it is worth
+saying why it came back when the rest did not. That plan died on its
+**dependency**: its picture *operations* needed Python and Pillow, which the
+generative boundary keeps outside the engine. Measurement needs nothing new —
+ffprobe already reports width, height and pixel format for a still, and the
+rest is one small decode plus arithmetic over a `Uint8Array`, the same shape
+`render-review.js` uses for a delivered file. The module reads pictures and
+never changes one; the moment it grows a crop or an encode it is the retired
+plan again.
+
+Two choices worth recording. The sample is **RGBA rather than greyscale**, so
+red and green at matching luminance is not reported as a blank card, and a
+transparent overlay is measured by its alpha exactly instead of by a colour
+threshold. And the background is taken from the **border median**, not assumed:
+a dark product on a dark background is as common as the white-margin case, and
+assuming either puts the box around the whole frame.
+
+Stills only. On a video these numbers would describe one arbitrary frame, and
+`measure_render` already answers the moving-picture version properly — an
+animated `.gif` is a still by extension and a movie by content, so the probe
+decides, not the filename.
+
+`ffmpegCapture` moved from `render-review.js` to `encoder.js` on the way past:
+it is a generic ffmpeg spawn-and-capture, not a fact about reviewing a render,
+and two callers now need it. Behaviour unchanged.
+
 ### The engine can hear where the voice pushes
 
 A 15 s spot was built with hand-typed animation timings that looked fine on

@@ -102,6 +102,7 @@ import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
 } from '../core/audio.js';
 import { measureAudioCues, projectCues, MAX_INLINE_ONSETS } from '../core/audio-cues.js';
+import { measurePictureFacts, isStillImage } from '../core/picture.js';
 import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
 
 /* ------------------------------------------------------------------ */
@@ -2926,7 +2927,14 @@ server.registerTool(
       '4.31 s — so a riser started ON the downbeat peaks four seconds late. Start the track ' +
       '`peakAtSeconds * fps` frames EARLY and the hit lands on the beat. Off by default because it decodes the ' +
       'whole file, unlike the metadata-only default read. Exact for a TRANSIENT (an impact, a stab); for a broad ' +
-      'swell the loudest part is a plateau, so treat the number as the middle of the climax rather than an edge.',
+      'swell the loudest part is a plateau, so treat the number as the middle of the climax rather than an edge. ' +
+      'For a STILL IMAGE it also returns `picture` (v0.27) — the questions a composition cannot ask about a file ' +
+      'it is about to place: `contentBox` (where the actual content sits, so a supplier photo with a wide uneven ' +
+      'white margin can be positioned by its PRODUCT instead of by its canvas), `meanLuminance` (how dark the ' +
+      'region under a caption is, before rendering and squinting at it), `isTransparent` + `hasAlpha` (whether an ' +
+      'overlay really carries a cutout), and `isBlank`. `sampledAt` states the grid the box was measured on, ' +
+      'which bounds its precision. It is one small decode and stills only — on a video these numbers would ' +
+      'describe one arbitrary frame, and measure_render answers that properly.',
     inputSchema: {
       path: z.string()
         .describe('assets/ or out/-relative path when `target` is given (out/ reads what the engine rendered), else a library-relative path from list_shared_assets'),
@@ -2934,9 +2942,11 @@ server.registerTool(
         .describe('Scene id "<film>/<scene>" or film id "<film>". Omit to probe a workspace-library file.'),
       audioPeak: z.boolean().optional()
         .describe('Also measure peak level and its position in seconds (decodes the file). Use before placing a one-shot cue on a beat.'),
+      picture: z.boolean().default(true)
+        .describe('Measure picture facts when the asset is a STILL image (one small decode). Set false to skip it.'),
     },
   },
-  wrap(async ({ path: relPath, target, audioPeak = false }) => {
+  wrap(async ({ path: relPath, target, audioPeak = false, picture = true }) => {
     const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
     const located = await locateMedia(relPath, target);
     const { abs, ...rest } = located;
@@ -2946,11 +2956,27 @@ server.registerTool(
       const { path: ffmpegPath } = await resolveFfmpegPath({ dataDir: store.dataDir });
       peak = await measureAudioPeakPosition({ filePath: abs, ffmpegPath }).catch(() => null);
     }
+    // Picture facts for a STILL (v0.27): the questions a composition can never
+    // ask about an image it is about to place. Stills only — on a video the
+    // same numbers would describe one arbitrary frame, and `measure_render`
+    // already answers the moving-picture version properly.
+    let pictureFacts = null;
+    if (picture && isStillImage(located.path, media)) {
+      const { path: ffmpegPath } = await resolveFfmpegPath({ dataDir: store.dataDir });
+      pictureFacts = await measurePictureFacts({
+        filePath: abs,
+        width: media?.video?.width,
+        height: media?.video?.height,
+        pixFmt: media?.video?.pixFmt,
+        ffmpegPath,
+      }).catch(() => null);
+    }
     return ok({
       ...rest,
       probed: media !== null,
       ...(media ?? {}),
       ...(peak ? { audio: { ...(media?.audio ?? {}), ...peak } } : {}),
+      ...(pictureFacts ? { picture: pictureFacts } : {}),
     });
   }),
 );

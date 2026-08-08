@@ -813,6 +813,37 @@ hard butt-join between two spans of speech clicks audibly; `acrossfade` overlaps
 its inputs, so the joined length is `sum(spans) − (N−1) × crossfade` — the fade
 consumes time, which is what makes it a crossfade rather than a gap.
 
+**Picture facts for stills (v0.27).** `core/picture.js` answers about an image
+what §9.6 answers about sound: `contentBox`, `meanLuminance`, `isTransparent`,
+`isBlank`, reported by `probe_asset`. A composition can *style* an image in CSS
+at render time; it can never ask a **question** about one, so "where is the
+content in this frame" and "how dark is the region under my caption" were
+previously answered by rendering and looking.
+
+It is the surviving half of the retired `prepare_image` plan, and the split is
+instructive: that plan died on its **dependency**, not on its idea. Its picture
+*operations* needed Python and Pillow, which §9.5 keeps outside the engine.
+Measurement needs nothing new — ffprobe already reports width, height and pixel
+format for a still, and the rest is one bounded decode through the shared
+`ffmpegCapture` plus arithmetic over a `Uint8Array`, the same shape
+`render-review.js` and `audio-cues.js` already use. **The module reads pictures
+and never changes one**; the moment it grows a crop, a key or an encode it is
+the retired plan again, dependency and all.
+
+Three decisions are load-bearing:
+
+- **The sample is RGBA, not greyscale.** Greyscale would report red and green at
+  matching luminance as a blank card, and would force a colour threshold onto
+  transparent overlays — which are a first-class Motion Studio output and have
+  an exact answer in their alpha.
+- **The background is the border median, not an assumption.** A dark product on
+  a dark background is as common as the white-margin supplier photo; assuming
+  either colour puts the box around the whole frame.
+- **Stills only, decided by the probe.** On a video these numbers describe one
+  arbitrary frame, and `measure_render` answers the moving-picture question
+  properly. An animated `.gif` is a still by extension and a movie by content,
+  so the frame count decides.
+
 ### 9.5 The generative boundary (v0.26)
 
 The audio (and image) capabilities split into two families, and the split is

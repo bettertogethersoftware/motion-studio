@@ -8,12 +8,11 @@
  * motion/black/static facts without introducing a cloud review dependency.
  */
 
-import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EngineError, ErrorCodes } from './errors.js';
-import { runFfmpeg, probeMedia } from './encoder.js';
+import { runFfmpeg, probeMedia, ffmpegCapture } from './encoder.js';
 import { outputIdentity } from './delivery.js';
 
 export const MAX_RENDER_INSPECTION_FRAMES = 24;
@@ -28,7 +27,6 @@ export const MAX_REVIEW_GRID_CELLS = 48;
 const SAMPLE_WIDTH = 64;
 const SAMPLE_HEIGHT = 36;
 const SAMPLE_BYTES = SAMPLE_WIDTH * SAMPLE_HEIGHT;
-const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
 
 const round = (value, digits = 3) => Number(Number(value).toFixed(digits));
 
@@ -143,50 +141,6 @@ export function reviewFrameList({ totalFrames, sceneLayout = [], frames, count =
   const n = Math.max(1, count);
   if (n === 1 || limit === 0) return [0];
   return unique(Array.from({ length: n }, (_, i) => Math.round((limit * i) / (n - 1))));
-}
-
-function ffmpegCapture({ args, ffmpegPath = 'ffmpeg', what, signal, onSpawn, maxBytes = MAX_CAPTURE_BYTES }) {
-  if (signal?.aborted) return Promise.reject(new EngineError(ErrorCodes.CANCELLED, `${what}: cancelled before start`));
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks = [];
-    let bytes = 0;
-    const stderr = [];
-    const abort = () => { try { proc.kill('SIGKILL'); } catch { /* already exited */ } };
-    if (onSpawn && proc.pid) onSpawn(proc.pid);
-    signal?.addEventListener('abort', abort, { once: true });
-    proc.stdout.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes > maxBytes) {
-        abort();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    proc.stderr.on('data', (chunk) => {
-      stderr.push(chunk.toString('utf8'));
-      if (stderr.length > 20) stderr.shift();
-    });
-    proc.on('error', (error) => {
-      signal?.removeEventListener('abort', abort);
-      reject(new EngineError(ErrorCodes.FFMPEG_FAILED, `${what}: failed to start ffmpeg: ${error.message}`));
-    });
-    proc.on('close', (code, killedBy) => {
-      signal?.removeEventListener('abort', abort);
-      if (signal?.aborted) return reject(new EngineError(ErrorCodes.CANCELLED, `${what}: cancelled`));
-      if (bytes > maxBytes) {
-        return reject(new EngineError(ErrorCodes.FFMPEG_FAILED, `${what}: output exceeded ${maxBytes} bytes`));
-      }
-      if (code !== 0) {
-        return reject(new EngineError(
-          ErrorCodes.FFMPEG_FAILED,
-          `${what}: ffmpeg exited with code ${code}${killedBy ? ` (${killedBy})` : ''}`,
-          { stderrTail: stderr.join('').trim().split('\n').slice(-20) },
-        ));
-      }
-      resolve(Buffer.concat(chunks));
-    });
-  });
 }
 
 /** Extract one downscaled PNG from an encoded output, at a frame-number time. */
