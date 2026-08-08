@@ -95,11 +95,20 @@
           <video class="scene" id="video-a" playsinline preload="auto"></video>
           <video class="scene" id="video-b" playsinline preload="auto"></video>
           <video class="scene" id="video-film" playsinline preload="auto"></video>
+          <!-- An UNRENDERED scene drew a striped card with its name on it, which
+               answers "is it rendered" and not "what is it". This draws the
+               composition itself, in the browser, at the playhead's frame — the
+               same thing the scene page does. It is a live preview and NOT the
+               delivery, which is what #live-tag says out loud. -->
+          <iframe id="scene-live" class="scene-live hidden" title="live preview of an unrendered scene"
+            scrolling="no" sandbox="allow-scripts allow-same-origin"></iframe>
           <div id="overlay-layer"></div>
           <div id="caption-layer"></div>
           <div id="scene-placeholder" class="hidden">
             <span class="ph-name"></span><span class="ph-note"></span>
           </div>
+          <div id="live-tag" class="fe-live-tag mono hidden"
+            title="drawn by this browser from the composition, not from a render — render the scene to see what will actually ship">live preview · not rendered</div>
           <div id="delivery-tag" class="fe-delivery-tag mono hidden"
             title="the archived build this player is pinned to — it never switches beneath you"></div>
           <!-- A segment whose file is shorter than the slot the timeline gives

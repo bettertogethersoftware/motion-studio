@@ -78,6 +78,12 @@ test('film page: the static shell serves ONE film surface', async () => {
   for (const file of ['/review.html', '/review.js', '/review.css']) {
     assert.equal((await fetch(base + file)).status, 404, `${file} is retired`);
   }
+
+  // An unrendered scene is drawn live from its composition (v0.28), which needs
+  // the iframe to exist and to be labelled as a preview rather than a render.
+  const shell = await (await fetch(base + '/film.html')).text();
+  assert.match(shell, /id="scene-live"/, 'the live-preview iframe is in the stage');
+  assert.match(shell, /id="live-tag"/, 'and it is labelled, because it is not the delivery');
 });
 
 test('film page: film with no delivery reports advisable-but-unbuilt state', async () => {

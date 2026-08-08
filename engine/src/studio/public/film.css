@@ -211,6 +211,28 @@ body.resizing-rail .rail-grip { background: var(--accent); opacity: 0.7; }
 }
 #scene-placeholder .ph-name { color: var(--text); font-size: 14px; }
 
+/* The unrendered scene, drawn live. Sized to the composition's OWN pixels and
+   scaled into the player box, exactly as the scene page does it — a composition
+   is authored at its render resolution and must not be laid out at some other
+   width, or what you see is a different layout from what will ship. */
+#player-box .scene-live {
+  position: absolute; left: 0; top: 0;
+  border: 0; background: #000;
+  transform-origin: 0 0;
+  display: block;
+}
+#player-box .scene-live.hidden { display: none; }
+/* Says what it is. The film page's promise is "what you scrub is what you
+   ship", and this one frame is the exception — so it is labelled rather than
+   left to look like a render. */
+.fe-live-tag {
+  position: absolute; left: 6px; top: 6px; z-index: 4;
+  background: rgba(12, 14, 18, 0.88); border: 1px dashed var(--dim);
+  color: var(--dim); font-size: 10px; line-height: 1.4; padding: 3px 8px;
+  pointer-events: none; letter-spacing: 0.06em;
+}
+.fe-live-tag.hidden { display: none; }
+
 /* transport reuses .transport/.transport-btn from styles.css */
 .fe-stage .transport { flex-wrap: wrap; }
 #mix-state { font-size: 11px; min-width: 90px; }

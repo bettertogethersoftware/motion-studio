@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### An unrendered scene shows you what it is
+
+The film player drew a striped card with the scene's name on it. That answers
+*is it rendered* — which the timeline's own dot already answered — and not
+**what is it**, which is the question you actually have when a film holds a
+scene called `2026-08-07 18_40_02-public_html – jj@…`. Finding out meant
+leaving the film and opening the scene.
+
+Now the composition is drawn in place, in the browser, at the playhead's frame
+— the same `/preview/<scene>/` iframe and `setFrame(n)` contract the scene page
+uses. It **follows the playhead**, so an unrendered scene can be scrubbed
+rather than merely glimpsed: drag across it and the title pops, the background
+drifts, the picture is there.
+
+It is deliberately **labelled** `live preview · not rendered`. The film page's
+promise is that what you scrub is what you ship, and this is the one exception:
+your browser drew it, not the render engine, so fonts, 3D libraries and heavy
+per-frame work behave like they do in the scene editor rather than like the
+frame-by-frame capture. It tells you what a scene is and roughly how it moves;
+rendering is still what tells you what will ship.
+
+The striped card remains for the cases where there is genuinely nothing to
+draw: a missing footage file, and a gap.
+
 ### Footage trims from its edges, and it is usually free
 
 `trim_footage`, and drag handles on footage blocks in the film timeline. The

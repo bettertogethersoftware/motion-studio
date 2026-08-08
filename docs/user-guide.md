@@ -901,6 +901,15 @@ timeline, one set of rules.
   captions; that player pins one archived build and never switches beneath
   you. A newer build offers itself in a banner, and a build whose length no
   longer matches the cut says so rather than pretending.
+- **A scene that has not been rendered still shows you what it is (v0.28).**
+  It used to be a striped card with the scene's name on it, which tells you
+  nothing when the name is a filename. Now the composition is drawn there in
+  your browser, and it **follows the playhead** — scrub across the scene and it
+  moves. The corner says **live preview · not rendered**, and that distinction
+  is real: your browser drew it, not the render engine, so it tells you what a
+  scene is and roughly how it moves, not exactly what will ship. Render it for
+  that. The striped card still appears where there is genuinely nothing to
+  draw — a missing footage file, or a gap.
 - **Honest progress.** The header shows what the AI reports it is doing
   ("Creating scene demo-shot"), live; when its heartbeat goes stale you see
   *waiting for the next AI run* — completed work and your advice are

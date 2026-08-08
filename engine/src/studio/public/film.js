@@ -523,6 +523,111 @@ $('#btn-problems').addEventListener('click', () => $('#problems-panel').classLis
 const videoEls = [$('#video-a'), $('#video-b')];
 let activeVideo = null;
 
+/* ---- drawing an unrendered scene, live (v0.28) ------------------------ */
+
+/**
+ * A scene that has never been rendered used to show a striped card with its
+ * name on it. That answers "is it rendered" — which the timeline's own dot
+ * already answered — and not "what IS it", which is the question you have when
+ * a film holds a scene called `2026-08-07 18_40_02-public_html — jj@…`.
+ *
+ * So the composition is drawn here instead, in this browser, at the playhead's
+ * frame — the same `/preview/<scene>/` iframe and the same `setFrame(n)`
+ * contract the scene page uses. It follows the playhead, so an unrendered scene
+ * can be scrubbed and not merely glimpsed.
+ *
+ * It is NOT the delivery, and the difference is the film page's whole promise
+ * ("what you scrub is what you ship"). This is the one exception, so it carries
+ * a tag saying so rather than passing for a render. Fonts, 3D libraries and
+ * heavy per-frame work behave like they do in the scene editor, not like the
+ * render engine's frame-by-frame capture.
+ */
+const liveScene = { slug: null, entry: new Map(), pending: false, want: null, ready: false };
+
+function hideLiveScene() {
+  if (liveScene.slug === null) return;
+  liveScene.slug = null;
+  liveScene.ready = false;
+  const f = $('#scene-live');
+  f.classList.add('hidden');
+  f.removeAttribute('src');
+  $('#live-tag')?.classList.add('hidden');
+}
+
+/** The scene's entry file, cached — planFilm does not report it, and it is rarely not the default. */
+function liveEntry(slug) {
+  if (liveScene.entry.has(slug)) return liveScene.entry.get(slug);
+  liveScene.entry.set(slug, 'composition.html');
+  api(sceneApi(slug))
+    .then((s) => { if (s?.config?.entry) liveScene.entry.set(slug, s.config.entry); })
+    .catch(() => { /* the default is right for every scaffolded scene */ });
+  return liveScene.entry.get(slug);
+}
+
+/** Scale the composition's own pixels into the player box. */
+function fitLiveScene(scene) {
+  const f = $('#scene-live');
+  const box = $('#player-box').getBoundingClientRect();
+  const w = scene.width || 1920;
+  const h = scene.height || 1080;
+  f.style.width = `${w}px`;
+  f.style.height = `${h}px`;
+  f.style.transform = `scale(${Math.min(box.width / w, box.height / h)})`;
+}
+
+/**
+ * @returns {boolean} true when the live preview is showing this scene
+ */
+function showLiveScene(scene, sceneFrame) {
+  if (!scene.slug) return false;
+  const f = $('#scene-live');
+  if (liveScene.slug !== scene.slug) {
+    liveScene.slug = scene.slug;
+    liveScene.ready = false;
+    f.classList.remove('hidden');
+    $('#live-tag')?.classList.remove('hidden');
+    f.onload = () => {
+      liveScene.ready = true;
+      // The engine states the frame geometry on every page it opens; a
+      // composition authored against those variables must get them here too or
+      // it lays out against nothing.
+      try {
+        const root = f.contentDocument?.documentElement;
+        if (root) {
+          root.style.setProperty('--ms-width', `${scene.width}px`);
+          root.style.setProperty('--ms-height', `${scene.height}px`);
+        }
+      } catch { /* cross-document mid-load */ }
+      pushLiveFrame();
+    };
+    f.src = `/preview/${encodeURIComponent(`${filmId}/${scene.slug}`)}/${liveEntry(scene.slug)}`;
+  }
+  fitLiveScene(scene);
+  liveScene.want = Math.max(0, Math.min(sceneFrame, (scene.durationInFrames || 1) - 1));
+  pushLiveFrame();
+  return true;
+}
+
+/**
+ * Drive the composition to the wanted frame, one call at a time. Scrubbing
+ * fires far faster than a composition can draw, so a queue would run minutes
+ * behind the pointer; instead the newest wanted frame wins and everything in
+ * between is dropped — which is what a scrub means anyway.
+ */
+async function pushLiveFrame() {
+  if (liveScene.pending || !liveScene.ready) return;
+  const n = liveScene.want;
+  if (n === null) return;
+  liveScene.pending = true;
+  try {
+    const win = $('#scene-live').contentWindow;
+    if (win && typeof win.setFrame === 'function') await win.setFrame(n);
+  } catch { /* iframe mid-reload */ } finally {
+    liveScene.pending = false;
+    if (liveScene.want !== n) pushLiveFrame();
+  }
+}
+
 function fitPlayerBox() {
   const first = state.detail?.scenes.find((s) => !s.missing);
   const w = first?.width ?? 1920, h = first?.height ?? 1080;
@@ -531,6 +636,12 @@ function fitPlayerBox() {
   const pb = $('#player-box');
   pb.style.width = `${Math.max(64, w * scale)}px`;
   pb.style.height = `${Math.max(36, h * scale)}px`;
+  // A live scene is scaled into the box by hand, so it has to be re-scaled when
+  // the box changes — the video elements get this free from `inset: 0`.
+  if (liveScene.slug) {
+    const s = state.detail?.scenes.find((x) => x.slug === liveScene.slug);
+    if (s) fitLiveScene(s);
+  }
   updateLayers(state.playhead);
 }
 window.addEventListener('resize', fitPlayerBox);
@@ -627,6 +738,14 @@ function syncVideo(frame) {
     videoEls.forEach((v) => { v.classList.remove('active'); v.pause(); });
     activeVideo = null;
     $('#shortfall-tag')?.classList.add('hidden');
+    // An unrendered SCENE can still be shown: draw its composition here, at
+    // this frame. Only a scene — footage has no composition to run, and a gap
+    // has nothing at all.
+    if (scene && scene.kind !== 'footage' && !scene.missing && showLiveScene(scene, frame - scene.filmOffset)) {
+      ph.classList.add('hidden');
+      return;
+    }
+    hideLiveScene();
     ph.classList.remove('hidden');
     ph.querySelector('.ph-name').textContent = scene ? scene.name : (totalFrames() ? 'gap' : 'no scenes yet');
     ph.querySelector('.ph-note').textContent = !scene ? 'add scenes with “+ scene”'
@@ -634,6 +753,7 @@ function syncVideo(frame) {
         : 'scene not rendered — render it to preview';
     return;
   }
+  hideLiveScene();
   ph.classList.add('hidden');
 
   // Auditioning an older take substitutes ONLY that scene's picture, in place,
