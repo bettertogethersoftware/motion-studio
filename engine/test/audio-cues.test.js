@@ -21,9 +21,10 @@ import path from 'node:path';
 import {
   fftInPlace, nextPowerOfTwo, spectralFlux, subtractLocalMedian, pickPeaks,
   perFrameRms, detectOnsets, decodeWav16Mono, measureAudioCues, projectCues,
-  CUE_DEFAULTS, MAX_INLINE_ONSETS,
+  measureOnsets, CUE_DEFAULTS, MAX_INLINE_ONSETS,
 } from '../src/core/audio-cues.js';
 import { pcmToWavBuffer, parseWavHeader } from '../src/core/audio.js';
+import { deriveTranscript, withFrames } from '../src/core/transcribe.js';
 
 const SR = 16000; // whisper's extraction rate; the cheapest honest rate to test at
 const FPS = 30;
@@ -242,6 +243,53 @@ test('audio-cues: the summary is small, the arrays are opt-in, the cap is stated
   assert.equal(projectCues(null), null, 'an unmeasurable file projects to nothing, not a throw');
   const small = projectCues({ ...cues, onsets: onsets.slice(0, 3) }, 'summary');
   assert.equal(small.onsetFramesTruncated, undefined, 'no flag when the cap does not bite');
+});
+
+/* ------------------------- onsets through transcribe ------------------------ */
+
+test('audio-cues: onsets survive the transcript cache as seconds, and frame at read time', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-cues-tx-'));
+  try {
+    const { samples } = concatWithGaps([speechBurst(0.8), speechBurst(0.9)], 0.4);
+    const file = path.join(dir, 'speech.wav');
+    await fsp.writeFile(file, pcmToWavBuffer(floatsToPcm16(samples), { sampleRate: SR, channels: 1 }));
+
+    const onsets = await measureOnsets(file);
+    assert.ok(onsets.length > 2, 'cues were found');
+    for (const o of onsets) {
+      assert.equal(o.frame, undefined, 'the cached form carries NO frames — it must serve any fps');
+      assert.ok(o.seconds >= 0 && o.strength > 0 && o.strength <= 1);
+    }
+
+    // One cached transcript, two films at different rates: the same cue must
+    // land on the frame each film would call it.
+    const derived = deriveTranscript({
+      tokens: [], segments: [], durationSeconds: samples.length / SR, onsets,
+    });
+    const at24 = withFrames(derived, 24);
+    const at30 = withFrames(derived, 30);
+    assert.equal(at24.onsets.length, onsets.length);
+    for (let i = 0; i < onsets.length; i++) {
+      assert.equal(at24.onsets[i].frame, Math.round(onsets[i].seconds * 24));
+      assert.equal(at30.onsets[i].frame, Math.round(onsets[i].seconds * 30));
+    }
+    assert.ok(at30.onsets.at(-1).frame > at24.onsets.at(-1).frame, 'and 30 fps is further along than 24');
+
+    // "Not measured" must stay distinguishable from "measured, nothing found":
+    // a transcript cached before cue measurement existed has no onsets key, and
+    // reporting [] for it would claim the audio is flat.
+    assert.equal(withFrames(deriveTranscript({ tokens: [], durationSeconds: 1 }), 30).onsets, null);
+    const legacy = { ...derived };
+    delete legacy.onsets;
+    assert.equal(withFrames(legacy, 30).onsets, null, 'an older cached doc reports unknown, not empty');
+    assert.deepEqual(
+      withFrames(deriveTranscript({ tokens: [], durationSeconds: 1, onsets: [] }), 30).onsets,
+      [],
+      'and silence measured IS an empty list',
+    );
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
 });
 
 /* --------------------------- the verification test -------------------------- */

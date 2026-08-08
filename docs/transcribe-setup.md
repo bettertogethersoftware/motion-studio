@@ -188,12 +188,15 @@ extracted WAV is a **temp file, not an asset**, because nobody asked for it and
   "speechRanges": [{ "startInFrames": 3, "endInFrames": 338 }, …],
   "leadingSilenceFrames": 3, "trailingSilenceFrames": 23,
 
+  // where the audio PUSHES — emphasis, not word boundaries (v0.27)
+  "onsetCount": 61, "onsetFrames": [4, 19, 37, 52, …],
+
   "cached": false, "elapsedMs": 9833,
   "rawSegments": [ … ]   // the vendor's own decode windows — debugging only
 }
 ```
 
-Five things about that shape are deliberate.
+Six things about that shape are deliberate.
 
 **1. Timings are in frames, and they are the product.** Everything that places
 anything in this engine speaks frames; a tool that returns seconds forces a hand
@@ -255,6 +258,28 @@ measured examples from real runs — `small.en` rendered "cutting-edge OLED" as
 **"cutting, HOLED"** and "24/7" as **"20/47"**, both flagged by a low
 `minTokenP`. A caption generated blind from either would have been wrong on
 screen.
+
+**6. `onsetFrames` is emphasis, and it is not `words[]` again** (v0.27).
+`words[]` says when a word is *spoken*; `onsetFrames` says which moments the
+audio *pushes* on — the stressed syllable inside a word, which is where a cut,
+a pop or a graphic belongs. The two disagree usefully: a soft onset can sit
+several frames after the word's start, and a single emphatic word can carry
+one cue while a fast clause carries four.
+
+It costs almost nothing to produce. The 16 kHz mono extraction the model reads
+is already exactly what the detector wants (`core/audio-cues.js` —
+half-wave-rectified spectral flux, local-median subtraction, peak-picking with
+a refractory gap), so it is one more pass over a file that is about to be
+deleted, not a second decode. And it rides this cache the way the words do:
+**seconds in the cache, frames per call**, so one cached transcript serves a
+24 fps film and a 30 fps one.
+
+`onsetFrames: null` means *not measured* — a transcript cached before this
+existed — and comes with `onsetsHint` naming `refresh: true`. That is
+deliberately a different answer from `[]`, which means measured and silent.
+The alternative, bumping the derivation version, would have re-run the **model**
+over every previously transcribed file to recover a cue list: this cache stores
+the derived transcript, not the raw tokens.
 
 ### It is a job, in its own lane
 

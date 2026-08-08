@@ -813,6 +813,15 @@ test('a second call is served from the sidecar, at whatever fps it asks for', { 
   assert.equal(doc.derivationVersion, DERIVATION_VERSION);
   assert.equal(doc.vendor, 'whisper-cpp');
   assert.ok(doc.derived.sentences[0].startSeconds > 0, 'the cache holds seconds, not frames');
+
+  // Emphasis is measured from the same extraction the model read (v0.27), and
+  // rides the cache the way the words do: seconds in, frames out per call.
+  assert.ok(Array.isArray(first.onsets), 'onsets were measured, not skipped');
+  assert.ok(first.onsets.length > 0, 'the tone has an attack to find');
+  assert.ok(doc.derived.onsets?.length > 0, 'and the cache carries them');
+  assert.equal(doc.derived.onsets[0].frame, undefined, 'as seconds only — a cue must serve any fps');
+  assert.equal(second.onsets[0].frame, Math.round(doc.derived.onsets[0].seconds * 24));
+  assert.equal(first.onsets[0].frame, Math.round(doc.derived.onsets[0].seconds * 30));
 });
 
 test('a sidecar from an older derivation is ignored rather than trusted', async () => {

@@ -109,7 +109,9 @@ than you asked for — check the file count if you use it.
 **Try `transcribe_asset { path }` first.** It does everything below and hands back
 what you would otherwise derive by hand: sentences re-segmented on real sentence
 boundaries with `startInFrames`/`durationInFrames`, a `words[]` array with per-word
-frames, `speechRanges` for where you can cut, and per-sentence `minTokenP`. It
+frames, `speechRanges` for where you can cut, `onsetFrames` for where the audio
+*pushes* (emphasis, which is not the same as a word boundary — it is where a cut
+or a graphic belongs), and per-sentence `minTokenP`. It
 takes video directly, caches its results so asking again is free, and runs as a
 job that does not block a render. Having a shell is not a reason to re-derive
 sentence boundaries from millisecond offsets once per session — that derivation is

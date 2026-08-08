@@ -55,6 +55,7 @@ import path from 'node:path';
 
 import { EngineError, ErrorCodes } from './errors.js';
 import { framesForDuration } from './audio.js';
+import { measureOnsets } from './audio-cues.js';
 import { runFfmpeg } from './encoder.js';
 import { defaultDataDir } from './scene.js';
 
@@ -265,7 +266,14 @@ const atFrame = (ms, fps) => Math.round((ms / 1000) * fps);
  * because seconds are fps-independent and one cached transcript must serve a
  * 24 fps film and a 30 fps one alike.
  */
-export function deriveTranscript({ tokens, segments = [], durationSeconds, silenceGapSeconds = 1 }) {
+export function deriveTranscript({
+  tokens, segments = [], durationSeconds, silenceGapSeconds = 1,
+  // Onsets in seconds (core/audio-cues.js), measured from the same extracted
+  // WAV the model read. `null` means "not measured" and stays distinguishable
+  // from `[]` ("measured, none") all the way to the response — a transcript
+  // cached before cue measurement existed must not claim the audio is flat.
+  onsets = null,
+}) {
   const words = flattenWords(tokens);
   const sentences = segmentSentences(words, { segmentStartsMs: segments.map((x) => x.startMs) });
   const ranges = deriveSpeechRanges(sentences, { silenceGapSeconds });
@@ -296,6 +304,7 @@ export function deriveTranscript({ tokens, segments = [], durationSeconds, silen
     rawSegments: segments.map((s) => ({
       text: s.text.trim(), startSeconds: sec(s.startMs), endSeconds: sec(s.endMs),
     })),
+    onsets: onsets ?? null,
   };
 }
 
@@ -338,6 +347,18 @@ export function withFrames(derived, fps) {
       endSeconds: r.endSeconds,
       endInFrames: atFrame(r.endSeconds * 1000, fps),
     })),
+    // Where the voice PUSHES, as opposed to where a word begins (v0.27). A
+    // word boundary is not emphasis: the stressed syllable inside a word is
+    // where a cut or a graphic belongs. `null` = this transcript predates cue
+    // measurement (a cache hit written before it), which is not the same
+    // statement as "no cues in this audio".
+    onsets: derived.onsets === null || derived.onsets === undefined
+      ? null
+      : derived.onsets.map((o) => ({
+        frame: atFrame(o.seconds * 1000, fps),
+        seconds: o.seconds,
+        strength: o.strength,
+      })),
     leadingSilenceSeconds: derived.leadingSilenceSeconds,
     leadingSilenceFrames: derived.leadingSilenceSeconds === null
       ? null
@@ -618,11 +639,17 @@ export async function transcribeMedia({
     });
 
     onPhase('deriving');
+    // The extraction the model just read is already 16 kHz mono PCM — exactly
+    // what the cue detector wants — so emphasis costs one more pass over a WAV
+    // that is about to be deleted, not a second decode. Best-effort: a file the
+    // detector cannot read yields null and the transcript is unaffected.
+    const onsets = await measureOnsets(wavPath).catch(() => null);
     const derived = deriveTranscript({
       tokens: raw.tokens,
       segments: raw.segments,
       durationSeconds: header.seconds,
       silenceGapSeconds,
+      onsets,
     });
     const doc = {
       key,

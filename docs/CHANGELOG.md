@@ -13,8 +13,8 @@ Nothing in the pipeline could have caught it. The render is correct, the mix is
 correct, `render-review` sees a picture that changes and audio that never
 clips. It is a **sync** defect, and sync is what neither half can see alone.
 
-`synthesize_speech` and `preview_audio` now measure the audio they just wrote,
-per frame:
+`synthesize_speech`, `preview_audio` and `transcribe_asset` now measure the
+audio, per frame:
 
 - **`onsetFrames`** — the frames the audio pushes on. Not word boundaries: the
   stressed syllable *inside* a word, which is where a cut, a pop or a stat card
@@ -23,6 +23,19 @@ per frame:
   `cues: "full"` — a value an animation can multiply a scale, radius or opacity
   by. The existing `envelopeDb` keeps its per-second meaning and its "did the
   mix go silent" job; this is a separate, additive field.
+
+On a **supplied** recording the same cues come back from `transcribe_asset`, so
+a film cut around someone else's footage gets emphasis beside the words rather
+than instead of them. It is measured from the 16 kHz mono extraction the model
+already read — one more pass over a file that was about to be deleted, not a
+second decode — and it rides the transcript cache the way the words do: seconds
+in the cache, frames per call, so one cached transcript serves a 24 fps film and
+a 30 fps one. A transcript cached before this existed reports `onsetFrames:
+null` and names `refresh: true`, because "not measured" and "measured, silent"
+are different answers and returning `[]` for both would be a lie. The per-frame
+envelope deliberately stays off this tool: it is fps-*dependent*, so caching it
+means caching per-fps or re-reading an hour-long file on every call, and
+`preview_audio` is the honest place to ask once the asset is on a timeline.
 
 The per-frame envelope is opt-in because a five-minute film at 30 fps is 9,000
 floats, and v0.26 spent a whole program keeping payloads like that out of a

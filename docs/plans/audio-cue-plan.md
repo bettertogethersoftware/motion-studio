@@ -1,11 +1,11 @@
 # Frame-granular audio cues — the two signals a composition cannot get
 
-> **Status: IN PROGRESS — the detector and the two engine-owned surfaces
-> shipped 2026-08-08.** `core/audio-cues.js` plus `cues` on
-> `synthesize_speech` and `preview_audio`, with the three open questions
-> below decided and the detector verified against real narration. Remaining:
-> `onsetFrames` on `transcribe_asset`, word frames for generated speech, and
-> the frame-API exposure (see the TODO). This is the smallest of the open
+> **Status: IN PROGRESS — the detector and all three surfaces shipped
+> 2026-08-08.** `core/audio-cues.js`, `cues` on `synthesize_speech` and
+> `preview_audio`, and `onsetFrames` on `transcribe_asset`, with the three
+> open questions below decided and the detector verified against real
+> narration. Remaining: word frames for generated speech, and the frame-API
+> exposure (see the TODO). This is the smallest of the open
 > plans and the one with the highest ratio of value to work: both signals are
 > already computed *somewhere* in the engine, at the wrong granularity or on
 > the wrong path.
@@ -130,7 +130,7 @@ are useful the moment they are returned.
 - [x] `core/audio-cues.js` — STFT, spectral flux, local-median subtraction, peak-picking, per-frame RMS; all pure (2026-08-08)
 - [x] Per-frame linear `envelope[]` on `synthesize_speech`, `preview_audio` (2026-08-08; `transcribe_asset` deliberately excluded — see the decisions below)
 - [x] `onsetFrames[]` on the same two (2026-08-08)
-- [ ] `onsetFrames[]` on `transcribe_asset` — fits its cache cleanly (onsets are fps-independent in seconds; `withFrames` frames them at read time, exactly as `words[]` already works)
+- [x] `onsetFrames[]` on `transcribe_asset` (2026-08-08) — measured from the 16 kHz extraction the model already read, cached in seconds and framed per call, with `null` reserved for "cached before cue measurement existed"
 - [ ] Word frames for generated speech, without a transcription round trip
 - [x] Test: recover known line starts from engine-generated multi-line narration, assert < 2 frames (2026-08-08, `engine/test/audio-cues.test.js`, 13 tests)
 - [x] Docs: `mcp-setup.md`, `architecture.md` §9.6, `CHANGELOG.md`, both SKILL files (2026-08-08 — the SKILL copies in each client's skill directory need re-copying, per the deploy guide)
@@ -165,6 +165,13 @@ are useful the moment they are returned.
    fps-*dependent*, so caching it means caching per-fps or recomputing over a
    possibly hour-long file on every call. For a supplied recording the honest
    place to get an envelope is `preview_audio`, once the asset is on a timeline.
+   Shipped 2026-08-08, and it forced a fifth decision: **the answer is
+   three-valued.** `[]` is measured-and-silent, `null` is not-measured (a
+   transcript cached before this existed), and the response names `refresh:
+   true` for the second. Bumping `DERIVATION_VERSION` instead would have been
+   tidier and much worse — the cache stores only the derived transcript, not the
+   raw tokens, so invalidating it re-runs the *model* over every previously
+   transcribed file to recover a cue list.
 5. **No sidecar file.** An `<asset>.cues.json` was considered (the
    `transcode.json` precedent) and rejected for now: its one real advantage is
    letting a *composition* fetch cues at render time, and that is the frame-API

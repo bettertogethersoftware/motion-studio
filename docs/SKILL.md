@@ -209,9 +209,10 @@ transcribe_asset {
 }
 ```
 
-Use `sentences` as edit blocks, `words` for word-synchronised graphics, and
-`speechRanges` for safe cuts. `rawSegments` are decoder windows, not edit
-points. Do not quote low-confidence transcription on screen without review. An
+Use `sentences` as edit blocks, `words` for word-synchronised graphics,
+`speechRanges` for safe cuts, and `onsetFrames` for emphasis — where the audio
+*pushes*, which is not the same as where a word begins and is what a cut or a
+hit should land on. `rawSegments` are decoder windows, not edit points. Do not quote low-confidence transcription on screen without review. An
 English-only model rejects an explicit non-English language; choose a
 multilingual model or omit `language` for auto-detection.
 

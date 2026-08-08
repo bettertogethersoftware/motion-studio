@@ -325,6 +325,28 @@ export function decodeWav16Mono(buf, info) {
 export const MAX_INLINE_ONSETS = 400;
 
 /**
+ * Onsets alone, in SECONDS, with no fps involved — the form that survives a
+ * cache. `transcribe_asset` stores its transcript per (file, model, language)
+ * and frames it at read time, so a cue list that carried frames could not be
+ * reused at another fps. Seconds in the cache, frames in the response, exactly
+ * as `words[]` already works.
+ *
+ * Returns null for anything that is not 16-bit PCM, like its siblings.
+ *
+ * @returns {Promise<Array<{seconds: number, strength: number}>|null>}
+ */
+export async function measureOnsets(filePath, opts = {}) {
+  const buf = await fsp.readFile(filePath);
+  const info = parseWavHeader(buf, filePath);
+  if (info.bitsPerSample !== 16 || info.dataOffset === undefined || info.dataSize === 0) return null;
+  const samples = decodeWav16Mono(buf, info);
+  // fps only decides how the peaks are bucketed into frames, and this caller
+  // wants them unbucketed; a high one keeps every distinct cue distinct.
+  return detectOnsets(samples, { sampleRate: info.sampleRate, fps: 1000, ...opts })
+    .map(({ seconds, strength }) => ({ seconds, strength }));
+}
+
+/**
  * The response projection for a cue measurement — the shape `synthesize_speech`
  * and `preview_audio` both return, written once so they cannot drift.
  *

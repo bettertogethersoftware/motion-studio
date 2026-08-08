@@ -891,6 +891,23 @@ five-minute film at 30 fps is 9,000 floats, and the token-efficient program
 always carries is the count, the onset frames, and `envelopePeak` — the
 divisor a caller needs and cannot compute for itself.
 
+`transcribe_asset` takes **onsets but not the envelope**, and the asymmetry is
+the cache. Onsets are fps-independent in seconds, so they store in `derived`
+and `withFrames` frames them per call — one cached transcript serving a 24 fps
+film and a 30 fps one, exactly as `words[]` already does. A per-frame envelope
+is fps-*dependent*: caching it means caching per-fps or recomputing over a
+possibly hour-long file on every call, and the honest place to get an envelope
+for a supplied recording is `preview_audio`, once the asset is on a timeline.
+The measurement runs on the same 16 kHz mono extraction the model read, so it
+costs one more pass over a file that was about to be deleted rather than a
+second decode.
+
+That cache also forces a three-valued answer, which is worth stating because
+collapsing it would be a lie: `onsetFrames: []` means measured and silent,
+while `null` means *not measured* — a transcript cached before cue measurement
+existed. The response says which, and names `refresh: true` as the fix, rather
+than reporting an empty list for an unasked question.
+
 ## 10. Security and sandboxing
 
 The agent-facing write surface is exactly composition source files and

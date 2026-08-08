@@ -101,7 +101,7 @@ import { resolveInTarget } from '../core/sandbox.js';
 import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
 } from '../core/audio.js';
-import { measureAudioCues, projectCues } from '../core/audio-cues.js';
+import { measureAudioCues, projectCues, MAX_INLINE_ONSETS } from '../core/audio-cues.js';
 import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
 
 /* ------------------------------------------------------------------ */
@@ -2973,7 +2973,10 @@ server.registerTool(
       'durationInFrames}) so recorded and generated narration are handled by one code path — `words[]` with ' +
       'per-word start/end frames (this is how you cue a graphic to a spoken word inside a sentence), ' +
       '`speechRanges[]` + `leadingSilenceFrames`/`trailingSilenceFrames` (where you can cut without clipping a ' +
-      'word), and `rawSegments[]` (the vendor\'s own decode windows, for debugging only — they start mid-clause ' +
+      'word), `onsetFrames[]` (v0.27 — the frames the audio PUSHES on, measured from the same extraction the ' +
+      'model read; a stressed syllable is not a word boundary, and it is where a cut or a graphic belongs; ' +
+      'null means a transcript cached before cue measurement existed, so pass refresh: true to measure it), ' +
+      'and `rawSegments[]` (the vendor\'s own decode windows, for debugging only — they start mid-clause ' +
       'and are NOT edit points). ' +
       'CONFIDENCE IS REPORTED, NOT HIDDEN: per-sentence `minTokenP`/`meanTokenP` and per-word `p`. A low minTokenP ' +
       'means the model guessed — never put such a sentence on screen verbatim without the user reading it. Proper ' +
@@ -3115,6 +3118,24 @@ server.registerTool(
       ...(words && page.length < matched.length
         ? { wordsTruncated: true, hint: `Showing ${page.length} of ${matched.length} words — raise maxWords, or use wordsMatching to find the one you need.` }
         : {}),
+      // Emphasis (v0.27), beside the words rather than instead of them. null =
+      // this cached transcript predates cue measurement; `refresh: true`
+      // measures it. That is a different statement from an empty list.
+      ...(t.onsets === null
+        ? {
+          onsetFrames: null,
+          onsetsHint: 'This transcript was cached before cue measurement existed — pass refresh: true to measure where the audio pushes.',
+        }
+        : {
+          onsetCount: t.onsets.length,
+          onsetFrames: t.onsets.slice(0, MAX_INLINE_ONSETS).map((o) => o.frame),
+          ...(t.onsets.length > MAX_INLINE_ONSETS
+            ? {
+              onsetFramesTruncated: true,
+              onsetsHint: `Showing ${MAX_INLINE_ONSETS} of ${t.onsets.length} cue frames — narrow the span you transcribe rather than reading them all.`,
+            }
+            : {}),
+        }),
       speechRanges: t.speechRanges,
       leadingSilenceSeconds: t.leadingSilenceSeconds,
       leadingSilenceFrames: t.leadingSilenceFrames,
