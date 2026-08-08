@@ -2021,6 +2021,10 @@ function sceneBlock(s, index) {
   const advN = unresolvedCount(segmentAdviceMatcher(s));
   if (advN) el.appendChild(adviceBadge(advN));
 
+  // Footage can be TRIMMED at its edges (v0.28); a scene cannot, because a
+  // scene's length is its config and its render. See attachFootageGrips.
+  if (footage && !s.missing) attachFootageGrips(el, s);
+
   // Drag to reorder: scenes are butt-joined, so the only degree of freedom is order.
   el.addEventListener('pointerdown', (ev) => {
     if (ev.target.classList.contains('grip')) return;
@@ -2063,6 +2067,147 @@ function sceneBlock(s, index) {
     });
   });
   return el;
+}
+
+/* ---- trimming footage (v0.28) ---------------------------------------- */
+
+/**
+ * Where each footage segment can be cut for free, keyed by segment id.
+ * Fetched once per segment and dropped whenever the film reloads, because a
+ * trim replaces the file and therefore the grid.
+ */
+const keyframeGrids = new Map();
+
+/**
+ * Start fetching a segment's grid. Deliberately fire-and-forget: a pointerdown
+ * handler must call `pointerDrag` SYNCHRONOUSLY or the pointer capture is set
+ * up after the gesture has already begun, and the first pointermove events go
+ * missing. So the grid is warmed on hover and read synchronously below.
+ */
+function warmFootageGrid(segmentId) {
+  if (keyframeGrids.has(segmentId)) return;
+  keyframeGrids.set(segmentId, null);
+  api(`/api/films/${fid}/footage/${encodeURIComponent(segmentId)}/keyframes`)
+    .then((g) => keyframeGrids.set(segmentId, g))
+    .catch(() => keyframeGrids.set(segmentId, { frames: [], intervalFrames: null, coarse: true }));
+}
+
+/**
+ * The grid if it has arrived, else null. A null grid means the handle moves
+ * freely for this one drag and the SERVER snaps on commit — which is still
+ * honest, because the response says where the cut actually landed and the
+ * toast repeats it.
+ */
+const footageGridNow = (segmentId) => keyframeGrids.get(segmentId) ?? null;
+
+/** The keyframe at or before `frame` — the only in-points a copy can start on. */
+function snapToKeyframe(grid, frame) {
+  let best = 0;
+  for (const f of grid) {
+    if (f > frame) break;
+    best = f;
+  }
+  return best;
+}
+
+/**
+ * Trim handles on a footage block.
+ *
+ * Unlike an audio clip's grips, this is **not** free metadata: it re-cuts the
+ * file. What makes it a handle rather than a job is that the head grip snaps
+ * to the clip's own KEYFRAME GRID, and a cut that starts on a keyframe is a
+ * stream copy — measured at 0.1-1.8 s where the same cut re-encoded is 0.5 s
+ * plus 0.69 s per second KEPT (see the plan's §3). Snapping is therefore not a
+ * UI nicety: it is what keeps the gesture affordable.
+ *
+ * It is also what keeps it honest. `ffmpeg -ss` snaps to the preceding
+ * keyframe *silently*, so a handle that moved freely would promise a frame it
+ * would not deliver. Here the handle can only stop where the cut can land, and
+ * a coarse clip visibly drags coarsely — which is the truth about that clip.
+ *
+ * The tail grip needs no grid: frame 0 is always a keyframe, so shortening the
+ * end is always a copy.
+ */
+function attachFootageGrips(el, s) {
+  const segmentId = s.id;
+  if (!segmentId) return;
+  // Warm the grid on hover so the drag itself never waits on a probe.
+  el.addEventListener('pointerenter', () => warmFootageGrid(segmentId), { once: true });
+
+  const commit = async (body, describe) => {
+    el.classList.add('busy');
+    try {
+      const r = await api(`/api/films/${fid}/footage/${encodeURIComponent(segmentId)}/trim`, {
+        method: 'POST', body,
+      });
+      keyframeGrids.delete(segmentId);
+      await refresh();
+      toast(`${describe} ✓ — ${r.durationInFrames}f by ${r.method === 'copy' ? 'copy' : 're-encode'} `
+        + `in ${(r.elapsedMs / 1000).toFixed(1)}s. ${r.keptOnDisk} is still in assets/.`, { kind: 'info' });
+      for (const w of r.warnings ?? []) toast(w, { kind: 'error' });
+    } catch (err) {
+      toastError(err);
+      renderTimeline();
+    } finally {
+      el.classList.remove('busy');
+    }
+  };
+
+  /* Head grip — moves the IN-POINT through the file. Snapped to the grid. */
+  const head = el.appendChild(document.createElement('div'));
+  head.className = 'grip left';
+  head.title = 'trim the clip start — snaps to where the file can be cut without re-encoding';
+  head.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation();
+    warmFootageGrid(segmentId);
+    const grid = footageGridNow(segmentId);
+    const total = s.durationInFrames;
+    const x0 = s.filmOffset * state.pxf;
+    let cut = 0;
+    pointerDrag(ev, {
+      onMove: (d, e2) => {
+        // Never past the last frame, never before the head of the file.
+        const want = Math.round(Math.max(0, Math.min(total - 1, d)));
+        cut = grid?.frames?.length ? snapToKeyframe(grid.frames, want) : want;
+        el.style.left = `${x0 + cut * state.pxf}px`;
+        el.style.width = `${Math.max(6, (total - cut) * state.pxf)}px`;
+        dragTip(cut === 0
+          ? 'full clip'
+          : `in at ${cut}f · keeps ${total - cut}f (${((total - cut) / fps()).toFixed(2)}s)`
+            + (grid?.coarse ? ' · coarse clip: cuts land seconds apart' : ''), e2);
+      },
+      onDone: (moved) => {
+        el.style.left = ''; el.style.width = '';
+        if (!moved || cut <= 0) { renderTimeline(); return; }
+        commit(
+          { startInFrames: cut, durationInFrames: total - cut, snapToKeyframe: true },
+          `Trimmed ${cut}f off the head`,
+        );
+      },
+    });
+  });
+
+  /* Tail grip — always a copy, because the cut starts at frame 0. */
+  const tail = el.appendChild(document.createElement('div'));
+  tail.className = 'grip right';
+  tail.title = 'trim the clip end — always a fast copy';
+  tail.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation();
+    const total = s.durationInFrames;
+    let keep = total;
+    pointerDrag(ev, {
+      onMove: (d, e2) => {
+        keep = Math.round(Math.max(1, Math.min(total, total + d)));
+        el.style.width = `${Math.max(6, keep * state.pxf)}px`;
+        dragTip(keep === total ? 'full clip' : `keeps ${keep}f (${(keep / fps()).toFixed(2)}s)`, e2);
+      },
+      onDone: (moved) => {
+        el.style.width = '';
+        if (!moved || keep >= total) { renderTimeline(); return; }
+        commit({ startInFrames: 0, durationInFrames: keep }, `Trimmed ${total - keep}f off the tail`);
+      },
+    });
+  });
 }
 
 function showInsertMarker(idx) {

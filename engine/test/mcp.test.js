@@ -202,8 +202,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'review_render_grid',
     // new in v0.27 (copying a scene across films)
     'clone_scene',
-    // new in v0.28 (supplied media as directable scenes)
-    'make_scene_from_footage', 'create_scene_from_image',
+    // new in v0.28 (supplied media as directable scenes, and re-cutting it)
+    'make_scene_from_footage', 'create_scene_from_image', 'trim_footage',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }

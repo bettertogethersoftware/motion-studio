@@ -744,6 +744,9 @@ supplied rather than animation it wrote:
   long that clip is, which the problems panel also reports as a signature
   mismatch. Conform the clip (`transcode_asset`) or correct the segment's
   frame count.
+- **You can now trim a clip on the timeline** (v0.28) by dragging its edges —
+  see *Trimming a clip on the timeline* below. It re-cuts the file rather than
+  hiding part of it, and the original is kept.
 - **Watch it before you cut it in, and after.** In **+ footage** each clip shows
   a frame from itself, its length, and its frame size — with the size in red
   when it does not match the film, which is the thing that would stop the build
@@ -760,6 +763,33 @@ supplied rather than animation it wrote:
 
 Together these mean a film built around your own recording no longer needs anyone
 to run ffmpeg by hand. See [film-setup.md](film-setup.md#footage-on-the-timeline-v022).
+
+### Trimming a clip on the timeline (v0.28)
+
+Footage blocks now have **edges you can drag**, like every other block — but
+unlike the others this one really re-cuts the file, so it is worth knowing what
+it does.
+
+Drag the **right** edge to shorten the end. That is always fast, and it is
+always exact.
+
+Drag the **left** edge to move the start. Here the handle **snaps**, and the
+snapping is the honest part rather than a convenience. A video file can only be
+cut cheaply at certain points; between them it has to be re-encoded, which takes
+seconds to minutes. So the handle stops only where the cut can actually land. A
+clip Motion Studio prepared snaps about six times a second — finer than you can
+drag — and you will not notice. A clip straight off a screen recorder snaps in
+whole seconds, and you will: that is the truth about that file, and a handle
+that glided smoothly and then quietly cut somewhere else would be lying to you.
+
+The original file stays in the film's assets either way, so a trim is never
+destructive — the clip you supplied is still there.
+
+Two things are worth saying plainly about cost. It depends on **what you keep**,
+not on how far you dragged: shaving half a second off a two-minute clip is the
+expensive case, not the cheap one, whenever a re-encode is needed at all. And if
+a clip snaps too coarsely to edit with, preparing it once (ask the AI, or use
+`transcode_asset`) makes every later trim on it instant.
 
 ### A still picture on the timeline (v0.28)
 
@@ -1061,8 +1091,10 @@ is — that is how you drop two seconds of room tone off the front of a take
 without re-cutting the file. The right grip still sets the out-point. The
 inspector shows both as **trim in / trim out**, in source frames, and the
 waveform redraws to the window you kept. Captions and overlays already had
-both edges; footage does not, by design — a footage clip joins the film
-without re-encoding, so trimming one is `transcode_asset`'s job.
+both edges. **Footage got them in v0.28** — but they mean something different
+there: an audio trim is free bookkeeping, while a footage trim re-cuts the
+file, so its left edge snaps to where the file can actually be cut. See
+*Trimming a clip on the timeline*.
 
 - **captions** — text blocks with frame-accurate in/out. A `.srt` sidecar is
   always written next to the built film; tick **burn captions** to also

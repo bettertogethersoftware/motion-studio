@@ -260,6 +260,47 @@ convert **once** and then clone short scenes that each `seekVideo` their own
 range of the same `.webm` — change `IN_POINT` and `durationInFrames`. Further
 scenes cost no further transcode.
 
+### Trimming a footage segment (v0.28)
+
+`trim_footage { film, segmentId, startInFrames?, durationInFrames? }`, and drag
+handles on the footage block in the Studio timeline.
+
+**The prepared file is the trim.** The operation writes a new file beside the
+old one and repoints the segment; `film.json` gains nothing that describes the
+cut a second time, the concat stays `-c copy`, and `framesVerified` simply sees
+a file with the frames its segment claims. The original stays in `assets/`, so
+the edit is reversible — and so its provenance verifies, which is why
+`derivedFrom` moves with the segment.
+
+**It is usually a stream copy.** A cut whose in-point is a **keyframe** needs no
+re-encode, and frame 0 always is one — so a tail trim is always cheap. Measured
+on real 1080p60 footage:
+
+| | cost |
+|---|---|
+| stream copy | 0.1–1.8 s |
+| re-encode | `0.50 s + 0.69 s per second KEPT` |
+
+Cost tracks what *survives*, not what you remove, so nudging one second off a
+152 s segment re-encodes ~105 s of video. What decides which you get is the
+clip's keyframe spacing: engine-prepared footage carries a 10-frame GOP (~1/6 s
+at 60fps, finer than anyone drags), while an as-supplied recording is 50–200
+frames apart. Preparing a coarse clip once with
+`transcode_asset { video: { gop: 10 } }` makes every later trim a copy.
+
+**The in-point is never moved silently.** `ffmpeg -ss` snaps to the preceding
+keyframe without saying so, so off the grid the default here is an exact
+re-encode. `snapToKeyframe: true` opts into the cheap path instead; the
+response reports `startFrame` and `snappedByFrames`, and the out-point is held
+fixed so the window lengthens rather than sliding. In the Studio the handle
+snaps to the clip's real grid, which means a coarse clip visibly drags coarsely
+— the granularity of the gesture is the granularity of the operation.
+
+Use `dryRun: true` to see `method`, the landing frame, `keyframes.intervalFrames`
+and `estimatedMs` before paying for anything. A film with no encode signature
+(no rendered scene) re-encodes against the segment's own probed properties,
+reported as `conformedTo.from: "segment"`.
+
 ### A still image on the timeline (v0.28)
 
 There are still exactly **two** kinds of segment, and a picture is neither — so

@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Footage trims from its edges, and it is usually free
+
+`trim_footage`, and drag handles on footage blocks in the film timeline. The
+prepared file **is** the trim: this writes a new file beside the old one and
+repoints the segment, so nothing in `film.json` describes the cut a second
+time, the lossless concat is untouched, and the frame-count rule that decides
+whether a delivery is honest just sees a file with the frames it claims. The
+original stays in `assets/`, so the edit is reversible.
+
+**The measurement changed the design, which is the point of having taken it.**
+A re-encode of the film's own signature costs `0.50 s + 0.69 s per second
+KEPT` — cost tracks what survives, not what you remove, so nudging one second
+off a real 152 s segment re-encodes ~105 s of video. That is a job. But footage
+the engine prepared carries a ten-frame GOP, and `gopSize` was already in
+`films.js`'s `neednotMatch`, so the same cut as a **stream copy** is 0.1–1.8 s.
+Proven rather than argued: a film built from copy-trimmed segments delivers a
+frame count exactly equal to the sum of its parts, and frames decoded out of
+the *delivery* are bit-identical to frames decoded out of the *segment files* —
+including at the seams.
+
+So the gesture is a handle that commits on release, and what makes it honest is
+**snapping**. `ffmpeg -ss` moves an in-point to the preceding keyframe
+*silently*; here the handle can only stop where the cut can actually land, so a
+prepared clip drags at ~1/6 s and a supplied recording drags in seconds —
+which is the truth about those clips. A tail trim needs no grid at all: frame 0
+is always a keyframe, so shortening the end is always a copy.
+
+Off the grid, the default is an exact **re-encode**, never a silent move.
+`snapToKeyframe: true` opts into the cheap path, and the response reports
+`startFrame` and `snappedByFrames` so the caller knows where the cut landed;
+the out-point is held fixed, so the window lengthens rather than sliding.
+`dryRun: true` reports the method, the landing frame, the clip's keyframe
+spacing and an estimated cost, changing nothing.
+
+Two gaps in the original plan closed on the way. A film with **no encode
+signature** — one with no rendered scene, which is two of the three
+footage-bearing films on the dev machine — now re-encodes against the
+*segment's own* probed properties, reported as `conformedTo.from: "segment"`.
+And the output's frame count is verified against the file **before** the play
+order moves; a mismatch refuses and changes nothing.
+
 ### A still image goes on the timeline — as a scene, not a new kind of block
 
 `create_scene_from_image`, and **+ image** beside **+ footage** in the film

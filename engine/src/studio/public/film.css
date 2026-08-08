@@ -444,6 +444,17 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .blk .grip.left::after { right: auto; left: 2px; }
 .blk .grip:hover::after { border-color: var(--accent); }
 .blk.dragging { opacity: 0.75; cursor: grabbing; z-index: 8; }
+/* A footage trim re-cuts the file, so unlike every other drag on this timeline
+   it is not instant — a copy is a beat, a re-encode is a job. The block says so
+   while it happens, and stops accepting another drag until it lands. */
+.blk.busy { opacity: 0.6; pointer-events: none; }
+.blk.busy .grip { display: none; }
+.blk.busy::after {
+  content: ''; position: absolute; inset: 0;
+  background: repeating-linear-gradient(135deg,
+    rgba(255, 255, 255, 0.10) 0 8px, transparent 8px 16px);
+  pointer-events: none;
+}
 /* Out of the mix — dimmed and dashed, so a silent clip cannot be mistaken for
    one that is simply quiet. */
 .blk-audio.muted { opacity: 0.4; border-style: dashed; }

@@ -83,6 +83,7 @@ import fsp from 'node:fs/promises';
 import { WorkspaceStore } from '../core/store.js';
 import { sceneFromFootage } from '../core/footage-scene.js';
 import { sceneFromImage, DEFAULT_STILL_FRAMES } from '../core/image-scene.js';
+import { trimFootage } from '../core/footage-trim.js';
 import { JobManager } from '../core/jobs.js';
 import {
   captureSingleFrame, captureFrames, renderComposition, renderParallel, renderStill,
@@ -1283,6 +1284,94 @@ server.registerTool(
           + 'before build_film. Edit composition.js to change it; IN_POINT selects which part of the clip it shows.'
         : `Scene "${localId(r.scene)}" is built beside the clip; the play order still shows the footage. `
           + 'Render the scene to compare, then swap it in with update_film.',
+    });
+  }),
+);
+
+server.registerTool(
+  'trim_footage',
+  {
+    title: 'Trim a footage segment to part of itself',
+    description:
+      'Cut a footage segment down to a window of itself (v0.28). The prepared file IS the trim: this writes a NEW ' +
+      'file beside it and repoints the segment, so nothing in film.json describes the cut a second time, the ' +
+      'lossless concat is untouched, and the frame-count rule that decides whether a delivery is honest just sees ' +
+      'a file with the frames it claims. The original stays in assets/, so the edit is reversible. ' +
+      '`startInFrames`/`durationInFrames` index the SEGMENT\'S CURRENT FILE, not the original source — each trim ' +
+      'composes on the last. ' +
+      'IT IS USUALLY A STREAM COPY, and that is the whole point. Measured on real 1080p60 footage: a copy is ' +
+      '0.1-1.8s where re-encoding the same cut is 0.5s + 0.69s per second KEPT (cost tracks what survives, not ' +
+      'what you remove — nudging 1s off a 152s segment re-encodes ~105s of video). A copy is possible when the ' +
+      'in-point lands on a KEYFRAME: frame 0 always is, so a tail-only trim is always cheap. Engine-prepared ' +
+      'footage carries a 10-frame GOP, so its keyframes are ~1/6s apart and almost any cut is cheap; ' +
+      'as-supplied recordings are 50-200 frames apart and mostly are not. ' +
+      'THE IN-POINT IS NEVER MOVED SILENTLY. Off a keyframe, the default is an exact RE-ENCODE. Pass ' +
+      'snapToKeyframe: true to take the preceding keyframe and the cheap path instead — the response then reports ' +
+      '`startFrame` and `snappedByFrames` so you know exactly where the cut landed, and the out-point is held ' +
+      'fixed (the window lengthens rather than sliding). ' +
+      'CALL IT WITH dryRun: true FIRST when the cost matters: it reports `method` (copy|reencode), where the cut ' +
+      'would land, the clip\'s `keyframes.intervalFrames`, and `estimatedMs` for a re-encode — changing nothing. ' +
+      'A film with no encode signature (one with no rendered scene) is handled: a re-encode conforms to the ' +
+      'SEGMENT\'S own probed properties instead, reported as `conformedTo.from: "segment"`. ' +
+      'The output frame count is verified against the file before the play order moves; a mismatch refuses and ' +
+      'changes nothing. To make every later trim on a coarse clip cheap, prepare it once with ' +
+      'transcode_asset { video: { gop: 10 } }. ' +
+      'Errors: `film_not_found`, `invalid_film` (no such segmentId, or the clip is unprobeable), `file_not_found` ' +
+      '(clip missing from assets/), `invalid_config` (the window is not inside the file, or is the whole clip), ' +
+      '`transcode_failed`.',
+    inputSchema: {
+      film: z.string().describe('The film the clip is on'),
+      segmentId: z.string().describe('The footage segment\'s stable `id` — get_film lists one per clip'),
+      startInFrames: z.number().int().min(0).default(0)
+        .describe('In-point within the segment\'s CURRENT file. 0 keeps the head (and is always a cheap copy).'),
+      durationInFrames: z.number().int().positive().optional()
+        .describe('How many frames to keep. Omit to keep everything from startInFrames to the end.'),
+      snapToKeyframe: z.boolean().default(false)
+        .describe('Accept the keyframe at or before startInFrames to get the copy instead of a re-encode. The '
+          + 'response reports where it actually landed; the out-point is held fixed.'),
+      dryRun: z.boolean().default(false)
+        .describe('Report method, landing frame, keyframe spacing and estimated cost. Changes nothing.'),
+      waitMs: z.number().int().min(0).max(600_000).default(120_000)
+        .describe('How long to block. Runs in the transcode lane, never behind a render.'),
+    },
+  },
+  wrap(async ({ film, segmentId, startInFrames, durationInFrames, snapToKeyframe, dryRun, waitMs }) => {
+    const doc = await store.getFilm(qualifyFilm(film));
+    const ffmpegPath = await ffmpegPathOnly();
+    const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
+    const args = {
+      store, filmId: doc.id, segmentId, startInFrames, durationInFrames, snapToKeyframe,
+      ffmpegPath, ffprobePath,
+    };
+    // A dry run only probes, so it never queues: the whole reason to call it is
+    // to find out what the real call would cost before paying for it.
+    if (dryRun) return ok(await trimFootage({ ...args, dryRun: true }));
+
+    const submitted = jobs.startTask({
+      kind: 'transcode',
+      targetId: `${doc.slug}:${segmentId}`,
+      run: ({ signal, onPhase, onChildPid }) =>
+        trimFootage({ ...args, signal, onPhase, onSpawn: onChildPid }),
+    });
+    const waited = await jobs.waitFor([submitted.jobId], { timeoutMs: waitMs, pollMs: 100 });
+    const status = waited.jobs[0];
+    if (status.state === 'error') {
+      throw new EngineError(status.error?.code ?? ErrorCodes.TRANSCODE_FAILED,
+        status.error?.message ?? 'trimming the clip failed', status.error?.detail);
+    }
+    if (status.state !== 'done') {
+      return ok({
+        jobId: submitted.jobId, state: status.state, phase: status.phase, stillRunning: true,
+        hint: `Still trimming (${status.phase}). Poll with wait_for_render { jobIds: ["${submitted.jobId}"] } — `
+          + 'the segment moves only when it finishes.',
+      });
+    }
+    const r = status.result;
+    return ok({
+      ...r,
+      note: `The segment now plays ${r.file} — ${r.durationInFrames} frames from frame ${r.startFrame} of `
+        + `${r.from}, by ${r.method === 'copy' ? 'stream copy' : 're-encode'} in ${r.elapsedMs} ms. `
+        + `${r.from} is still in assets/, so this is reversible.`,
     });
   }),
 );

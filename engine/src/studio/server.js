@@ -55,6 +55,9 @@
  *   POST   /api/films/:fid/scenes            {name,fps?,…} → scaffold a scene into the film
  *   POST   /api/films/:fid/scenes/from-image {image,imageFrom?,name?,slug?,durationInFrames?}
  *                                            → scaffold a scene that holds a still
+ *   GET    /api/films/:fid/footage/:segId/keyframes   where this clip can be cut for free
+ *   POST   /api/films/:fid/footage/:segId/trim        {startInFrames?,durationInFrames?,
+ *                                            snapToKeyframe?,dryRun?} → re-cut the segment
  *   POST   /api/films/:fid/scenes/:slug/clone  {toFilm?,name?} → duplicate a scene
  *                                            (composition, assets, libraries, settings)
  *   GET    /api/scenes/:sid                  config + file list
@@ -189,6 +192,7 @@ import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks, audibleTracks } from '../core/films.js';
 import { sceneFromImage } from '../core/image-scene.js';
+import { trimFootage, keyframeGrid } from '../core/footage-trim.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
 import { resolveReviewPolicy, extractRenderedFrame } from '../core/render-review.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
@@ -1364,6 +1368,45 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           const seed = settings && outputSeedFromSettings(settings, scene.config.output);
           if (seed) scene.config = await store.updateConfig(scene.id, { output: seed });
           return sendJson(res, 201, scene);
+        }
+
+        /* ---- trimming a footage segment (v0.28) ---- */
+        // GET /api/films/:fid/footage/:segmentId/keyframes — where this clip
+        // can be cut for free. The timeline's trim handle snaps to this grid,
+        // which is the whole honesty of the gesture: the granularity you can
+        // drag at IS the granularity the cheap operation has. Measured, not
+        // assumed — an engine-prepared clip is ~1/6 s, a supplied recording
+        // seconds, and the handle should feel like whichever it is.
+        if (isFilmRoute && req.method === 'GET' && sub === 'footage'
+          && parts.length === 6 && parts[5] === 'keyframes') {
+          const doc = await store.getFilm(targetId);
+          const plan = await planFilm({ film: doc, store });
+          const seg = plan.scenes.find((s) => s.kind === 'footage' && s.id === parts[4]);
+          if (!seg || seg.missing) return sendJson(res, 404, { code: 'file_not_found', message: 'no such footage segment' });
+          const probe = await resolveFfprobePath({ dataDir: store.dataDir });
+          const grid = await keyframeGrid({
+            filePath: path.join(store.filmPath(doc.id), seg.footage.replace(/\\/g, '/')),
+            fps: seg.fps ?? plan.fps ?? doc.sceneDefaults?.fps,
+            ffprobePath: probe.path,
+          });
+          return sendJson(res, 200, { segmentId: parts[4], footage: seg.footage, frames: seg.actualFrames, ...grid });
+        }
+
+        // POST /api/films/:fid/footage/:segmentId/trim — the handle's commit.
+        // Same engine call the MCP trim_footage makes, so a cut the human drags
+        // and one the AI asks for are one operation.
+        if (isFilmRoute && req.method === 'POST' && sub === 'footage'
+          && parts.length === 6 && parts[5] === 'trim') {
+          const body = await readBody(req);
+          const probe = await resolveFfprobePath({ dataDir: store.dataDir });
+          const r = await trimFootage({
+            store, filmId: targetId, segmentId: parts[4],
+            startInFrames: body.startInFrames, durationInFrames: body.durationInFrames,
+            snapToKeyframe: body.snapToKeyframe !== false,
+            dryRun: body.dryRun === true,
+            ffmpegPath: await ffmpegPath(), ffprobePath: probe.path,
+          });
+          return sendJson(res, r.dryRun ? 200 : 201, r);
         }
 
         // POST /api/films/:fid/scenes/from-image — the toolbar's "+ image", and

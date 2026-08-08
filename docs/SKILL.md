@@ -376,6 +376,21 @@ a long recording, convert once and clone short scenes that seek their own
 ranges of the same `.webm`; further scenes cost no further transcode. The new
 scene is unrendered — render it before `build_film`.
 
+**Trimming a clip does not need a scene.** `trim_footage { film, segmentId,
+startInFrames?, durationInFrames? }` re-cuts a footage segment in place on the
+timeline: it writes a new file, repoints the segment, and leaves the original in
+`assets/`. Frames index the segment's **current** file, so trims compose. It is
+usually a **stream copy** — 0.1–1.8 s — because a cut starting on a keyframe
+needs no re-encode and frame 0 always is one, so shortening the tail is always
+cheap. Re-encoding costs `0.50 s + 0.69 s per second KEPT`, which is a job: cost
+tracks what survives, so trimming one second off a 152 s clip re-encodes ~105 s.
+Call it with `dryRun: true` when that matters — it reports `method`, the landing
+frame, the clip's `keyframes.intervalFrames` and `estimatedMs` without doing
+anything. Off a keyframe the default is an exact re-encode; `snapToKeyframe:
+true` takes the cheap path and tells you where the cut landed. If a clip's
+keyframes are far apart, `transcode_asset { video: { gop: 10 } }` once makes
+every later trim a copy.
+
 **A still image is not a segment kind either — it is a scene.**
 `create_scene_from_image { film, image }` puts a picture on the play order as
 an ordinary `{slug}` scene holding it, and unlike the footage conversion it

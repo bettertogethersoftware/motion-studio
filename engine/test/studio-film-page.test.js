@@ -386,3 +386,73 @@ test('film page: + image scaffolds a scene from a library still', { skip: !haveF
   assert.equal(missing.data.code, 'file_not_found');
   assert.equal((await j(`/api/films/${enc(stillsFilm)}`)).data.film.scenes.length, 1);
 });
+
+/**
+ * Trimming footage from the timeline (v0.28): the handle's two endpoints. The
+ * grid is what the handle snaps to, and the trim is the same engine call the
+ * MCP `trim_footage` makes — so a cut the human drags and one the AI asks for
+ * are one operation.
+ */
+test('film page: footage trim reports its keyframe grid and re-cuts the segment', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const made = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST', body: { name: 'Trim Film', fps: 30, width: 320, height: 240, durationInFrames: 30 },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.data));
+  const trimFilm = made.data.film.id;
+
+  // A clip with the engine's own 10-frame GOP — the grid a prepared clip has.
+  const clip = path.join(os.tmpdir(), `ms-trim-route-${Date.now()}.mp4`);
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+    '-i', 'testsrc2=size=320x240:rate=30:duration=6',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p',
+    '-g', '10', '-keyint_min', '10', '-sc_threshold', '0', '-frames:v', '180', clip]);
+  const put = await fetch(`${base}/api/films/${enc(trimFilm)}/asset?path=${enc('assets/clip.mp4')}`,
+    { method: 'PUT', body: await fsp.readFile(clip) });
+  assert.ok(put.ok, `asset upload failed: ${put.status}`);
+  await fsp.rm(clip, { force: true });
+
+  const patched = await j(`/api/films/${enc(trimFilm)}`, {
+    method: 'PATCH',
+    body: { patch: { scenes: [{ footage: 'assets/clip.mp4', durationInFrames: 180, label: 'Clip' }] } },
+  });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+  const segId = patched.data.film.scenes[0].id;
+
+  // The grid the handle snaps to.
+  const grid = await j(`/api/films/${enc(trimFilm)}/footage/${enc(segId)}/keyframes`);
+  assert.equal(grid.status, 200, JSON.stringify(grid.data));
+  assert.equal(grid.data.frames[0], 0, 'frame 0 is always a keyframe');
+  assert.ok(grid.data.count > 10, `expected a fine grid, got ${grid.data.count}`);
+  assert.equal(grid.data.coarse, false);
+
+  // A dry run changes nothing.
+  const dry = await j(`/api/films/${enc(trimFilm)}/footage/${enc(segId)}/trim`, {
+    method: 'POST', body: { startInFrames: 30, durationInFrames: 60, dryRun: true },
+  });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.data.method, 'copy');
+  assert.equal((await j(`/api/films/${enc(trimFilm)}`)).data.film.scenes[0].durationInFrames, 180);
+
+  // The commit: a keyframe-aligned head trim is a copy.
+  const cut = await j(`/api/films/${enc(trimFilm)}/footage/${enc(segId)}/trim`, {
+    method: 'POST', body: { startInFrames: 30, durationInFrames: 60, snapToKeyframe: true },
+  });
+  assert.equal(cut.status, 201, JSON.stringify(cut.data));
+  assert.equal(cut.data.method, 'copy');
+  assert.equal(cut.data.startFrame, 30);
+  assert.equal(cut.data.framesVerified, true);
+
+  // The segment moved; the film still plans; the original is still there.
+  const read = await j(`/api/films/${enc(trimFilm)}`);
+  assert.equal(read.data.film.scenes[0].footage, cut.data.file);
+  assert.equal(read.data.film.scenes[0].durationInFrames, 60);
+  assert.equal(read.data.film.scenes[0].id, segId, 'the segment keeps its identity');
+  assert.equal(read.data.detail.scenes[0].framesVerified, true);
+  assert.deepEqual(read.data.detail.problems, [], JSON.stringify(read.data.detail.problems));
+  const assets = await j(`/api/films/${enc(trimFilm)}/assets`);
+  assert.ok(assets.data.files.some((f) => f.path === 'assets/clip.mp4'), 'the original is kept, so this is reversible');
+
+  // An unknown segment is a clean 404, not a half-applied edit.
+  const nope = await j(`/api/films/${enc(trimFilm)}/footage/${enc('seg-nope')}/keyframes`);
+  assert.equal(nope.status, 404);
+});

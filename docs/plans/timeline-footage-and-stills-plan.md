@@ -111,7 +111,23 @@ changed** — which is the point, and is checkable by diff.
 in the film toolbar calling it. Engine first: the tool is the product, the
 button is the convenience.
 
-## 3. Trimming footage — measure before building
+## 3. Trimming footage — measure before building ✅ **delivered 2026-08-08**
+
+> **Shipped as `trim_footage` (`engine/src/core/footage-trim.js`), plus drag
+> handles on footage blocks.** Built from the measurement below rather than
+> from this section's original assumption that a re-encode was unavoidable, so
+> the gesture is a handle that commits on release — §3's own "fast" branch —
+> and the re-encode is the fallback rather than the mechanism.
+>
+> What shipped beyond the text: the **`dryRun`** preview (method, landing
+> frame, keyframe spacing, estimated cost, changing nothing), **frame-count
+> verification before the play order moves** (a bad encode refuses instead of
+> producing a segment that lies about its length), and the **no-signature
+> film** case §3 never covered — a re-encode there conforms to the segment's
+> own probed properties, reported as `conformedTo.from: "segment"`.
+>
+> 17 tests, including the two fixtures that *are* the feature: a clip with a
+> 10-frame GOP and one with a 250-frame GOP.
 
 **The drag re-runs the prepare step.** Pull a footage block's edge and the
 Studio re-transcodes that clip with new `trim` values through `transcode_asset`
@@ -308,6 +324,14 @@ request:
    `0.50 s + 0.69 s per second kept` (~105 s for the one real segment), but a
    **stream copy does the same trim in 0.2–1.8 s**, frame-exact and
    concat-legal, whenever the footage was engine-prepared.
-3. **Trim-as-copy-where-possible**, re-prepare where not — the interaction in
-   §3's last section, chosen from those numbers rather than from §3's original
-   assumption that a re-encode was unavoidable.
+3. ~~**Trim-as-copy-where-possible**, re-prepare where not.~~ **Done
+   2026-08-08** — `trim_footage` plus the timeline handles, built to the
+   interaction in §3's last section.
+
+**This plan is complete.** What is left is not in it: the Studio does not yet
+offer a one-click *"prepare this clip for finer trimming"* for a coarse-grid
+segment (the trim response and the drag tip both name the fix, but the human
+has to reach for `transcode_asset`), and superseded trim outputs accumulate in
+`assets/` because keeping them is what makes a trim reversible and its
+provenance verifiable. Both are follow-ups worth their own entry if they start
+to bite.

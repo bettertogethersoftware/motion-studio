@@ -40,6 +40,7 @@ Motion Studio is three thin entry points around one shared render engine.
           films.js     — film documents: validation, planning, build (§13)
           footage-scene.js — a supplied clip becomes a scene that plays it (§14)
           image-scene.js — a supplied still becomes a scene that holds it (§14)
+          footage-trim.js — re-cutting a footage segment, copy where it can (§14)
           revisions.js — immutable scene-revision archive + pointers (§14)
           deliveries.js— immutable film deliveries + frozen manifests (§14)
           advice.js    — durable human advice, leases, evidence (§14)
@@ -1992,6 +1993,46 @@ happening and the composition is not rewritten around it. And an animated GIF:
 an `<img>` plays one on the wall clock, so parallel render workers would each
 capture a different moment — named loudly, with the conversion route, rather
 than silently fixed.
+
+**Trimming footage** (`core/footage-trim.js`, v0.28) is the third supplied-media
+operation, and the one whose design was decided by a measurement rather than by
+argument. The rule it keeps is the same one that makes footage safe at all:
+**the prepared file is the trim.** A cut writes a new file and repoints the
+segment, so `film.json` never carries a second answer to "which part of this
+clip plays", the concat stays `-c copy`, and `framesVerified` sees a file with
+the frames its segment declares. The retired alternative — a
+`trimStartInFrames` field the build honours — is recorded in the plan's §4: it
+would have forced a per-build pre-trim, trading the lossless concat for
+edit-time convenience, and required editing the very rule that decides whether a
+delivery is honest.
+
+What the measurement changed is *how* the cut is made. Re-encoding to the film's
+signature costs `0.50 s + 0.69 s per second KEPT` — cost tracks what survives,
+so a one-second nudge on a 152 s segment re-encodes ~105 s of video, and the
+fit has no term at all for the size of the edit. That is a job. But the footage
+path prepares clips with `gop: 10`, and `gopSize` was already in `neednotMatch`,
+so the same cut as a **stream copy** is 0.1–1.8 s. That was verified end to end
+rather than reasoned: a film built from copy-trimmed segments delivers exactly
+the sum of its parts' frames, and frames decoded out of the *delivery* are
+bit-identical to frames decoded out of the *segment files*, at the seams
+included.
+
+So the operation takes the copy whenever the in-point is a keyframe (frame 0
+always is, which makes a tail trim unconditionally cheap) and re-encodes
+otherwise — and it will not move an in-point silently, which is the trap
+`ffmpeg -ss` sets by snapping to the preceding keyframe without saying so.
+`snapToKeyframe` makes that an explicit request and the result states where the
+cut landed. The Studio's handle snaps to the clip's real grid, so the
+granularity you can drag at *is* the granularity the cheap operation has: a
+prepared clip drags at a sixth of a second, a supplied recording in seconds.
+
+Two things the plan's text had not covered. A film with **no encode signature**
+— no rendered scene, which is two of the three footage-bearing films on the dev
+machine — has nothing for `matchFilm` to conform to; a re-encode there uses the
+segment's own probed properties, because matching the file you are cutting is
+what keeps it joinable to itself. And the output's frame count is verified
+against the file *before* the play order moves, so a bad encode refuses rather
+than producing a segment that lies about its length.
 
 The preview player stitches **segments**, not scenes: a footage segment is
 served from the film's own Range-capable asset route (`sceneSrc`), because it
