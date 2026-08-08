@@ -201,6 +201,29 @@ The asymmetry is worth stating because it is not obvious: a **tail** trim starts
 at frame 0, which is always a keyframe, so it is *always* available; a **head**
 trim must start on a keyframe, so it is available on a grid.
 
+#### The concat, proven rather than reasoned
+
+That a copied span with a 10-frame GOP joins the timeline was an argument from
+`neednotMatch`, not a result. It has now been **built**: a scratch film of
+`scene → copy-trimmed A (300 f) → copy-trimmed B (180 f) → scene`, so both the
+scene↔footage and footage↔footage seams meet mismatched keyframe structures.
+
+- `planFilm` reports **no problems**, and `framesVerified` is `true` for both
+  copied segments (declared 300/180, actual 300/180).
+- `build_film` succeeded in **1.6 s** and delivered **540 frames — exactly the
+  sum of the segments**, which is the rule that decides whether a delivery is
+  honest.
+- The delivery is 16.2 MB while the two copied segments alone are 16.0 MB, so
+  nothing was re-encoded on the way through.
+- **Pixel identity**: a frame decoded out of the *built film* is bit-identical
+  (SHA-256 over raw RGB) to the same frame decoded out of the *segment file*,
+  at all five sampled positions — including the first and last frame of each
+  copied segment, which are the seams themselves. A re-encode could not survive
+  that test.
+
+So the lossless concat is not merely undisturbed by a differing GOP; the copied
+pixels reach the delivery untouched.
+
 #### The catch, and it is the whole design
 
 The grid is a property of **how the footage arrived**, and it varies by an order
