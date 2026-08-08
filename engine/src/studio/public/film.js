@@ -3397,6 +3397,11 @@ function setTimelineHeight(px) {
  * did not actually measure. */
 function computeFit() {
   const sc = $('#tl-scroll');
+  // BUG-4: the ResizeObserver below can fire while this document's iframe is
+  // being torn down — the element is gone, the callback is not. A document with
+  // no timeline has no fit to compute; the cost of not guarding was one red
+  // console line per closed film, which a real error then had to be found among.
+  if (!sc) return;
   const usable = sc.clientWidth - HEAD_W - TAIL_PX / 2;
   state.fitMeasured = usable > 0;
   state.pxfFit = Math.max(0.005, usable / Math.max(1, totalFrames()));
@@ -4528,9 +4533,35 @@ function renderUpdatedBanner() {
  * draws, read vertically: the human picks a thing here or there and both
  * highlight, because both are views of `film.scenes[]`.
  */
+/**
+ * The film tree's keyboard (U-10). `#fe-tree` has carried
+ * `role="tree" aria-label="film structure"` since it was built, while every row
+ * under it was a plain `div` — so it announced as **a tree containing nothing**.
+ * The role was added in good faith and never finished; this finishes it.
+ *
+ * Rows activate on `pointerdown` rather than `click` (selection has to beat the
+ * timeline's own drag), so `Enter` dispatches a `pointerdown` — the same
+ * listener the pointer reaches, rather than a second copy of what selecting
+ * does. The delegated handler on `#fe-tree` is `dblclick` only, so nothing
+ * double-fires.
+ */
+const filmTreeNav = StudioUtil.treeNav($('#fe-tree'), {
+  rows: () => [...$('#fe-tree').querySelectorAll('.tree-row')],
+  level: (row) => (row.classList.contains('tree-film') ? 1
+    : row.classList.contains('tree-seq') ? 2 : 3),
+  expanded: (row) => (row.classList.contains('tree-seq')
+    ? row.dataset.collapsed !== 'true'
+    : null),
+  toggle: (row) => row.querySelector('.tree-twist')
+    ?.dispatchEvent(new Event('pointerdown', { bubbles: true })),
+  open: (row) => row.dispatchEvent(new Event('pointerdown', { bubbles: true })),
+  key: (row) => row.dataset.key ?? '',
+});
+
 function renderTree() {
   const box = $('#fe-tree');
   if (!box || !state.detail) return;
+  filmTreeNav.capture();   // before the wipe — see treeNav()
   box.innerHTML = '';
   const sel = state.selection;
 
@@ -4550,6 +4581,7 @@ function renderTree() {
   el('span', { class: 'tree-twist', text: '▾' }),
   el('span', { class: 'tree-name', text: state.film?.name ?? 'film' }),
   el('span', { class: 'tree-meta mono', text: state.detail.totalFrames ? timecode(state.detail.totalFrames) : '—' }));
+  rootRow.dataset.key = 'film';
   const filmAdvice = unresolvedCount((a) => a.target?.type === 'film');
   if (filmAdvice) rootRow.appendChild(adviceBadge(filmAdvice));
   box.appendChild(rootRow);
@@ -4561,6 +4593,8 @@ function renderTree() {
       class: `tree-row tree-seq${band.label ? '' : ' anon'}`
         + `${sel?.kind === 'sequence' && sel.sequence === band.label ? ' selected' : ''}`,
     });
+    bandRow.dataset.key = `seq:${key}`;
+    bandRow.dataset.collapsed = String(collapsed);
     bandRow.appendChild(el('span', {
       class: 'tree-twist',
       text: collapsed ? '▸' : '▾',
@@ -4616,6 +4650,7 @@ function renderTree() {
       }),
       el('span', { class: 'tree-name', text: seg.missing ? `⚠ ${seg.slug ?? seg.footage}` : seg.name }),
       el('span', { class: 'tree-meta mono', text: `${seg.durationInFrames ?? 0}f` }));
+      row.dataset.key = `seg:${i}`;
       row.title = footage
         ? `footage — ${seg.footage}`
         : `${seg.slug}${seg.rendered ? '' : ' — not rendered yet'}`;
@@ -4641,6 +4676,7 @@ function renderTree() {
       box.appendChild(row);
     }
   }
+  filmTreeNav.sync();
 }
 
 /* ------------------------- inspector: shared bits ----------------------- */

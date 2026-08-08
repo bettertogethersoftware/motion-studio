@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Both trees have a keyboard, and the film tree stops lying about itself
+
+The Explorer is the app's primary navigation and it was pointer-only: no role,
+no `tabindex`, no arrow keys, no `Enter`. `Ctrl+P` covered opening a document
+you can already name and did nothing for browsing. The film document's
+structure tree was worse in a specific way — it has carried `role="tree"
+aria-label="film structure"` since it was built, while every row under it was a
+plain `<div>`, so it **announced as a tree containing nothing**. The role was
+added in good faith and never finished.
+
+One helper, `treeNav()`, now serves both: `role="treeitem"`, `aria-level`,
+`aria-expanded` where a row collapses, and a **roving tabindex** — one Tab
+reaches the tree, arrows move inside it, `Home`/`End` jump to the ends, `Enter`
+opens or selects. Not a tab stop per row: a 24-scene film would cost 24 Tab
+presses to cross, which is a worse keyboard than none.
+
+Nothing changes for the mouse. The focus ring is the shell's existing
+`:focus-visible` amber outline, which Chromium paints only for keyboard
+interaction, and no DOM was restructured — both trees are flat, with depth
+stated by `aria-level` rather than by wrapping children in `role="group"`,
+which would have meant moving every CSS rule keyed on their row classes to say
+something `aria-level` already says.
+
+`Enter` dispatches the row's own click (Explorer) or `pointerdown` (film tree)
+rather than reimplementing what opening a row does, so the keyboard and the
+pointer cannot route differently.
+
+Three things only driving it in a browser revealed. `ArrowRight` **opened** a
+film instead of expanding it — a workspace row toggles itself, but a film row's
+disclosure is the glyph button beside the name while clicking the row opens the
+document. Focus had to be captured **before** the repaint, not after: both
+renderers begin with `innerHTML = ''`, which destroys the focused node and
+drops focus to `<body>`, so any after-the-fact test is always false and
+expanding a film stranded the keyboard mid-tree. And `aria-expanded` turned out
+to be on two elements at once — the treeitem now owns it and the glyph keeps
+only its own name.
+
+Also fixed, since it is a console error in the same document (**BUG-4**):
+`computeFit` read `#tl-scroll.clientWidth` with no guard, and its
+`ResizeObserver` can fire while the film document's iframe is being torn down —
+the element is gone, the callback is not. One red line per closed film, which a
+real error then had to be found among.
+
 ### A scene no longer runs the Frame API it was born with
 
 Each scene holds its own copy of the Frame API runtime, so it is

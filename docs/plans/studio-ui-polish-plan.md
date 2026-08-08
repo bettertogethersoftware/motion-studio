@@ -404,7 +404,33 @@ investigating it found a plain bug. The palette leaves focus on `<body>`
 when it closes, which is not an ARIA question and costs every user their
 keyboard.
 
-### U-10 — the two trees get a keyboard and real semantics  *(~1 d)*
+### U-10 — the two trees get a keyboard and real semantics  *(~1 d)* — **SHIPPED 2026-08-08**
+
+> `treeNav()` in `studio-util.js`, used by both trees. Verified in the browser
+> against the running Studio: 27 Explorer rows and 16 film-tree rows, all
+> `treeitem`, **one tab stop each**, arrows/Home/End/Enter, and expand-collapse
+> with focus surviving both rebuilds.
+>
+> **Three things the plan did not foresee, each found by driving it:**
+>
+> - **`ArrowRight` opened a film instead of expanding it.** A workspace row
+>   toggles itself, but a film row's disclosure is the glyph *button* beside the
+>   name and clicking the row opens the document. `toggle` now clicks the
+>   control, not the row.
+> - **Capture focus BEFORE the repaint, not after.** Both renderers start with
+>   `innerHTML = ''`, which destroys the focused node and drops focus to
+>   `<body>` — so any after-the-fact "was focus ours" test is always false and
+>   expanding a film stranded the keyboard. The helper exposes `capture()` for
+>   the top of a repaint, which is the `captureFocus`/`restoreFocus` shape this
+>   slice was told to reuse; the event-based version I tried first was the
+>   deviation.
+> - **`aria-expanded` was on two elements.** U-14 put it on the film row's
+>   glyph; the treeitem now owns it, and the glyph keeps only its own name.
+>
+> `aria-selected` was deliberately **not** added: U-14's `aria-current="page"`
+> already states which document is open, and a second selection vocabulary
+> beside it would announce the same fact twice — the same duplication the
+> glyph's `aria-expanded` had.
 
 The Explorer is the app's primary navigation and it is **pointer-only**.
 `renderTree` builds `<li>` rows with click handlers

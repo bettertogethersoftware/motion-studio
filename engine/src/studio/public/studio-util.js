@@ -406,9 +406,139 @@
     } catch { /* shell mid-navigation */ }
   }
 
+  /* ------------------------------- tree keyboard ---------------------------- */
+
+  /**
+   * Give a tree a keyboard and real semantics (U-10). Two documents have one
+   * each — the Explorer's workspace tree and the film document's structure
+   * tree — and they are the same job done twice, which is exactly the
+   * condition that produced the duplicated toast() this file exists to delete.
+   *
+   * **Roving tabindex, not a tab stop per row.** One Tab reaches the tree and
+   * the arrows move inside it. Per-row `tabindex="0"` would cost 24 Tab presses
+   * to cross a 24-scene film, which is a worse keyboard than none.
+   *
+   * **Both trees are FLAT in the DOM** — rows are siblings and nesting is
+   * indentation — so depth is stated with `aria-level` rather than by wrapping
+   * children in `role="group"`. That is a real choice: the wrapper version is
+   * the textbook ARIA tree, and it would mean restructuring both renderers and
+   * every CSS rule keyed on their row classes, to say something `aria-level`
+   * already says correctly.
+   *
+   * `sync()` is called after every repaint. Both trees rebuild wholesale, so it
+   * also restores the roving position by KEY rather than by index: a row that
+   * survived a rebuild under a different position is still the row you were on.
+   *
+   * @param {Element} container
+   * @param {object} o
+   * @param {() => Element[]} o.rows     focusable rows, in visual order
+   * @param {(row) => number} o.level    1-based depth for aria-level
+   * @param {(row) => boolean|null} o.expanded  null when the row does not expand
+   * @param {(row, expand: boolean) => void} o.toggle
+   * @param {(row) => void} o.open       Enter, and the double-purpose of ArrowRight
+   * @param {(row) => string} o.key      identity that survives a repaint
+   */
+  function treeNav(container, o) {
+    if (!container) return { sync() {} };
+    container.setAttribute('role', 'tree');
+    let currentKey = null;
+    // Which row focus was last on, so a rebuild can be told apart from the user
+    // deliberately leaving. Both renderers start with `innerHTML = ''`, which
+    // destroys the focused node and drops focus to <body> BEFORE sync() runs —
+    // so "is focus inside the container" is already false by the time we could
+    // ask, and expanding a film with the keyboard would silently strand you.
+    // Was focus ours when the repaint began? Asked BEFORE the wipe, not after:
+    // both renderers start with `innerHTML = ''`, which destroys the focused
+    // node and drops focus to <body>, so by the time sync() could look the
+    // answer is always "no" and expanding a film would strand the keyboard.
+    // This is the shape the film inspector already uses (captureFocus /
+    // restoreFocus) rather than a second invention.
+    let heldFocus = false;
+
+    container.addEventListener('focusin', (e) => {
+      // The roving position follows focus however it ARRIVED — clicking a row
+      // or tabbing into one moves it too, or the next repaint restores to
+      // wherever the arrows last were and the keyboard jumps somewhere else.
+      const row = e.target.closest?.('[role="treeitem"]');
+      if (row) currentKey = o.key(row);
+    });
+
+    const rowsNow = () => o.rows().filter(Boolean);
+    const indexOfCurrent = (rows) => {
+      const i = rows.findIndex((r) => o.key(r) === currentKey);
+      return i === -1 ? 0 : i;
+    };
+
+    function focusRow(rows, i, { moveFocus = true } = {}) {
+      const row = rows[Math.max(0, Math.min(rows.length - 1, i))];
+      if (!row) return;
+      currentKey = o.key(row);
+      for (const r of rows) r.tabIndex = r === row ? 0 : -1;
+      if (moveFocus) row.focus();
+    }
+
+    container.addEventListener('keydown', (e) => {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;      // shell chords stay the shell's
+      const rows = rowsNow();
+      if (!rows.length) return;
+      const row = e.target.closest?.('[role="treeitem"]');
+      if (!row || !rows.includes(row)) return;
+      const i = rows.indexOf(row);
+      const expanded = o.expanded(row);
+
+      switch (e.key) {
+        case 'ArrowDown': focusRow(rows, i + 1); break;
+        case 'ArrowUp': focusRow(rows, i - 1); break;
+        case 'Home': focusRow(rows, 0); break;
+        case 'End': focusRow(rows, rows.length - 1); break;
+        case 'Enter': o.open(row); return;                  // no preventDefault: the row decides
+        case 'ArrowRight':
+          if (expanded === false) o.toggle(row, true);
+          else focusRow(rows, i + 1);
+          break;
+        case 'ArrowLeft':
+          if (expanded === true) { o.toggle(row, false); break; }
+          // Otherwise step OUT: the nearest row above at a shallower level.
+          for (let j = i - 1; j >= 0; j--) {
+            if (o.level(rows[j]) < o.level(row)) { focusRow(rows, j); break; }
+          }
+          break;
+        default: return;
+      }
+      e.preventDefault();
+      e.stopPropagation();   // the film document binds bare arrows to the playhead
+    });
+
+    return {
+      /** Call at the top of a repaint, before the rows are replaced. */
+      capture() {
+        heldFocus = container.contains(document.activeElement);
+      },
+      sync() {
+        const rows = rowsNow();
+        // Ours before the repaint, or ours right now (a sync with no repaint).
+        const hadFocus = heldFocus || container.contains(document.activeElement);
+        heldFocus = false;
+        for (const row of rows) {
+          row.setAttribute('role', 'treeitem');
+          row.setAttribute('aria-level', String(o.level(row)));
+          const ex = o.expanded(row);
+          if (ex === null) row.removeAttribute('aria-expanded');
+          else row.setAttribute('aria-expanded', String(ex));
+          row.tabIndex = -1;
+        }
+        if (!rows.length) return;
+        // Keep focus inside the tree across a rebuild that replaced the node it
+        // was on — otherwise expanding a film drops you back to <body>, which
+        // is the palette bug (U-11) in a different costume.
+        focusRow(rows, indexOfCurrent(rows), { moveFocus: hadFocus });
+      },
+    };
+  }
+
   window.StudioUtil = {
     $, enc, api, toast, toastError, askForText, askToConfirm,
     shell, hostShell, registerDocument, syncDocument, openDocument,
-    bindShellKeys, subscribeProduction, PRODUCTION_EVENTS,
+    bindShellKeys, subscribeProduction, PRODUCTION_EVENTS, treeNav,
   };
 })();

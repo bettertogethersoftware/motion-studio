@@ -216,8 +216,40 @@ async function loadFilmScenes(filmId) {
   return sceneFolders;
 }
 
+/**
+ * The rail's keyboard (U-10). It was pointer-only: no role, no tabindex, no
+ * arrows, no Enter — and this is the app's primary navigation. `Ctrl+P` covered
+ * opening a document you can already name and did nothing for browsing.
+ *
+ * Levels are stated rather than nested: the `<ul>` is flat and depth is
+ * indentation, so a workspace is 1, a film or the library is 2, a scene is 3.
+ * `Enter` dispatches the row's own click, so the keyboard and the pointer can
+ * never route differently — a second copy of "what does opening this do" is
+ * how they drift.
+ */
+const explorerNav = StudioUtil.treeNav($('#workspace-tree'), {
+  rows: () => [...$('#workspace-tree').querySelectorAll(
+    'li.tree-ws, li.tree-film, li.tree-scene, li.tree-lib, li.tree-first-film',
+  )],
+  level: (row) => (row.classList.contains('tree-ws') ? 1
+    : row.classList.contains('tree-scene') ? 3 : 2),
+  expanded: (row) => {
+    if (row.classList.contains('tree-ws')) return !collapsedWs.has(row.dataset.key.slice(3));
+    if (row.classList.contains('tree-film')) return expandedFilms.has(row.dataset.key.slice(5));
+    return null;
+  },
+  // A workspace row toggles itself; a film row's disclosure is the glyph
+  // BUTTON beside its name, and clicking the row opens the film instead. Using
+  // the row for both is how ArrowRight opened a document in testing rather than
+  // expanding it.
+  toggle: (row) => (row.querySelector('button.tree-ico') ?? row).click(),
+  open: (row) => row.click(),
+  key: (row) => row.dataset.key ?? '',
+});
+
 function renderTree() {
   const ul = $('#workspace-tree');
+  explorerNav.capture();   // before the wipe — see treeNav()
   ul.innerHTML = '';
   if (!state.tree.length) {
     ul.appendChild(el('li', 'dim tree-note', 'no workspaces yet — “+ workspace” starts one'));
@@ -227,6 +259,7 @@ function renderTree() {
     const open = !collapsedWs.has(ws.id);
 
     const wsRow = el('li', 'tree-ws');
+    wsRow.dataset.key = `ws:${ws.id}`;
     const name = el('span', 'ws-name', ws.name);
     name.title = `${ws.name} — ${ws.path}`;
     const add = el('button', 'ghost tiny tree-add', '+ film');
@@ -246,6 +279,7 @@ function renderTree() {
       // The row's "+ film" only appears on hover, which would leave a fresh
       // workspace with no visible way forward — so the empty state IS the button.
       const first = el('li', 'tree-note tree-first-film');
+      first.dataset.key = `first:${ws.id}`;
       first.append(glyph('add'), el('span', 'p-name dim', 'first film'));
       first.title = 'create this workspace\'s first film';
       first.addEventListener('click', () => openNewFilmDialog(ws.id));
@@ -255,6 +289,7 @@ function renderTree() {
     // Library row: the workspace's shared-asset surface (the human uploads,
     // the agent consumes via list_shared_assets / use_shared_asset).
     const lib = el('li', 'tree-lib' + (state.libraryWs === ws.id ? ' active' : ''));
+    lib.dataset.key = `lib:${ws.id}`;
     lib.append(
       glyph('library'),
       el('span', 'p-name', 'library'),
@@ -265,6 +300,7 @@ function renderTree() {
     ul.appendChild(lib);
   }
   syncTreeSelection();
+  explorerNav.sync();
 }
 
 /**
@@ -362,6 +398,7 @@ function appendFilmRows(ul, f) {
 
   const row = el('li', 'tree-film' + (f.broken ? ' missing' : '') + (fOpen ? ' expanded' : ''));
   row.dataset.doc = docKey('film', f.id);
+  row.dataset.key = row.dataset.doc;
   const name = el('span', 'p-name', f.name);
   name.title = f.broken
     ? `${f.name} — film.json is broken or missing`
@@ -387,7 +424,9 @@ function appendFilmRows(ul, f) {
   const standing = f.working
     ? `${f.working.agent} — ${f.working.activity} (${f.working.ageSeconds}s ago)`
     : FILM_STANDING[f.state]?.[1] ?? '';
-  mark.setAttribute('aria-expanded', String(fOpen));
+  // `aria-expanded` lives on the ROW, which is the treeitem (U-10). It was here
+  // too, from U-14 — two elements claiming one disclosure state, announced
+  // twice. The button keeps its own name, which is the part it alone can say.
   mark.setAttribute('aria-label', `${fOpen ? 'hide' : 'show'} scenes${standing ? ` — ${standing}` : ''}`);
   mark.title = `${fOpen ? 'hide' : 'show'} scenes${standing ? `
 ${standing}` : ''}`;
@@ -414,6 +453,7 @@ ${standing}` : ''}`;
   for (const s of scenes) {
     const sRow = el('li', 'tree-scene' + (s.missing ? ' missing' : ''));
     sRow.dataset.doc = docKey('scene', s.id);
+    sRow.dataset.key = sRow.dataset.doc;
     const sName = el('span', 'p-name', s.name);
     sName.title = s.id;
     sRow.append(standingGlyph('scene', SCENE_STANDING, s.missing ? 'missing' : rendered[s.id]), sName);

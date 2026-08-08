@@ -13,8 +13,8 @@ measurement, never a suspicion), who is bitten and how badly, the workaround if
 one exists, and the candidate fixes with their costs. If an entry cannot carry
 evidence it is not a bug report yet — reproduce it first.
 
-**Open: BUG-3, BUG-4.** BUG-1 was fixed 2026-08-08 and BUG-2 on 2026-08-06;
-both are kept below with the fix noted, because the evidence is the useful part.
+**Open: BUG-3.** BUG-1 and BUG-4 were fixed 2026-08-08, BUG-2 on 2026-08-06;
+all are kept below with the fix noted, because the evidence is the useful part.
 
 ---
 
@@ -195,7 +195,14 @@ single function every edit funnels through is cheap insurance.
 
 ---
 
-## BUG-4 — `computeFit` throws on a film document that is closing
+## BUG-4 — `computeFit` throws on a film document that is closing — **FIXED 2026-08-08**
+
+> Fix (1), the guard, taken with U-10 since it is a console error in the same
+> document: `const sc = $('#tl-scroll'); if (!sc) return;`. A document with no
+> timeline has no fit to compute. Fix (2) — disconnecting the observer on
+> teardown — is still not worth it on its own: the shell removes the frame
+> without waiting on anything but the save flush, so the guard is needed
+> underneath either way.
 
 **Found** 2026-08-06, in the control run for the Explorer-standing change (the
 same error appears on unmodified `master`, so it predates it). **Severity:**

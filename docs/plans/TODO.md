@@ -177,11 +177,16 @@ Active plan documents:
        one can exist, and a clip can be dragged between them), audio clips trim
        from the head as well as the tail — a new engine field,
        `trimStartInFrames`, proven against ffmpeg — and the audio picker plays
-       each file before you place it. **Remaining: U-10 (both trees), ~1 day.
-       U-13 (timeline blocks) was retired 2026-08-08** — the slice nominated
-       itself as the cut, selection was its only missing piece, and the
-       inspector is already a keyboard path to every value a selected block
-       exposes ([retired.md](retired.md)).
+       each file before you place it. **U-10 shipped 2026-08-08** — one
+       `treeNav()` helper in `studio-util.js` giving both trees roles, levels
+       and a roving tabindex, verified in the browser (one tab stop each,
+       arrows/Home/End/Enter, expand-collapse with focus surviving the
+       rebuild); the film tree had claimed `role="tree"` since it was built
+       while announcing as a tree containing nothing. **U-13 (timeline blocks)
+       was retired the same day** — the slice nominated itself as the cut,
+       selection was its only missing piece, and the inspector is already a
+       keyboard path to every value a selected block exposes
+       ([retired.md](retired.md)). **The Studio UI program is closed.**
 6. [ ] **Vendor-boundary remainder**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
        extraction first). **C-2 desktop packaging was retired 2026-08-08** —
@@ -288,11 +293,10 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       delivery" fails rarely under the full parallel run, passes standalone
       and on re-run. Worth one root-cause hour before it erodes trust in
       red suites.
-- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — **two open**,
-      neither blocking (BUG-1 fixed 2026-08-08, BUG-2 2026-08-06).
+- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — **one open**,
+      not blocking (BUG-1 and BUG-4 fixed 2026-08-08, BUG-2 2026-08-06).
       **BUG-3**: the film page accepts edits before it has loaded, and drops
-      them. **BUG-4**: `computeFit` throws on a document being torn down — one
-      console line, one-line fix.
+      them.
 
 ## Parked, with reasons
 
