@@ -81,7 +81,7 @@ Active plan documents:
 | [docker-support-plan.md](docker-support-plan.md) | the containerized third distribution tier — demo-in-a-box, server-hosted Studio, MCP sidecar (proposed, 1–2 d) |
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets |
-| [timeline-footage-and-stills-plan.md](timeline-footage-and-stills-plan.md) | trimming footage from both edges, and `+ image` as a play-order segment — both approved from use 2026-08-08; the footage half turns on keeping a trim frame-exact without losing the lossless concat |
+| [timeline-footage-and-stills-plan.md](timeline-footage-and-stills-plan.md) | `+ image` as a scaffolded scene, and trimming footage by re-running its prepare step — **revised 2026-08-08** to keep both outside the assemble path, the frame-count rule and the segment-kind walks; scene-from-image is next |
 | [batch-templating-plan.md](batch-templating-plan.md) | one composition, many data rows — Slice 0 is an example and ships on its own; the engine slices are **gated on a named use case** (proposed 2026-08-08) |
 | [auto-reframe-plan.md](auto-reframe-plan.md) | `measure_reframe` — the hard half of aspect variants |
 | [ai-only-desktop-vendor-boundary-plan.md](ai-only-desktop-vendor-boundary-plan.md) | **delivered 2026-08-04 as v0.26.0** (Slices 0/A/B/C-1 — see [completed.md](completed.md)); kept for the two remainders below |

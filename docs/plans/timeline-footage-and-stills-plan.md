@@ -1,129 +1,138 @@
-# Trimming footage, and putting a still on the timeline
+# Stills on the timeline, and trimming footage — without touching the build path
 
-> **Status: PROPOSED 2026-08-08.** Both features approved from use ("we can
-> resize audio both ways but we cannot resize footage", "we should allow import
-> images as well like `+ image`"). Written before implementation because the
-> first one carries a decision — frame-exactness versus the lossless concat —
-> that must be made deliberately rather than discovered halfway through a build
-> path. Estimate: 1–2 days each, independent of one another.
+> **Status: REVISED 2026-08-08, reversing this document's own first revision
+> the same day.** Both features are still wanted; both are now specified in a
+> shape that stays **outside the engine's load-bearing paths**, which is the
+> stated constraint. Estimate: scene-from-image ~1 day, trim ~1 day plus a
+> measurement first. Independent of each other.
+>
+> **What changed and why.** The first revision proposed a `trimStartInFrames`
+> field on footage segments plus a build-time pre-trim, and a third segment kind
+> for stills. Reading the build path killed both. They are recorded in §4 so
+> they are not re-proposed.
 
-## 1. What is true today
+## 1. The constraint, stated as a test
 
-| | audio track | footage segment |
-|---|---|---|
-| in-point into the source | `trimStartInFrames` (U-15) | **none** |
-| out-point | `trimEndInFrames` (U-15) | **none** |
-| length on the timeline | derived from the trims | `durationInFrames`, declared and probe-verified |
-| trimmable in the Studio | yes, both edges | no |
+The core is the **assemble path** (`film.js` `assembleFilm` → `concatSegments`,
+`-c copy`), the **frame-count verification** that decides whether a delivery is
+honest (`planFootage`'s `framesVerified`, `verifyFrameCount` at promotion), and
+the **segment-kind walks** that ask "is this a scene?". A change is safe for
+this plan if it adds nothing to those three.
 
-`checkFootage` ([films.js:157](../../engine/src/core/films.js:157)) accepts
-`footage`, `durationInFrames`, `label`, `sequence`, `id` and `derivedFrom` —
-there is no in-point anywhere in the schema. A footage segment therefore always
-plays its file from frame 0 for the number of frames its slot declares, and a
-slot longer than the clip holds the last frame (which the player now says out
-loud, v0.27).
+Both features below pass that test by construction: one is a scaffolder that
+produces an ordinary scene, the other is the Studio orchestrating two existing
+engine operations. Neither adds a field to `film.json`, a branch to the concat,
+or a case to a walk.
 
-Stills have no place in the play order at all. `+ overlay` already accepts an
-image and is the right tool for a logo or a lower third, but an overlay is
-*over* something — there is no way to say "this picture is the frame, for four
-seconds".
+## 2. Scene-from-image — build this first
 
-## 2. The decision that governs the footage half
+**`+ image` scaffolds a scene that displays a still**, exactly as `+ footage`
+scaffolds one from a clip. The play order receives an ordinary `{slug}` segment
+and nothing downstream can tell the difference.
 
-A film assembles by **lossless concat**: `-f concat -c copy`
-([encoder.js:214](../../engine/src/core/encoder.js:214)). Nothing is
-re-encoded unless the finishing pass has overlays or burnt captions.
+Why a scene rather than a new segment kind: a scene is **strictly more**. A
+still segment could only sit there; a scene can be pushed in on, have text laid
+over it, cross-fade its own contents — and the author can open it and direct it,
+which is the product's whole shape. The cost is also lower, which is the
+unusual part: no new kind means no walk to update.
 
-The concat demuxer supports `inpoint`/`outpoint`, so a trim looks free. **It is
-not, and this is the trap:** with `-c copy` those directives seek to the nearest
-**keyframe**. A 240-frame trim would deliver whatever the GOP boundary allows —
-and this engine derives every later offset from `durationInFrames`, verifies the
-delivered frame count at promotion (`verifyFrameCount`), and refuses to assemble
-a scene whose settings changed. A keyframe-snapped trim breaks that invariant
-silently, in the one place the engine promises exactness.
+**Lighter than `sceneFromFootage`, which is the model.** That one must
+transcode video to match the film's signature. A still needs **no ffmpeg at
+all**: copy the file into the scene's `assets/`, write a composition that draws
+it, register the scene. The expensive, failure-prone half of the existing
+function is simply absent.
 
-Three honest ways out:
+### What it does
 
-| | how | cost |
-|---|---|---|
-| **A. Pre-trim to a frame-exact intermediate** | a trimmed segment is cut into `out/.staging/` with `-ss`/`-frames:v` at the film's encode voice, and the concat consumes that | one re-encode per trimmed segment per build; the concat stays lossless for everything else. **Recommended** |
-| **B. `inpoint`/`outpoint` with `-c copy`** | one line in the concat list | free, and wrong: keyframe-snapped, so the frame count is not what the timeline says. Only acceptable if the trim is *advisory*, which it is not |
-| **C. Re-run `transcode_asset`** | the drag edits the transcode's `trim`, which is already frame-exact, and the segment points at the new file | no build-path change at all, and provenance stays truthful (`derivedFrom` already records the transcode) — but a re-encode of the whole clip on every drag, and it mutates an asset other segments may share |
+1. Resolve the image — a workspace-library path (the common case, `+ image`
+   opens the library picker) or a film-relative `assets/` path.
+2. **Probe it with `probe_asset`'s picture facts** (v0.27) — `width`, `height`,
+   `hasAlpha`, `contentBox`. This is what lets the scaffolder choose honestly
+   between cover and contain instead of guessing, and it is already built.
+3. Copy into the new scene's `assets/`, using the workspace library's
+   hardlink-on-use path where the source is a library file.
+4. Write a composition: the image full-frame, `object-fit: cover` when the
+   aspect is close and `contain` on a letterbox background when it is not, with
+   the chosen mode stated in a comment so the author can flip it.
+5. Create the scene at the film's geometry and append it to the play order —
+   the same call `+ footage` ends with.
 
-**Take A.** It confines the cost to the segments that are actually trimmed,
-keeps the lossless path for the common case, and reuses the staging discipline
-P0-1 already built. State the re-encode in the build result the way the
-deliverable re-encode is stated, so it is visible rather than inferred from a
-timing difference.
+### Rules
 
-## 3. Schema: one length field, not two
+- **The composition must be plain.** The point of a scene over a segment is
+  that it can be directed afterwards, and an author reading a wall of generated
+  cleverness will not direct it. One `<img>`, one rule, one comment.
+- **Duration is a caller's choice with a stated default** (the film's
+  `sceneDefaults`, else 90 frames). A still has no natural length, and picking
+  one silently is the kind of invention this backlog dislikes.
+- **`hasAlpha` is reported, not resolved.** A transparent PNG over the film's
+  background is a legitimate look and so is a matted one; say which is
+  happening rather than choosing.
+- Nothing is written outside the new scene folder.
 
-Audio derives its length from `trimStart`/`trimEnd` because an audio track has
-no slot. **Footage has a slot**, and `durationInFrames` is load-bearing:
-`planFilm` resolves every later offset from it and probes the file against it.
+### Acceptance
 
-So footage gains **`trimStartInFrames` only**:
+A library PNG becomes a scene in one call; the scene renders at the film's
+geometry with the image filling the frame; a portrait image in a landscape film
+letterboxes rather than stretching; the play order gains exactly one `{slug}`
+entry; `planFilm`'s problems are empty; and **no code outside the scaffolder
+changed** — which is the point, and is checkable by diff.
 
-- `trimStartInFrames` — the in-point, a source-frame offset at the film's fps.
-- `durationInFrames` — unchanged in meaning: how many frames this segment
-  occupies. The segment plays source frames `[trimStart, trimStart + duration)`.
+### Surfaces
 
-Dragging the **left** edge raises `trimStartInFrames` and lowers
-`durationInFrames` by the same amount; dragging the **right** edge changes
-`durationInFrames` alone. Both edges move, and there is still exactly one length
-in the document.
+`create_scene_from_image` as an MCP tool beside the footage one, and `+ image`
+in the film toolbar calling it. Engine first: the tool is the product, the
+button is the convenience.
 
-Adding `trimEndInFrames` to match audio's spelling would create a second way to
-express the same length and a rule about which wins — the kind of ambiguity this
-backlog has retired before. Record the asymmetry in `film-setup.md` so it reads
-as a decision rather than an oversight.
+## 3. Trimming footage — measure before building
 
-**Validation** (`checkFootage`): non-negative integer; `trimStart + duration`
-must not exceed the probed frame count, which `planFootage` already reads —
-that check is the whole reason the trim can be trusted, and it belongs beside
-the existing `footage_duration_mismatch`.
+**The drag re-runs the prepare step.** Pull a footage block's edge and the
+Studio re-transcodes that clip with new `trim` values through `transcode_asset`
+— which is already frame-exact and already how footage reaches a timeline —
+then patches the segment's `durationInFrames`. Both halves are existing, tested
+engine operations invoked the ordinary way.
 
-## 4. The stills half
+- **One source of truth.** The prepared file *is* the trim. Nothing in
+  `film.json` describes it a second time.
+- **The concat stays lossless.** No pre-trim, no per-build re-encode, no branch
+  in the assemble path.
+- **Frame-exactness is inherited**, not re-earned in new code.
 
-A third segment kind in the play order, beside `{slug}` and `{footage}`:
+### The hazard, and the fix
 
-```json
-{ "image": "assets/plate.png", "durationInFrames": 120, "label": "…" }
-```
+Re-transcoding **in place** would silently change every other segment sharing
+that asset. Write to a derived filename and repoint the segment's `derivedFrom`
+— the provenance pointer exists for exactly this, so the segment moves and
+nothing else does.
 
-- `planFilm` treats it like footage for layout: it occupies frames and carries
-  a `sequence` label and an `id`.
-- The build turns it into a segment with `-loop 1 -t <duration>` at the film's
-  encode voice — a re-encode by construction, since a PNG is not a video
-  stream. Same staging path as A above, so the two features share it.
-- `probe_asset`'s picture facts (v0.27) already answer whether the image
-  matches the film's geometry; a mismatch is a plan-time warning, not a refusal
-  — letterboxing a 4:3 still into a 16:9 film is a legitimate choice.
-- **Not** a scene. A scene is a folder with a composition; this is a file with
-  a duration. An author who wants the still to *move* (a push-in, text over it)
-  wants `sceneFromFootage`'s equivalent for images, which is a separate item
-  and should stay separate.
+### Measure first, then choose the interaction
 
-`isFootageSegment` in `core/films.js` is the shape to copy — and the reason
-BUG-2 existed (a segment kind the walk did not know about was described as a
-scene called `undefined`), so every place that asks "is this a scene?" has to
-learn the third answer at the same time. That is the main risk in this half and
-it is a search, not a design problem.
+A re-encode is seconds, not milliseconds. **Time one on a real clip before
+designing the gesture.** If it is fast, a handle that commits on release is
+honest. If it is twenty seconds, it is a job and must present as one — progress,
+cancellable, the block marked stale meanwhile. Do not build a live scrub over an
+operation that cannot be live.
 
-## 5. Order and acceptance
+## 4. Retired from this plan, with reasons
 
-1. **Footage trim, engine** — schema, validation against the probe, the
-   pre-trim intermediate, the build result reporting it. Acceptance: a film
-   with one trimmed segment builds to a frame count that equals the timeline's,
-   proven by `ffprobe`, and an untrimmed film still takes the lossless path
-   (assert no re-encode).
-2. **Footage trim, Studio** — drag handles on footage blocks, reusing the audio
-   block's grip grammar so both lanes trim the same way.
-3. **Stills** — the segment kind, then `+ image` beside `+ footage`.
+Recorded so they are not re-proposed by a later reading of the same feature
+request:
 
-## 6. Deliberately out of scope
+- **`trimStartInFrames` on footage segments.** It puts a second answer to
+  "which part of this clip plays" into `film.json`, and forces the build to
+  pre-trim — a per-build re-encode that trades the lossless concat, an
+  architectural property, for edit-time convenience. It also requires editing
+  the `framesVerified` rule, which is the code that decides whether a delivery
+  is honest. The trim already exists in `transcode_asset`, is frame-exact, and
+  is paid once.
+- **A third segment kind for stills** (`{image, durationInFrames}`). Every
+  "is this a scene?" site in the codebase would have to learn a third answer,
+  and that exact omission is **BUG-2** — a segment kind a walk did not know
+  about surfaced as a scene called `undefined` and reached the MCP manifest. It
+  would buy something weaker than a scene, for more risk.
 
-- Transitions between segments — that is P1-3, still held.
-- A Ken Burns move on a still: that is a composition, and the answer is a scene.
-- Trimming a *scene* segment. A scene's length is its own config, and two
-  places to set it is the ambiguity §3 exists to avoid.
+## 5. Order
+
+1. **Scene-from-image**, engine then button. Safe, self-contained, useful now.
+2. **Time a trim re-encode** on a real clip — a measurement, not a build.
+3. **Trim-as-re-prepare**, with the interaction chosen from that number.
