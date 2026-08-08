@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### An overlay is placed by dragging it, and lands bottom-right
+
+An overlay's box lived only in the inspector's **x % / y % / width %** sliders,
+so putting a face cam in a corner meant reading three numbers and imagining the
+result. The picture is now the control: **drag it to move, drag its corner to
+resize**, and clicking it selects it — no hunting for its block on the timeline
+first. Percentages stay the stored truth, which is what keeps a placement
+meaningful across aspect variants; the drag just writes them, clamped to the
+same bounds the sliders use and rounded to the same half-percent, so the two can
+never disagree.
+
+A gesture is **one undo step and one save**, the same contract the sliders
+already established: live updates during the drag touch state and the preview
+only, then a single commit on release.
+
+**Preview only, and that is not an omission.** In `built film` the overlay is
+already composited into the file by the finishing pass — there is no element to
+grab, and a handle over baked pixels would promise an edit that mode cannot
+make.
+
+**A new overlay now lands bottom-right** with a 4% margin, where a face cam
+goes, instead of top-left. Getting that corner right needs the asset's real
+shape — `xPct`/`yPct` place the TOP-LEFT, and the element takes its height from
+the picture — so the height is computed through the asset's own aspect, read
+from the picker's already-loaded thumbnail. Guessing it is what would leave a
+portrait overlay hanging off the bottom of the frame.
+
 ### Timeline blocks show the clip, not its filename
 
 A block said `▣ 2026-08-02 04-24-09.trim12.mp4 · 206f`, which names a file and

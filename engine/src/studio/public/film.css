@@ -194,7 +194,22 @@ body.resizing-rail .rail-grip { background: var(--accent); opacity: 0.7; }
 }
 #player-box video.scene.active { display: block; }
 #overlay-layer { position: absolute; inset: 0; pointer-events: none; }
-#overlay-layer img, #overlay-layer video { position: absolute; display: block; }
+/* The overlays themselves ARE grabbable (v0.28) — the layer stays transparent
+   to the pointer so the picture underneath is still clickable. In `built film`
+   the layer is emptied, so nothing here can suggest an edit that mode cannot
+   make. */
+#overlay-layer img, #overlay-layer video {
+  position: absolute; display: block;
+  pointer-events: auto; cursor: move;
+}
+#overlay-layer .sel { outline: 1px dashed var(--accent); outline-offset: 1px; }
+#overlay-handle {
+  position: absolute; z-index: 5;
+  width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  background: var(--ink); border: 1px solid var(--accent);
+  cursor: nwse-resize;
+}
+#overlay-handle.hidden { display: none; }
 #caption-layer {
   position: absolute; left: 5%; right: 5%;
   text-align: center; pointer-events: none;

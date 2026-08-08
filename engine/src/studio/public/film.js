@@ -872,11 +872,13 @@ function updateLayers(frame) {
       el.src = assetUrl(o.src);
       state.overlayEls.set(o.id, el);
       layer.appendChild(el);
+      attachOverlayDrag(el, o.id);
     }
     el.style.left = `${o.xPct ?? 0}%`;
     el.style.top = `${o.yPct ?? 0}%`;
     el.style.width = o.widthPct != null ? `${o.widthPct}%` : 'auto';
     el.style.opacity = String(o.opacity ?? 1);
+    el.classList.toggle('sel', state.selection?.kind === 'overlay' && state.selection.id === o.id);
     if (isVid) {
       const t = (frame - o.fromFrame) / fps();
       if (Math.abs(el.currentTime - t) > 0.15 && el.readyState >= 1) el.currentTime = t;
@@ -887,6 +889,7 @@ function updateLayers(frame) {
   for (const [id, el] of state.overlayEls) {
     if (!live.has(id)) { el.remove(); state.overlayEls.delete(id); }
   }
+  syncOverlayHandle();
 
   // Captions.
   const cap = $('#caption-layer');
@@ -897,6 +900,130 @@ function updateLayers(frame) {
   if ((style.position ?? 'bottom') === 'top') { cap.style.top = '4.5%'; cap.style.bottom = 'auto'; }
   else { cap.style.bottom = '4.5%'; cap.style.top = 'auto'; }
 }
+
+/* ---- placing an overlay by hand (v0.28) ------------------------------- */
+
+/*
+ * An overlay's box lived only in the inspector's x/y/width sliders, so putting
+ * a face cam in a corner meant reading three numbers and imagining the result.
+ * Now the picture itself is the control: drag it to move, drag its corner to
+ * resize. Percentages stay the stored truth — that is what keeps a placement
+ * meaningful across aspect variants — the drag just writes them.
+ *
+ * PREVIEW ONLY, and that is not an omission. In `built film` the overlay is
+ * already composited into the file by the finishing pass; there is no element
+ * to grab, and offering a handle over baked pixels would promise an edit that
+ * could not happen. `updateLayers` removes the live layer in that mode, so this
+ * code is simply never reached there.
+ *
+ * The commit shape is the sliders': live updates during the gesture touch state
+ * and the preview only, then ONE `mutate` on release — so a drag is one undo
+ * step and one save, not a hundred.
+ */
+
+/** The slider bounds, so a drag and the inspector can never disagree. */
+const OVERLAY_BOUNDS = { pos: [-50, 150], width: [2, 200] };
+/** The sliders step in halves; matching it keeps the numbers readable. */
+const halfStep = (n) => Math.round(n * 2) / 2;
+
+function overlayById(id) {
+  return (state.film?.overlays ?? []).find((x) => x.id === id) ?? null;
+}
+
+/** Percent of the player box that one pixel is worth, on each axis. */
+function overlayPctPerPx() {
+  const pb = $('#player-box');
+  return { x: 100 / Math.max(1, pb.clientWidth), y: 100 / Math.max(1, pb.clientHeight) };
+}
+
+/**
+ * A drag that edits the film document: live while it moves, one commit at the
+ * end. `apply` writes onto the live object (preview only); `final` is what the
+ * single mutate writes.
+ */
+function overlayGesture(ev, id, { apply }) {
+  const o = overlayById(id);
+  if (!o) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const before = { xPct: o.xPct ?? 0, yPct: o.yPct ?? 0, widthPct: o.widthPct ?? 30 };
+  const per = overlayPctPerPx();
+  const x0 = ev.clientX;
+  const y0 = ev.clientY;
+  let next = { ...before };
+
+  const move = (e2) => {
+    next = apply(before, (e2.clientX - x0) * per.x, (e2.clientY - y0) * per.y);
+    const live = overlayById(id);
+    if (!live) return;
+    Object.assign(live, next);
+    updateLayers(state.playhead);
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    const live = overlayById(id);
+    if (!live) return;
+    // Put the pre-drag values back, then commit once: the undo stack gets the
+    // whole gesture as a single step, exactly as the sliders do it.
+    Object.assign(live, before);
+    if (next.xPct === before.xPct && next.yPct === before.yPct && next.widthPct === before.widthPct) {
+      updateLayers(state.playhead);
+      return;
+    }
+    mutate((film) => {
+      const target = (film.overlays ?? []).find((x) => x.id === id);
+      if (target) Object.assign(target, next);
+    }, { silent: true });
+    updateLayers(state.playhead);
+    if (state.selection?.kind === 'overlay' && state.selection.id === id) renderInspector();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+/** Click to select, drag to move. Attached once, when the element is created. */
+function attachOverlayDrag(el, id) {
+  el.addEventListener('pointerdown', (ev) => {
+    if (state.source === 'delivery') return;      // baked pixels, nothing to move
+    if (state.selection?.kind !== 'overlay' || state.selection.id !== id) {
+      select({ kind: 'overlay', id });
+      renderInspector();
+    }
+    overlayGesture(ev, id, {
+      apply: (before, dxPct, dyPct) => ({
+        ...before,
+        xPct: halfStep(clamp(before.xPct + dxPct, ...OVERLAY_BOUNDS.pos)),
+        yPct: halfStep(clamp(before.yPct + dyPct, ...OVERLAY_BOUNDS.pos)),
+      }),
+    });
+  });
+}
+
+/** Keep the resize grip on the selected overlay's bottom-right corner. */
+function syncOverlayHandle() {
+  const grip = $('#overlay-handle');
+  if (!grip) return;
+  const sel = state.selection;
+  const el = sel?.kind === 'overlay' && state.source !== 'delivery' ? state.overlayEls.get(sel.id) : null;
+  if (!el || !el.offsetWidth) { grip.classList.add('hidden'); return; }
+  grip.classList.remove('hidden');
+  grip.style.left = `${el.offsetLeft + el.offsetWidth}px`;
+  grip.style.top = `${el.offsetTop + el.offsetHeight}px`;
+}
+
+$('#overlay-handle')?.addEventListener('pointerdown', (ev) => {
+  const sel = state.selection;
+  if (sel?.kind !== 'overlay') return;
+  overlayGesture(ev, sel.id, {
+    // Width only: height follows from the asset's own aspect, so a drag can
+    // never squash the picture.
+    apply: (before, dxPct) => ({
+      ...before,
+      widthPct: halfStep(clamp(before.widthPct + dxPct, ...OVERLAY_BOUNDS.width)),
+    }),
+  });
+});
 
 /* ------------------------------ playback ------------------------------- */
 
@@ -4372,9 +4499,11 @@ function pickListForAssets(ulSel, kinds, onPick) {
     );
     // Clicking the row commits the file; while it is being watched that would
     // be a surprise, so the picture and its button only ever play it.
+    // The row is handed to the picker too: it already holds a loaded thumbnail,
+    // which is the cheapest place to learn an asset's real aspect.
     li.addEventListener('click', (ev) => {
       if (ev.target === video || ev.target.closest('.pk-play')) return;
-      onPick(a);
+      onPick(a, li);
     });
     ul.appendChild(li);
   }
@@ -4579,14 +4708,45 @@ $('#image-file-input').addEventListener('change', (e) => {
 });
 $('#btn-add-image').addEventListener('click', openImageDialog);
 
+/** Margin from the frame edge, in percent, for a newly placed overlay. */
+const OVERLAY_INSET_PCT = 4;
+
+/**
+ * Where a new overlay lands: the **bottom-right corner**, which is where a
+ * face cam goes and the corner a viewer's eye is least often reading.
+ *
+ * `xPct`/`yPct` place the overlay's TOP-LEFT, so a bottom-right corner has to
+ * be computed backwards through the asset's own aspect — the element is sized
+ * by width and takes its height from the picture. Guessing that height is what
+ * would leave a portrait overlay hanging off the bottom of the frame, so it is
+ * read from the picker's already-loaded thumbnail, and falls back to the film's
+ * aspect (which makes height% equal width%) only when nothing has loaded yet.
+ */
+function overlayStartBox(row) {
+  const widthPct = 28;
+  const media = row?.querySelector('img.pk-thumb, video.pk-video');
+  const aw = media?.naturalWidth || media?.videoWidth || 0;
+  const ah = media?.naturalHeight || media?.videoHeight || 0;
+  const frame = state.detail?.scenes.find((s) => s.width > 0);
+  const frameAspect = (frame?.width ?? 1920) / (frame?.height ?? 1080);
+  const assetAspect = aw > 0 && ah > 0 ? aw / ah : frameAspect;
+  const heightPct = widthPct * (frameAspect / assetAspect);
+  return {
+    widthPct,
+    xPct: halfStep(clamp(100 - widthPct - OVERLAY_INSET_PCT, ...OVERLAY_BOUNDS.pos)),
+    yPct: halfStep(clamp(100 - heightPct - OVERLAY_INSET_PCT, ...OVERLAY_BOUNDS.pos)),
+  };
+}
+
 function openOverlayDialog() {
   const lane = takeLane('overlays');
-  pickListForAssets('#overlay-pick', ['image', 'video'], (a) => {
+  pickListForAssets('#overlay-pick', ['image', 'video'], (a, row) => {
+    const box = overlayStartBox(row);
     mutate((film) => film.overlays.push({
       id: uuid(), src: a.path, lane,
       fromFrame: Math.round(state.playhead),
       toFrame: Math.min(Math.round(state.playhead) + fps() * 3, Math.max(totalFrames(), Math.round(state.playhead) + fps() * 3)),
-      xPct: 4, yPct: 6, widthPct: 28, opacity: 1,
+      ...box, opacity: 1,
     }));
     $('#overlay-dialog').close();
     select({ kind: 'overlay', id: state.film.overlays[state.film.overlays.length - 1].id });

@@ -103,6 +103,11 @@
           <iframe id="scene-live" class="scene-live hidden" title="live preview of an unrendered scene"
             scrolling="no" sandbox="allow-scripts allow-same-origin"></iframe>
           <div id="overlay-layer"></div>
+          <!-- The selected overlay's resize grip (v0.28). One element rather
+               than one per overlay: only the selection can be resized, and a
+               handle on every overlay would clutter the picture it is there to
+               help you judge. -->
+          <div id="overlay-handle" class="hidden" title="drag to resize — the overlay keeps its aspect"></div>
           <div id="caption-layer"></div>
           <div id="scene-placeholder" class="hidden">
             <span class="ph-name"></span><span class="ph-note"></span>

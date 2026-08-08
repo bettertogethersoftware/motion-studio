@@ -1120,7 +1120,12 @@ file, so its left edge snaps to where the file can actually be cut. See
   render them into the picture (size/position under the film inspector).
 - **overlay** — images (logo, watermark) or videos (a transparent `.webm`
   stinger keeps its alpha) composited over the film: position/width in % of
-  frame, opacity, frame-accurate window.
+  frame, opacity, frame-accurate window. **Drag it in the preview to place it,
+  and drag its corner to resize** (v0.28) — clicking it selects it, the whole
+  drag is one undo step, and it keeps its aspect. A new overlay lands
+  **bottom-right**, where a face cam goes. The sliders are still there for exact
+  numbers. Dragging works in **preview**; in *built film* the overlay is already
+  baked into the file, so there is nothing to move.
 - **advice** — a marker per piece of human advice, wherever on the film it
   was left. Clicking one selects what it was about and opens it. Blocks and
   tree rows carry a small count badge while advice on them is unresolved.
