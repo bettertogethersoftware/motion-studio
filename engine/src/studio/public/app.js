@@ -316,10 +316,14 @@ function renderTree() {
  * tree would drop the rail's scroll position each time.
  */
 function syncTreeSelection() {
+  // Same rule as the tab strip: a document covered by the library, vendors or
+  // settings page is OPEN, not the one you are looking at. Saying otherwise
+  // put `aria-current="page"` on a film while the library filled the stage.
+  const covered = stagePageUp();
   for (const row of $('#workspace-tree').querySelectorAll('[data-doc]')) {
     const key = row.dataset.doc;
     const open = docs.has(key);
-    const active = key === activeDocKey;
+    const active = key === activeDocKey && !covered;
     row.classList.toggle('open', open && !active);
     row.classList.toggle('active', active);
     if (active) row.setAttribute('aria-current', 'page');
@@ -2259,12 +2263,40 @@ async function closeDocument({ kind, id }, { flush = true } = {}) {
   syncTreeSelection();
 }
 
-/** Exactly one document is visible, and only when no full-stage page is up. */
+/**
+ * Is a full-stage page (library, vendors, settings) covering the editor?
+ *
+ * The tab strip and the Explorer both have to ask, because `activeDocKey`
+ * survives a page opening — it is where you will land when the page closes —
+ * and a tab drawn `active` while a page covers it says you are looking at a
+ * document you cannot see.
+ */
+function stagePageUp() {
+  return !!vendorState.openCapability || !!state.settingsOpen || !!state.libraryWs;
+}
+
+/**
+ * Exactly one document is visible, and only when no full-stage page is up.
+ *
+ * The tab strip is repainted from HERE rather than by each page's own
+ * show/hide, because whether a page covers the editor is now part of what a tab
+ * says about itself — and `showLibraryPage` repainted the tree but not the
+ * strip, so closing the library left every tab drawn inactive over a document
+ * that was back on screen. One repaint, at the one place all five callers
+ * already pass through.
+ */
 function syncStagePages() {
-  const pageUp = !!vendorState.openCapability || !!state.settingsOpen || !!state.libraryWs;
+  const pageUp = stagePageUp();
   $('#editor-stack').classList.toggle('hidden', pageUp || !docs.size);
   $('#empty-state').classList.toggle('hidden', pageUp || docs.size > 0);
   for (const [key, d] of docs) d.frame.classList.toggle('on', key === activeDocKey);
+  renderDocTabs();
+  // The rail says the same thing the strip does, so it is repainted from the
+  // same place. Only the library page happened to call renderTree() on its way
+  // through; settings and vendors did not, and left a film row marked
+  // `aria-current="page"` underneath a settings page. Classes only — this runs
+  // on every switch and a rebuild would cost the rail its scroll.
+  syncTreeSelection();
   if (!pageUp && docs.size) notifyShown();
 }
 
@@ -2294,8 +2326,17 @@ function renderDocTabs() {
   strip.innerHTML = '';
   strip.classList.toggle('hidden', !docs.size);
   let activeTab = null;
+  // A page covering the stage means NO tab is the one you are looking at. The
+  // key is kept (closing the page returns you to it) but the strip must not
+  // claim it — visibly or to a screen reader.
+  const covered = stagePageUp();
   for (const [key, d] of docs) {
-    const on = key === activeDocKey;
+    const on = key === activeDocKey && !covered;
+    // Where the keyboard ENTERS the strip is not the same question as what you
+    // are looking at. Covered or not, the remembered document keeps the one tab
+    // stop — otherwise opening the library would leave the whole strip
+    // unreachable by Tab, which is a worse bug than the one being fixed.
+    const isTabStop = key === activeDocKey;
     const tab = el('div', 'doc-tab' + (on ? ' active' : ''));
     tab.title = `${d.name}\n${d.id}`;
     // A roving tabindex: one Tab stop for the whole strip, which is what a
@@ -2303,7 +2344,7 @@ function renderDocTabs() {
     // rule in tabs.css — dead since the strip was written — able to fire.
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-selected', String(on));
-    tab.tabIndex = on ? 0 : -1;
+    tab.tabIndex = isTabStop ? 0 : -1;
     tab.append(
       el('span', 'doc-tab-mark', d.kind === 'film' ? '▶' : '◧'),
       el('span', 'doc-tab-name', d.name),
@@ -2328,7 +2369,7 @@ function renderDocTabs() {
       else if (ev.key === 'Delete') { ev.preventDefault(); closeDocument(d); }
     });
     strip.appendChild(tab);
-    if (on) activeTab = tab;
+    if (isTabStop) activeTab = tab;
   }
   strip.scrollLeft = scrollLeft;
   activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -2336,7 +2377,9 @@ function renderDocTabs() {
 
 /** Keep the keyboard on the strip while arrowing along it. */
 function focusActiveTab() {
-  $('#doc-tabs')?.querySelector('.doc-tab.active')?.focus();
+  // The tab stop, not `.active`: while a stage page covers the editor no tab is
+  // active, and querying for that class would drop focus on the floor.
+  $('#doc-tabs')?.querySelector('.doc-tab[tabindex="0"]')?.focus();
 }
 
 /**

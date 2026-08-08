@@ -803,3 +803,33 @@ CI — the acceptance is the hand-driven pass in Verification, and adding a
 tool would be a new dependency this plan has already ruled out; and ARIA
 on anything that a native element already describes, which is most of the
 form surface.
+
+## Open, raised from use: should the stage pages be documents? (2026-08-08)
+
+Reported as "the library does not create its own tab", with the activity-bar
+pages behaving the same way. It is **not** a bug in the sense reported — the
+shell decided the opposite on purpose, and `showDocument` says so: *"Opening a
+document leaves whatever full-stage page was up: they are alternatives to the
+editor, not layers over it."* Library, vendors and settings replace the editor
+stack rather than joining the working set.
+
+What **was** wrong, and is now fixed, is that the strip and the rail went on
+claiming the covered document was the active one — see the CHANGELOG entry. So
+the honest state today is: a page covering the editor is visible everywhere,
+and the pages still have no tabs.
+
+**Making them documents is a shell-model change, not a small fix.** Every
+document in `docs` is `{kind, id, name, frame}` where `frame` is an **iframe**,
+and that assumption is load-bearing in `openDocument` (creates it), `showDocument`
+and `syncStagePages` (toggle `.on`), `closeDocument` (removes it), `notifyShown`
+(reaches `contentWindow.StudioDoc`), `persistDocs`/restore (re-opens by
+`kind:id`), plus the palette, `Alt+1…9`, and the status bar. A page-backed
+document needs a variant whose element is an existing `<section>` and whose
+`contentWindow` is absent — perhaps 150 lines through the most load-bearing
+module in the Studio, immediately after the UI program closed.
+
+Worth doing if the working set is meant to be "everything I have open" rather
+than "every document I have open" — which is a real product question, and the
+Explorer already answers it differently (the library has a rail row, and it
+lights while its page is up). Decide that before writing code; the cost is
+mostly in the decision, not the keystrokes.

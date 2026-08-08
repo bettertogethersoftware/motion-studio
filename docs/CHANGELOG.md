@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### A tab stops claiming you are looking at it when you are not
+
+Open a film, then click the library: the library filled the stage and the film's
+tab went on drawing itself **active**, with `aria-selected="true"`, over a
+document you could no longer see. The Explorer rail said the same thing, marking
+that film `aria-current="page"`. Both now say *open* rather than *active* while
+a full-stage page — library, vendors or settings — covers the editor.
+
+The remembered document keeps the strip's single **tab stop** throughout,
+because where the keyboard enters the strip is a different question from what
+you are looking at. Losing that would have made opening the library leave the
+whole strip unreachable by Tab, which is worse than the bug being fixed.
+
+Two repaints moved to `syncStagePages()` while fixing it, and both were live
+defects of their own: `showLibraryPage` repainted the tree but not the tab
+strip, so closing the library left every tab drawn inactive over a document
+that was back on screen; and only the library page called `renderTree()` on its
+way through, so settings and vendors left a film row marked `aria-current` under
+a page covering it. One repaint each, at the one place all five callers already
+pass through.
+
+**Not** in this change: giving those pages their own tabs. They are still
+alternatives to the editor rather than documents in the working set — see the
+note in `docs/plans/studio-ui-polish-plan.md`.
+
 ### `browse` opens the library folder — when that means anything
 
 The workspace library page shows its path; now it can open it. **browse** hands
