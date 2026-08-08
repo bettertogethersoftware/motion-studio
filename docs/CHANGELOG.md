@@ -44,6 +44,16 @@ The reasoning behind the cage was the real mistake: it applied a rule measured
 on a 152-second segment to a half-second one. Re-encoding costs by the frames
 it **keeps**, so on a clip already trimmed down it is well under a second.
 
+**A container that over-counts its own tail** — also corrected from use. A real
+screen recording declares 623 frames in `nb_frames` *and* reports 623 packets,
+while a full decode yields 622: its last packets are out of order. Both cheap
+counts lie the same way, so a trim keeping everything to the end asked for one
+frame that does not exist, and the first version refused the whole operation
+over it (`transcode_failed`, nothing changed). The frames that arrived were
+exactly right, so a shortfall of a frame or two **at the end of the source** is
+now taken and reported, with the cause named. Anywhere else, or by more, a short
+file is still a failure — nothing else explains it.
+
 Off the grid, the default is an exact **re-encode**, never a silent move.
 `snapToKeyframe: true` opts into the cheap path, and the response reports
 `startFrame` and `snappedByFrames` so the caller knows where the cut landed;

@@ -24,7 +24,8 @@ import { promisify } from 'node:util';
 
 import { makeStore, TEST_WS } from './helpers/workspace.mjs';
 import {
-  trimFootage, keyframeGrid, keyframeAtOrBefore, trimSignature, COARSE_GRID_FRAMES,
+  trimFootage, keyframeGrid, keyframeAtOrBefore, trimSignature, acceptShortTail,
+  COARSE_GRID_FRAMES, TAIL_SLACK_FRAMES,
 } from '../src/core/footage-trim.js';
 import { planFilm } from '../src/core/films.js';
 
@@ -358,6 +359,42 @@ test('a clip whose only keyframe is frame 0 still head-trims — exactly, by re-
     assert.equal(r.framesVerified, true);
     assert.equal(await countFrames(path.join(film.path, r.file)), 20);
   });
+
+/**
+ * A container that over-counts its own tail (found in use, 2026-08-08).
+ *
+ * A real screen recording in the workspace declares 623 frames in `nb_frames`
+ * AND reports 623 packets, while a full decode yields 622 — its last packets
+ * are out of order (pts 10.3167, 10.3833, 10.3500). Both cheap counts lie the
+ * same way, so a trim keeping everything to the end asks for one frame that
+ * does not exist, and the first version refused the whole operation over it.
+ *
+ * The frames that DID arrive were exactly right, so a small shortfall at the
+ * end of the source is now taken and reported. The rule is deliberately narrow
+ * — anywhere but the tail, or by more than a couple of frames, a short file is
+ * still a failure, because nothing else explains it.
+ */
+test('a short tail is accepted only at the end of the source, and only by a frame or two', () => {
+  // The reported case: 391 asked for at the very end, 390 produced.
+  const real = acceptShortTail({ requested: 391, produced: 390, reachedEnd: true });
+  assert.equal(real.accept, true);
+  assert.equal(real.frames, 390, 'the segment declares what the file actually holds');
+  assert.equal(real.shortfall, 1);
+
+  // Same shortfall, but the window did NOT run to the end — nothing explains
+  // that, so it stays a failure.
+  assert.equal(acceptShortTail({ requested: 391, produced: 390, reachedEnd: false }).accept, false);
+
+  // Too big to be a container quirk.
+  assert.equal(acceptShortTail({ requested: 400, produced: 200, reachedEnd: true }).accept, false);
+  assert.equal(acceptShortTail({ requested: 10, produced: 10 - TAIL_SLACK_FRAMES, reachedEnd: true }).accept, true);
+  assert.equal(acceptShortTail({ requested: 10, produced: 10 - TAIL_SLACK_FRAMES - 1, reachedEnd: true }).accept, false);
+
+  // An empty output is never "nearly right".
+  assert.equal(acceptShortTail({ requested: 1, produced: 0, reachedEnd: true }).accept, false);
+  // A LONGER output is not a tail shortfall either.
+  assert.equal(acceptShortTail({ requested: 10, produced: 12, reachedEnd: true }).accept, false);
+});
 
 test('trimSignature prefers the film, falls back to the clip, and refuses to guess', () => {
   const filmSig = { id: 'f', width: 1920, height: 1080, ffmpegArgs: ['-c:v', 'libx264'] };

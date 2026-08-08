@@ -61,6 +61,38 @@ export const MAX_GRID_KEYFRAMES = 4000;
  */
 export const COARSE_GRID_FRAMES = 20;
 
+/**
+ * How many frames a trim reaching the END of its source may come up short
+ * before that is a failure rather than the container being optimistic.
+ *
+ * Both cheap frame counts lie in the same direction: a real screen recording
+ * in this workspace declares 623 in `nb_frames` AND reports 623 packets, while
+ * `-count_frames` — a full decode — yields 622, and so does a plain re-encode.
+ * Its last packets are out of order (pts 10.3167, 10.3833, 10.3500), which is
+ * how a container ends up describing one more picture than it can produce.
+ *
+ * There is no cheap truthful count, so a trim that keeps everything to the end
+ * of such a file asks for one frame that does not exist. Refusing that is
+ * pedantry — the frames it DID get are exactly right — so a small tail
+ * shortfall is accepted and reported. Anywhere else, or by more than this, a
+ * short file is still a failure.
+ */
+export const TAIL_SLACK_FRAMES = 2;
+
+/**
+ * Should a short output be accepted as the container over-counting its tail?
+ *
+ * Pure, because the interesting cases are all arithmetic and none of them are
+ * worth an encode to test: the container lied by one at the end (accept), the
+ * encode dropped half the clip (refuse), the shortfall is in the middle of the
+ * source rather than at its end (refuse — nothing explains that).
+ */
+export function acceptShortTail({ requested, produced, reachedEnd, slack = TAIL_SLACK_FRAMES }) {
+  const shortfall = requested - produced;
+  const accept = reachedEnd && produced >= 1 && shortfall > 0 && shortfall <= slack;
+  return { accept, shortfall, frames: accept ? produced : requested };
+}
+
 /** `clip.trim2.mp4` → `clip`, so repeated trims do not stack suffixes. */
 const stemOf = (file) => path.basename(file, path.extname(file)).replace(/\.trim\d+$/, '');
 
@@ -259,7 +291,11 @@ export async function trimFootage({
   const canSnap = snapToKeyframe && !grid.coarse && snapTo !== null && snapTo < start;
   const method = onKeyframe || canSnap ? 'copy' : 'reencode';
   const actualStart = method === 'copy' ? (onKeyframe ? start : snapTo) : start;
-  const actualKeep = outPoint - actualStart;
+  // `let`, because a trim that runs to the end of the source may legitimately
+  // come back one frame shorter than the container promised — see
+  // TAIL_SLACK_FRAMES and the verification below.
+  let actualKeep = outPoint - actualStart;
+  const reachedEnd = outPoint >= available;
 
   const warnings = [];
   if (method === 'copy' && actualStart !== start) {
@@ -348,12 +384,26 @@ export async function trimFootage({
   const outFrames = outMedia?.video?.frames
     ?? await probeFrameCount({ filePath: outAbs, ffprobePath }).catch(() => null);
   if (outFrames !== null && outFrames !== actualKeep) {
-    await fsp.rm(outAbs, { force: true }).catch(() => {});
-    await fsp.rm(transcodeMetaPath(outAbs), { force: true }).catch(() => {});
-    throw new EngineError(ErrorCodes.TRANSCODE_FAILED,
-      `The trimmed file has ${outFrames} frames but ${actualKeep} were asked for — refusing to put a segment on the `
-      + 'timeline whose declared length its file does not have. Nothing was changed.',
-      { expected: actualKeep, actual: outFrames, file: outName });
+    const tail = acceptShortTail({ requested: actualKeep, produced: outFrames, reachedEnd });
+    if (!tail.accept) {
+      await fsp.rm(outAbs, { force: true }).catch(() => {});
+      await fsp.rm(transcodeMetaPath(outAbs), { force: true }).catch(() => {});
+      throw new EngineError(ErrorCodes.TRANSCODE_FAILED,
+        `The trimmed file has ${outFrames} frames but ${actualKeep} were asked for — refusing to put a segment on `
+        + 'the timeline whose declared length its file does not have. Nothing was changed.'
+        + (reachedEnd
+          ? ` This trim runs to the end of "${rel}", and the shortfall is larger than a container over-counting its `
+            + 'tail; the source may be damaged.'
+          : ''),
+        { expected: actualKeep, actual: outFrames, file: outName });
+    }
+    // The container promised more pictures than it can produce. Take what the
+    // file really holds, and say so — the frames that arrived are the right
+    // ones, and a segment declaring what it actually has is the honest result.
+    warnings.push(`"${rel}" reports ${available} frames but yields ${available - tail.shortfall}: its container `
+      + `over-counts by ${tail.shortfall}, which only shows up in a full decode. This trim ran to the end of it, so `
+      + `it kept ${outFrames} frames rather than the ${actualKeep} requested. Nothing else is affected.`);
+    actualKeep = outFrames;
   }
 
   // A sidecar in `transcode_asset`'s own shape, so `derivedFrom` means the same
@@ -394,6 +444,9 @@ export async function trimFootage({
   return {
     ...preview,
     dryRun: false,
+    // Not `preview`'s figure: a tail shortfall corrects it, and what is
+    // returned must be what the segment now declares.
+    durationInFrames: actualKeep,
     elapsedMs: Date.now() - started,
     frames: outFrames,
     framesVerified: outFrames === actualKeep,

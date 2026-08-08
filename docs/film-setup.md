@@ -296,6 +296,12 @@ fixed so the window lengthens rather than sliding. In the Studio the handle
 snaps to the clip's real grid, which means a coarse clip visibly drags coarsely
 — the granularity of the gesture is the granularity of the operation.
 
+The trimmed file's frame count is verified before the segment moves. One
+exception, because it is real: some containers describe more pictures than they
+can produce (a recording here declares 623 frames and yields 622, visible only
+in a full decode), so a shortfall of a frame or two at the **end of the source**
+is taken and reported rather than refused.
+
 Use `dryRun: true` to see `method`, the landing frame, `keyframes.intervalFrames`
 and `estimatedMs` before paying for anything. A film with no encode signature
 (no rendered scene) re-encodes against the segment's own probed properties,
