@@ -243,7 +243,20 @@ export async function trimFootage({
   // The OUT-point is what the user fixed by dragging the head; snapping the
   // in-point earlier therefore lengthens the window rather than sliding it.
   const outPoint = start + keep;
-  const canSnap = snapToKeyframe && snapTo !== null && snapTo < start;
+  /*
+   * Snapping is only offered on a grid that IS an edit grid. On a coarse one
+   * the nearest keyframe is seconds away, and taking it would not be a cheaper
+   * version of the requested cut — it would be a different cut.
+   *
+   * The case that made this a rule rather than a nicety: repeated copy-trims of
+   * a coarse clip converge on a file whose ONLY keyframe is frame 0 (measured
+   * in a real film: 623 frames/3 keyframes → 163/1 → 77/1 → 32/1). Snapping
+   * there lands every head trim back on 0 — that is, silently refuses to trim
+   * the head while reporting success. A re-encode is the honest answer, and on
+   * a clip that has been trimmed down it is also a cheap one: cost is the
+   * frames KEPT, so a half-second segment re-encodes in well under a second.
+   */
+  const canSnap = snapToKeyframe && !grid.coarse && snapTo !== null && snapTo < start;
   const method = onKeyframe || canSnap ? 'copy' : 'reencode';
   const actualStart = method === 'copy' ? (onKeyframe ? start : snapTo) : start;
   const actualKeep = outPoint - actualStart;
@@ -255,9 +268,14 @@ export async function trimFootage({
       + 'what makes this a copy instead of a re-encode. Pass snapToKeyframe: false for the exact frame.');
   }
   if (method === 'reencode' && grid.coarse) {
-    warnings.push(`This clip's keyframes are ~${grid.intervalFrames ?? '?'} frames apart, so snapping would move the `
-      + 'in-point too far to be an edit. It is being re-encoded, which is exact. Preparing the clip once with '
-      + 'transcode_asset { video: { gop: 10 } } would make every later trim a copy.');
+    warnings.push(grid.count <= 1
+      ? 'This clip has only one keyframe (its first frame), which is what repeated copy-trims of a coarse clip '
+        + 'converge on — so there is nothing to snap to and no cheap head trim left. It is being re-encoded, which '
+        + `is exact, and cheap here because cost is the ${actualKeep} frames KEPT. Preparing it once with `
+        + 'transcode_asset { video: { gop: 10 } } would restore a usable grid.'
+      : `This clip's keyframes are ~${grid.intervalFrames} frames apart, so snapping would move the in-point too `
+        + 'far to be an edit. It is being re-encoded, which is exact. Preparing the clip once with '
+        + 'transcode_asset { video: { gop: 10 } } would make every later trim a copy.');
   }
 
   const est = method === 'copy' ? null : Math.round(498 + 11.51 * actualKeep);

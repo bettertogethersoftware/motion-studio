@@ -318,6 +318,47 @@ test('a footage-only film has no signature, and a re-encode conforms to the clip
     assert.equal(await countFrames(path.join(film.path, r.file)), 60);
   });
 
+/**
+ * The case that shipped broken (found in use, 2026-08-08).
+ *
+ * Repeated copy-trims of a COARSE clip converge: each copy starts at a keyframe
+ * and keeps fewer frames than the source's next one, so the output has exactly
+ * one keyframe — frame 0 — and every later one does too. A real film reached
+ * 623 frames/3 keyframes → 163/1 → 77/1 → 32/1.
+ *
+ * The engine was always right here (no keyframe to snap to means re-encode),
+ * but the Studio caged its handle to the grid, so on such a clip the handle
+ * could only ever land on frame 0 and the drag silently did nothing. The cage
+ * is gone; this pins the engine half so the fallback can never quietly rot.
+ *
+ * The measured lesson underneath it: a re-encode costs by frames KEPT, so on a
+ * clip that has been trimmed down it is cheap. The rule "re-encoding is a job"
+ * came from a 152 s segment and does not transfer to a half-second one.
+ */
+test('a clip whose only keyframe is frame 0 still head-trims — exactly, by re-encode',
+  { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+    const dir = await fsp.mkdtemp(path.join(tmp, 'ws-'));
+    const { store, film, segmentId } = await filmWith(dir, coarseSrc);
+
+    // Converge it the way repeated trims do: a copy from frame 0 keeping fewer
+    // frames than the 250-frame GOP leaves a file with one keyframe.
+    const first = await trimFootage({ store, filmId: film.id, segmentId, durationInFrames: 40 });
+    assert.equal(first.method, 'copy');
+    const grid = await keyframeGrid({ filePath: path.join(film.path, first.file), fps: FPS });
+    assert.deepEqual(grid.frames, [0], 'precondition: the converged clip has exactly one keyframe');
+
+    // There is no keyframe to snap to, so even asking to snap must not silently
+    // land on 0 and call it done — it re-encodes and gives the exact frame.
+    const r = await trimFootage({
+      store, filmId: film.id, segmentId, startInFrames: 12, durationInFrames: 20, snapToKeyframe: true,
+    });
+    assert.equal(r.method, 'reencode');
+    assert.equal(r.startFrame, 12, 'the frame that was asked for, not frame 0');
+    assert.equal(r.snappedByFrames, 0);
+    assert.equal(r.framesVerified, true);
+    assert.equal(await countFrames(path.join(film.path, r.file)), 20);
+  });
+
 test('trimSignature prefers the film, falls back to the clip, and refuses to guess', () => {
   const filmSig = { id: 'f', width: 1920, height: 1080, ffmpegArgs: ['-c:v', 'libx264'] };
   assert.equal(trimSignature({ planSignature: filmSig, media: null, file: 'x' }).source, 'film');

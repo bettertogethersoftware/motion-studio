@@ -126,8 +126,24 @@ button is the convenience.
 > film** case §3 never covered — a re-encode there conforms to the segment's
 > own probed properties, reported as `conformedTo.from: "segment"`.
 >
-> 17 tests, including the two fixtures that *are* the feature: a clip with a
+> 18 tests, including the two fixtures that *are* the feature: a clip with a
 > 10-frame GOP and one with a 250-frame GOP.
+>
+> **Corrected the same day, from use.** The handle was first built to *snap* to
+> the keyframe grid — this section's own recommendation, and wrong. Repeated
+> copy-trims of a coarse clip **converge**: each copy starts at a keyframe and
+> keeps fewer frames than the source's next one, so the output has exactly one
+> keyframe, and so does every trim after it. A real film went 623 frames/3
+> keyframes → 163/1 → 77/1 → 32/1. On that clip a caged handle can only land on
+> frame 0, so it looked draggable and silently did nothing; the engine had the
+> matching fault, snapping a requested frame 12 back to 0 and reporting success.
+>
+> The handle is now **magnetic** — it pulls toward cheap cut points and reaches
+> anything else exactly — and snapping is only offered on a grid fine enough to
+> *be* an edit grid. The underlying error is worth keeping: the cage applied a
+> cost rule measured on a **152-second** segment to a **half-second** one. Cost
+> is the frames KEPT, so a clip already trimmed down re-encodes in well under a
+> second, and there was never anything to protect the user from.
 
 **The drag re-runs the prepare step.** Pull a footage block's edge and the
 Studio re-transcodes that clip with new `trim` values through `transcode_asset`

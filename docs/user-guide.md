@@ -773,14 +773,17 @@ it does.
 Drag the **right** edge to shorten the end. That is always fast, and it is
 always exact.
 
-Drag the **left** edge to move the start. Here the handle **snaps**, and the
-snapping is the honest part rather than a convenience. A video file can only be
-cut cheaply at certain points; between them it has to be re-encoded, which takes
-seconds to minutes. So the handle stops only where the cut can actually land. A
-clip Motion Studio prepared snaps about six times a second — finer than you can
-drag — and you will not notice. A clip straight off a screen recorder snaps in
-whole seconds, and you will: that is the truth about that file, and a handle
-that glided smoothly and then quietly cut somewhere else would be lying to you.
+Drag the **left** edge to move the start. It goes wherever you put it, but it
+**pulls** toward certain points as you pass them. Those are the places the file
+can be cut without re-encoding — instantly. Between them the cut is exact but
+has to re-encode, and the label under your cursor says which one you are about
+to get. A clip Motion Studio prepared has those points about six times a second,
+so you will feel a gentle magnetism and nothing else. A clip straight off a
+screen recorder may have only one, at its very start.
+
+Re-encoding is not the disaster it sounds like: it costs by how much you
+**keep**, so trimming a clip you have already cut short is well under a second.
+It is only slow on a long clip you are barely shortening.
 
 The original file stays in the film's assets either way, so a trim is never
 destructive — the clip you supplied is still there.

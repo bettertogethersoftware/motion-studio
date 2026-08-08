@@ -29,6 +29,21 @@ prepared clip drags at ~1/6 s and a supplied recording drags in seconds —
 which is the truth about those clips. A tail trim needs no grid at all: frame 0
 is always a keyframe, so shortening the end is always a copy.
 
+**The handle is magnetic, not caged** — corrected the same day, from use. The
+first version constrained the head grip to the keyframe grid, which looks
+right and is wrong: repeated copy-trims of a coarse clip *converge* on a file
+whose only keyframe is frame 0 (a real film went 623 frames/3 keyframes → 163/1
+→ 77/1 → 32/1), and on such a clip a caged handle can never move at all. It
+appeared draggable and silently did nothing. The grip now pulls toward cheap cut
+points and goes anywhere else exactly, saying which the drop would be. The
+engine had the matching fault — asked to snap with only frame 0 available it
+snapped there, discarding the edit while reporting success — so snapping is now
+offered only on a grid fine enough to *be* an edit grid.
+
+The reasoning behind the cage was the real mistake: it applied a rule measured
+on a 152-second segment to a half-second one. Re-encoding costs by the frames
+it **keeps**, so on a clip already trimmed down it is well under a second.
+
 Off the grid, the default is an exact **re-encode**, never a silent move.
 `snapToKeyframe: true` opts into the cheap path, and the response reports
 `startFrame` and `snappedByFrames` so the caller knows where the cut landed;

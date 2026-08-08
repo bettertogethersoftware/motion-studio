@@ -2100,14 +2100,29 @@ function warmFootageGrid(segmentId) {
  */
 const footageGridNow = (segmentId) => keyframeGrids.get(segmentId) ?? null;
 
-/** The keyframe at or before `frame` — the only in-points a copy can start on. */
-function snapToKeyframe(grid, frame) {
-  let best = 0;
+/**
+ * Magnetic snap toward a cheap cut point — NOT a cage.
+ *
+ * A keyframe is where a trim can be a stream copy, so the handle pulls toward
+ * one when it is close. It does not refuse to leave: an in-point between
+ * keyframes is perfectly reachable, it just re-encodes, and a re-encode costs
+ * by the frames it KEEPS — a half-second segment re-encodes in well under a
+ * second. Caging the handle to the grid was this feature's first shipped bug:
+ * repeated copy-trims of a coarse clip converge on a file whose only keyframe
+ * is frame 0, and a caged handle on such a clip can never move at all.
+ *
+ * @returns {{frame: number, onKeyframe: boolean}}
+ */
+function magnetToKeyframe(grid, frame) {
+  if (!grid?.length) return { frame, onKeyframe: false };
+  // A fixed pixel feel rather than a fixed frame count, so the pull is the
+  // same gesture at every zoom level.
+  const tolerance = Math.max(1, Math.round(6 / Math.max(state.pxf, 0.0001)));
+  let best = null;
   for (const f of grid) {
-    if (f > frame) break;
-    best = f;
+    if (Math.abs(f - frame) <= tolerance && (best === null || Math.abs(f - frame) < Math.abs(best - frame))) best = f;
   }
-  return best;
+  return best === null ? { frame, onKeyframe: false } : { frame: best, onKeyframe: true };
 }
 
 /**
@@ -2156,7 +2171,7 @@ function attachFootageGrips(el, s) {
   /* Head grip — moves the IN-POINT through the file. Snapped to the grid. */
   const head = el.appendChild(document.createElement('div'));
   head.className = 'grip left';
-  head.title = 'trim the clip start — snaps to where the file can be cut without re-encoding';
+  head.title = 'trim the clip start — pulls toward cut points that need no re-encode, exact anywhere else';
   head.addEventListener('pointerdown', (ev) => {
     ev.stopPropagation();
     warmFootageGrid(segmentId);
@@ -2164,23 +2179,31 @@ function attachFootageGrips(el, s) {
     const total = s.durationInFrames;
     const x0 = s.filmOffset * state.pxf;
     let cut = 0;
+    let cheap = true;
     pointerDrag(ev, {
       onMove: (d, e2) => {
         // Never past the last frame, never before the head of the file.
         const want = Math.round(Math.max(0, Math.min(total - 1, d)));
-        cut = grid?.frames?.length ? snapToKeyframe(grid.frames, want) : want;
+        const m = magnetToKeyframe(grid?.frames, want);
+        cut = m.frame;
+        cheap = cut === 0 || m.onKeyframe;
         el.style.left = `${x0 + cut * state.pxf}px`;
         el.style.width = `${Math.max(6, (total - cut) * state.pxf)}px`;
+        // Say which of the two operations this drop would be. The cost is the
+        // frames KEPT, so it is named rather than the frames removed.
         dragTip(cut === 0
           ? 'full clip'
-          : `in at ${cut}f · keeps ${total - cut}f (${((total - cut) / fps()).toFixed(2)}s)`
-            + (grid?.coarse ? ' · coarse clip: cuts land seconds apart' : ''), e2);
+          : `in at ${cut}f · keeps ${total - cut}f (${((total - cut) / fps()).toFixed(2)}s) · `
+            + (cheap ? 'copy' : `re-encode ${total - cut}f`), e2);
       },
       onDone: (moved) => {
         el.style.left = ''; el.style.width = '';
         if (!moved || cut <= 0) { renderTimeline(); return; }
+        // The handle has already chosen the frame, so ask for it EXACTLY: a
+        // landing on a keyframe copies by itself, and anywhere else the caller
+        // gets the frame it pointed at rather than a silent slide backwards.
         commit(
-          { startInFrames: cut, durationInFrames: total - cut, snapToKeyframe: true },
+          { startInFrames: cut, durationInFrames: total - cut, snapToKeyframe: false },
           `Trimmed ${cut}f off the head`,
         );
       },
