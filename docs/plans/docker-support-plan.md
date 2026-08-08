@@ -3,7 +3,19 @@
 > **Status: PROPOSED** (2026-08-04). Estimate: 1–2 days. Prerequisites are
 > already met: Linux is supported (linux-ready plan, L4 passed), the browser
 > launcher already carries the two classic container flags, and everything
-> heavy is a fetchable pack.
+> heavy is a fetchable pack. **Blocked** on Docker not being installed on the
+> dev machine — the slice cannot be honestly verified without it.
+>
+> **Audience re-checked 2026-08-08.** §1 names the demo/first-impression tier
+> first, and §1 also calls this "the cleanest possible version of the no-shell
+> demo tier" — which is the tier [TODO.md](TODO.md)'s standing rule says to
+> size the effort for. At 1–2 days plus an install this is not in
+> cheap-Env-A-win territory *on the demo argument alone*. It stays scheduled
+> because the other two run modes pay for it independently and are not Env A
+> at all: the **server-hosted Studio** (mode 1) serves the *human* adviser
+> across machines, the case `MOTION_STUDIO_STUDIO_HOST` was built for, and the
+> **MCP sidecar** (mode 2) is install convenience for any agent, shell or not.
+> Schedule it on those; treat demo-in-a-box as the bonus, not the reason.
 
 ## 1. Decision
 

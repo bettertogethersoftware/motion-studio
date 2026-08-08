@@ -8,6 +8,69 @@ with the reason; known defects — things that are wrong *now*, as opposed to
 work we intend to do — live in [bug-backlog.md](bug-backlog.md). Update this
 index whenever a linked plan moves.
 
+## Read this before proposing anything
+
+> **Who the customer is, so a plan is not written for the wrong one.**
+> [deploy/PROVISION.md](../../deploy/PROVISION.md) §"No-shell customers
+> (MCP-only, Env A)", stated product intent 2026-08-04:
+>
+> > This is the **demo / first-impression tier** … real production customers
+> > run shell-capable agents that generate audio/visuals through ComfyUI
+> > helpers or AI-written API tools, and the built-in tts/music vendors serve
+> > scratch work and demos. **Size the effort accordingly.**
+
+**The policy, stated so it is not over-applied (2026-08-08): Env B is the main
+focus. Env A is the demo tier — but a cheap Env A win still gets done.** "Size
+the effort accordingly" is a *cost* test, not an exclusion. Serving only Env A
+does not disqualify an item; it caps what that item is allowed to cost. A day
+of work reusing machinery the engine already has is worth doing for the demo
+tier. A multi-day slice, a new dependency, or a change to timeline arithmetic
+everything else depends on is not — unless something other than Env A pays
+for it.
+
+This exists because the failure mode is real and repeated: a plan gets written
+to close a gap an **Env A** agent hits, the gap is genuine, the customer who
+would benefit does not exist, and the price was never asked. `prepare_image` is
+the worked example — a full design, deferred, then retired. Note *why* it
+failed, because it is the cost test and not the environment test: its picture
+ops needed a Python/Pillow dependency the boundary forbids, while every
+production machine already has those operations through ImageMagick
+([retired.md](retired.md)). The measurement half of that same plan survives, on
+exactly this rule — it is Env A-only *and* nearly free, because `probe_asset`
+already runs ffprobe and `render-review.js` already decodes a frame to
+greyscale and does the arithmetic in Node.
+
+Three tests before a plan earns a document. They are cheap and they disagree
+often enough to be worth running separately:
+
+1. **Which environment pays, and what does it cost?** If Env B pays, cost is
+   judged on merit as usual. If **only Env A** pays, the item is demo-tier by
+   the quote above and must be *cheap* — days, not weeks, and no new
+   dependency, no new surface for the rest of the engine to carry. Expensive
+   and Env A-only is the combination to park behind a named customer. See
+   [agent-environments.md](../agent-environments.md) for the definitions and
+   the capability-vs-knowledge rule.
+2. **Is it knowledge or capability?** *Knowledge* — a measurement, an
+   invariant, a resolved layout — serves **both** environments, and Env B
+   needs it *more*, because Env B is the one hand-writing commands against
+   invariants nothing states. That is the shape worth building even when Env A
+   is the only one that is blocked without it.
+3. **Would a shell-capable agent still want it?** If a production agent with
+   ffmpeg, whisper and the helper tools would use it, it is production work.
+   If it only saves that agent a command it can already write, it is not.
+
+**The two directions are not symmetric, and the quote is easy to over-apply.**
+PROVISION.md's own next section pushes work *into* the engine for exactly these
+customers: a customer's speech API becomes an engine **vendor**, never a
+helper, "This preserves `synthesize_speech`'s frame-accurate `timings`, which
+agent-side generation loses." So: **generation** belongs agent-side and is
+demo-tier in the engine; **deterministic, timing-coupled measurement** belongs
+in the engine even when the caller has a shell (architecture §9.5, the
+generative boundary). Audio cues are the worked example on this side — Env B
+cannot get onsets from ffmpeg at all, and a production agent generating
+narration through a TTS helper is precisely the one with no engine timings to
+lose.
+
 Active plan documents:
 
 | document | what it is |
@@ -18,6 +81,7 @@ Active plan documents:
 | [docker-support-plan.md](docker-support-plan.md) | the containerized third distribution tier — demo-in-a-box, server-hosted Studio, MCP sidecar (proposed, 1–2 d) |
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets |
+| [batch-templating-plan.md](batch-templating-plan.md) | one composition, many data rows — Slice 0 is an example and ships on its own; the engine slices are **gated on a named use case** (proposed 2026-08-08) |
 | [auto-reframe-plan.md](auto-reframe-plan.md) | `measure_reframe` — the hard half of aspect variants |
 | [ai-only-desktop-vendor-boundary-plan.md](ai-only-desktop-vendor-boundary-plan.md) | **delivered 2026-08-04 as v0.26.0** (Slices 0/A/B/C-1 — see [completed.md](completed.md)); kept for the two remainders below |
 | [linux-ready-plan.md](linux-ready-plan.md) | **complete 2026-08-04 — Linux is supported**; kept for the record and the remaining caveats |
@@ -55,9 +119,13 @@ Active plan documents:
        against real narration, four of five line starts land within two
        frames at 30 fps, and the two things that measurement corrected
        (centred windows; the vendor's ~140 ms clip padding masquerading as
-       detector error) are recorded there. **Remaining: `onsetFrames` on
-       `transcribe_asset`, word frames for generated speech, the SKILL
-       files, and the frame-API exposure.**
+       detector error) are recorded there. **All three surfaces now carry
+       cues** — `transcribe_asset` took onsets the same day, measured off the
+       extraction whisper already reads and cached in seconds so one
+       transcript still serves 24 and 30 fps; the envelope stays off it
+       because it is fps-dependent. **Remaining: word frames for generated
+       speech, and the frame-API exposure** (the plan defers the latter by
+       design).
        **Progress 2026-08-06 — Stage B's authoring contract shipped**
        (its prerequisite, not the render path): the engine states
        `--ms-width`/`--ms-height` and the `--ms-safe-*` rectangles on every
@@ -185,10 +253,30 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
 - [ ] **Coverage reporting + a small cross-platform media fixture set.**
 - [ ] **Still-image facts on `probe_asset`** — `width`, `height`, `hasAlpha`,
       `contentBox`, `meanLuminance`, `isBlank` for a still input. The one
-      knowledge-shaped half of the retired `prepare_image` plan
-      ([retired.md](retired.md)): no Python, no new vehicle, and it answers
-      "where is the content in this frame" and "how dark is the region under
-      my caption" before a render instead of after one.
+      surviving half of the retired `prepare_image` plan
+      ([retired.md](retired.md)). **Env A-only, and kept because it is cheap**
+      (the rule above): Env B answers all six with one `magick identify
+      -format` call — measured 2026-08-08 — so this buys the demo tier
+      something a production agent already has. It earns its place on price.
+      `probe_asset` already runs ffprobe for width/height/pix_fmt, and
+      `greyFrame` in [render-review.js](../../engine/src/core/render-review.js)
+      already decodes one frame to greyscale through `-f rawvideo` and does the
+      arithmetic on a Buffer in Node — ffmpeg reads a PNG the same way it reads
+      an mp4. So it is that decode at a higher resolution plus sums over a
+      `Uint8Array`: **no Python, no ImageMagick, no new dependency** — which is
+      precisely what killed the ops half of the parent plan. ~½ day. Do not let
+      it grow: the moment it wants to *change* a picture it is the retired plan
+      again.
+- [ ] **Asset-duration staleness** — a scene whose configured duration no
+      longer matches the asset it plays, reported in the `stale_render` /
+      `plan.problems` family. The measurement-shaped remainder of the
+      Remotion-parity read ([retired.md](retired.md)); a composed stack cannot
+      see the scene config and the asset at once.
+- [ ] **Declared scene inputs, as validation only** — a scene may state the
+      assets/values it requires, so `verify_film` can fail a scene wired to a
+      missing asset before a render is paid for. No props GUI: see the
+      Remotion-parity entry in [retired.md](retired.md) for why the editor half
+      is retired and what would revive it.
 - [ ] **Contribution/support contracts** for the repository.
 - [ ] **Known suite flake** — `studio-film-page` "build archives a
       delivery" fails rarely under the full parallel run, passes standalone

@@ -361,6 +361,21 @@ a build on its own.
 
 ## P1-3 — Transitions on the timeline
 
+> **Held 2026-08-08, pending a better justification than the one below.** The
+> motivation as written is purely Env A ("a wall for an MCP-only agent"), and
+> [TODO.md](TODO.md)'s standing rule allows an Env A-only item only when it is
+> *cheap*. This one is the opposite: the plan calls it medium, wants its own
+> document first, and it changes the timeline arithmetic that captions, audio
+> placement and the promotion frame-count check all depend on.
+>
+> **The argument that would save it is reproducibility, not capability.** Env B
+> can hand-write a dissolve in ffmpeg — and the moment it does, the delivery is
+> no longer what `film.json` describes, which breaks the one-authoritative-record
+> rule this whole document rests on. That reason applies to a shell-capable
+> production agent, so it clears the bar the current wording does not. It needs
+> stating and testing (does a real Env B production actually want dissolves, or
+> is the butt-joined cut the house style?) before this is scheduled.
+
 The one genuine capability gap in the timeline model: segments are butt-joined by
 lossless concat, so a dissolve is impossible without hand-written ffmpeg — a wall
 for an MCP-only agent.

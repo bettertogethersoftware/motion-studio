@@ -26,6 +26,17 @@ should ship as two things rather than one:
 - **`transcode_asset` gains a time-varying crop** — capability. Only Env A is blocked
   without it.
 
+**Both halves are in scope (re-evaluated 2026-08-08).** Under
+[TODO.md](TODO.md)'s standing rule — Env B is the main focus, Env A is the demo
+tier, and a cheap Env A win still gets done — the capability half passes on
+price rather than on audience. The expensive, judgement-carrying work is the
+measurement (sampling, letterbox detection, column scoring, the DP), and both
+halves consume it. Once a validated path exists, applying it is generating a
+`sendcmd` script and splicing one filter — small, and the engine has to own the
+generation anyway, because §9.4 forbids the caller supplying ffmpeg arguments.
+If the crop half ever stops being small, it is the half to drop: Env B applies
+the path itself, and the path is the part it cannot compute.
+
 ## Why
 
 Centre-cropping 16:9 to 9:16 discards 68% of the width, and on real footage the
