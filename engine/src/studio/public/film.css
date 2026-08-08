@@ -449,6 +449,25 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 }
 .blk:hover { border-color: var(--dim); }
 .blk.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+/* Frames along the block (v0.28). Stretched across it, because the tiles are
+   evenly spaced in time and the block is a linear map of that same span — so
+   the picture under a given x is the picture at that moment. Dimmed and sat
+   behind everything, because the block still has to be readable: the strip
+   answers "what is this", the label answers "which one". */
+.blk .blk-strip {
+  position: absolute; inset: 0; z-index: 0;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.blk.selected .blk-strip { opacity: 0.72; }
+/* A readable floor under the label, so light footage cannot wash the text out. */
+.blk .blk-strip::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(10, 12, 16, 0.15), rgba(10, 12, 16, 0.55));
+}
+
 .blk .blk-label {
   padding: 0 6px; position: relative; z-index: 2;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

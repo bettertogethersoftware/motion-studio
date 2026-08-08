@@ -462,3 +462,71 @@ test('film page: footage trim reports its keyframe grid and re-cuts the segment'
   const nope = await j(`/api/films/${enc(trimFilm)}/footage/${enc('seg-nope')}/keyframes`);
   assert.equal(nope.status, 404);
 });
+
+/**
+ * Filmstrips on timeline blocks (v0.28): frames along a block, so a timeline is
+ * read rather than decoded. Generated on demand and never written into the
+ * film — a strip is a view of a file, not a fact about the production.
+ */
+test('film page: filmstrips come from footage and from a rendered scene, and refuse honestly', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const made = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST', body: { name: 'Strip Film', fps: 30, width: 320, height: 240, durationInFrames: 8 },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.data));
+  const stripFilm = made.data.film.id;
+
+  const clip = path.join(os.tmpdir(), `ms-strip-${Date.now()}.mp4`);
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+    '-i', 'testsrc2=size=320x240:rate=30:duration=4',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p',
+    '-frames:v', '120', clip]);
+  const put = await fetch(`${base}/api/films/${enc(stripFilm)}/asset?path=${enc('assets/clip.mp4')}`,
+    { method: 'PUT', body: await fsp.readFile(clip) });
+  assert.ok(put.ok);
+  await fsp.rm(clip, { force: true });
+
+  const scene = await j(`/api/films/${enc(stripFilm)}/scenes`, {
+    method: 'POST', body: { name: 'Strip Scene', durationInFrames: 8 },
+  });
+  assert.equal(scene.status, 201);
+  const patched = await j(`/api/films/${enc(stripFilm)}`, {
+    method: 'PATCH',
+    body: { patch: { scenes: [{ slug: 'strip-scene' }, { footage: 'assets/clip.mp4', durationInFrames: 120 }] } },
+  });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+  const segId = patched.data.film.scenes[1].id;
+
+  // Footage: a real JPEG, and asking for more tiles gives a wider one.
+  const narrow = await fetch(`${base}/api/films/${enc(stripFilm)}/footage/${enc(segId)}/filmstrip?tiles=4`);
+  assert.equal(narrow.status, 200);
+  assert.equal(narrow.headers.get('content-type'), 'image/jpeg');
+  const narrowBytes = Buffer.from(await narrow.arrayBuffer());
+  assert.equal(narrowBytes[0], 0xff, 'JPEG magic');
+  assert.equal(narrowBytes[1], 0xd8);
+
+  const wide = await fetch(`${base}/api/films/${enc(stripFilm)}/footage/${enc(segId)}/filmstrip?tiles=16`);
+  assert.equal(wide.status, 200);
+  const wideBytes = Buffer.from(await wide.arrayBuffer());
+  assert.ok(wideBytes.length > narrowBytes.length, `16 tiles (${wideBytes.length}B) should exceed 4 (${narrowBytes.length}B)`);
+
+  // An UNRENDERED scene has no frames to sample, and says so rather than 500ing.
+  const unrendered = await j(`/api/scenes/${enc(`${stripFilm}/strip-scene`)}/filmstrip`);
+  assert.equal(unrendered.status, 404);
+  assert.equal(unrendered.data.code, 'scene_not_rendered');
+
+  // Rendered, it has one.
+  const render = await j(`/api/scenes/${enc(`${stripFilm}/strip-scene`)}/render`, { method: 'POST', body: {} });
+  assert.equal(render.status, 202);
+  assert.equal((await waitJob(render.data.jobId)).state, 'done');
+  const sceneStrip = await fetch(`${base}/api/scenes/${enc(`${stripFilm}/strip-scene`)}/filmstrip?tiles=4`);
+  assert.equal(sceneStrip.status, 200);
+  assert.equal(sceneStrip.headers.get('content-type'), 'image/jpeg');
+
+  // Nothing was written into the film to make any of that.
+  const assets = await j(`/api/films/${enc(stripFilm)}/assets`);
+  assert.deepEqual(assets.data.files.map((f) => f.path), ['assets/clip.mp4'],
+    'a filmstrip is a view of a file, not a file in the film');
+
+  const nope = await fetch(`${base}/api/films/${enc(stripFilm)}/footage/${enc('seg-nope')}/filmstrip`);
+  assert.equal(nope.status, 404);
+});

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Timeline blocks show the clip, not its filename
+
+A block said `▣ 2026-08-02 04-24-09.trim12.mp4 · 206f`, which names a file and
+shows nothing. Every other editor draws frames from the clip along the block,
+and the difference is between **reading** a timeline and decoding one — the same
+complaint that produced the live scene preview: it is hard to tell what a thing
+is without opening it.
+
+Footage segments and rendered scenes now carry a **filmstrip**: one image of
+evenly-spaced frames, stretched across the block. Because the tiles are evenly
+spaced *in time* and a block maps that span linearly, the picture under a given
+x is the picture at that moment — the strip shows the clip's timing, not
+wallpaper. It sits behind the label at half opacity under a readability floor,
+so the block still answers "which one" as well as "what".
+
+Strips are **generated on demand and never written into a film**: a filmstrip
+is a view of a file, not a fact about the production, and a cache the human
+finds in `assets/` is a file they have to wonder about. The cost is one bounded
+ffmpeg run per segment per session, so they are fetched at most three at a time,
+only for blocks wide enough to show anything, at a tile count chosen from a
+short ladder (so nudging the zoom does not re-fetch everything), and cached for
+the session keyed by the file and its length — which means a trim misses and a
+repaint hits. **Reload** clears them, for the one case the key cannot see: a
+re-render at the same length and path.
+
+An unrendered scene has no frames to sample and says so (`scene_not_rendered`);
+the live preview is what answers "what is this" there.
+
 ### An overlay on a film with no scenes says why nothing plays
 
 Add an overlay to a film that has no scene and no footage and the player simply

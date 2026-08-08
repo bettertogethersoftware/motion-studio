@@ -41,6 +41,7 @@ Motion Studio is three thin entry points around one shared render engine.
           footage-scene.js — a supplied clip becomes a scene that plays it (§14)
           image-scene.js — a supplied still becomes a scene that holds it (§14)
           footage-trim.js — re-cutting a footage segment, copy where it can (§14)
+          filmstrip.js — frames along a timeline block, on demand (§14)
           revisions.js — immutable scene-revision archive + pointers (§14)
           deliveries.js— immutable film deliveries + frozen manifests (§14)
           advice.js    — durable human advice, leases, evidence (§14)

@@ -418,6 +418,10 @@ async function reloadFilm() {
       }
     }
     stopPlayback();
+    // The one gesture that re-reads everything from disk also drops the strips:
+    // a scene re-rendered at the same length and path is the case their cache
+    // key cannot see, and this is the button for "something changed underneath".
+    clearStrips();
     // Pause before dropping: revoking an object URL does not stop an element
     // that has already loaded it (the same trap as invalidateMixIfAudioChanged).
     try { state.mix.el?.pause(); } catch { /* already detached */ }
@@ -2153,6 +2157,9 @@ function sceneBlock(s, index) {
   const advN = unresolvedCount(segmentAdviceMatcher(s));
   if (advN) el.appendChild(adviceBadge(advN));
 
+  // Frames along the block, when it is wide enough to show any (v0.28).
+  attachStrip(el, s, w);
+
   // Footage can be TRIMMED at its edges (v0.28); a scene cannot, because a
   // scene's length is its config and its render. See attachFootageGrips.
   if (footage && !s.missing) attachFootageGrips(el, s);
@@ -2199,6 +2206,107 @@ function sceneBlock(s, index) {
     });
   });
   return el;
+}
+
+/* ---- filmstrips on timeline blocks (v0.28) ---------------------------- */
+
+/**
+ * Frames drawn along a block, so the timeline can be read rather than decoded.
+ *
+ * A block used to carry a filename and a frame count, which is what you already
+ * knew. This draws the clip itself — the same thing every other editor does,
+ * and the same complaint that produced the live scene preview: it is hard to
+ * tell what a thing IS without opening it.
+ *
+ * Each strip is one image of evenly-spaced frames, stretched across the block.
+ * Because the tiles are evenly spaced in TIME and a block maps that span
+ * linearly, tile boundaries land where those frames actually are — so the strip
+ * is a picture of the clip's timing, not wallpaper.
+ *
+ * Generating one costs an ffmpeg run, so: only for blocks wide enough to show
+ * anything, at most a few at a time, cached for the session, and asked for at a
+ * tile count that suits the block's width rather than its zoom-of-the-moment.
+ */
+const strips = { cache: new Map(), inFlight: 0, queue: [] };
+const STRIP_MAX_PARALLEL = 3;
+/** Below this a strip is a smear; the label is more use. */
+const STRIP_MIN_WIDTH = 90;
+
+/** A tile ladder, so a nudge of the zoom slider does not re-fetch everything. */
+function stripTilesFor(px) {
+  if (px < 260) return 4;
+  if (px < 640) return 8;
+  if (px < 1400) return 16;
+  return 32;
+}
+
+/**
+ * Cache key. It carries what the picture depends on — the file and its length —
+ * so a trim (which changes the path) or a length change misses, while a plain
+ * repaint hits. A re-render at the SAME length and path is the one case that
+ * keeps a stale strip; the reload button clears the cache for exactly that.
+ */
+function stripKey(s, tiles) {
+  return s.kind === 'footage'
+    ? `f:${s.id}:${s.footage}:${s.durationInFrames}:${tiles}`
+    : `s:${s.sceneId}:${s.durationInFrames}:${tiles}`;
+}
+
+function stripUrl(s, tiles) {
+  return s.kind === 'footage'
+    ? `/api/films/${fid}/footage/${encodeURIComponent(s.id)}/filmstrip?tiles=${tiles}`
+    : `${sceneApi(s.slug)}/filmstrip?tiles=${tiles}`;
+}
+
+function pumpStripQueue() {
+  while (strips.inFlight < STRIP_MAX_PARALLEL && strips.queue.length) {
+    const job = strips.queue.shift();
+    strips.inFlight += 1;
+    fetch(job.url)
+      .then((r) => (r.ok ? r.blob() : null))
+      .then((b) => {
+        // A scene that is not rendered, or a file with nothing to sample, is a
+        // normal answer — remembered as "no strip" so it is asked once.
+        const href = b ? URL.createObjectURL(b) : null;
+        strips.cache.set(job.key, href);
+        if (href) job.paint(href);
+      })
+      .catch(() => strips.cache.set(job.key, null))
+      .finally(() => { strips.inFlight -= 1; pumpStripQueue(); });
+  }
+}
+
+/** Put a strip behind a block's label, fetching it if this is the first ask. */
+function attachStrip(el, s, widthPx) {
+  if (widthPx < STRIP_MIN_WIDTH) return;
+  if (s.missing || (s.kind !== 'footage' && !s.rendered)) return;
+  const tiles = stripTilesFor(widthPx);
+  const key = stripKey(s, tiles);
+  const paint = (href) => {
+    // The block may have been repainted since the fetch started.
+    if (!el.isConnected) return;
+    let strip = el.querySelector('.blk-strip');
+    if (!strip) {
+      strip = el.insertBefore(document.createElement('div'), el.firstChild);
+      strip.className = 'blk-strip';
+    }
+    strip.style.backgroundImage = `url(${href})`;
+  };
+  if (strips.cache.has(key)) {
+    const href = strips.cache.get(key);
+    if (href) paint(href);
+    return;
+  }
+  strips.cache.set(key, null);            // claim it, so a repaint does not re-queue
+  strips.queue.push({ key, url: stripUrl(s, tiles), paint });
+  pumpStripQueue();
+}
+
+/** Drop every cached strip — the explicit reload, when the files may have changed. */
+function clearStrips() {
+  for (const href of strips.cache.values()) if (href) URL.revokeObjectURL(href);
+  strips.cache.clear();
+  strips.queue.length = 0;
 }
 
 /* ---- trimming footage (v0.28) ---------------------------------------- */

@@ -56,6 +56,8 @@
  *   POST   /api/films/:fid/scenes/from-image {image,imageFrom?,name?,slug?,durationInFrames?}
  *                                            → scaffold a scene that holds a still
  *   GET    /api/films/:fid/footage/:segId/keyframes   where this clip can be cut for free
+ *   GET    /api/films/:fid/footage/:segId/filmstrip?tiles=  frames along the block (jpeg)
+ *   GET    /api/scenes/:sid/filmstrip?tiles=            the same, from the render (jpeg)
  *   POST   /api/films/:fid/footage/:segId/trim        {startInFrames?,durationInFrames?,
  *                                            snapToKeyframe?,dryRun?} → re-cut the segment
  *   POST   /api/films/:fid/scenes/:slug/clone  {toFilm?,name?} → duplicate a scene
@@ -193,6 +195,7 @@ import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks, audibleTracks } from '../core/films.js';
 import { sceneFromImage } from '../core/image-scene.js';
 import { trimFootage, keyframeGrid } from '../core/footage-trim.js';
+import { filmstrip, clampTiles } from '../core/filmstrip.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
 import { resolveReviewPolicy, extractRenderedFrame } from '../core/render-review.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
@@ -1368,6 +1371,48 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           const seed = settings && outputSeedFromSettings(settings, scene.config.output);
           if (seed) scene.config = await store.updateConfig(scene.id, { output: seed });
           return sendJson(res, 201, scene);
+        }
+
+        /* ---- filmstrips for timeline blocks (v0.28) ---- */
+        // GET /api/films/:fid/footage/:segmentId/filmstrip?tiles=N
+        // Frames along the block, so a timeline can be read instead of decoded.
+        // Generated on demand and never written into the film: a filmstrip is a
+        // view of a file, not a fact about the production.
+        if (isFilmRoute && req.method === 'GET' && sub === 'footage'
+          && parts.length === 6 && parts[5] === 'filmstrip') {
+          const doc = await store.getFilm(targetId);
+          const plan = await planFilm({ film: doc, store });
+          const seg = plan.scenes.find((s) => s.kind === 'footage' && s.id === parts[4]);
+          if (!seg || seg.missing) return sendJson(res, 404, { code: 'file_not_found', message: 'no such footage segment' });
+          const strip = await filmstrip({
+            filePath: path.join(store.filmPath(doc.id), seg.footage.replace(/\\/g, '/')),
+            frames: seg.actualFrames ?? seg.durationInFrames,
+            tiles: clampTiles(url.searchParams.get('tiles')),
+            ffmpegPath: await ffmpegPath(),
+          });
+          if (!strip) return sendJson(res, 404, { code: 'file_not_found', message: 'no frames to sample' });
+          res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': strip.length, 'Cache-Control': 'no-store' });
+          return res.end(strip);
+        }
+
+        // GET /api/scenes/:sid/filmstrip?tiles=N — the same, from the scene's
+        // RENDERED output. An unrendered scene has no frames to sample; the
+        // live preview is what answers "what is this" there.
+        if (isSceneRoute && req.method === 'GET' && sub === 'filmstrip' && parts.length === 4) {
+          const t = await describeTarget(targetId);
+          const outFile = path.join(t.path, t.outDir, t.config.output?.filename ?? 'output.mp4');
+          if (!fs.existsSync(outFile)) {
+            return sendJson(res, 404, { code: 'scene_not_rendered', message: 'render the scene to get a filmstrip' });
+          }
+          const strip = await filmstrip({
+            filePath: outFile,
+            frames: t.config.durationInFrames,
+            tiles: clampTiles(url.searchParams.get('tiles')),
+            ffmpegPath: await ffmpegPath(),
+          });
+          if (!strip) return sendJson(res, 404, { code: 'file_not_found', message: 'no frames to sample' });
+          res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': strip.length, 'Cache-Control': 'no-store' });
+          return res.end(strip);
         }
 
         /* ---- trimming a footage segment (v0.28) ---- */

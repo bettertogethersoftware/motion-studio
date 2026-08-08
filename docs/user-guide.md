@@ -901,6 +901,13 @@ timeline, one set of rules.
   captions; that player pins one archived build and never switches beneath
   you. A newer build offers itself in a banner, and a build whose length no
   longer matches the cut says so rather than pretending.
+- **Blocks show the clip (v0.28).** A footage block, and a scene that has been
+  rendered, draw frames from themselves along the block instead of just a
+  filename and a frame count — so the timeline can be read at a glance. The
+  frames are evenly spaced in time, which means the picture under a point on the
+  block is roughly the picture at that moment. Zoom in and more frames appear.
+  Nothing is written to disk to do it; if a clip cannot be read, the block falls
+  back to its label.
 - **A scene that has not been rendered still shows you what it is (v0.28).**
   It used to be a striped card with the scene's name on it, which tells you
   nothing when the name is a filename. Now the composition is drawn there in
