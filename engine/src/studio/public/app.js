@@ -2091,6 +2091,37 @@ async function refreshLibrary() {
 }
 
 $('#btn-library-close').addEventListener('click', () => showLibraryPage(null));
+
+/** Copy the library path, which is the answer that works in every deployment. */
+async function copyLibraryPath() {
+  const p = $('#library-path').textContent;
+  if (!p) return;
+  try {
+    await navigator.clipboard.writeText(p);
+    toast(`Copied: ${p}`, { kind: 'info', timeoutMs: 3000 });
+  } catch {
+    // Clipboard access is refused on an insecure origin that is not localhost,
+    // which is the same deployment where `browse` is refused — so say the path
+    // rather than fail twice.
+    toast(`Copy this path by hand: ${p}`, { kind: 'error' });
+  }
+}
+$('#btn-library-copy').addEventListener('click', copyLibraryPath);
+
+/* `browse` opens the folder on the machine RUNNING the Studio. When that is not
+ * the machine you are looking at — a remote viewer, a container, a headless box
+ * — the server refuses with a reason rather than silently opening a window
+ * nobody will see, and this falls back to the copy, which always works. */
+$('#btn-library-reveal').addEventListener('click', async () => {
+  const ws = state.libraryWs;
+  if (!ws) return;
+  let res;
+  try { res = await api(`/api/workspaces/${enc(ws)}/library/reveal`, { method: 'POST' }); }
+  catch (err) { return toastError(err); }
+  if (res.revealed) return;
+  toast(res.message ?? 'Could not open the folder here.', { kind: 'error' });
+  await copyLibraryPath();
+});
 $('#library-upload').addEventListener('change', async (e) => {
   const ws = state.libraryWs;
   const files = [...e.target.files];

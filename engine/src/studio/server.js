@@ -43,6 +43,9 @@
  *   GET    /api/workspaces/:ws/library/file?path=          stream/download
  *   PUT    /api/workspaces/:ws/library/file?path=          raw-body upload (no size cap beyond 2 GB guard)
  *   DELETE /api/workspaces/:ws/library/file?path=
+ *   POST   /api/workspaces/:ws/library/reveal   open the folder in the OS file
+ *                                               manager — LOOPBACK ONLY, and it
+ *                                               opens on the SERVER's desktop
  *   POST   /api/workspaces/:ws/films         {name,fps?,width?,height?,durationInFrames?,slug?,deliverables?}
  *   GET    /api/films/:fid                   film document + resolved detail (layout, problems)
  *   PATCH  /api/films/:fid                   {patch} — scenes order/audio/overlays/captions/…
@@ -107,6 +110,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { MAX_ASSET_BYTES } from '../core/scene.js';
 import { WorkspaceStore } from '../core/store.js';
+import { canReveal, revealDirectory } from '../core/reveal.js';
 import {
   readSettings, updateSettings, resolveFfmpegPath, resolveFfprobePath,
   withNewSceneDefaults, outputSeedFromSettings, DEFAULT_SETTINGS,
@@ -1063,6 +1067,20 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
             if (req.method === 'DELETE') {
               return sendJson(res, 200, await store.deleteLibraryFile(wsId, rel));
             }
+          }
+          // POST .../library/reveal — open this library in the OS file manager.
+          //
+          // The client names a WORKSPACE and the directory is resolved here; a
+          // path from the client is never opened, because this spawns a process
+          // and the Studio has no authentication of its own (see the bind
+          // comment in start()). `canReveal` is the whole policy and it refuses
+          // by default — a refusal is 200 with a reason, not an error, because
+          // the page turns it into "copy the path instead" rather than a toast.
+          if (req.method === 'POST' && parts[4] === 'reveal' && parts.length === 5) {
+            const dir = store.libraryPath(wsId);
+            const allowed = canReveal({ remoteAddress: req.socket?.remoteAddress });
+            if (!allowed.ok) return sendJson(res, 200, { revealed: false, path: dir, ...allowed });
+            return sendJson(res, 200, { path: dir, ...revealDirectory(dir) });
           }
         }
 

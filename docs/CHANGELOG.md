@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### `browse` opens the library folder — when that means anything
+
+The workspace library page shows its path; now it can open it. **browse** hands
+the folder to the OS file manager — `explorer.exe`, `open`, `xdg-open` — and
+**copy path** sits beside it.
+
+The platform switch is the easy half. The half worth stating: the Studio is a
+web server, so this runs on the **server's** machine, and that is only what you
+want when the server and the browser are the same box. Three shipped shapes
+where they are not — viewing over `MOTION_STUDIO_STUDIO_HOST`, the container in
+the Docker plan, and the server-hosted tier — and in a container it is worse
+than useless, because `/data/workspaces/...` is not a path the host would
+recognise, so even a working opener reveals the wrong place.
+
+So the request must come from loopback, and that one gate does two jobs.
+Usefulness: loopback is exactly "the file manager I open is the one you are
+looking at". And **safety**, which matters more — the Studio has no
+authentication of its own, and an unauthenticated endpoint that *spawns a
+process with a path argument* is a different risk class from one that serves
+files. The client therefore names a **workspace**, never a path, and the server
+resolves the directory itself.
+
+There is deliberately **no Docker check**. `/.dockerenv` sniffing tests the
+wrong axis: the real question is "can I open a window this human will see",
+which is equally false on a headless box, over SSH, and in WSL without an X
+server. The gate asks that instead — and under normal port publishing a
+containerised Studio sees requests from the bridge gateway rather than
+loopback, so Docker falls out of it without being named.
+
+A refusal is not a dead button: it says why, then copies the path, which works
+in every deployment. If the clipboard is unavailable too (an insecure non-local
+origin — the same deployment), it prints the path to copy by hand.
+
+One trap recorded in the code for whoever meets it next: **`explorer.exe` exits
+1 on success**, so an exit code can never be the success test. Nothing here
+waits for one.
+
 ### The film explorer has an edge you can drag
 
 The rail was a fixed 216px with a `«` button that folded it to an icon strip —

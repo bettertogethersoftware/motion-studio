@@ -117,6 +117,7 @@ docs/ (this plan + docker section in README.md, mcp-setup.md)
 | Fonts differ from the Windows reference machine | cross-machine pixel identity was never the contract; sidecar records the font environment (§10 fonts decision) |
 | Image size creep | packs-as-volumes, headless-shell-only, size budget in the build script |
 | Studio exposed unauthenticated | loopback publish by default; the §14/mcp-setup warning repeated in compose comments |
+| The library page's `browse` button | already handled, and worth checking stays that way: `core/reveal.js` refuses any request that is not from loopback, and under normal port publishing a containerised Studio sees the bridge gateway instead — so the button degrades to "copy path" in the image without a Docker check existing anywhere |
 | distro ffmpeg regresses | doctor's ≥5 floor check runs at build time; fall back to the static build used by CI |
 
 ## 6. Non-goals

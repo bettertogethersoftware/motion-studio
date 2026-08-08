@@ -310,6 +310,14 @@ once it grows past a handful of files), **downloads**, and **deletes** —
 deleting asks you to type the filename back, because a library file can be the
 plate a dozen scenes were built from. Scenes that already pulled a file in keep
 their own copy; this removes the shared original.
+
+**browse** opens the folder in your file manager, which is the quickest way to
+drop in a hundred plates at once or point another program at them. It works
+when the Studio is running on the machine you are sitting at — that is the only
+case where it can, since it opens the folder on the machine running the
+*server*, not the one running the browser. Viewing a Studio hosted elsewhere,
+or one inside a container, it says so and copies the path instead; **copy
+path** is always there beside it.
 Unlike scene and film assets there's no 25 MB cap — the library exists
 specifically for the files too big for that channel (a licensed soundtrack,
 a folder of location photos, a multi-gigabyte video plate). An agent lists

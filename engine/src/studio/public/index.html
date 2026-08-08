@@ -590,6 +590,10 @@
         <h2 id="library-title">library</h2>
         <span class="spacer"></span>
         <span id="library-path" class="dim mono path-chip"></span>
+        <!-- Opens the folder on the machine RUNNING the Studio, which is why it
+             falls back to copying the path when that is not this machine. -->
+        <button id="btn-library-reveal" class="ghost" title="open this folder in the file manager">browse</button>
+        <button id="btn-library-copy" class="ghost" title="copy this folder's path">copy path</button>
         <button id="btn-library-close" class="ghost">close</button>
       </header>
       <p class="dim note library-intro">
