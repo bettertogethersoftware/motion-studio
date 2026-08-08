@@ -119,6 +119,76 @@ pointer, or U-10 landing its roving-tabindex helper in `studio-util.js` — a
 lane is a one-level tree, so the grammar becomes nearly free once that helper
 exists.
 
+## Remotion Studio parity features (2026-08-08)
+
+A feature-by-feature read of the Remotion Studio's documentation against this
+tree, prompted by "list the features they have and we don't." Most of the list
+is genuinely absent — and should stay absent, because it is built for a
+human-in-the-loop product and this one bets the human is *not* in the loop. The
+whole class is retired here so it is not re-proposed as a gap.
+
+Retired outright:
+
+- **Zod-schema props + the graphical props editor.** A props form exists so a
+  human can vary a video without touching code, and so a non-AI caller can
+  render N variants. Here the thing that would fill the form is the AI, which
+  already has a wider channel — `write_composition_bundle`, `clone_scene`,
+  `update_scene_config` edit anything, not a fixed field set. It also fails the
+  moat test in [competitive-position.md](../competitive-position.md): a composed
+  stack can do it.
+- **Saving edited props back to source, and `visualControl()`** (a widget in the
+  UI that rewrites the source line behind it). **This contradicts a settled
+  decision rather than merely losing on priority:** the Studio never edits
+  production directly — the human's channel is advice, and advice is durable
+  evidence (their words, what they were watching, a frame grab, the AI's
+  answer). A control that silently rewrites the composition destroys that trail.
+- **An embeddable `<Player>`.** That is an embed/SaaS business; the deliverable
+  here is a measured file.
+- **An in-Studio "Ask AI" chatbot.** The AI is already outside, driving through
+  MCP. A second in-app channel bypasses the advice record, and the need behind
+  it — "is anyone listening?" — is served by `report_agent_activity`, the
+  Explorer's amber pulse and `get_production_status`.
+- **Canvas-level direct manipulation** (click-select/move/resize/crop a scene's
+  contents, marquee select, layer ordering). A scene's interior is code the AI
+  owns. Timeline-level editing is a different matter and is legitimate — it is
+  scoped in [studio-ui-polish-plan.md](studio-ui-polish-plan.md), where U-15
+  already shipped lane storage, head-trimming and audition.
+- **`@remotion/studio`'s scripting API** (`play`/`seek`/`goToComposition`/
+  `getStaticFiles`/`writeStaticFile`/…). Those sixteen functions exist because
+  Remotion has no agent protocol; MCP is a superset, and the file half is
+  already `list_assets` / `write_asset_file` / `sync_shared_files`.
+- **Ecosystem packages and Lambda/Cloud Run rendering.** Already-settled
+  unwinnable fronts — see `competitive-position.md`'s "Where you cannot win".
+
+Already covered, and mistakenly first read as gaps:
+
+- **Hosting the Studio for a remote viewer** — `MOTION_STUDIO_STUDIO_HOST`
+  (v0.26) plus the server-hosted tier in
+  [docker-support-plan.md](docker-support-plan.md).
+- **`calculateMetadata()`** (a composition computing its own duration from an
+  asset) — `footage-scene.js` already derives a scene from a supplied clip's
+  real duration, and `probe_asset` supplies the numbers.
+
+**What survives, in Motion Studio's shape** — both moved to
+[TODO.md](TODO.md)'s engineering backlog, both measurement-shaped rather than
+GUI-shaped:
+
+1. **Asset-duration staleness** — the honest remainder of `calculateMetadata`.
+   Not live re-evaluation; a check that a scene's configured duration no longer
+   matches the asset it plays, in the `stale_render` / `plan.problems` family.
+2. **Declared scene inputs as a *validation* surface** — "this scene needs
+   `{headline, logo}`" so `verify_film` can catch a scene wired to a missing
+   asset before a render is paid for. The knowledge-shaped half of the props
+   idea, without the editor.
+
+**Revisit trigger for the props editor specifically:** a customer wanting
+**batch templating** — many videos from one composition and a data file. That is
+a different job from the production loop, and it is the only reading under which
+a declared input schema earns a GUI. Scoped 2026-08-08 in
+[batch-templating-plan.md](batch-templating-plan.md), which ranks the candidate
+use cases and keeps the editor retired: even under batch templating the data
+channel and the validation surface carry the value, and the form does not.
+
 ## C-2 desktop packaging (2026-08-08)
 
 The packaged half of the vendor-boundary plan's Slice C — a bundled Node

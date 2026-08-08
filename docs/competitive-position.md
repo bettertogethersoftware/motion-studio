@@ -231,3 +231,30 @@ Written down so it can be pointed at later:
 - Distributed cloud rendering. Fights Tier 3 and cedes ground on Remotion's turf.
 - A default cloud review vendor. Trades the offline identity for parity.
 - Better local TTS or a better synth. Buy it through the vendor chain instead.
+- A graphical props editor, controls that rewrite the composition source, an
+  embeddable player, an in-Studio chatbot, canvas-level direct manipulation.
+  Added 2026-08-08 after reading the Remotion Studio's documentation feature by
+  feature — reasons per item in [plans/retired.md](plans/retired.md).
+
+## Checked against the Remotion Studio, 2026-08-08
+
+The exercise: list what their Studio has that this one does not, then ask of
+each whether *this* product needs it. Almost the whole list is built for a
+human-in-the-loop product, and this one bets the human is not in the loop — so
+"they have it, we don't" is the wrong measurement, exactly as the section below
+says. Two items survived, both by changing shape from GUI to measurement:
+**asset-duration staleness** and **declared scene inputs as a validation
+surface** — the latter feeds Tier 2 item 6 (`verify_film`) rather than standing
+alone. Both are in [plans/TODO.md](plans/TODO.md)'s engineering backlog; the
+retired majority, with reasons and revisit triggers, is in
+[plans/retired.md](plans/retired.md).
+
+One correction worth recording: parameterisation *looked* like the biggest gap
+on a first read and is not, because the party that would fill the props form is
+the AI, and the AI already edits compositions directly. The only reading under
+which it becomes real is batch templating — many videos from one composition
+and a data file — which is a different job, and nobody has asked for it. Scoped
+anyway in [plans/batch-templating-plan.md](plans/batch-templating-plan.md), and
+gated there: its flagship case is **localization**, because a language variant
+changes the film's *timing*, which is the one thing a template engine cannot
+absorb and whole-film ownership can.
