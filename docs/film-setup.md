@@ -260,6 +260,41 @@ convert **once** and then clone short scenes that each `seekVideo` their own
 range of the same `.webm` — change `IN_POINT` and `durationInFrames`. Further
 scenes cost no further transcode.
 
+### A still image on the timeline (v0.28)
+
+There are still exactly **two** kinds of segment, and a picture is neither — so
+`create_scene_from_image { film, image }` makes it a **scene**, and the play
+order receives an ordinary `{ slug }`. That is the design, not an implementation
+detail: a third segment kind (`{ image, durationInFrames }`) would make every
+"is this a scene?" walk learn a third answer, which is precisely the omission
+BUG-2 was, and would buy something *weaker*. A still segment could only sit
+there; a scene can be pushed in on, cross-faded, or carry type over it, and you
+can open its `composition.js` and direct it.
+
+```jsonc
+"scenes": [
+  { "slug": "title" },
+  { "slug": "rome-forum" },   // ← a still. Nothing here says so, and nothing needs to.
+  { "footage": "assets/f1.mp4", "durationInFrames": 231 }
+]
+```
+
+Unlike the footage conversion below, it costs **no transcode**: the image
+extensions the asset sandbox admits (`.png .jpg .jpeg .gif .webp .svg`) are
+exactly the ones the render browser draws. The file is hardlinked or copied into
+the new scene's `assets/`, a plain composition is written around it — one
+`<img>`, one rule, one comment — and nothing outside that folder is touched.
+`image` is a workspace-library path by default (`imageFrom: "film"` reads the
+film's own `assets/` instead), and `durationInFrames` is yours to choose,
+falling back to the film's `sceneDefaults` and then to 90 frames.
+
+The fit is **measured**: `object-fit: cover` when filling the frame would crop at
+most a fifth of the picture, `contain` when it would cost more — so a portrait
+plate in a landscape film letterboxes rather than stretching. Transparency and
+an animated GIF are **reported, not resolved**; see the tool's row in
+[mcp-setup.md](mcp-setup.md). In the Studio the same operation is **+ image** in
+the film toolbar.
+
 ### Source provenance for prepared footage
 
 `transcode_asset` writes a `.transcode.json` sidecar beside every prepared video.

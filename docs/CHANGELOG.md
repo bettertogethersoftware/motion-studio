@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### A still image goes on the timeline — as a scene, not a new kind of block
+
+`create_scene_from_image`, and **+ image** beside **+ footage** in the film
+toolbar. Point it at a picture in the workspace library (or the film's own
+`assets/`) and it becomes a scene holding that still, appended to the play
+order.
+
+**A scene rather than a third kind of segment**, which is the whole design and
+was the argued-over part. The obvious shape — `{image, durationInFrames}` on
+the timeline — would make every "is this a scene?" walk in the codebase learn a
+third answer, and that exact omission is what BUG-2 was: a segment kind a walk
+did not know about surfaced as a scene called `undefined` and reached the MCP
+manifest. It also buys *less*. A still segment could only sit there; a scene can
+be pushed in on, cross-faded, or have type laid over it, and you can open it and
+direct it. So the play order receives an ordinary `{slug}` and **nothing outside
+the scaffolder changed** — not the assemble path, not the frame-count rule, not
+one segment-kind walk.
+
+It is much lighter than the footage conversion it is modelled on: **no
+transcode**. The image extensions the asset sandbox admits are exactly the ones
+the render browser draws, so the file is hardlinked (or copied) into the new
+scene's `assets/` and a composition is written around it.
+
+**The fit is measured, not guessed.** The image is probed, and `object-fit:
+cover` is chosen when filling the frame would crop at most a fifth of the
+picture — a 3:2 photograph in a 16:9 film loses 15.6%, which is what everyone
+does with a camera's own aspect — and `contain` when it would cost more. So a
+4:3 still pillarboxes and a portrait plate letterboxes instead of stretching.
+The mode and its *reason* are the one comment in the generated `styles.css`,
+because the point of a scene is that it gets directed afterwards and flipping
+the fit should be a one-word edit by someone who can see why it was chosen. When
+nothing can measure the image — no ffmpeg, or an `.svg`, which ffmpeg cannot
+decode — the fit is `contain` and `fit.measured` is `false`. It never pretends
+to have measured.
+
+**Length is asked for, not invented.** A still has no natural duration, so
+`durationInFrames` is the caller's, then the film's `sceneDefaults`, then a
+named 90 frames.
+
+Two things are **reported rather than resolved**. Transparency: a cutout over
+the film's background and a matted one are both legitimate, so the measurement
+says which is happening and the composition is not rewritten around it. And an
+animated GIF, which an `<img>` plays on the wall clock — parallel render workers
+would each capture a different moment, so it is named with the conversion route
+instead of being quietly fixed.
+
+The generated composition is deliberately plain: one `<img>`, one rule, one
+comment. Nothing outside the new scene folder is written, and the play order is
+appended **last**, so a failure leaves an unused folder rather than a film that
+no longer plays.
+
 ### A tab stops claiming you are looking at it when you are not
 
 Open a film, then click the library: the library filled the stage and the film's

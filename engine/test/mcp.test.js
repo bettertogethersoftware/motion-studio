@@ -202,6 +202,8 @@ test('mcp: exposes the full spec tool surface', async (t) => {
     'review_render_grid',
     // new in v0.27 (copying a scene across films)
     'clone_scene',
+    // new in v0.28 (supplied media as directable scenes)
+    'make_scene_from_footage', 'create_scene_from_image',
   ]) {
     assert.ok(names.includes(required), `missing tool ${required}`);
   }
@@ -436,6 +438,49 @@ test('mcp: write_asset_file round-trips base64 and enforces the sandbox', async 
   });
   assert.equal(outside.isError, true);
   assert.equal(outside.data.code, 'path_not_allowed');
+});
+
+test('mcp: create_scene_from_image puts a still on the film as an ordinary scene (v0.28)', async (t) => {
+  if (!haveFfmpeg) return t.skip('ffmpeg missing');
+  const film = await callJson('create_film', {
+    name: `Stills ${++filmCounter}`, width: 320, height: 180, fps: 30, durationInFrames: 60,
+  });
+  assert.equal(film.isError, false, JSON.stringify(film.data));
+
+  // A PORTRAIT plate in a landscape film: the case where a guessed fit would
+  // stretch the picture and a measured one letterboxes it.
+  const png = path.join(tmp, 'mcp-plate.png');
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=180x320',
+    '-frames:v', '1', png]);
+  const put = await callJson('write_asset_file', {
+    target: film.data.film,
+    path: 'assets/plate.png',
+    contentBase64: (await fsp.readFile(png)).toString('base64'),
+  });
+  assert.equal(put.isError, false, JSON.stringify(put.data));
+
+  const made = await callJson('create_scene_from_image', {
+    film: film.data.film, image: 'assets/plate.png', imageFrom: 'film', durationInFrames: 45,
+  });
+  assert.equal(made.isError, false, JSON.stringify(made.data));
+  assert.equal(made.data.config.width, 320, 'the FILM\'s geometry, not the image\'s');
+  assert.equal(made.data.config.height, 180);
+  assert.equal(made.data.config.durationInFrames, 45, 'the caller\'s length');
+  assert.equal(made.data.fit.mode, 'contain', 'measured, so a portrait plate letterboxes');
+  assert.equal(made.data.fit.measured, true);
+  assert.equal(made.data.picture.width, 180);
+  assert.equal(made.data.image.file, 'assets/plate.png');
+
+  // The play order gained exactly one ORDINARY segment — a bare {slug}, with
+  // nothing on it for a segment-kind walk to miss.
+  const read = await callJson('get_film', { film: film.data.film });
+  assert.equal(read.data.scenes.length, 1);
+  assert.deepEqual(Object.keys(read.data.scenes[0]), ['slug']);
+  assert.equal(read.data.scenes[0].slug, made.data.scene.split('/').pop());
+
+  // …and it is a real, readable scene the author can go and direct.
+  const css = await callJson('read_composition_file', { scene: made.data.scene, path: 'styles.css' });
+  assert.match(css.data.content, /object-fit: contain;/);
 });
 
 test('mcp: list_assets reports kind and audio reference counts (v0.15)', async (t) => {

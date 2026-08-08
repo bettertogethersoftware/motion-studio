@@ -65,7 +65,7 @@ This is the fastest way around a machine with a lot of work on it — the tree
 is a convenience, not the only route. The commands on offer are the shell's
 (new workspace, the vendor pages, settings, close a document) plus whatever the
 active document adds: a film contributes build, advise, the
-add-narration/audio/caption/footage/overlay actions, undo/redo, fit-the-timeline
+add-narration/audio/caption/footage/image/overlay actions, undo/redo, fit-the-timeline
 and the six inspector tabs.
 
 Dismissing the palette puts the keyboard back where it took it from, so the
@@ -761,6 +761,34 @@ supplied rather than animation it wrote:
 Together these mean a film built around your own recording no longer needs anyone
 to run ffmpeg by hand. See [film-setup.md](film-setup.md#footage-on-the-timeline-v022).
 
+### A still picture on the timeline (v0.28)
+
+**+ image**, beside **+ footage**. Pick a picture — from the workspace library
+first, then this film's own assets — say how long it should hold, and it lands
+at the end of the play order.
+
+What arrives is a **scene**, not a new kind of block, and that is the point
+rather than a technicality. A still that could only sit there would be the last
+thing you ever did to it; a scene can be pushed in on, cross-faded, or have a
+title laid over it — and you can open it and change it, like every other scene.
+It is unrendered when it appears, same as a scene you just made.
+
+**It fits the picture by measuring it, not guessing.** An image close to the
+film's shape fills the frame; one that is not — a portrait plate in a landscape
+film, a 4:3 photograph in a 16:9 one — letterboxes rather than stretching, which
+is the failure everyone recognises and nobody wants. Whichever it chose, the
+scene's `styles.css` says which and *why*, on the one line you would change to
+flip it.
+
+Two things it tells you instead of deciding for you. A **transparent** PNG shows
+the scene's background through it, which may be exactly right or may mean you
+wanted it matted — so it says so and leaves the file alone. And an **animated**
+GIF cannot animate here: a browser plays one on the clock, and Motion Studio
+renders frame by frame, so parallel workers would each catch a different moment.
+It still goes on the timeline, holding one frame, and says what to do instead.
+Both arrive as a message that stays until you dismiss it, because they are yours
+to act on.
+
 ## Watching and advising: the film page (v0.23)
 
 Clicking a film opens **its one page**. It exists for the workflow Motion
@@ -851,7 +879,7 @@ timeline, one set of rules.
 ### The production controls
 
 They are always available: the add row (`+ narration`, `+ audio`, `+ caption`,
-`+ footage`, `+ overlay`), snap, drag-to-reorder and edge-trim, the full
+`+ footage`, `+ image`, `+ overlay`), snap, drag-to-reorder and edge-trim, the full
 property inspector, undo/redo, per-scene render and **build film**. Scenes are
 added from where the scene folders actually are — the rail's **+ new scene**,
 or by dragging one from the rail onto the timeline. Sequences are drawn

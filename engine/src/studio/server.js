@@ -53,6 +53,8 @@
  *   POST   /api/films/:fid/build             {outputFilename?,audioTargetPeakDb?,burnCaptions?,deliverable?} → job
  *   POST   /api/films/:fid/preview-audio     master mix as WAV (the build's exact ffmpeg graph)
  *   POST   /api/films/:fid/scenes            {name,fps?,…} → scaffold a scene into the film
+ *   POST   /api/films/:fid/scenes/from-image {image,imageFrom?,name?,slug?,durationInFrames?}
+ *                                            → scaffold a scene that holds a still
  *   POST   /api/films/:fid/scenes/:slug/clone  {toFilm?,name?} → duplicate a scene
  *                                            (composition, assets, libraries, settings)
  *   GET    /api/scenes/:sid                  config + file list
@@ -186,6 +188,7 @@ import { checkPrerequisites, MIN_NODE, MIN_FFMPEG } from '../core/prereqs.js';
 import { resolveInTarget } from '../core/sandbox.js';
 import { EngineError, ErrorCodes, asEngineError } from '../core/errors.js';
 import { planFilm, submitFilmBuild, toMixerTracks, audibleTracks } from '../core/films.js';
+import { sceneFromImage } from '../core/image-scene.js';
 import { mixAudioOnly, probeMedia } from '../core/encoder.js';
 import { resolveReviewPolicy, extractRenderedFrame } from '../core/render-review.js';
 import { resolveDeliverableSelections } from '../core/deliverables.js';
@@ -1361,6 +1364,25 @@ export function createStudioServer({ store: initialStore = null, jobs = new JobM
           const seed = settings && outputSeedFromSettings(settings, scene.config.output);
           if (seed) scene.config = await store.updateConfig(scene.id, { output: seed });
           return sendJson(res, 201, scene);
+        }
+
+        // POST /api/films/:fid/scenes/from-image — the toolbar's "+ image", and
+        // the same engine call the MCP create_scene_from_image makes. A still
+        // becomes an ORDINARY scene appended to the play order: no new segment
+        // kind, nothing for the assemble path or a segment-kind walk to learn.
+        // The image comes from the workspace library (the default, and what the
+        // picker lists first) or from this film's own assets/.
+        if (isFilmRoute && req.method === 'POST' && sub === 'scenes'
+          && parts.length === 5 && parts[4] === 'from-image') {
+          const body = await readBody(req);
+          const probe = await resolveFfprobePath({ dataDir: store.dataDir });
+          const made = await sceneFromImage({
+            store, filmId: targetId,
+            image: body.image, imageFrom: body.imageFrom,
+            name: body.name, slug: body.slug, durationInFrames: body.durationInFrames,
+            ffmpegPath: await ffmpegPath(), ffprobePath: probe.path,
+          });
+          return sendJson(res, 201, made);
         }
 
         // POST /api/films/:fid/scenes/:slug/clone — the film page's "duplicate",

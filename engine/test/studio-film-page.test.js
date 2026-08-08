@@ -337,3 +337,52 @@ test('film page: a footage clip is an advisable target with a stable id', async 
   assert.equal(noId.status, 400);
   assert.equal(noId.data.code, 'invalid_advice');
 });
+
+/**
+ * `+ image` (v0.28): the toolbar button's endpoint. It is the same engine call
+ * the MCP `create_scene_from_image` makes, so a still the human drops in and
+ * one the AI places are one operation — and, crucially, the play order gains
+ * an ordinary scene rather than a third kind of segment.
+ */
+test('film page: + image scaffolds a scene from a library still', { skip: !haveFfmpeg && 'ffmpeg not installed' }, async () => {
+  const film = await j(`/api/workspaces/${TEST_WS}/films`, {
+    method: 'POST', body: { name: 'Stills Film', fps: 30, width: 320, height: 180, durationInFrames: 30 },
+  });
+  assert.equal(film.status, 201, JSON.stringify(film.data));
+  const stillsFilm = film.data.film.id;
+
+  // A PORTRAIT plate in the workspace library — the case a guessed fit would
+  // stretch. The library is a human's folder, so the file is put there on disk.
+  const libDir = path.join(store.libraryPath(TEST_WS), 'plates');
+  await fsp.mkdir(libDir, { recursive: true });
+  await execFileP('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=180x320',
+    '-frames:v', '1', path.join(libDir, 'tall.png')]);
+
+  const made = await j(`/api/films/${enc(stillsFilm)}/scenes/from-image`, {
+    method: 'POST', body: { image: 'plates/tall.png', durationInFrames: 45 },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.data));
+  assert.equal(made.data.config.width, 320, 'the film\'s geometry');
+  assert.equal(made.data.config.durationInFrames, 45);
+  assert.equal(made.data.fit.mode, 'contain', 'measured, so it letterboxes instead of stretching');
+  assert.equal(made.data.image.source, 'library');
+
+  // One ordinary {slug} segment, and the film still plans as a film.
+  const read = await j(`/api/films/${enc(stillsFilm)}`);
+  assert.equal(read.data.film.scenes.length, 1);
+  assert.deepEqual(Object.keys(read.data.film.scenes[0]), ['slug']);
+  assert.equal(read.data.detail.scenes[0].kind, 'scene');
+  assert.deepEqual(
+    read.data.detail.problems.filter((p) => p.code !== 'scene_not_rendered'),
+    [],
+    JSON.stringify(read.data.detail.problems),
+  );
+
+  // A path that is not there fails as a structured 404, not a half-made scene.
+  const missing = await j(`/api/films/${enc(stillsFilm)}/scenes/from-image`, {
+    method: 'POST', body: { image: 'plates/nope.png' },
+  });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.data.code, 'file_not_found');
+  assert.equal((await j(`/api/films/${enc(stillsFilm)}`)).data.film.scenes.length, 1);
+});

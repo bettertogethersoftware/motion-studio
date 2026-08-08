@@ -376,6 +376,21 @@ a long recording, convert once and clone short scenes that seek their own
 ranges of the same `.webm`; further scenes cost no further transcode. The new
 scene is unrendered — render it before `build_film`.
 
+**A still image is not a segment kind either — it is a scene.**
+`create_scene_from_image { film, image }` puts a picture on the play order as
+an ordinary `{slug}` scene holding it, and unlike the footage conversion it
+costs **no transcode**: the image extensions the sandbox admits are the ones the
+render browser draws. `image` is a library-relative path from
+`list_shared_assets` by default (`imageFrom: "film"` reads the film's own
+`assets/`). Choose `durationInFrames` — a still has no natural length, and the
+fallback is the film's `sceneDefaults`, then 90 frames. The fit is measured for
+you: `cover` when filling the frame crops at most a fifth of the picture,
+`contain` otherwise, with the reason written into the scene's `styles.css`.
+`picture.isTransparent` and an animated GIF are **reported, not resolved** —
+read the response before assuming the still is inert. Prefer this over writing
+your own image composition: it is one call, it measures rather than guesses, and
+the scene it leaves is one you can then direct.
+
 For footage that should sit beside rendered scenes, conform it to the film's
 actual encode signature:
 

@@ -82,6 +82,7 @@ import fsp from 'node:fs/promises';
 
 import { WorkspaceStore } from '../core/store.js';
 import { sceneFromFootage } from '../core/footage-scene.js';
+import { sceneFromImage, DEFAULT_STILL_FRAMES } from '../core/image-scene.js';
 import { JobManager } from '../core/jobs.js';
 import {
   captureSingleFrame, captureFrames, renderComposition, renderParallel, renderStill,
@@ -1282,6 +1283,76 @@ server.registerTool(
           + 'before build_film. Edit composition.js to change it; IN_POINT selects which part of the clip it shows.'
         : `Scene "${localId(r.scene)}" is built beside the clip; the play order still shows the footage. `
           + 'Render the scene to compare, then swap it in with update_film.',
+    });
+  }),
+);
+
+server.registerTool(
+  'create_scene_from_image',
+  {
+    title: 'Put a still image on the film as a scene',
+    description:
+      'Scaffold a SCENE that displays a still image and append it to the play order (v0.28) — the picture half of ' +
+      'make_scene_from_footage, and much cheaper: there is NO transcode, because the extensions this accepts are ' +
+      'exactly the ones the render browser already draws. USE IT to put a plate, a title card, a chart, a ' +
+      'photograph or a generated frame into a film. ' +
+      'It is a scene rather than a new kind of segment because a scene is strictly MORE: a still segment could ' +
+      'only sit there, while this one can be pushed in on, cross-faded, or have type laid over it — open ' +
+      'composition.js and direct it. The play order gains one ordinary `{slug}` entry, so nothing downstream ' +
+      'treats it specially. ' +
+      'The image is read from the workspace library by default (the path list_shared_assets reports); pass ' +
+      'imageFrom: "film" to use the film\'s own "assets/…" file instead. It is hardlinked or copied into the new ' +
+      'scene\'s assets/, and nothing outside that folder is written. ' +
+      'The scene is built at the film\'s ESTABLISHED geometry — what its first resolved segment sets — so it ' +
+      'concatenates by construction. ' +
+      `DURATION IS YOURS TO CHOOSE: a still has no natural length, so \`durationInFrames\` defaults to the film's ` +
+      `sceneDefaults and then to ${DEFAULT_STILL_FRAMES} frames, rather than a length being invented for it. ` +
+      'THE FIT IS MEASURED, NOT GUESSED: the image is probed, and `object-fit: cover` is chosen when filling the ' +
+      'frame would crop at most a fifth of the picture (a 3:2 photograph in a 16:9 film loses 15.6%), `contain` ' +
+      '(letterboxed) when it would cost more — so a 4:3 still pillarboxes and a portrait plate in a landscape ' +
+      'film letterboxes instead of stretching. The response returns `fit` with the reason, ' +
+      'and the same sentence is the one comment in styles.css, so flipping it is a one-word edit. When the image ' +
+      'cannot be measured (no ffmpeg, or an .svg, which ffmpeg cannot decode) the fit is `contain` and `fit.' +
+      'measured` is false — it never pretends to have measured. ' +
+      'REPORTED, NOT RESOLVED: `picture.isTransparent`/`hasAlpha` (a cutout over the film background and a matted ' +
+      'one are both legitimate looks), and an ANIMATED GIF, which an <img> plays on the wall clock — each ' +
+      'parallel render worker would capture a different moment, so convert it and use make_scene_from_footage ' +
+      'instead. The new scene is UNRENDERED: render it before build_film. ' +
+      'Errors: `film_not_found`, `file_not_found` (no such image), `invalid_config` (not an image extension), ' +
+      '`invalid_film` (the film has no geometry yet — give it sceneDefaults), `scene_already_exists` (explicit ' +
+      '`slug` taken).',
+    inputSchema: {
+      film: z.string().describe('The film to add the scene to'),
+      image: z.string()
+        .describe('Library-relative path from list_shared_assets (e.g. plates/rome-forum.png) — or the film\'s own "assets/…" path when imageFrom is "film"'),
+      imageFrom: z.enum(['library', 'film']).default('library')
+        .describe('Where to read the image: the workspace library (default) or the film\'s own assets/'),
+      name: z.string().min(1).optional().describe('Scene display name (default: the image\'s filename)'),
+      slug: z.string().optional().describe('Explicit scene slug; errors if taken. Omit to derive + auto-dedupe.'),
+      durationInFrames: z.number().int().positive().optional()
+        .describe(`How long the still holds, in film frames. Default: the film's sceneDefaults, else ${DEFAULT_STILL_FRAMES}.`),
+    },
+  },
+  wrap(async ({ film, image, imageFrom, name, slug, durationInFrames }) => {
+    const doc = await store.getFilm(qualifyFilm(film));
+    const ffmpegPath = await ffmpegPathOnly();
+    const { path: ffprobePath } = await resolveFfprobePath({ dataDir: store.dataDir });
+    const r = await sceneFromImage({
+      store, filmId: doc.id, image, imageFrom, name, slug, durationInFrames,
+      ffmpegPath, ffprobePath,
+    });
+    return ok({
+      scene: localId(r.scene),
+      name: r.name,
+      config: r.config,
+      image: r.image,
+      fit: r.fit,
+      picture: r.picture,
+      warnings: r.warnings,
+      note: `"${localId(r.scene)}" is the last segment of the film, ${r.config.durationInFrames} frames of `
+        + `${r.image.file} fitted with object-fit: ${r.fit.mode}. It is UNRENDERED — render it before build_film. `
+        + 'It is an ordinary scene: edit composition.js to move, mask or caption the picture, and styles.css to '
+        + 'change the fit.',
     });
   }),
 );
@@ -4298,7 +4369,7 @@ server.registerTool(
         hierarchy: 'workspace → film → scene',
         atomicRenderUnit: 'scene — one composition folder, rendered and revised independently',
         narrativeGrouping: 'sequence — a label on film segments (film.scenes[i].sequence) plus optional film.sequences metadata; groups scenes for human navigation and advice, renders nothing',
-        segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list; a scene is addressed by slug, a footage clip by its stable id. Footage joins as-is and cannot be altered; make_scene_from_footage converts one into a scene that plays it when it needs frame-driven work',
+        segments: 'a film plays scenes ({slug}) and footage ({id, footage, durationInFrames}) in one ordered list — exactly TWO kinds, and a still image is neither: create_scene_from_image places one as an ordinary scene. A scene is addressed by slug, a footage clip by its stable id. Footage joins as-is and cannot be altered; make_scene_from_footage converts one into a scene that plays it when it needs frame-driven work',
         adviceTargets: 'film, lane (a whole timeline row: family + lane index), sequence, scene, footage, audio, caption, overlay — the human clicks, Studio fills the ids',
       },
       formats: ['mp4', 'webm', 'gif', 'prores', 'png-sequence'],

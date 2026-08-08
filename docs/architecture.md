@@ -39,6 +39,7 @@ Motion Studio is three thin entry points around one shared render engine.
           film.js      — scene assembly primitives (lossless concat, §13)
           films.js     — film documents: validation, planning, build (§13)
           footage-scene.js — a supplied clip becomes a scene that plays it (§14)
+          image-scene.js — a supplied still becomes a scene that holds it (§14)
           revisions.js — immutable scene-revision archive + pointers (§14)
           deliveries.js— immutable film deliveries + frozen manifests (§14)
           advice.js    — durable human advice, leases, evidence (§14)
@@ -1954,6 +1955,43 @@ a duplicate of its penultimate frame. The clamp is now half a frame in
 container rounded and still short of `duration`; and generated compositions
 seek frame *centres* (`(frame + 0.5)/fps`) so the same rounding cannot bite at
 any other frame either.
+
+**Still → scene** (`core/image-scene.js`, v0.28) answers the same question for
+a picture, and the interesting part is what it deliberately is *not*. The
+obvious design — a third kind of segment, `{image, durationInFrames}` — was
+retired in the plan (`docs/plans/timeline-footage-and-stills-plan.md` §4)
+because every "is this a scene?" walk in the codebase would have to learn a
+third answer, and that exact omission is what produced BUG-2: a segment kind a
+walk did not know about surfaced as a scene called `undefined` and reached the
+MCP manifest. It would also buy something *weaker*. A still segment could only
+sit there; a scene can be pushed in on, cross-faded, or have type laid over it,
+and the author can open it — which is the whole shape of the product. So
+`create_scene_from_image` scaffolds an **ordinary scene** and the play order
+receives an ordinary `{slug}`. Nothing was added to the assemble path, the
+frame-count rule, or any segment-kind walk.
+
+It is far cheaper than the footage conversion, and for a reason worth stating:
+the image extensions the asset sandbox admits are exactly the ones the render
+browser draws, so there is **no transcode at all** — the file is hardlinked or
+copied into the new scene's `assets/` and a composition is written around it.
+ffmpeg is used for one optional thing: measuring the picture (`core/picture.js`)
+so that `object-fit` is a decision instead of a guess. `cover` when filling the
+frame would crop at most a fifth of the image (a 3:2 photograph in a 16:9 film
+loses 15.6%), `contain` when it would cost more — so a 4:3 still pillarboxes
+and a portrait plate letterboxes rather than stretching. The chosen mode *and
+its reason* are the one comment in the generated `styles.css`, because a scene
+exists to be directed afterwards and flipping the fit should be a one-word edit
+by someone who can see why it was chosen. When nothing can measure the image —
+no ffmpeg, or an `.svg`, which ffmpeg cannot decode — the fit is `contain` and
+`fit.measured` is `false`: it never pretends to have measured.
+
+Two facts are **reported rather than resolved**, which is the same rule the
+render review follows. Transparency: a cutout over the film's background and a
+matted one are both legitimate looks, so the measurement says which is
+happening and the composition is not rewritten around it. And an animated GIF:
+an `<img>` plays one on the wall clock, so parallel render workers would each
+capture a different moment — named loudly, with the conversion route, rather
+than silently fixed.
 
 The preview player stitches **segments**, not scenes: a footage segment is
 served from the film's own Range-capable asset route (`sceneSrc`), because it

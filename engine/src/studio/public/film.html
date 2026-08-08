@@ -148,6 +148,7 @@
         <button id="btn-add-audio" class="ghost" title="place an audio asset on the timeline">+ audio</button>
         <button id="btn-add-caption" class="ghost" title="add a caption at the playhead">+ caption</button>
         <button id="btn-add-footage" class="ghost" title="put a supplied video on the timeline beside the rendered scenes">+ footage</button>
+        <button id="btn-add-image" class="ghost" title="hold a still image on the timeline, as a scene you can then direct">+ image</button>
         <button id="btn-add-overlay" class="ghost" title="overlay an image or video on the film">+ overlay</button>
       </div>
       <div class="divider"></div>
@@ -282,6 +283,30 @@
   <ul id="footage-pick" class="pick-list"></ul>
   <div class="fieldrow right">
     <button type="button" class="ghost" data-close="footage-dialog">close</button>
+  </div>
+</dialog>
+
+<dialog id="image-dialog" class="fe-dialog dialog-wide">
+  <h2>add image</h2>
+  <p class="dim note">A still becomes a <strong>scene</strong> that holds it — not a new kind of block — so afterwards
+  you can open it and push in on the picture, lay type over it, or fade it, like any other scene. It is built at the
+  film&rsquo;s geometry and <strong>appended</strong> to the play order; drag it where you want it. The fit is
+  measured, not guessed: an image close to the film&rsquo;s shape fills the frame, and one that is not letterboxes
+  rather than stretching &mdash; the reason is written into the scene&rsquo;s <code>styles.css</code>, where it is a
+  one-word change. The new scene is <strong>unrendered</strong>. Library files are listed first; uploads go into this
+  film&rsquo;s assets.</p>
+  <div class="fieldrow">
+    <button id="btn-image-upload" class="ghost">+ upload file…</button>
+    <input type="file" id="image-file-input" accept=".png,.jpg,.jpeg,.gif,.webp,.svg" multiple hidden>
+    <label>hold for
+      <input id="image-duration" type="number" min="1" step="1" value="90" style="width:74px">
+    </label>
+    <span id="image-duration-hint" class="dim mono"></span>
+    <span id="image-upload-msg" class="dim mono"></span>
+  </div>
+  <ul id="image-pick" class="pick-list"></ul>
+  <div class="fieldrow right">
+    <button type="button" class="ghost" data-close="image-dialog">close</button>
   </div>
 </dialog>
 

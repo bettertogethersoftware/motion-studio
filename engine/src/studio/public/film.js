@@ -4034,6 +4034,119 @@ $('#footage-file-input').addEventListener('change', (e) => {
 });
 $('#btn-add-footage').addEventListener('click', openFootageDialog);
 
+/* ---- stills ---- */
+
+/**
+ * Put a still on the timeline (v0.28).
+ *
+ * Not a new kind of block — a SCENE that holds the picture, which is the whole
+ * point: a still segment could only sit there, while a scene can be pushed in
+ * on, cross-faded, or have type laid over it, and the author can open it. The
+ * play order therefore gains an ordinary `{slug}` entry and nothing downstream
+ * treats it specially. The engine does the work (`create_scene_from_image`);
+ * this button is the convenience.
+ *
+ * The picker lists the WORKSPACE LIBRARY first, because that is where a
+ * human's pictures actually live and it is shared across every film in the
+ * workspace, then this film's own image assets. Upload puts a file in the
+ * film's assets — same route as every other dialog here.
+ */
+function imageDefaultFrames() {
+  return state.film?.sceneDefaults?.durationInFrames || 90;
+}
+
+function syncImageDurationHint() {
+  const frames = Number($('#image-duration').value);
+  $('#image-duration-hint').textContent = frames > 0 ? `frames — ${(frames / fps()).toFixed(1)}s` : 'frames';
+}
+
+async function openImageDialog() {
+  const ul = $('#image-pick');
+  const msg = $('#image-upload-msg');
+  const dur = $('#image-duration');
+  dur.value = String(imageDefaultFrames());
+  syncImageDurationHint();
+  ul.innerHTML = '<li class="pick-empty">reading the library…</li>';
+  $('#image-dialog').showModal();
+
+  const ws = String(filmId ?? '').split('/')[0];
+  let library = [];
+  // A missing or unreadable library is not an error here: the film's own
+  // assets are still a complete answer, and an empty list says so.
+  try { ({ files: library } = await api(`/api/workspaces/${encodeURIComponent(ws)}/library`)); }
+  catch { library = []; }
+
+  const items = [
+    ...library.filter((f) => f.kind === 'image').map((f) => ({
+      from: 'library',
+      path: f.path,
+      bytes: f.bytes,
+      url: `/api/workspaces/${encodeURIComponent(ws)}/library/file?path=${encodeURIComponent(f.path)}`,
+    })),
+    ...state.assets.filter((a) => a.kind === 'image').map((a) => ({
+      from: 'film', path: a.path, bytes: a.bytes, url: assetUrl(a.path),
+    })),
+  ];
+
+  ul.innerHTML = '';
+  if (!items.length) {
+    ul.innerHTML = '<li class="pick-empty">no images here yet — upload one above, '
+      + 'or drop files in the workspace library</li>';
+    return;
+  }
+  for (const it of items) {
+    const li = document.createElement('li');
+    li.append(
+      el('img', { class: 'pk-thumb', src: it.url, loading: 'lazy', alt: '' }),
+      el('span', { class: 'pk-name mono', text: it.path.replace(/^assets\//, '') }),
+      // Where it comes from is worth a badge: the library is shared across the
+      // workspace, the film's assets are this film's alone.
+      el('span', { class: 'pk-dur mono dim', text: it.from }),
+      el('span', {
+        class: 'pk-meta',
+        text: it.bytes > 1e6 ? `${(it.bytes / 1e6).toFixed(1)} MB` : `${Math.round(it.bytes / 1e3)} kB`,
+      }),
+    );
+    li.addEventListener('click', () => addImageScene(it));
+    ul.appendChild(li);
+  }
+  msg.textContent = '';
+}
+
+async function addImageScene(pick) {
+  const msg = $('#image-upload-msg');
+  const frames = Number($('#image-duration').value);
+  if (!(frames > 0)) { msg.textContent = 'give it a length in frames'; return; }
+  msg.textContent = 'building the scene…';
+  try {
+    await waitForSaved(); // the server appends to the play order it reads from disk
+    const made = await api(`/api/films/${fid}/scenes/from-image`, {
+      method: 'POST',
+      body: { image: pick.path, imageFrom: pick.from, durationInFrames: frames },
+    });
+    $('#image-dialog').close();
+    await refresh();
+    const index = state.film.scenes.findIndex((s) => s.slug === made.scene.split('/').pop());
+    if (index >= 0) select({ kind: 'scene', index });
+    toast(`“${made.name}” is on the timeline ✓ — ${made.config.durationInFrames} frames, `
+      + `object-fit: ${made.fit.mode}. Render it before you build.`, { kind: 'info' });
+    // Measured facts the human has to act on — transparency, an animated GIF —
+    // get the sticky toast: the scene was built, and the decision is theirs.
+    for (const w of made.warnings ?? []) toast(w, { kind: 'error' });
+  } catch (err) {
+    toastError(err);
+  } finally {
+    msg.textContent = '';
+  }
+}
+$('#image-duration').addEventListener('input', syncImageDurationHint);
+$('#btn-image-upload').addEventListener('click', () => $('#image-file-input').click());
+$('#image-file-input').addEventListener('change', (e) => {
+  if (e.target.files.length) uploadInto([...e.target.files], '#image-upload-msg', openImageDialog);
+  e.target.value = '';
+});
+$('#btn-add-image').addEventListener('click', openImageDialog);
+
 function openOverlayDialog() {
   const lane = takeLane('overlays');
   pickListForAssets('#overlay-pick', ['image', 'video'], (a) => {
@@ -5807,6 +5920,7 @@ StudioPalette.register([
   { id: 'film.audio', title: 'Film: Add Audio…', group: 'commands', run: () => $('#btn-add-audio').click() },
   { id: 'film.caption', title: 'Film: Add Caption at Playhead', group: 'commands', run: () => $('#btn-add-caption').click() },
   { id: 'film.footage', title: 'Film: Add Footage…', group: 'commands', run: () => $('#btn-add-footage').click() },
+  { id: 'film.image', title: 'Film: Add Image…', group: 'commands', run: () => $('#btn-add-image').click() },
   { id: 'film.overlay', title: 'Film: Add Overlay…', group: 'commands', run: () => $('#btn-add-overlay').click() },
   { id: 'view.fit', title: 'Timeline: Fit the Whole Film', group: 'commands', run: () => zoomFit() },
   { id: 'view.rail', title: 'View: Toggle Side Bar', group: 'commands', run: () => $('#btn-explorer').click() },
