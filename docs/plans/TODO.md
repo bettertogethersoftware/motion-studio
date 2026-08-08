@@ -19,7 +19,6 @@ Active plan documents:
 | [production-workflow-backlog.md](production-workflow-backlog.md) | the product backlog: staging→validate→promote, review artefacts, aspect variants, libraries |
 | [audio-cue-plan.md](audio-cue-plan.md) | frame-granular envelope + emphasis onsets |
 | [auto-reframe-plan.md](auto-reframe-plan.md) | `measure_reframe` — the hard half of aspect variants |
-| [image-prep-plan.md](image-prep-plan.md) | `prepare_image` — the still-image hole in the media surface |
 | [ai-only-desktop-vendor-boundary-plan.md](ai-only-desktop-vendor-boundary-plan.md) | **delivered 2026-08-04 as v0.26.0** (Slices 0/A/B/C-1 — see [completed.md](completed.md)); kept for the two remainders below |
 | [linux-ready-plan.md](linux-ready-plan.md) | **complete 2026-08-04 — Linux is supported**; kept for the record and the remaining caveats |
 
@@ -98,14 +97,17 @@ Active plan documents:
        one can exist, and a clip can be dragged between them), audio clips trim
        from the head as well as the tail — a new engine field,
        `trimStartInFrames`, proven against ffmpeg — and the audio picker plays
-       each file before you place it. **Remaining: U-10 (both trees) and U-13
-       (timeline blocks) — about 1 day.**
-6. [ ] **Vendor-boundary remainders**, whenever convenient: treating the
+       each file before you place it. **Remaining: U-10 (both trees), ~1 day.
+       U-13 (timeline blocks) was retired 2026-08-08** — the slice nominated
+       itself as the cut, selection was its only missing piece, and the
+       inspector is already a keyboard path to every value a selected block
+       exposes ([retired.md](retired.md)).
+6. [ ] **Vendor-boundary remainder**, whenever convenient: treating the
        pinned browser and FFmpeg as packs (the bootstrap must learn archive
-       extraction first); C-2 desktop packaging (bundled Node, installer) —
-       **deprioritized by §10.7** ("no installer channel — the Electron
-       host follows, never leads"); the unpackaged `desktop/` host covers
-       the checkout case today.
+       extraction first). **C-2 desktop packaging was retired 2026-08-08** —
+       §10.7 had already ruled out the installer channel ("the Electron host
+       follows, never leads"), and the unpackaged `desktop/` host covers the
+       checkout case today ([retired.md](retired.md)).
 
 ## Token-efficient loop progress (2026-08-04, closed)
 
@@ -169,6 +171,12 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       required-check branch protection (the workflow itself shipped
       2026-08-04). Add the docker-build job here when the Docker plan runs.
 - [ ] **Coverage reporting + a small cross-platform media fixture set.**
+- [ ] **Still-image facts on `probe_asset`** — `width`, `height`, `hasAlpha`,
+      `contentBox`, `meanLuminance`, `isBlank` for a still input. The one
+      knowledge-shaped half of the retired `prepare_image` plan
+      ([retired.md](retired.md)): no Python, no new vehicle, and it answers
+      "where is the content in this frame" and "how dark is the region under
+      my caption" before a render instead of after one.
 - [ ] **Contribution/support contracts** for the repository.
 - [ ] **Known suite flake** — `studio-film-page` "build archives a
       delivery" fails rarely under the full parallel run, passes standalone
@@ -187,14 +195,6 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
 
 ## Parked, with reasons
 
-- [ ] **`prepare_image`** ([plan](image-prep-plan.md)) — **deferred
-      2026-08-04 by the user**: its Python/Pillow dependency makes it
-      shell-tool territory (an agent-side helper beside the forges), not
-      an engine vendor — consistent with the generative-boundary rule that
-      spawned external interpreters stay outside the MCP surface. The plan
-      document remains valid as the design record for whoever builds the
-      shell version; the Env-A hard wall stands and is the revisit trigger
-      (an MCP-only customer who must prep supplier stills).
 - [ ] **Helper win32 audit remainder**: FFmpeg/FluidSynth *discovery* is
       platform-aware in all tools-root helpers, but their full command
       construction is unaudited for Windows-only conventions. Do before

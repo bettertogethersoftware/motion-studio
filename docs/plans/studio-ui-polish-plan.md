@@ -507,7 +507,13 @@ everyone.
   ([app.js:86](../../engine/src/studio/public/app.js:86)); give it a text
   label so it does not announce as a symbol.
 
-### U-13 — timeline blocks are reachable  *(~½ d)*
+### U-13 — timeline blocks are reachable  *(~½ d)* — **RETIRED 2026-08-08**
+
+> Cut, exactly as this slice's own last paragraph proposed. Selection is the
+> only missing piece, and the inspector is already a keyboard path to every
+> value a selected block exposes. Reason and revisit trigger in
+> [retired.md](retired.md); the slice stays here as the design record if it
+> comes back.
 
 Every block on the film timeline is a pointer-only `<div>`. They all come
 from one builder, `baseBlock()`

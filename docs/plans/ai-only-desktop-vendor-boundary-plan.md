@@ -526,6 +526,13 @@ Recommended delivery slices:
 | C | AI-only Windows desktop sidecar and smoke installer | 2–4 days |
 |  | **Windows-first total** | **12–19 days** |
 
+**Slice C's packaging half was retired 2026-08-08.** C-1 — the unpackaged
+`desktop/` Electron viewer host — shipped in v0.26.0 and covers the checkout
+case. The remainder (bundled Node, signed installer, update channel, and the
+"Signed Windows installer and update channel" estimate below) contradicts
+§10.7's *no installer channel* decision, so it is not an open remainder:
+reason and revisit trigger in [retired.md](retired.md).
+
 Slice A was re-estimated upward from 4–6 days: threading the injected runtime
 through the MCP and Studio entrypoints (~15 vendor symbols each) and the
 settings-validation redesign in Phase 1 dominate it, not the file moves.
