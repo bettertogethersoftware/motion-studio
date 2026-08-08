@@ -14,9 +14,7 @@
 .sp-audio-msg.warn { color: var(--accent); }
 
 /* Dialogs the module owns, matching what the page markup used to declare. */
-.sp-dialog .sp-dialog-summary { font-size: 13px; margin: 0 0 10px; }
 .sp-dialog .sp-delete-note { font-size: 11px; max-width: 380px; }
-.sp-dialog-asset { max-width: 520px; }
 
 /* ------------------------------- compact -------------------------------- */
 

@@ -111,7 +111,9 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
   border-left: 2px solid transparent;
   cursor: grab;
   user-select: none;
-  display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; align-items: center;
+  /* name/meta stacked in the first column, then the two row actions: append
+     to the timeline, and delete the folder. */
+  display: grid; grid-template-columns: 1fr auto auto; gap: 1px 6px; align-items: center;
 }
 .scene-rail-list li:hover { background: var(--ink-3); border-left-color: var(--accent); }
 .scene-rail-list li.listed { cursor: default; }
@@ -123,6 +125,16 @@ body.resizing-insp .insp-grip { background: var(--accent); opacity: 0.7; }
   font: 13px var(--mono); padding: 2px 8px; cursor: pointer;
 }
 .scene-rail-list .sr-add:hover { color: var(--accent); border-color: var(--accent); }
+/* Throwing one away, on the shelf where they pile up. Quiet until hovered:
+   the row's job is to be dragged back onto the timeline, and the destructive
+   act should not compete with that. */
+.scene-rail-list .sr-del {
+  grid-row: span 2;
+  background: none; border: 1px solid transparent; color: var(--dim);
+  font: 11px var(--mono); padding: 2px 6px; cursor: pointer; opacity: 0.5;
+}
+.scene-rail-list li:hover .sr-del { opacity: 1; border-color: var(--line); }
+.scene-rail-list .sr-del:hover { color: var(--err); border-color: var(--err); }
 .scene-rail-list li.incompat { opacity: 0.55; }
 .scene-rail-list li.incompat .sr-meta { color: var(--err); }
 .scene-rail-list .sr-flag { color: var(--accent); }
@@ -459,7 +471,8 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 
 /* ------------------------------- dialogs ------------------------------- */
 
-.fe-dialog { min-width: 460px; max-width: 640px; }
+/* Width comes from the one `dialog` rule in styles.css — a picker adds
+   `.dialog-wide` there rather than inventing a third size here. */
 .fe-dialog h2 { margin-top: 0; }
 .pick-list {
   list-style: none; margin: 10px 0; padding: 0;
@@ -728,6 +741,16 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 .fe-delivery-tag.warn { color: var(--accent); border-color: var(--accent); }
 .fe-delivery-tag.hidden { display: none; }
 
+/* The picture has run out before its slot has. Top-right, opposite the
+   delivery tag, so both can be true at once without stacking. */
+.fe-shortfall-tag {
+  position: absolute; right: 6px; top: 6px; z-index: 4; max-width: 62%;
+  background: rgba(12, 14, 18, 0.88); border: 1px solid var(--accent);
+  color: var(--accent); font-size: 10px; line-height: 1.4; padding: 3px 8px;
+  pointer-events: none; text-align: right;
+}
+.fe-shortfall-tag.hidden { display: none; }
+
 /* --------------------------- inspector sections ------------------------- */
 
 .adv-head-row { display: flex; align-items: center; gap: 8px; }
@@ -784,7 +807,6 @@ body.resizing-tl .tl-grip { background: var(--accent); opacity: 0.7; }
 
 /* ------------------------------ advice popup ---------------------------- */
 
-.advice-dialog { min-width: 420px; max-width: 560px; }
 .adv-target-card { border: 1px solid var(--line); border-left: 2px solid var(--accent); padding: 8px 10px; margin-bottom: 10px; }
 .adv-target-title { display: block; font: 13px var(--sans); color: var(--text); }
 .adv-target-card .mono { font-size: 10px; }

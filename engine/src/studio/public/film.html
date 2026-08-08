@@ -103,6 +103,10 @@
           </div>
           <div id="delivery-tag" class="fe-delivery-tag mono hidden"
             title="the archived build this player is pinned to — it never switches beneath you"></div>
+          <!-- A segment whose file is shorter than the slot the timeline gives
+               it holds its last frame, and used to do so in silence: the
+               picture simply stopped changing and nothing said why. -->
+          <div id="shortfall-tag" class="fe-shortfall-tag mono hidden"></div>
         </div>
       </div>
       <div class="transport">
@@ -245,7 +249,7 @@
   </footer>
 </dialog>
 
-<dialog id="audio-dialog" class="fe-dialog">
+<dialog id="audio-dialog" class="fe-dialog dialog-wide">
   <h2>add audio</h2>
   <p class="dim note">Audio assets live in the film's own assets/ folder. The clip is placed at the playhead.</p>
   <div class="fieldrow">
@@ -259,7 +263,7 @@
   </div>
 </dialog>
 
-<dialog id="footage-dialog" class="fe-dialog">
+<dialog id="footage-dialog" class="fe-dialog dialog-wide">
   <h2>add footage</h2>
   <p class="dim note">A video that joins the timeline <strong>as-is</strong>, beside the rendered scenes — that is how
   you cut &ldquo;footage, then a scene, then footage&rdquo;. It is never re-encoded, so it must already match the
@@ -277,7 +281,7 @@
   </div>
 </dialog>
 
-<dialog id="overlay-dialog" class="fe-dialog">
+<dialog id="overlay-dialog" class="fe-dialog dialog-wide">
   <h2>add overlay</h2>
   <p class="dim note">An image (logo, watermark, lower-third) or a video (transparent .webm stinger) composited
   over the film by the finishing pass. Placed at the playhead for 3 seconds — drag to taste.</p>
@@ -292,7 +296,7 @@
   </div>
 </dialog>
 
-<dialog id="tts-dialog" class="fe-dialog">
+<dialog id="tts-dialog" class="fe-dialog dialog-wide">
   <h2>narration</h2>
   <form id="tts-form" method="dialog">
     <textarea id="tts-text" placeholder="Type the narration. It is synthesized into the film's assets and placed at the playhead." maxlength="20000"></textarea>

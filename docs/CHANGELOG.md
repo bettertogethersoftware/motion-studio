@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+### The player says when a clip has run out
+
+A segment states a frame **count**, and the timeline lays it out at the
+**film's** rate — the same number meaning two lengths the moment the file's own
+rate differs. A 60fps clip of 623 frames is 10.4s of video sitting in a 20.8s
+slot: halfway through, the element reaches its last frame and holds it.
+
+The plan has always called this out as `footage_signature_mismatch`, but in the
+**problems panel** — while the symptom appears in the *player*, which froze in
+silence and left you wondering whether the app had hung. It now says so, over
+the picture:
+
+> holding the last frame — 10.4s of video in a 20.8s slot
+
+with the cause and the fix in its tooltip. It clears the moment the playhead
+moves back inside the material, and never shows on a built film, which is one
+file with no segment slots to fall short of.
+
+It reports what PLAYBACK can see. A scene whose render already baked in a
+freeze looks like a full-length file to the player, and reads as one — that
+case is now refused at conversion time instead (see the footage→scene entry).
+
+### Every dialog is the same dialog
+
+The shared `dialog` rule stated a `min-width` and no maximum, so a modal's
+width was whatever its longest sentence happened to be. The confirmation for
+deleting a scene stretched most of the way across a 1500px window while the
+advise popup beside it sat at 560 and a picker at 640 — three widths, none of
+them chosen.
+
+Width is now stated once, with two named exceptions and no others:
+
+| | width |
+|---|---|
+| any dialog | `min(520px, 100vw − 48px)` |
+| `.dialog-wide` — one carrying a list or picker | `min(680px, 100vw − 48px)` |
+| the advice board — a full reading surface | its own `min(880px, …)`, no padding |
+
+Every dialog also gets `max-height: 100vh − 96px` and scrolls inside itself, so
+a long pick list or a long piece of advice can no longer push its own buttons
+off-screen.
+
+Two real defects fell out of the audit. The confirmation's body carried
+`sp-dialog-summary`, a class only styled *under* `.sp-dialog` — which that
+dialog does not have — so it was unstyled browser text; and because nothing set
+`white-space`, every confirmation written with blank lines between paragraphs
+collapsed into one run-on sentence. Both are fixed by one `dialog .dialog-body`
+rule, now used by the confirmation, the text prompt, the home page's delete-film
+dialog and the scene panels' two — where three different classes had described
+the same paragraph.
+
+### An unused scene can be thrown away from where it sits
+
+A scene dropped from the play order lands in the **unused scenes** rail, and
+then had nowhere to go. Deleting the folder lived behind **delete scene…** on
+a scene's *config* tab — reachable only by selecting the scene, which meant
+putting it *back* on the timeline first. The one place you are actually
+standing when you decide a spare scene can go was the one place that could not
+do it.
+
+Each rail row now carries a **✕**. It deletes the folder — composition, assets
+and every render — so it asks first and names what goes rather than saying "are
+you sure": none of it is undoable and none of it is in the film's history. Only
+scenes the play order does not reference are listed there, so it can never pull
+a segment out from under the film. The button stays quiet until the row is
+hovered, because that row's usual job is to be dragged back onto the timeline.
+
+### One advise button, not two
+
+The inspector's **advice** tab had its own `✎ advise` beside the heading, doing
+exactly what the toolbar's does, on the same selection, two hundred pixels
+away. The toolbar's never moves, is visible on every tab, and names its target;
+the second was a duplicate rather than a convenience. The tab is where the
+conversation is *read* — the empty state now names the gesture (`✎ advise`, or
+`A`) instead of repeating the control.
+
 ### A supplied clip can become a scene that plays it
 
 Footage joins the timeline **as-is**, which is what makes it lossless — and

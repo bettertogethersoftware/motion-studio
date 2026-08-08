@@ -527,6 +527,8 @@ function syncDeliveryVideo(frame) {
   const v = $('#video-film');
   videoEls.forEach((el) => { el.classList.remove('active'); el.pause(); });
   activeVideo = null;
+  // A delivery is ONE file; there are no segment slots left to fall short of.
+  $('#shortfall-tag')?.classList.add('hidden');
   const ph = $('#scene-placeholder');
   if (!state.manifest) {
     v.classList.remove('active');
@@ -557,6 +559,36 @@ function syncDeliveryVideo(frame) {
   }
 }
 
+/**
+ * Say when the picture has run out before its slot has.
+ *
+ * A segment states a frame COUNT and the timeline lays it out at the FILM's
+ * rate, so the two agree only while the file's own rate does. A 60fps clip of
+ * 623 frames is 10.4s of video in a 20.8s slot: the element reaches its last
+ * frame halfway through and holds it. That is a real defect in the film — the
+ * plan reports it as `footage_signature_mismatch` — but the player, where you
+ * actually notice, used to freeze in silence and leave you wondering whether
+ * the app had hung. It names the shortfall instead.
+ */
+function showShortfall(scene, wantSeconds, el) {
+  const tag = $('#shortfall-tag');
+  if (!tag) return;
+  const have = el?.duration;
+  const slot = (scene.durationInFrames ?? 0) / fps();
+  // Half a frame of slack: the last frame legitimately starts fractionally
+  // before `duration`, and flagging that would cry wolf on every clip.
+  const short = Number.isFinite(have) && have > 0 && wantSeconds > have + 0.5 / fps();
+  tag.classList.toggle('hidden', !short);
+  if (!short) return;
+  tag.textContent = `holding the last frame — ${have.toFixed(1)}s of video in a ${slot.toFixed(1)}s slot`;
+  tag.title = scene.kind === 'footage'
+    ? `This clip is ${scene.fps ?? '?'}fps and the film is ${fps()}fps, so its ${scene.durationInFrames} frames are `
+      + `${have.toFixed(1)}s of file but ${slot.toFixed(1)}s of this film. Conform it with transcode_asset, or `
+      + 'correct the segment\'s durationInFrames.'
+    : `This scene is ${scene.durationInFrames} frames but its material runs out at ${have.toFixed(1)}s. `
+      + 'Shorten the scene, or give its composition more to show.';
+}
+
 function syncVideo(frame) {
   if (state.source === 'delivery') return syncDeliveryVideo(frame);
   $('#video-film').classList.remove('active');
@@ -567,6 +599,7 @@ function syncVideo(frame) {
   if (!playable) {
     videoEls.forEach((v) => { v.classList.remove('active'); v.pause(); });
     activeVideo = null;
+    $('#shortfall-tag')?.classList.add('hidden');
     ph.classList.remove('hidden');
     ph.querySelector('.ph-name').textContent = scene ? scene.name : (totalFrames() ? 'gap' : 'no scenes yet');
     ph.querySelector('.ph-note').textContent = !scene ? 'add scenes with “+ scene”'
@@ -622,6 +655,7 @@ function syncVideo(frame) {
     if (!el.paused) el.pause();
     if (drift > 0.03 && el.readyState >= 1) el.currentTime = t;
   }
+  showShortfall(scene, t, el);
 
   // Preload the next rendered scene into the spare element near the cut.
   const next = (state.detail.scenes ?? []).slice(index + 1).find((s) => !s.missing && s.rendered);
@@ -3523,6 +3557,19 @@ function renderScenesRail() {
       add.addEventListener('pointerdown', (ev) => ev.stopPropagation());
       li.appendChild(add);
     }
+    // Getting rid of one, from where they pile up. A scene dropped from the
+    // play order lands here and then had nowhere to go: deleting the folder
+    // lived behind the CONFIG tab of a scene you first had to put BACK on the
+    // timeline to select. This is the shelf, so it is where "throw it away"
+    // belongs — and because that is irreversible, it asks first and says what
+    // goes with it. A broken folder gets the button too; clearing it is the
+    // only thing anyone wants from it.
+    const del = el('button', {
+      class: 'sr-del', text: '✕', title: 'delete this scene folder — composition, assets and renders',
+      onclick: (ev) => { ev.stopPropagation(); confirmDeleteSceneFolder(f); },
+    });
+    del.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    li.appendChild(del);
     const meta = el('span', {
       class: 'sr-meta',
       text: (f.missing ? 'unreadable ' : compat.ok === false ? '≠ film format ' : '') || ' ',
@@ -3532,6 +3579,33 @@ function renderScenesRail() {
     if (!f.missing) li.addEventListener('pointerdown', (ev) => dragSceneFromRail(ev, f));
     ul.appendChild(li);
   }
+}
+
+/**
+ * Delete an unused scene's folder for good.
+ *
+ * The only destructive act in this rail, so it names what it destroys rather
+ * than asking "are you sure?" — a scene folder holds the composition someone
+ * wrote, its assets and every render, and none of it is in the undo stack.
+ * Only scenes the play order does NOT reference are listed here, so this can
+ * never pull a segment out from under the film.
+ */
+async function confirmDeleteSceneFolder(f) {
+  const ok = await askToConfirm({
+    title: `delete “${f.name ?? f.slug}”`,
+    body: `Delete the scene folder ${f.slug} from disk — its composition, its assets and everything it has `
+      + 'rendered?\n\nThis film does not play it, so the cut does not change. Nothing here is undoable, and the '
+      + 'folder is not in the film’s history.',
+    ok: 'delete the folder',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api(`${sceneApi(f.slug)}?deleteFiles=1`, { method: 'DELETE' });
+    toast(`Deleted ${f.name ?? f.slug}.`, { kind: 'info' });
+    await refresh();
+    StudioUtil.shell()?.treeChanged();
+  } catch (err) { toastError(err); }
 }
 
 /** Pointer-drag an unlisted scene row onto the timeline: a chip follows the
@@ -4844,12 +4918,12 @@ function renderAdviceSection(box, { lead = false } = {}) {
   const open = scoped.filter((a) => a.status !== 'resolved');
   const openAnywhere = (state.advice ?? []).filter((a) => a.status !== 'resolved');
   if (!lead) box.appendChild(el('hr', { class: 'sep' }));
+  // No advise button here. The toolbar's is the same call on the same
+  // selection, it never moves, and it names its target — a second one two
+  // hundred pixels away was a duplicate, not a convenience. The empty state
+  // below names the gesture instead, which is what a first-time reader needs.
   box.appendChild(el('div', { class: 'adv-head-row' },
-    el('h3', { text: open.length ? `advice · ${open.length} open` : 'advice' }),
-    // The same action as the header control, in the place you are already
-    // reading. With nothing selected it arms one targeting click instead of
-    // guessing what you meant.
-    el('button', { class: 'primary tiny-btn', text: '✎ advise', onclick: startAdvice })));
+    el('h3', { text: open.length ? `advice · ${open.length} open` : 'advice' })));
   const scopeRow = el('div', { class: 'adv-scope-row' },
     el('span', { class: 'mono dim adv-scope', text: `on ${scope.name}` }));
   // This panel is one target's share of the conversation. The way out to the
@@ -4873,7 +4947,8 @@ function renderAdviceSection(box, { lead = false } = {}) {
   } else {
     box.appendChild(el('p', {
       class: 'dim note',
-      text: 'Nothing said about this yet. What you send is kept together with what you were watching.',
+      text: 'Nothing said about this yet. Press ✎ advise on the timeline toolbar (or A) — what you send is kept '
+        + 'together with what you were watching.',
     }));
   }
 

@@ -1489,6 +1489,7 @@ page's own, each an IIFE exporting exactly one global:
 | `scene-panels.js` / `scene-panels.css` | `ScenePanels` | a scene's **config, audio, assets and outputs** panels |
 | `palette.js` | `StudioPalette` | quick open (`Ctrl+P`) and the command palette (`Ctrl+Shift+P`) |
 | `shell.css` / `tabs.css` | — | the activity bar, status bar, editor stack, tabs, palette chrome, and the shared list/scrollbar grammar |
+| `styles.css` | — | the base every page starts from, including the ONE `dialog` rule: panel, padding, `max-height` with its own scroll, and width — `min(520px, …)` by default, `.dialog-wide` at 680 for one carrying a list, and nothing else. Stating width there rather than per-dialog is what stopped a modal being as wide as its longest sentence; `dialog .dialog-body` is the single class for the paragraph under the heading, `pre-line` so a warning written in paragraphs stays in paragraphs |
 
 **The chrome is VS Code's (v0.27).** Not as decoration: the app already had
 that shape and was spelling it differently, so adopting the grammar cost markup
@@ -1926,10 +1927,10 @@ mounted", which is what stops its audition when you leave.
 
 Its right half opens the **advice board** (`Shift+A`): every piece of advice on
 the film in one popup, grouped by target and ordered down the cut, filtered by
-*open / answered / all*. It is a full-width modal dialog like every other one
-on the page, and the width is the point — the AI's before/after evidence is
-what a report is read for, and in the inspector's 300px column it is two
-thumbnails. Its head and foot are pinned so the counts, the filters and
+*open / answered / all*. It is the one dialog that sets its own size — the
+widest of the three the shared `dialog` rule allows — and the width is the
+point: the AI's before/after evidence is what a report is read for, and in the
+inspector's 300px column it is two thumbnails. Its head and foot are pinned so the counts, the filters and
 *withdraw all* cannot walk off the top of a long conversation. An entry expands
 in place; **go to it ↗** closes the board, seeks the playhead and selects what
 that entry was about. Both readers of the advice share `state.openAdviceId` and

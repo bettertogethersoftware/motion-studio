@@ -214,7 +214,7 @@
       dlg.innerHTML = `
         <form id="confirm-form" method="dialog">
           <h2 id="confirm-title"></h2>
-          <p class="sp-dialog-summary" id="confirm-body"></p>
+          <p class="dialog-body" id="confirm-body"></p>
           <div class="fieldrow right">
             <button type="button" data-close="confirm-dialog" class="ghost">cancel</button>
             <button type="submit" class="primary" id="confirm-ok">ok</button>

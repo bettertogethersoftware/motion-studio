@@ -495,17 +495,47 @@ label.disabled input, label.disabled select { cursor: not-allowed; }
 
 /* ------------------------------- dialogs ------------------------------- */
 
+/* One dialog, three widths, on every page.
+ *
+ * This is the whole contract, so a new modal is consistent by DEFAULT rather
+ * than by remembering to be. It used to state only a `min-width`, which meant
+ * a dialog's width was whatever its longest sentence happened to be — the
+ * confirmation for deleting a scene stretched most of the way across a
+ * 1500px window while the advise popup beside it sat at 560. Width is stated
+ * here, once, and the two exceptions say so out loud:
+ *
+ *   default            a question, a short form — most dialogs
+ *   .dialog-wide       one carrying a list or a picker, where filenames need room
+ *   .advice-board      a full reading surface; sets its own and clears padding
+ */
 dialog {
   background: var(--ink-2);
   color: var(--text);
   border: 1px solid var(--line);
   padding: 20px 22px;
-  min-width: 340px;
+  box-sizing: border-box;
+  width: min(520px, calc(100vw - 48px));
+  /* A dialog is never taller than the window: a long pick list or a long
+     piece of advice scrolls inside it rather than putting its own buttons
+     off-screen. */
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
 }
+dialog.dialog-wide { width: min(680px, calc(100vw - 48px)); }
 dialog::backdrop { background: rgba(4, 5, 8, 0.7); }
 dialog h2 { margin: 0 0 14px; font: 600 13px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
 dialog label { margin-bottom: 10px; }
 dialog .fieldrow { margin-bottom: 10px; }
+/* The action row is the last thing in every dialog: same side, no trailing
+   margin, and clear of whatever it follows. */
+dialog .fieldrow.right { margin: 16px 0 0; }
+/* The sentence under the heading — what this dialog is asking. `pre-line`
+   because these are written with blank lines between paragraphs, and without
+   it a three-paragraph warning collapses into one run-on line. */
+dialog .dialog-body {
+  font-size: 13px; line-height: 1.5; margin: 0 0 4px;
+  color: var(--text); white-space: pre-line;
+}
 
 /* ------------------------------- assets -------------------------------- */
 

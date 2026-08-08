@@ -269,6 +269,11 @@ film's play order (the folder stays on disk, listed as *unlisted* in the
 [film editor](#the-film-editor)'s scenes rail); tick *also delete files on
 disk* to remove the folder too.
 
+You rarely need to come here for that, though: a scene that is not in the play
+order sits in the film page's **unused scenes** rail, and each row there has
+its own **✕** that deletes the folder — which is where you actually are when
+you decide a spare scene can go.
+
 Edit `composition.js` in your editor of choice against the Frame API
 ([frame-api.md](frame-api.md) — read it before writing your first
 composition; the one-paragraph version: everything must be a pure function
@@ -722,6 +727,15 @@ supplied rather than animation it wrote:
   render, and deciding to spend those is the AI's half of the loop, not yours —
   the same reason "ask AI to use this version" sends advice instead of
   switching a take.
+- **If the picture stops changing, the player says why.** A segment declares a
+  frame *count*, and the timeline reads that count at the *film's* rate — so a
+  60fps clip of 623 frames is 10.4s of video in a 20.8s slot, and holds its
+  last frame for the rest. A tag appears over the picture — *holding the last
+  frame — 10.4s of video in a 20.8s slot* — with the cause in its tooltip. It
+  is not the app hanging; it is the clip and the film disagreeing about how
+  long that clip is, which the problems panel also reports as a signature
+  mismatch. Conform the clip (`transcode_asset`) or correct the segment's
+  frame count.
 - **Watch it before you cut it in, and after.** In **+ footage** each clip shows
   a frame from itself, its length, and its frame size — with the size in red
   when it does not match the film, which is the thing that would stop the build
@@ -773,12 +787,12 @@ timeline, one set of rules.
   their own unresolved count, and both are one sentence instead of the same
   sentence repeated per block. The **advice** row at the bottom is the record
   of this conversation rather than a part of the film, so it is not a target.
-- **The advise button never moves.** It sits on the **timeline toolbar**, past
-  `snap`, and it names what it is aimed at — `✎ advise · test3` — so pressing
-  it is never a guess. The same button heads the inspector's **advice** tab —
-  the first tab on every selection, and the one a selection lands on — beside
-  the conversation about that exact thing; both do exactly the same thing, so
-  use whichever is closer.
+- **The advise button never moves, and there is only one of it.** It sits on
+  the **timeline toolbar**, past `snap`, and it names what it is aimed at —
+  `✎ advise · test3` — so pressing it is never a guess. It is visible on every
+  tab, so the inspector's **advice** tab does not repeat it: that panel is
+  where you *read* the conversation, and `A` or the toolbar button is where you
+  add to it.
 - **The whole conversation, in one popup.** The `≡` button beside advise (or
   `Shift+A`) opens the **advice board**: every piece of advice on this film,
   grouped by what it is about and ordered down the cut, with *open*,
@@ -918,8 +932,14 @@ scene/footage blocks, audio, caption and overlay tracks, and an advice row:
   (v0.26); double-click the empty timeline background to fit the whole film
   again.
 - **scenes and footage** — **drag a scene from the unused list onto the
-  timeline** to place it (an insert marker shows where it lands); drag blocks
-  to reorder. **+ new scene** at the
+  timeline** to place it (an insert marker shows where it lands), or **+** to
+  append it; drag blocks to reorder. Each unused row also has a **✕** that
+  **deletes that scene's folder** — composition, assets and renders. It asks
+  first and names what goes, because none of it is undoable; the film does not
+  play those scenes, so the cut never changes. That is the shelf where removed
+  scenes pile up, so it is where throwing one away belongs — it used to mean
+  putting the scene back on the timeline just to reach *delete scene…* on its
+  config tab. **+ new scene** at the
   foot of the rail scaffolds a fresh scene folder directly into the film, and
   the **⧉** on a scene row duplicates an existing one instead — the whole
   scene, composition files, assets, vendored 3D libraries and settings alike.

@@ -317,7 +317,7 @@
     /* ---------------------------- delete scene --------------------------- */
 
     const deleteFilesBox = el('input', { name: 'deleteFiles', type: 'checkbox' });
-    const deleteSummary = el('p', { class: 'sp-dialog-summary' });
+    const deleteSummary = el('p', { class: 'dialog-body' });
     const deleteForm = el('form', { method: 'dialog' },
       el('h2', { text: 'delete scene' }),
       deleteSummary,
@@ -681,7 +681,7 @@
       await loadAssets();
     }
 
-    const assetDeleteSummary = el('p', { class: 'sp-dialog-summary' });
+    const assetDeleteSummary = el('p', { class: 'dialog-body' });
     const assetDeleteCount = el('span');
     const assetDeleteList = el('ul', { class: 'ref-list mono' });
     const assetUpdateAudioBox = el('input', { name: 'updateAudio', type: 'checkbox', checked: true });
@@ -699,7 +699,7 @@
         el('button', { type: 'button', class: 'ghost', text: 'cancel', onclick: () => assetDeleteDialog.close() }),
         el('button', { type: 'submit', class: 'primary', text: 'delete' })),
     );
-    const assetDeleteDialog = el('dialog', { class: 'sp-dialog sp-dialog-asset' }, assetDeleteForm);
+    const assetDeleteDialog = el('dialog', { class: 'sp-dialog' }, assetDeleteForm);
     let assetPendingDelete = null;
 
     function openAssetDeleteDialog(a) {
