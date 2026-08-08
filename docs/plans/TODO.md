@@ -46,6 +46,18 @@ Active plan documents:
        cannot fix by cropping alone. Then the queued plans, audio-cue first
        (smallest, knowledge-shaped, caught a real 1.5–2.7 s sync defect no
        existing check can see).
+       **Progress 2026-08-08 — audio-cue started and half shipped**
+       ([plan](audio-cue-plan.md)): `core/audio-cues.js` (pure — a
+       hand-written FFT, spectral flux, local-median subtraction,
+       peak-picking, per-frame RMS) plus `cues` on `synthesize_speech` and
+       `preview_audio`. All three of the plan's open questions are decided
+       in the document, and the detector is verified rather than trusted —
+       against real narration, four of five line starts land within two
+       frames at 30 fps, and the two things that measurement corrected
+       (centred windows; the vendor's ~140 ms clip padding masquerading as
+       detector error) are recorded there. **Remaining: `onsetFrames` on
+       `transcribe_asset`, word frames for generated speech, the SKILL
+       files, and the frame-API exposure.**
        **Progress 2026-08-06 — Stage B's authoring contract shipped**
        (its prerequisite, not the render path): the engine states
        `--ms-width`/`--ms-height` and the `--ms-safe-*` rectangles on every

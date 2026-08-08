@@ -101,6 +101,7 @@ import { resolveInTarget } from '../core/sandbox.js';
 import {
   wavDurationSeconds, framesForDuration, measureWavLevels, measureWavEnvelope, splitSentences, concatWavBuffers,
 } from '../core/audio.js';
+import { measureAudioCues, projectCues } from '../core/audio-cues.js';
 import { TTS_VENDORS, MUSIC_VENDORS, TRANSCRIPTION_VENDORS } from '../core/settings.js';
 
 /* ------------------------------------------------------------------ */
@@ -2732,16 +2733,21 @@ server.registerTool(
       'render succeeds and nothing clips; fix the gains before rendering (gainDb must compensate each file\'s ' +
       'measured level, not encode a template). mix.envelopeDb is the per-second RMS of the mix (null = digital ' +
       'silence) and mix.silentTailSeconds the length of the dead tail, so a mix that goes silent early is ' +
-      'visible here without measuring the WAV yourself. Fails with no_audio_tracks when the timeline is empty.',
+      'visible here without measuring the WAV yourself. `cues` (v0.27) is the same mix measured PER FRAME: ' +
+      'onsetFrames[] are the frames the audio pushes on — where a cut or a pop belongs — and envelopePeak is the ' +
+      'divisor for normalising the per-frame envelope you get with cues: "full". ' +
+      'Fails with no_audio_tracks when the timeline is empty.',
     inputSchema: {
       target: z.string().describe('Scene id "<film>/<scene>" or film id "<film>"'),
       outputFilename: z.string().optional()
         .describe('Bare .wav filename inside the "out" dir (default audio-preview.wav)'),
       waitMs: z.number().int().min(0).max(50_000).default(45_000)
         .describe('Block up to this long; a longer mix returns a jobId to poll with wait_for_render'),
+      cues: z.enum(['none', 'summary', 'full']).default('summary')
+        .describe('Frame-granular cue measurement of the mix (v0.27): "summary" = cue count + onset frames + envelope peak; "full" adds the per-frame linear envelope and per-cue strength (a 5-minute mix at 30 fps is 9,000 floats); "none" skips it'),
     },
   },
-  wrap(async ({ target, outputFilename, waitMs }) => {
+  wrap(async ({ target, outputFilename, waitMs, cues }) => {
     await requirePrereqs();
     const t = await describeTarget(target);
     const tracks = await t.getTracks();
@@ -2811,6 +2817,12 @@ server.registerTool(
         // per-second envelope so a mix that goes silent early is visible here
         // instead of only in the rendered film.
         const envelope = await measureWavEnvelope(outputPath).catch(() => null);
+        // The per-SECOND envelope above answers "did the mix go silent". The
+        // per-FRAME cues below are the signal an animation can be driven by;
+        // both are reported, and envelopeDb keeps its old meaning (plan rule 4).
+        const cueData = cues === 'none'
+          ? null
+          : await measureAudioCues(outputPath, { fps: t.fps }).catch(() => null);
 
         return {
           target: localId(t.id),
@@ -2829,6 +2841,7 @@ server.registerTool(
               silentTailSeconds: envelope.silentTailSeconds,
             } : {}),
           },
+          ...(cueData ? { cues: projectCues(cueData, cues) } : {}),
         };
       },
     });
@@ -3476,6 +3489,12 @@ server.registerTool(
       'deterministic=true (piper and elevenlabs only) pins the output so identical input yields identical timing ' +
       'across runs (Piper: --noise-scale 0 --noise-w 0; ElevenLabs: a fixed seed) — use it whenever cue frames ' +
       'are computed from the clip. ' +
+      '`cues` (v0.27) measures the clip the engine just wrote, PER FRAME: onsetFrames[] are the frames the voice ' +
+      'pushes on — the stressed syllable, which is where a cut, a pop or a stat card belongs, and is NOT the same ' +
+      'as a word boundary — and envelopePeak is the divisor for normalising the per-frame linear envelope you get ' +
+      'with cues: "full". Use these instead of hand-typing animation frames: measured against real narration, ' +
+      'hand-typed timings ran 1.5-2.7 SECONDS ahead of the words they illustrated, and nothing else in the ' +
+      'pipeline can see that — the render is correct, the mix is correct, and the sync is wrong. ' +
       'mode="attach" (default) also appends the clip to the target\'s audio tracks (scene config.audio, or the ' +
       'film\'s master timeline) so the next render/build mixes it in automatically; mode="asset-only" just writes ' +
       'the WAV and reports its duration, leaving you to wire it later. ' +
@@ -3503,9 +3522,11 @@ server.registerTool(
         .describe('sentenceTimings only: silence inserted between sentences'),
       deterministic: z.boolean().optional()
         .describe('piper/elevenlabs: pin the output so identical input yields identical timing across runs (piper: slightly flatter prosody; elevenlabs: fixed seed)'),
+      cues: z.enum(['none', 'summary', 'full']).default('summary')
+        .describe('Frame-granular cue measurement of the clip just written (v0.27): "summary" = cue count + onset frames + envelope peak; "full" adds the per-frame linear envelope and per-cue strength (a 5-minute clip at 30 fps is 9,000 floats); "none" skips the measurement'),
     },
   },
-  wrap(async ({ target, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds, deterministic }) => {
+  wrap(async ({ target, text, vendor, voice, rate, volume, style, mode, assetPath, startInFrames, gainDb, sentenceTimings, sentenceGapSeconds, deterministic, cues }) => {
     // Probe before touching the target: an unconfigured vendor should fail
     // without leaving a half-written asset behind. `probe: true` also walks a
     // configured preference chain to the first available vendor (v0.19) and
@@ -3601,6 +3622,14 @@ server.registerTool(
     // Same level report music/sfx return, so narration can be balanced against
     // a bed without a render (v0.19). Nulls = unmeasurable, never an error.
     const levels = await measureWavLevels(abs).catch(() => ({ peakDb: null, meanDb: null }));
+    // Frame-granular cues (v0.27). The engine WROTE this audio and still could
+    // not say which frame the voice pushes on — the gap that let hand-typed
+    // animation timings sit 1.5-2.7s ahead of the words they illustrate.
+    // Best-effort by construction: a cue measurement must never fail a
+    // synthesis that otherwise worked.
+    const cueData = cues === 'none'
+      ? null
+      : await measureAudioCues(abs, { fps: t.fps }).catch(() => null);
     if (sentences && !timings) {
       // Single sentence: the clip IS the sentence; report it in the same shape.
       timings = [{
@@ -3642,6 +3671,7 @@ server.registerTool(
       peakDb: levels.peakDb,
       meanDb: levels.meanDb,
       ...(timings ? { timings } : {}),
+      ...(cueData ? { cues: projectCues(cueData, cues) } : {}),
       // The vendor's own duration claim (summed + gaps in the per-sentence
       // path), vs the header-measured durationSeconds above. Before v0.20 this
       // leaked the LAST sentence's duration in the timings path.

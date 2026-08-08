@@ -281,6 +281,12 @@ in ffmpeg, and reaching for `drawtext` or `overlay` for them is a mistake:
   rather than rewriting the timeline.
 - **Cue placement** — `probe_asset { audioPeak: true }` returns `peakAtSeconds`,
   so a one-shot is placed by its transient rather than by where its file starts.
+  For narration, `synthesize_speech` and `preview_audio` return a `cues` block
+  measured PER FRAME: `onsetFrames` are where the voice pushes (the stressed
+  syllable, not the word boundary), and `cues: "full"` adds a per-frame linear
+  `envelope[]` an animation can be driven by. Prefer these to hand-typed frame
+  numbers — measured on a real spot, hand-typed cues ran 1.5–2.7 s ahead of the
+  words they illustrated, and nothing else in the pipeline can see that.
   Do this instead of decoding PCM yourself: measured across five generated cues
   the transient sat anywhere from 0.00 s to 4.31 s in, so placing by file start
   puts a riser seconds late. Independently generated audio never phase-locks to

@@ -1,9 +1,14 @@
 # Frame-granular audio cues — the two signals a composition cannot get
 
-> **Status: PROPOSED. Nothing here has shipped.** Design record. This is the
-> smallest of the open plans and the one with the highest ratio of value to work:
-> both signals are already computed *somewhere* in the engine, at the wrong
-> granularity or on the wrong path.
+> **Status: IN PROGRESS — the detector and the two engine-owned surfaces
+> shipped 2026-08-08.** `core/audio-cues.js` plus `cues` on
+> `synthesize_speech` and `preview_audio`, with the three open questions
+> below decided and the detector verified against real narration. Remaining:
+> `onsetFrames` on `transcribe_asset`, word frames for generated speech, and
+> the frame-API exposure (see the TODO). This is the smallest of the open
+> plans and the one with the highest ratio of value to work: both signals are
+> already computed *somewhere* in the engine, at the wrong granularity or on
+> the wrong path.
 >
 > Found by building a 15 s narrated spot and then measuring the result — the same
 > method that produced plans 4 and 5. Findings marked **[measured]**.
@@ -122,24 +127,72 @@ are useful the moment they are returned.
 
 ## TODO
 
-- [ ] `core/audio-cues.js` — STFT, spectral flux, local-median subtraction, peak-picking, per-frame RMS; all pure
-- [ ] Per-frame linear `envelope[]` on `synthesize_speech`, `preview_audio`, `transcribe_asset`
-- [ ] `onsetFrames[]` on the same three
+- [x] `core/audio-cues.js` — STFT, spectral flux, local-median subtraction, peak-picking, per-frame RMS; all pure (2026-08-08)
+- [x] Per-frame linear `envelope[]` on `synthesize_speech`, `preview_audio` (2026-08-08; `transcribe_asset` deliberately excluded — see the decisions below)
+- [x] `onsetFrames[]` on the same two (2026-08-08)
+- [ ] `onsetFrames[]` on `transcribe_asset` — fits its cache cleanly (onsets are fps-independent in seconds; `withFrames` frames them at read time, exactly as `words[]` already works)
 - [ ] Word frames for generated speech, without a transcription round trip
-- [ ] Test: recover known line starts from engine-generated multi-line narration, assert < 2 frames
-- [ ] Docs: `mcp-setup.md`, `architecture.md` §9 (audio), `CHANGELOG.md`, both SKILL files
+- [x] Test: recover known line starts from engine-generated multi-line narration, assert < 2 frames (2026-08-08, `engine/test/audio-cues.test.js`, 13 tests)
+- [x] Docs: `mcp-setup.md`, `architecture.md` §9.6, `CHANGELOG.md`, both SKILL files (2026-08-08 — the SKILL copies in each client's skill directory need re-copying, per the deploy guide)
 - [ ] Later, separately: expose `envelope[]` to compositions through the frame API
 
-## Open questions — decide before implementing
+## Open questions — DECIDED 2026-08-08
 
-1. **Response size.** A 5-minute film at 30 fps is 9000 envelope floats. Quantise to
-   3 decimals, or downsample and let the composition interpolate?
-2. **Does `onsetFrames` need strength?** A bare frame list cannot distinguish a
-   stressed syllable from a soft one. `{frame, strength}` costs little and lets a
-   caller threshold.
-3. **Whose fps?** Speech tools are film-agnostic today. The cue arrays need one, so
-   either the film's fps must be resolvable at call time or fps becomes a required
-   argument.
+1. **Response size.** *Neither quantise-and-always-send nor downsample:* the
+   per-frame envelope is **opt-in** (`cues: "full"`), and the default summary
+   carries the count, `onsetFrames`, and `envelopePeak`. 9,000 floats in a
+   default read is exactly what the token-efficient program (v0.26) spent a
+   whole slice removing, and this plan predates it. Values are rounded to 4
+   decimals; the inline cue list is capped at 400 frames and **says so** when
+   the cap bites, rather than trimming quietly.
+2. **Does `onsetFrames` need strength?** Yes, and it is computed — but it lives
+   in `onsets: [{frame, seconds, strength}]` under `cues: "full"`, while the
+   summary returns a bare `onsetFrames: [int]`. A caller that wants to
+   threshold asks for it; the cheap shape stays cheap. Strength turned out to
+   carry real information: the one line the detector places late is also the
+   one with a weak peak, so a caller *can* tell a soft onset from a crisp one.
+3. **Whose fps?** Already answered by the tree — no new argument. All three
+   tools are target-addressed and resolve `t.fps` today
+   (`transcribe_asset` even takes an explicit `fps` override with the target's
+   as its default). The plan's worry about "film-agnostic speech tools" does
+   not survive contact with the code.
+
+### Decided while building
+
+4. **`transcribe_asset` gets onsets, not the envelope.** Onsets are
+   fps-independent in seconds, so they cache the way `words[]` already does and
+   `withFrames` frames them at read time. A per-frame envelope is
+   fps-*dependent*, so caching it means caching per-fps or recomputing over a
+   possibly hour-long file on every call. For a supplied recording the honest
+   place to get an envelope is `preview_audio`, once the asset is on a timeline.
+5. **No sidecar file.** An `<asset>.cues.json` was considered (the
+   `transcode.json` precedent) and rejected for now: its one real advantage is
+   letting a *composition* fetch cues at render time, and that is the frame-API
+   step this plan already defers. Adding files, staleness rules and cleanup for
+   a consumer that does not exist yet is cost without a payer.
+
+## What the measurement corrected
+
+Two findings from verifying rather than trusting the detector, both of which
+would otherwise have shipped silently:
+
+- **Windows must be centred on their hop.** Windows that *start* at their hop
+  report every cue early by most of a window, and make a line beginning at
+  frame 0 undetectable — the first window has no predecessor to be an increase
+  over. **[measured]** Bias against a known attack: −10 ms for an instant
+  attack, and about half the attack ramp as the attack softens (0/5/20/40 ms
+  ramps → −10/0/+10/+20 ms). That is the perceptual answer, so it is pinned by
+  a test rather than corrected.
+- **The prototype's "64 ms worst case" needs its ground truth restated.**
+  Against real Windows-TTS narration the cues first measured 170–300 ms late on
+  *every* line. They were not late: the vendor pads each clip with ~112–145 ms
+  of silence, so `concatWavBuffers`' segment starts are **clip** boundaries,
+  not **voice** onsets. Against where the voice actually starts: **[measured]**
+  four of five lines within 1–2 frames at 30 fps (34–68 ms). The fifth,
+  "Your pulse…", is 165 ms — a soft `/j/` glide whose strongest attack really
+  is five frames in, and whose cue strength (0.31) is correspondingly low. A
+  detector that finds *attacks* will always place a gradual onset later than a
+  boundary-finder would; that is a limit to state, not to tune away.
 
 ## Deliberately out of scope
 

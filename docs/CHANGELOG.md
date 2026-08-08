@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### The engine can hear where the voice pushes
+
+A 15 s spot was built with hand-typed animation timings that looked fine on
+playback. Measured against the finished voiceover afterwards, every stat card
+was fully on screen **1.5–2.7 seconds before the voice named it** — the SYS
+card at frame 80 for a word spoken at 125, PUL at 101 for 181.
+
+Nothing in the pipeline could have caught it. The render is correct, the mix is
+correct, `render-review` sees a picture that changes and audio that never
+clips. It is a **sync** defect, and sync is what neither half can see alone.
+
+`synthesize_speech` and `preview_audio` now measure the audio they just wrote,
+per frame:
+
+- **`onsetFrames`** — the frames the audio pushes on. Not word boundaries: the
+  stressed syllable *inside* a word, which is where a cut, a pop or a stat card
+  belongs. Cue an animation off these instead of typing frame numbers.
+- **`envelopePeak`**, plus a per-frame linear **`envelope[]`** with
+  `cues: "full"` — a value an animation can multiply a scale, radius or opacity
+  by. The existing `envelopeDb` keeps its per-second meaning and its "did the
+  mix go silent" job; this is a separate, additive field.
+
+The per-frame envelope is opt-in because a five-minute film at 30 fps is 9,000
+floats, and v0.26 spent a whole program keeping payloads like that out of a
+default read. The summary carries what you decide with — the count, the onset
+frames, and the divisor to normalise against — and says so when the inline cue
+list is capped, rather than trimming quietly.
+
+`core/audio-cues.js` is pure arithmetic: a hand-written radix-2 FFT,
+half-wave-rectified spectral flux, local-median subtraction (so a loud passage
+cannot out-vote a quiet one), and peak-picking with a refractory gap so one
+syllable yields one cue. No ffmpeg, no vendor, no model, no new dependency. A
+file it cannot read reports nothing rather than failing the synthesis.
+
+**It is verified rather than trusted**, because a detector three frames off
+produces work that looks right and is wrong. Narration the engine assembles
+itself has exactly known line starts, so the suite recovers them and holds a
+two-frame budget at 30 fps. Two things that measurement corrected, both of
+which would have shipped silently:
+
+- Windows must be **centred** on their hop. Windows that start at their hop
+  report every cue early by most of a window, and a line beginning at frame 0
+  is invisible — the first window has no predecessor to be an increase over.
+- Against real Windows-TTS narration the cues first looked 170–300 ms late, on
+  every line. They were not: the vendor pads each clip with ~140 ms of silence,
+  so the clip boundary is not the voice. Against where the voice actually
+  starts, four of five lines land within two frames. The fifth is a soft `/j/`
+  glide ("Your pulse…") whose strongest attack genuinely is five frames in —
+  a real limit of measuring attacks rather than boundaries, stated rather than
+  tuned away.
+
 ### The player says when a clip has run out
 
 A segment states a frame **count**, and the timeline lays it out at the

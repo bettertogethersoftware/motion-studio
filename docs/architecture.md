@@ -848,6 +848,49 @@ loses — while music/image/video generation APIs become agent-side helper
 directories. The boundary runs between capabilities, not between local and
 cloud.
 
+### 9.6 Frame-granular cues (v0.27)
+
+`core/audio-cues.js` measures two things about a clip that the rest of the
+audio surface could not answer, and both are reported as **frames at the
+caller's fps** — the invariant `transcode_asset` already states.
+
+| signal | what it is | why the existing measurement did not cover it |
+|---|---|---|
+| `envelope[]` | per-**frame** linear RMS | `measureWavEnvelope` (§9.1) buckets one **second** in dB, for a "did the mix go silent" warning. At 30 fps that is thirty identical numbers — a bar chart, not something an animation can multiply a scale or an opacity by |
+| `onsets[]` | the frames the audio **pushes** on, with a 0..1 strength | nothing measured emphasis at all. A stressed syllable is not a word boundary, and it is where a cut or a pop belongs |
+
+The module is **pure arithmetic over sample arrays** — a hand-written radix-2
+FFT, half-wave-rectified spectral flux, local-median subtraction, and
+peak-picking with a refractory gap so one syllable yields one cue. No ffmpeg,
+no vendor, no model, no new dependency; the only I/O is `measureAudioCues`,
+which reads a 16-bit PCM WAV exactly as `measureWavLevels` does and returns
+`null` for anything else. A cue measurement can therefore never fail a
+synthesis or a mix that otherwise worked.
+
+Three properties are load-bearing and are pinned by
+`engine/test/audio-cues.test.js`:
+
+- **Windows are centred on their hop.** Windows that *start* at their hop
+  report every cue early by most of a window, and make a line beginning at
+  frame 0 invisible — the first window has no predecessor to be an increase
+  over.
+- **The reported time tracks the attack, not the window.** Measured: a hard
+  attack lands within one hop, and the cue drifts by about half the attack
+  ramp as the attack softens. That is the perceptual answer, and a
+  window-length correction would look identical on one fixture and be wrong on
+  the next.
+- **The detector is verified, not trusted.** Narration the engine assembles
+  itself has exactly known line starts (`concatWavBuffers`), so the suite
+  recovers them and asserts a two-frame budget at 30 fps.
+
+Consumers are the tools that already produce engine-owned audio —
+`synthesize_speech` and `preview_audio`, both via `projectCues` so the response
+shape cannot drift. The per-frame envelope is **opt-in** (`cues: "full"`): a
+five-minute film at 30 fps is 9,000 floats, and the token-efficient program
+(§11) exists to keep exactly that out of a default read. What the summary
+always carries is the count, the onset frames, and `envelopePeak` — the
+divisor a caller needs and cannot compute for itself.
+
 ## 10. Security and sandboxing
 
 The agent-facing write surface is exactly composition source files and

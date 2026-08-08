@@ -572,6 +572,21 @@ scene's config. When cue frames depend on repeatable clip timing, pass
 Piper or ElevenLabs); other vendors return a warning rather than pretending to
 honour it.
 
+**Do not hand-type the frame an element appears on.** The response's `cues`
+block reports what the engine measured about the clip it just wrote:
+`onsetFrames` are the frames the voice *pushes* on — the stressed syllable,
+where a cut or a card belongs — and `envelopePeak` is the divisor for the
+per-frame linear `envelope[]` you get with `cues: "full"` (opt-in: a
+five-minute clip at 30 fps is 9,000 floats). Cue animation off those, and off
+`timings`/`words`, rather than off numbers that looked right on playback.
+
+This is the one defect class no other check in the pipeline can see. Measured
+on a real 15 s spot: every stat card was fully on screen **1.5–2.7 seconds
+before the voice named it**, while the render was correct, the mix was
+correct, and `measure_render` saw a picture that changes and audio that never
+clips. Sync is what neither half can see alone. `preview_audio` reports the
+same `cues` block for a whole mix.
+
 When a film has a master audio timeline, `build_film` uses it in place of
 per-scene audio; it does not sum both timelines. Put the authoritative long-form
 mix on the film and preview that target.
