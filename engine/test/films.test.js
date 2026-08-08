@@ -251,6 +251,56 @@ test('validateFilm refuses deliverables that would overwrite the master', () => 
   })), (error) => /duplicates the master/.test(error.detail.problems.join(' ')));
 });
 
+/**
+ * A film carrying LAYERS but no SEGMENTS (v0.28, found in use).
+ *
+ * Overlays, captions and audio ride over the play order and give a film no
+ * length, so on a film with neither a scene nor a clip every one of them is
+ * orphaned — nothing plays, nothing builds. The two `*_out_of_range` checks
+ * cannot catch it: both are guarded by `totalFrames &&`, which is exactly zero
+ * here. It reported no problem at all, and a human who had just dropped an
+ * overlay on the timeline was told only "no scenes yet".
+ */
+test('planFilm: layers on a film with no segments are reported, not silently orphaned', async () => {
+  await withTmp(async (home) => {
+    const store = await makeStore(home);
+    const film = await store.createFilm(TEST_WS, { name: 'Layers Only' });
+
+    // A brand-new empty film is NOT a defect — saying so would flag every film
+    // at the moment it is created.
+    const empty = await planFilm({ film: await store.getFilm(film.id), store });
+    assert.equal(empty.totalFrames, 0);
+    assert.equal(empty.problems.find((p) => p.code === 'film_has_no_segments'), undefined,
+      'an empty film with nothing on it is just empty');
+
+    const withOverlay = await store.updateFilm(film.id, {
+      overlays: [{ src: 'assets/logo.png', fromFrame: 0, toFrame: 90, xPct: 4, yPct: 6, widthPct: 28, opacity: 1 }],
+    });
+    const plan = await planFilm({ film: withOverlay, store });
+    const problem = plan.problems.find((p) => p.code === 'film_has_no_segments');
+    assert.ok(problem, JSON.stringify(plan.problems));
+    assert.match(problem.message, /1 overlay/);
+    assert.match(problem.message, /no scenes or footage/);
+
+    // It counts every family, and pluralises what it names.
+    const withMore = await store.updateFilm(film.id, {
+      captions: [
+        { id: 'c1', text: 'one', fromFrame: 0, toFrame: 30 },
+        { id: 'c2', text: 'two', fromFrame: 30, toFrame: 60 },
+      ],
+    });
+    const plan2 = await planFilm({ film: withMore, store });
+    const p2 = plan2.problems.find((p) => p.code === 'film_has_no_segments');
+    assert.match(p2.message, /1 overlay and 2 captions/);
+
+    // And it goes away the moment the film has something to play.
+    await store.createScene(film.id, { name: 'Hero', durationInFrames: 30 });
+    const plan3 = await planFilm({ film: await store.getFilm(film.id), store });
+    assert.equal(plan3.problems.find((p) => p.code === 'film_has_no_segments'), undefined,
+      'a film with a segment carries its layers normally');
+  });
+});
+
 /* -------------------------------- store --------------------------------- */
 
 test('film documents: create → get → update → list → remove (folder survives)', async () => {

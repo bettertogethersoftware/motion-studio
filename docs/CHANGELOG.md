@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### An overlay on a film with no scenes says why nothing plays
+
+Add an overlay to a film that has no scene and no footage and the player simply
+refuses. That is *correct* — overlays, captions and audio are composited **over**
+the play order and give a film no length of their own, so a film without
+segments is genuinely zero frames long. It was just never said.
+
+Worse, the engine was silent too. `planFilm` already checks whether a caption or
+overlay starts after the film ends, and **both checks are guarded by
+`totalFrames &&`** — which is exactly zero here. So the one case where *every*
+layer is orphaned reported no problem at all.
+
+It now reports `film_has_no_segments`, naming what is on the film ("1 overlay
+and 2 captions") and what to do about it, and the player's card says the same
+thing instead of "add scenes with + scene" to someone who has just added
+something. A brand-new empty film is still not a defect — the problem only
+fires once a layer has actually been placed, or every film would be born
+broken.
+
+Builds gate on specific problem codes rather than on the problem count, so
+nothing that built before builds differently.
+
 ### An unrendered scene shows you what it is
 
 The film player drew a striped card with the scene's name on it. That answers

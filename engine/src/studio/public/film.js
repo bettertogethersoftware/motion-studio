@@ -646,6 +646,12 @@ function fitPlayerBox() {
 }
 window.addEventListener('resize', fitPlayerBox);
 
+/** How many layers are on the film — the things that ride over the play order. */
+function layerCount() {
+  const f = state.film;
+  return (f?.overlays?.length ?? 0) + (f?.captions?.length ?? 0) + (f?.audio?.length ?? 0);
+}
+
 function sceneAt(frame) {
   const scenes = state.detail?.scenes ?? [];
   for (let i = scenes.length - 1; i >= 0; i--) {
@@ -748,7 +754,13 @@ function syncVideo(frame) {
     hideLiveScene();
     ph.classList.remove('hidden');
     ph.querySelector('.ph-name').textContent = scene ? scene.name : (totalFrames() ? 'gap' : 'no scenes yet');
-    ph.querySelector('.ph-note').textContent = !scene ? 'add scenes with “+ scene”'
+    // A film can have overlays, captions and audio on it and STILL be empty:
+    // those are composited over the play order and give it no length, so the
+    // player has nothing to run. Saying "add scenes" to someone who has just
+    // added an overlay reads as the app ignoring what they did.
+    ph.querySelector('.ph-note').textContent = !scene
+      ? (layerCount() ? 'overlays, captions and audio sit OVER the film — they give it no length. '
+        + 'Add a scene or a clip and they will play over it.' : 'add scenes with “+ scene”')
       : scene.kind === 'footage' ? 'footage file missing from the film’s assets/'
         : 'scene not rendered — render it to preview';
     return;

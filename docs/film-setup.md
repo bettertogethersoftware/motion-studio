@@ -72,6 +72,24 @@ applies it at the **scene** level, across a film.
   index (every reorder changes it) can serve as identity. Scenes already have
   one — the slug.
 
+## Layers need something to sit on (v0.28)
+
+Overlays, captions and audio are composited **over** the play order. They give a
+film no length of its own — `plan.totalFrames` is the sum of its **segments**
+(scenes and footage) and nothing else. So a film carrying only layers is
+genuinely zero frames long: there is nothing to play, and nothing to build.
+
+That is easy to hit by accident, because a dropped overlay looks placed. And the
+`caption_out_of_range` / `overlay_out_of_range` checks cannot catch it: both are
+guarded by `totalFrames &&`, which is exactly zero in this case — so the one
+situation where *every* layer is orphaned reported nothing at all.
+
+`planFilm` therefore reports **`film_has_no_segments`**, naming what is on the
+film ("1 overlay and 2 captions") and what is missing. It fires only once a
+layer has actually been placed; a brand-new empty film is not a defect. Builds
+gate on specific problem codes rather than on the problem count, so this
+reports without blocking anything that built before.
+
 ## Stale renders: the sidecar (v0.21)
 
 Existence of `out/output.mp4` used to be the whole of "is this scene rendered?".

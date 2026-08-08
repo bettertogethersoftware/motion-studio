@@ -1158,6 +1158,34 @@ export async function planFilm({ film, store, ffprobePath = null }) {
     }
   }
 
+  /*
+   * Layers on a film with no SEGMENTS (v0.28).
+   *
+   * Overlays, captions and audio are composited OVER the play order; they give
+   * a film no length of their own (`totalFrames` above sums segments only). So
+   * on a film with neither a scene nor a clip, every one of them is orphaned:
+   * nothing plays, nothing builds, and the two range checks above are skipped
+   * by their own `totalFrames &&` guard — precisely in the case where they
+   * would have caught it. This is what a human sees as "I added an overlay and
+   * it will not play", with the app reporting no problem at all.
+   *
+   * Only when something has actually been placed. A brand-new empty film is not
+   * a defect, and saying so would flag every film at the moment it is created.
+   */
+  const layers = [
+    [(film.overlays ?? []).length, 'overlay', 'overlays'],
+    [(film.captions ?? []).length, 'caption', 'captions'],
+    [(film.audio ?? []).length, 'audio track', 'audio tracks'],
+  ].filter(([n]) => n > 0);
+  if (!scenes.length && layers.length) {
+    problems.push({
+      code: 'film_has_no_segments',
+      message: `This film has ${layers.map(([n, one, many]) => `${n} ${n === 1 ? one : many}`).join(' and ')} `
+        + 'but no scenes or footage. Those are composited OVER the play order and give the film no length of their '
+        + 'own, so there is nothing to play or build yet. Add a scene or a clip and they will appear over it.',
+    });
+  }
+
   // Sequence metadata whose label no longer appears on any segment (v0.27).
   // Presentation-only data cannot break a build, so this is not a `problem` —
   // but it is the fingerprint of a play-order patch that replaced the segment
