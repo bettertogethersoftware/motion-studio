@@ -288,13 +288,8 @@ Summarized in [completed.md](completed.md); kept here as the slice ledger.
       delivery" fails rarely under the full parallel run, passes standalone
       and on re-run. Worth one root-cause hour before it erodes trust in
       red suites.
-- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — three open,
-      none blocking (BUG-2 was fixed 2026-08-06). **BUG-1**: a scene's vendored
-      `frame-api.js` is frozen at creation, so every scene made before a runtime
-      bump lacks the helpers [frame-api.md](../frame-api.md) documents (v1.6's
-      `frameSize`/`safeArea` today; v1.4 and v1.5 had the same hole unnoticed) —
-      fix (2), re-copying the runtime on *clone*, is worth taking on its own,
-      and it is the one that misleads a reader rather than merely failing one.
+- [ ] **Known defects** live in [bug-backlog.md](bug-backlog.md) — **two open**,
+      neither blocking (BUG-1 fixed 2026-08-08, BUG-2 2026-08-06).
       **BUG-3**: the film page accepts edits before it has loaded, and drops
       them. **BUG-4**: `computeFit` throws on a document being torn down — one
       console line, one-line fix.

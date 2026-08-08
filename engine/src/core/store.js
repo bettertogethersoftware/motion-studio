@@ -65,6 +65,7 @@ import {
   slugify, makeConfig, validateConfig, migrateConfig,
   scaffoldSceneFiles, MAX_ASSET_BYTES, TEMPLATES_ROOT, SCENE_CONFIG,
   checkJsSyntax, checkDeterminism, checkCanvasStateBalance, checkSequenceCoverage,
+  ensureSceneRuntime,
 } from './scene.js';
 import { normalizeOutputFilename } from './formats.js';
 import { validateFilm, normalizeFilm, isFootageSegment } from './films.js';
@@ -645,6 +646,14 @@ export class WorkspaceStore {
       const files = await copySceneTree(source.path, scenePath, {
         outDirName, excludeFiles: [SCENE_CONFIG], linkThreshold: Infinity,
       });
+      // ...including the source's `frame-api.js`, which is the one file in that
+      // walk we do NOT want inherited: a clone is a NEW scene, and cloning a
+      // 2026-08 scene in 2026-12 would otherwise mint a brand-new scene running
+      // an old runtime (BUG-1). Overwrite it with the engine's current copy.
+      // Deliberately not extended to the vendored 3D library builds beside it —
+      // those are pinned and hashed into `libraryBuilds` on purpose, because a
+      // silent upgrade would change rendered pixels.
+      await ensureSceneRuntime(scenePath);
       // A scaffolded scene always has assets/ and out/; a clone of a scene
       // that had neither should not be shaped differently from a new one.
       await fsp.mkdir(path.join(scenePath, 'assets'), { recursive: true });

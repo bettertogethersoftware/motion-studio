@@ -19,6 +19,7 @@ import path from 'node:path';
 import { makeStore, TEST_WS } from './helpers/workspace.mjs';
 import { archiveRevision } from '../src/core/revisions.js';
 import { sceneOutputPath, writeRenderMeta } from '../src/core/film.js';
+import { ensureSceneRuntime, RUNTIME_FRAME_API as CURRENT_RUNTIME } from '../src/core/scene.js';
 
 async function tmpStore() {
   return makeStore(await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-clone-')));
@@ -260,4 +261,84 @@ test('clone_scene: unknown source and unknown destination fail honestly', async 
   );
   // Nothing was created by any of the three.
   assert.equal((await store.listScenes(film.id)).length, 1);
+});
+
+/* --------------------- BUG-1: the vendored runtime ------------------------- */
+
+test('clone_scene: a clone gets the CURRENT runtime, not the source\'s old copy', async () => {
+  const { store, film, src } = await fixture();
+
+  // Age the source's runtime the way real time does it: the scene was created
+  // before a runtime release, so its copy is whatever shipped back then.
+  const srcRuntime = path.join(src.path, 'frame-api.js');
+  await fsp.writeFile(srcRuntime, '/* MotionStudio frame API v1.2 */\nwindow.MotionStudio = {};\n');
+
+  const clone = await store.cloneScene(src.id, film.id, { name: 'Cloned' });
+  const current = await fsp.readFile(CURRENT_RUNTIME, 'utf8');
+
+  assert.equal(
+    await fsp.readFile(path.join(clone.path, 'frame-api.js'), 'utf8'),
+    current,
+    'a clone is a NEW scene — inheriting a stale runtime would mint the bug afresh',
+  );
+  // The source is left exactly as it was: cloning reads it, it does not fix it.
+  // (The render and preview paths are what refresh a scene in place.)
+  assert.match(await fsp.readFile(srcRuntime, 'utf8'), /v1\.2/);
+});
+
+test('clone_scene: the pinned 3D library build is NOT refreshed with the runtime', async () => {
+  // The runtime is engine-owned and byte-identical everywhere, so overwriting
+  // it loses no author intent. A library build is pinned and hashed into
+  // `libraryBuilds` precisely so a scene records what it holds — refreshing one
+  // silently would change rendered pixels. The two must not be confused.
+  const { store, film, src } = await fixture();
+  const libs = path.join(store.dataDir, 'libs', 'three');
+  await fsp.mkdir(libs, { recursive: true });
+  await fsp.writeFile(path.join(libs, 'three.min.js'), '/* pinned build, do not touch */');
+  process.env.MOTION_STUDIO_LIBS_DIR = path.dirname(libs);
+  try {
+    await store.addLibrary(src.id, { library: 'three' });
+    // Age the runtime too, so the clone exercises both rules in one call.
+    await fsp.writeFile(path.join(src.path, 'frame-api.js'), '/* v1.2 */');
+
+    const clone = await store.cloneScene(src.id, film.id, { name: 'Cloned' });
+    assert.equal(
+      await fsp.readFile(path.join(clone.path, 'three.min.js'), 'utf8'),
+      '/* pinned build, do not touch */',
+      'the pin came across untouched',
+    );
+    assert.ok(
+      (await fsp.readFile(path.join(clone.path, 'frame-api.js')))
+        .equals(await fsp.readFile(CURRENT_RUNTIME)),
+      'while the runtime beside it was refreshed',
+    );
+  } finally {
+    delete process.env.MOTION_STUDIO_LIBS_DIR;
+  }
+});
+
+test('ensureSceneRuntime: refreshes stale and missing, and is silent when current', async () => {
+  const { src } = await fixture();
+  const target = path.join(src.path, 'frame-api.js');
+  const current = await fsp.readFile(CURRENT_RUNTIME);
+
+  // Already current: no write, and it says so.
+  assert.deepEqual(await ensureSceneRuntime(src.path), { refreshed: false });
+
+  // Stale.
+  await fsp.writeFile(target, '/* v1.2 */');
+  assert.deepEqual(await ensureSceneRuntime(src.path), { refreshed: true, reason: 'stale' });
+  assert.ok((await fsp.readFile(target)).equals(current));
+
+  // Missing entirely — a hand-made folder, or one whose copy was deleted.
+  await fsp.rm(target);
+  assert.deepEqual(await ensureSceneRuntime(src.path), { refreshed: true, reason: 'missing' });
+  assert.ok((await fsp.readFile(target)).equals(current));
+
+  // Confined to one engine-owned filename: nothing else in the folder moves.
+  const sibling = path.join(src.path, 'composition.js');
+  const before = await fsp.readFile(sibling, 'utf8');
+  await fsp.writeFile(target, '/* stale again */');
+  await ensureSceneRuntime(src.path);
+  assert.equal(await fsp.readFile(sibling, 'utf8'), before, 'the author\'s files are untouched');
 });

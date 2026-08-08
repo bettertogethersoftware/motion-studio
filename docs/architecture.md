@@ -82,7 +82,13 @@ fidelity since the browser preview drives the project's real entry HTML).
 
 A composition is a folder with `scene.json` (fps, dimensions, duration,
 output and audio settings), an HTML entry point, and JS that registers a
-per-frame function through the copied-in `frame-api.js` runtime. The engine
+per-frame function through the copied-in `frame-api.js` runtime. That copy
+keeps the scene self-contained, and since v0.27 `ensureSceneRuntime()`
+refreshes it from the engine's own before each render or preview (and on
+clone), so a scene cannot go on running the runtime of its birth date —
+engine-owned and byte-identical everywhere, unlike the vendored 3D library
+builds beside it, which stay pinned because a silent upgrade would change
+pixels. The engine
 loads the entry in headless Chromium, then for each frame: sets
 `window.frameReady = false`, invokes `window.setFrame(n)`, waits for
 `frameReady === true` (or `window.__frameError`), screenshots, and streams

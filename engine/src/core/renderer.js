@@ -60,6 +60,7 @@ import {
   measureRenderedPicture, createDeliveryReview, assertReviewAllowsPromotion, resolveReviewPolicy,
 } from './render-review.js';
 import { measureWavLevels, wavDurationSeconds } from './audio.js';
+import { ensureSceneRuntime } from './scene.js';
 import { getFormat, INTERMEDIATE, encodingCompatibilityWarnings } from './formats.js';
 import { acquireRenderLock } from './lock.js';
 import { sceneOutputPath, writeRenderMeta } from './film.js';
@@ -506,6 +507,10 @@ export async function renderComposition(opts) {
   const reviewFps = prx && prx.frameStep > 1 ? config.fps / prx.frameStep : config.fps;
   const effectiveReviewPolicy = resolveReviewPolicy({ globalPolicy: reviewPolicy });
   const startedAt = Date.now();
+  // Once per render, before the page opens — never inside the frame loop.
+  // A scene created before a runtime release otherwise renders against the
+  // helpers it was born with (BUG-1).
+  await ensureSceneRuntime(scenePath).catch(() => {});
   const entryUrl = pathToFileURL(path.resolve(scenePath, config.entry)).href;
 
   progress.start({ jobId, totalFrames, fps: config.fps, width: capture.width, height: capture.height });
@@ -810,6 +815,10 @@ export async function captureFrames({
     );
   }
   for (const frame of frames) assertFrameInRange(frame, config);
+
+  // Same refresh as the render path, once per preview batch: a preview that
+  // silently used older helpers than the render would be worse than either.
+  await ensureSceneRuntime(scenePath).catch(() => {});
 
   const transparent = !!config.output?.transparent;
   const browser = await browserFactory({});

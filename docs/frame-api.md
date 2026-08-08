@@ -314,14 +314,20 @@ here is required. What it buys is that the same film can produce a second aspect
 by re-rendering rather than by cropping — the difference between a title that
 reflows and a title with its right half cut off.
 
-**One caveat for existing scenes.** The **CSS variables** are injected by the
-engine, so they are available in every scene immediately, however old. The
-**JavaScript helpers** live in the `frame-api.js` copied into the scene folder
-when it was created, so `MotionStudio.frameSize()`/`safeArea()` exist only in
-scenes scaffolded at runtime v1.6 or later — check `MotionStudio.version`. In
-an older scene, read the variables directly
-(`getComputedStyle(document.documentElement).getPropertyValue('--ms-safe-title-left')`),
-or copy a current `frame-api.js` in with `sync_shared_files` from a scene that
+**Existing scenes are fine** (since v0.27). The **CSS variables** are injected
+by the engine, so they have always been available in every scene however old.
+The **JavaScript helpers** live in the `frame-api.js` copied into the scene
+folder — and that copy is now refreshed from the engine's current runtime
+whenever the scene is rendered or previewed, and whenever it is cloned. So a
+scene scaffolded before v1.6 gains `frameSize()`/`safeArea()` the next time it
+runs, with nothing to do by hand.
+
+Before v0.27 that copy was frozen at creation, which made this section a
+caveat and the surrounding documentation quietly wrong for old folders: the
+helper was documented, the scene did not have it, and the only clue was a
+`TypeError` at frame 0. If you are reading a scene folder that has not been
+rendered since, `MotionStudio.version` still tells you what it holds, and
+`sync_shared_files` still copies a current `frame-api.js` from a scene that
 has one.
 
 ## 14. Checklist before rendering

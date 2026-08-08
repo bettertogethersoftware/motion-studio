@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### A scene no longer runs the Frame API it was born with
+
+Each scene holds its own copy of the Frame API runtime, so it is
+self-contained. That copy was written once, when the scene was created, and
+never touched again — so a scene kept the runtime of its birth date for life
+while the engine's moved on. `clone_scene` made it worse rather than better:
+its tree walk copied `frame-api.js` across with everything else, so cloning a
+2026-08 scene in 2026-12 minted a **brand-new** scene running an old runtime.
+
+The failure this produces misleads rather than breaks. An author reads
+[frame-api.md](frame-api.md), calls `MotionStudio.safeArea('title')`, and gets
+a `TypeError` at frame 0 — from documentation that is correct for the product
+and wrong for that folder. Nothing in the message says "this scene carries an
+older runtime." v1.6's `frameSize`/`safeArea` is simply the release where it
+surfaced; v1.4's `seekVideo` and v1.5's `beatGrid` had the same hole and it
+went unnoticed only because each arrived alongside the films that first used
+it.
+
+`ensureSceneRuntime()` now compares the scene's copy with the engine's and
+rewrites it when they differ or it is missing. It runs **once per render and
+once per preview batch, before the page opens** — never inside the frame loop —
+and once more on clone, so a clone starts current instead of inheriting.
+
+Overwriting is legitimate here in a way it would not be for a composition file:
+this runtime is engine-owned and byte-identical across every scene, so there is
+no author intent in the bytes to lose. **Vendored 3D library builds are the
+opposite case and are deliberately not refreshed** — they are pinned and hashed
+into `libraryBuilds` precisely so a scene records the build it holds, and a
+silent upgrade would change rendered pixels. A test asserts a `three.min.js`
+beside the runtime survives untouched, along with the author's
+`composition.js`: the refresh is confined to one engine-owned filename.
+
 ### A composition can style an image; now something can ask a question about one
 
 `probe_asset` returns a `picture` block for a still. Four facts, all of them

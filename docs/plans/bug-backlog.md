@@ -13,9 +13,29 @@ measurement, never a suspicion), who is bitten and how badly, the workaround if
 one exists, and the candidate fixes with their costs. If an entry cannot carry
 evidence it is not a bug report yet — reproduce it first.
 
+**Open: BUG-3, BUG-4.** BUG-1 was fixed 2026-08-08 and BUG-2 on 2026-08-06;
+both are kept below with the fix noted, because the evidence is the useful part.
+
 ---
 
-## BUG-1 — a scene's vendored `frame-api.js` is frozen at creation
+## BUG-1 — a scene's vendored `frame-api.js` is frozen at creation — **FIXED 2026-08-08**
+
+> Fixed by taking **both** candidate fixes below, which turned out to be one
+> function rather than two: `ensureSceneRuntime(scenePath)` in
+> `core/scene.js` compares the scene's copy with the engine's and rewrites it
+> when they differ (or when it is missing entirely). It is called once per
+> render and once per preview batch — before the page opens, never inside the
+> frame loop — and once by `cloneScene` after its tree walk, so a clone is born
+> current instead of inheriting its source's copy.
+>
+> The three properties the report demanded are each pinned by a test: it writes
+> `frame-api.js` and nothing else (the author's `composition.js` and a pinned
+> `three.min.js` beside it are asserted untouched), it is silent when the copy
+> is already current, and it returns `{refreshed:false}` rather than writing.
+> Fix (3), reporting the mismatch, was not needed once the mismatch stopped
+> existing. Tests: `clone-scene.test.js` (3), `frame-geometry.test.js` (2).
+>
+> Everything below is the original report, kept because it is the evidence.
 
 **Found** 2026-08-06, while shipping frame API v1.6 (the `--ms-*` frame-geometry
 authoring contract). **Severity:** low today, rising with every runtime release.

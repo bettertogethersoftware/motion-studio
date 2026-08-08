@@ -203,3 +203,47 @@ test('MotionStudio.safeArea: a host that injects nothing still gets the document
   const engine = safeAreaVariables({ width: 1920, height: 1080 });
   assert.equal(`${Math.round(title.left)}px`, engine['--ms-safe-title-left'], 'the fallback must agree with the engine');
 });
+
+/* ----------- BUG-1: the scene's vendored runtime is kept current ----------- */
+
+test('the render and preview paths refresh a scene\'s stale frame-api.js', async () => {
+  // The defect this covers is a misleading one rather than a breaking one: a
+  // scene keeps the runtime it was BORN with, so an author following
+  // frame-api.md calls a documented helper and gets a TypeError at frame 0
+  // from a folder that predates it. v1.4's seekVideo and v1.5's beatGrid had
+  // the same hole; v1.6's frameSize/safeArea is the one that surfaced it.
+  const current = await fsp.readFile(RUNTIME_FRAME_API);
+
+  for (const [label, run] of [
+    ['preview', (scenePath, config) => captureFrames({
+      scenePath, config, frames: [0], browserFactory: spyingFactory([]),
+    })],
+    ['still', (scenePath, config) => renderStill({
+      scenePath, config, frame: 0, outputPath: path.join(scenePath, 'still.png'),
+      browserFactory: spyingFactory([]),
+    })],
+  ]) {
+    const { scenePath, config } = await scene(`runtime-${label}`);
+    const target = path.join(scenePath, 'frame-api.js');
+    await fsp.writeFile(target, '/* MotionStudio frame API v1.2 */');
+
+    await run(scenePath, config);
+    assert.ok(
+      (await fsp.readFile(target)).equals(current),
+      `${label} refreshed the scene's runtime before opening the page`,
+    );
+  }
+});
+
+test('refreshing the runtime does not touch anything else in the scene folder', async () => {
+  const { scenePath, config } = await scene('runtime-confined');
+  await fsp.writeFile(path.join(scenePath, 'frame-api.js'), '/* v1.2 */');
+  await fsp.writeFile(path.join(scenePath, 'composition.js'), '/* the author\'s work */');
+  await fsp.writeFile(path.join(scenePath, 'three.min.js'), '/* a pinned build */');
+
+  await captureFrames({ scenePath, config, frames: [0], browserFactory: spyingFactory([]) });
+
+  assert.equal(await fsp.readFile(path.join(scenePath, 'composition.js'), 'utf8'), '/* the author\'s work */');
+  assert.equal(await fsp.readFile(path.join(scenePath, 'three.min.js'), 'utf8'), '/* a pinned build */',
+    'a vendored library build is pinned on purpose — refreshing it would change pixels');
+});

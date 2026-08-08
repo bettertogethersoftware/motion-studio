@@ -224,6 +224,63 @@ export const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 export { ASSET_EXTENSIONS };
 
 /* ------------------------------------------------------------------ */
+/* The vendored runtime, kept current (BUG-1, v0.27)                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Each scene holds its own copy of the Frame API runtime so it is
+ * self-contained. Until now that copy was written once by `createScene` and
+ * never touched again, so a scene kept the runtime it was BORN with for its
+ * whole life while `src/runtime/frame-api.js` moved on — and `cloneScene`
+ * made a brand-new scene inherit an old one.
+ *
+ * The failure that produced this is worth stating, because it misleads rather
+ * than breaks: [frame-api.md](../../docs/frame-api.md) documents
+ * `frameSize()`/`safeArea()` (v1.6), an author calls one in a scene created
+ * before that release, and gets a `TypeError` at frame 0 from documentation
+ * that is correct for the product and wrong for that folder. v1.4's
+ * `seekVideo` and v1.5's `beatGrid` had the same hole; it went unnoticed only
+ * because each arrived alongside the films that first used it.
+ *
+ * Three properties this must have, and each is a way it could go wrong:
+ *
+ * - **Confined to one engine-owned filename.** It writes `frame-api.js` and
+ *   nothing else, ever. The file sits in a folder full of the author's work.
+ * - **Silent when current**, so it is not an event in the normal case.
+ * - **Not per frame.** Callers invoke it once per render or preview batch,
+ *   before the page opens — never inside the frame loop.
+ *
+ * Overwriting is legitimate here in a way it would not be for a composition
+ * file: this runtime is engine-owned and byte-identical across every scene, so
+ * there is no author intent in the bytes to lose. Vendored 3D library builds
+ * are the opposite case and are deliberately NOT refreshed — they are pinned
+ * and hashed into `libraryBuilds` because a silent upgrade would change
+ * rendered pixels (`core/libraries.js`).
+ *
+ * @returns {Promise<{refreshed: boolean, reason?: string}>}
+ */
+let runtimeBytes = null;
+export async function ensureSceneRuntime(scenePath) {
+  // The engine's own copy cannot change while the process runs, so it is read
+  // once; the scene's copy is re-read every time, because that is the thing
+  // being checked.
+  if (!runtimeBytes) runtimeBytes = await fsp.readFile(RUNTIME_FRAME_API);
+  const target = path.join(scenePath, 'frame-api.js');
+  let current;
+  try {
+    current = await fsp.readFile(target);
+  } catch {
+    // Missing entirely (a hand-made scene folder, or one whose copy was
+    // deleted) is the same answer as stale: write the current runtime.
+    await fsp.writeFile(target, runtimeBytes);
+    return { refreshed: true, reason: 'missing' };
+  }
+  if (current.equals(runtimeBytes)) return { refreshed: false };
+  await fsp.writeFile(target, runtimeBytes);
+  return { refreshed: true, reason: 'stale' };
+}
+
+/* ------------------------------------------------------------------ */
 /* Determinism lint (v0.10)                                            */
 /* ------------------------------------------------------------------ */
 
